@@ -1,0 +1,30 @@
+{
+  "task_id": "sho_heat_capacity",
+  "arm": "A0",
+  "model": "deepseek-v4-flash",
+  "final_expression": "k_B*x**2*exp(x)/(exp(x)-1)**2",
+  "verdict": "derived",
+  "assumptions": [
+    "体系是单个一维量子简谐振子，哈密顿量为标准形式，能谱 E_n=ħω(n+1/2)，能级非简并",
+    "系统与热库达到正则平衡，振子-热库耦合弱到不修正能谱",
+    "温度 T>0，因此 β=1/(k_B T) 有限，x=ħω/(k_B T)>0",
+    "ħ>0, ω>0, k_B>0；几何级数 Σ e^{-nx} 收敛，分母 1-e^{-x} 和 e^x-1 在实数 T>0 上非零",
+    "正则系综关系 U=-∂lnZ/∂β 和 C=∂U/∂T 成立，且求导与求迹/求和可交换（β>0 时收敛）",
+    "高温极限使用 x→0 的 Laurent/泰勒展开；保留高阶项时适用域为 0<|x|<2π，首项极限只需 x→0",
+    "结果是单个振子的热容；若题目指 N 个无相互作用独立振子，总热容需乘以 N"
+  ],
+  "unverified_steps": [
+    "一维谐振子能谱 E_n=ħω(n+1/2) 是量子力学标准解，未在本回答中重新解定态薛定谔方程",
+    "正则系综 Gibbs 态和热力学关系 C=∂U/∂T 是统计力学基本框架，未作微正则到正则的推导",
+    "高温展开中 sinh/指数级数的系数按标准级数给出，未用数值软件逐项验证"
+  ],
+  "reasoning_summary": "由一维谐振子能谱 E_n=ħω(n+1/2) 求正则配分函数，得到平均能量 U=ħω(1/2+1/(e^x-1))；对温度求导得 C=k_B x^2 e^x/(e^x-1)^2。高温 x→0 时展开为 k_B(1-x^2/12+O(x^4))，因此极限为 k_B。",
+  "raw_text": "下面把 \\(C(T)\\) 理解为**单个**一维量子简谐振子的热容；若题目指 \\(N\\) 个无相互作用独立振子，总热容为 \\(N C(T)\\)。\n\n令\n\\[\n\\beta=\\frac{1}{k_B T},\\qquad x=\\beta\\hbar\\omega=\\frac{\\hbar\\omega}{k_B T}.\n\\]\n\n## 推导\n\n### 1. 能谱\n一维谐振子的量子能级为\n\\[\nE_n=\\hbar\\omega\\left(n+\\frac12\\right),\\qquad n=0,1,2,\\dots\n\\]\n能级是非简并的。\n\n### 2. 正则配分函数\n正则系综中\n\\[\nZ=\\operatorname{Tr}e^{-\\beta H}\n=\\sum_{n=0}^{\\infty}e^{-\\beta E_n}\n=\\sum_{n=0}^{\\infty}e^{-\\beta\\hbar\\omega(n+1/2)}\n=e^{-x/2}\\sum_{n=0}^{\\infty}e^{-nx}.\n\\]\n因为 \\(T>0\\)，所以 \\(x>0\\)，\\(e^{-x}<1\\)，几何级数收敛：\n\\[\nZ=\\frac{e^{-x/2}}{1-e^{-x}}.\n\\]\n因此\n\\[\n\\ln Z=-\\frac{x}{2}-\\ln(1-e^{-x}).\n\\]\n\n### 3. 平均能量\n正则系综中\n\\[\nU=\\langle H\\rangle=-\\frac{\\partial\\ln Z}{\\partial\\beta}.\n\\]\n这一步来自\n\\[\n\\frac{\\partial Z}{\\partial\\beta}\n=-\\operatorname{Tr}(H e^{-\\beta H})\n=-Z\\langle H\\rangle.\n\\]\n由链式法则：\n\\[\n\\frac{\\partial\\ln Z}{\\partial\\beta}\n=\\frac{\\partial\\ln Z}{\\partial x}\\frac{\\partial x}{\\partial\\beta}\n=\\left[-\\frac12-\\frac{1}{e^x-1}\\right]\\hbar\\omega.\n\\]\n所以\n\\[\nU=\\hbar\\omega\\left(\\frac12+\\frac{1}{e^x-1}\\right).\n\\]\n其中 \\(\\hbar\\omega/2\\) 是零点能，它对热容没有贡献。\n\n### 4. 热容\n\\[\nC=\\frac{\\partial U}{\\partial T}.\n\\]\n由于\n\\[\n\\frac{d}{dx}\\frac{1}{e^x-1}\n=-\\frac{e^x}{(e^x-1)^2},\n\\qquad\n\\frac{dx}{dT}=-\\frac{\\hbar\\omega}{k_B T^2},\n\\]\n得到\n\\[\nC\n=\\hbar\\omega\\left[-\\frac{e^x}{(e^x-1)^2}\\right]\n\\left[-\\frac{\\hbar\\omega}{k_B T^2}\\right]\n=\\frac{(\\hbar\\omega)^2}{k_B T^2}\\frac{e^x}{(e^x-1)^2}.\n\\]\n又因为\n\\[\n\\frac{(\\hbar\\omega)^2}{k_B T^2}=k_B x^2,\n\\]\n所以\n\\[\n\\boxed{\nC(T)=k_B x^2\\frac{e^x}{(e^x-1)^2}\n},\\qquad x=\\frac{\\hbar\\omega}{k_B T}.\n\\]\n\n等价地，\n\\[\nC(T)=\\frac{k_B x^2}{4\\sinh^2(x/2)}.\n\\]\n\n### 5. 高温极限\n高温对应 \\(T\\to\\infty\\)，即 \\(x\\to0\\)。利用展开\n\\[\n\\frac{e^x}{(e^x-1)^2}\n=\\frac{1}{x^2}-\\frac{1}{12}+\\frac{x^2}{240}+O(x^4),\n\\]\n得到\n\\[\nC(T)=k_B\\left(1-\\frac{x^2}{12}+O(x^4)\\right)\n\\]\n所以\n\\[\n\\boxed{\nC(T)\\to k_B\n\\qquad (T\\to\\infty).\n}\n\\]\n这是经典一维谐振子能量均分定理的结果：两个平方项贡献 \\(k_B\\)。\n\n---\n\n## 用到的假设\n\n- 体系是单个一维量子简谐振子，哈密顿量为标准形式，能谱为 \\(E_n=\\hbar\\omega(n+1/2)\\)。\n- 能级非简并；配分函数直接对 \\(n\\) 求和。\n- 系统与热库达到正则平衡，振子-热库耦合弱到不修正能谱。\n- \\(T>0\\)，所以 \\(\\beta=1/(k_B T)\\) 有限，\\(x>0\\)。\n- \\(e^{-x}<1\\)，几何级数收敛，分母 \\(1-e^{-x}\\) 非零。\n- 在 \\(\\beta>0\\) 时，求导与求和/求迹可交换。\n- 热容定义为 \\(C=\\partial U/\\partial T\\)，固定外参量（这里是 \\(\\omega\\)）。\n- 若题目指 \\(N\\) 个无相互作用独立振子，则总热容为 \\(N C(T)\\)；本推导按单振子。\n\n---\n\n## 未做机械验证的步骤\n\n- 一维谐振子能谱 \\(E_n=\\hbar\\omega(n+1/2)\\) 是量子力学标准解，本回答未重新解定态薛定谔方程。\n- 正则系综 Gibbs 态 \\(e^{-\\beta H}/Z\\) 是统计力学基本框架，本回答未从头推导。\n- 高温展开中 \\(\\sinh\\)/指数级数的系数按标准级数给出，未用数值软件逐项验证。\n\n```json\n{\n  \"final_expression\": \"k_B*x**2*exp(x)/(exp(x)-1)**2\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"体系是单个一维量子简谐振子，哈密顿量为标准形式，能谱 E_n=ħω(n+1/2)，能级非简并\",\n    \"系统与热库达到正则平衡，振子-热库耦合弱到不修正能谱\",\n    \"温度 T>0，因此 β=1/(k_B T) 有限，x=ħω/(k_B T)>0\",\n    \"ħ>0, ω>0, k_B>0；几何级数 Σ e^{-nx} 收敛，分母 1-e^{-x} 和 e^x-1 在实数 T>0 上非零\",\n    \"正则系综关系 U=-∂lnZ/∂β 和 C=∂U/∂T 成立，且求导与求迹/求和可交换（β>0 时收敛）\",\n    \"高温极限使用 x→0 的 Laurent/泰勒展开；保留高阶项时适用域为 0<|x|<2π，首项极限只需 x→0\",\n    \"结果是单个振子的热容；若题目指 N 个无相互作用独立振子，总热容需乘以 N\"\n  ],\n  \"unverified_steps\": [\n    \"一维谐振子能谱 E_n=ħω(n+1/2) 是量子力学标准解，未在本回答中重新解定态薛定谔方程\",\n    \"正则系综 Gibbs 态和热力学关系 C=∂U/∂T 是统计力学基本框架，未作微正则到正则的推导\",\n    \"高温展开中 sinh/指数级数的系数按标准级数给出，未用数值软件逐项验证\"\n  ],\n  \"reasoning_summary\": \"由一维谐振子能谱 E_n=ħω(n+1/2) 求正则配分函数，得到平均能量 U=ħω(1/2+1/(e^x-1))；对温度求导得 C=k_B x^2 e^x/(e^x-1)^2。高温 x→0 时展开为 k_B(1-x^2/12+O(x^4))，因此极限为 k_B。\"\n}\n```",
+  "thinking_chars": 44151,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 151.5,
+  "tokens": 18216,
+  "parse_ok": true
+}

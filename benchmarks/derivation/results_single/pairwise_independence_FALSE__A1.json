@@ -1,0 +1,71 @@
+{
+  "task_id": "pairwise_independence_FALSE",
+  "arm": "A1",
+  "final_expression": "(1/2)^3=1/8",
+  "final_expression_source": "guessed_from_last_step",
+  "main_result_statement": "命题「两两独立⟹相互独立」不成立（refuted）。反例：X,Y iid Bern(1/2)，Z=X⊕Y；P(X=0,Y=0,Z=0)=1/4 ≠ ∏边缘=1/8。",
+  "verdict": "refuted",
+  "verification_evidence": [
+    {
+      "step": "S3",
+      "probe": "ff14c007a4b4b5c7",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S5",
+      "probe": "785dcc41c9def01e",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S10",
+      "probe": "c3224669453c2384",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S11",
+      "probe": "ed5f5cf3bf9849b1",
+      "status": "verified",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 4,
+  "step_count": 12,
+  "assumptions": [
+    "A1: X,Y iid Bern(1/2)",
+    "A2: Z := X⊕Y"
+  ],
+  "unverified_steps": [
+    "S1",
+    "S2",
+    "S4",
+    "S6",
+    "S7",
+    "S8",
+    "S9",
+    "S12"
+  ],
+  "validity_domain": [
+    "A1",
+    "A2"
+  ],
+  "credibility": {
+    "level": "high",
+    "basis": "5 个算术锚 check_step 全 verified；4 点样本空间精确分数穷举（8 个三元组合）逐点确认两两独立成立、相互独立全败；prose 步骤为初等真值表推理并有穷举佐证。"
+  },
+  "findings": [
+    "命题为假（refuted），单个反例即推翻全称命题",
+    "失败机制：两两独立只约束 2 变量边缘；Z=X⊕Y 保留 X,Y 相关残差",
+    "穷举展品：两两独立三条件全 True；相互独立全 8 三元组合 False",
+    "教科书级反例（Feller Vol. I）；本链自证",
+    "一般随机变量为假；联合高斯等特殊族可能不同",
+    "最脆步骤 S4/S6/S9 为 prose，有穷举佐证"
+  ],
+  "frozen": true,
+  "turns": 18,
+  "tool_calls": 25,
+  "elapsed_s": 310.8,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787424152-fe2ba9"
+}

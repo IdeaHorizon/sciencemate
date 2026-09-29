@@ -1,0 +1,96 @@
+/* Scheduler controls + pause-event UI */
+
+/* 这里原有一条同名规则，其每一条属性都被 app/globals.css 里的同选择器规则
+   覆盖（globals 的 @import 在文件头，自身规则在后，等特异性下 globals 胜）。
+   删掉的是死代码：留着只会让人以为改这里有效。globals 那份仍在，渲染不变。 */
+
+.project-chat-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.project-chat-controls-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
+}
+.project-chat-pause {
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.pause-banner-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.pause-banner-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.pause-banner-situation {
+  font-size: 13px;
+  color: var(--color-fg);
+  margin: var(--space-2) 0 0;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.pause-banner-attention {
+  font-size: 12px;
+  color: var(--color-fg-muted);
+  margin: var(--space-2) 0 0;
+  font-style: italic;
+}
+
+.checkpoint-prompt {
+  font-size: 13px;
+  color: var(--color-fg);
+  margin-bottom: var(--space-3);
+  line-height: 1.5;
+  font-weight: 500;
+}
+.checkpoint-choices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.checkpoint-choice-btn {
+  text-align: left;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-bg);
+  color: var(--color-fg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: color var(--duration-hover) ease, background-color var(--duration-hover) ease,
+    border-color var(--duration-hover) ease, box-shadow var(--duration-hover) ease,
+    opacity var(--duration-hover) ease, transform var(--duration-press) var(--ease-out);
+  line-height: 1.4;
+}
+/* 这里原有一条同名规则，其每一条属性都被 app/globals.css 里的同选择器规则
+   覆盖（globals 的 @import 在文件头，自身规则在后，等特异性下 globals 胜）。
+   删掉的是死代码：留着只会让人以为改这里有效。globals 那份仍在，渲染不变。 */
+.checkpoint-choice-recommended {
+  border: 2px solid var(--color-success);
+  background: var(--color-success-bg);
+  font-weight: 600;
+}
+.checkpoint-choice-recommended:hover {
+  background: var(--color-success-bg);
+  filter: brightness(1.1);
+}
+.checkpoint-choice-secondary {
+  background: transparent;
+  color: var(--color-fg-muted);
+}

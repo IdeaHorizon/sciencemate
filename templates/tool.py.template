@@ -1,0 +1,133 @@
+"""{tool_name} —— {一行模块说明}
+
+完整规范见 `docs/tool-spec.md`。可工作的 dummy 例子见
+`nodes/experiment/tools/extract_keywords.py.example`。
+
+复制到 tools/{feature}.py 后填写,然后在 tools/__init__.py 中加上
+`from . import {feature}`,以便在 import 时完成工具注册。
+
+接口契约（启动时校验，不通过直接报错）:
+  - **必须** async def
+  - **必须** 第一个 kwarg 是 `state: State`
+  - **必须** 加 `**_: Any` 兜底（防 LLM 多传字段 TypeError）
+  - **必须** 返回 dict 含 `status` 字段（success/error/pause）
+  - name 必须匹配 `^[a-zA-Z0-9_-]{1,64}$`
+  - parameters_schema 是合法 JSON Schema object
+
+经验法则:
+  - 只用 async; CPU 密集的工作放到 asyncio.to_thread
+  - 永不抛异常; 自己 catch 返 status=error 比让框架兜底要好（error 信息更精确）
+  - 在模块加载时立即注册 —— 不要延后到某个函数里再做
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from core.state import State
+from core.tool_registry import ToolDefinition, register_tool
+
+
+# ── 1. 实现工具 ──────────────────────────────────────────────────────────────
+
+async def _{tool_name}(
+    state: State,
+    {param1}: str,
+    {param2}: int = 10,
+    **_: Any,
+) -> dict:
+    """{给人看的一行说明(不是给 LLM 的)。}
+
+    {如果有用,再写一段更长的备注。}
+    """
+    # 校验
+    if not {param1}:
+        return {"status": "error", "error": "{param1} 是必填的"}
+
+    # 执行工作。三种常见模式:
+
+    # (a) 调用 HTTP API:
+    # async with httpx.AsyncClient(timeout=30) as client:
+    #     try:
+    #         resp = await client.get(URL, params={"q": {param1}})
+    #         resp.raise_for_status()
+    #         return {"status": "success", "data": resp.json()}
+    #     except httpx.TimeoutException:
+    #         return {"status": "error", "error": "timeout"}
+
+    # (b) CPU 密集的 Python:
+    # try:
+    #     result = await asyncio.to_thread(_sync_compute, {param1})
+    #     return {"status": "success", "data": result}
+    # except SpecificError as e:
+    #     return {"status": "error", "error": str(e)}
+
+    # (c) 操作 state:
+    # state.save_artifact(artifact_type="...", name="...", content="...")
+    # return {"status": "success"}
+
+    return {"status": "success"}
+
+
+# ── 2. 注册工具 ──────────────────────────────────────────────────────────────
+
+register_tool(
+    ToolDefinition(
+        name="{tool_name}",
+        # ── description = LLM 真正看到的接口 contract（详见 docs/tool-spec.md § 3）─────────
+        #
+        # 推荐 5 段结构，**Use when / Do NOT use when 是核心**：
+        #   1. 一句话做什么（动词开头）
+        #   2. **Use when**：1-3 个典型触发场景
+        #   3. **Do NOT use when**：哪些场景该用别的工具，避免越权 / 误用
+        #   4. 关键参数行为：非显然的参数语义 / 参数互斥 / 默认值意义
+        #   5. 返回 / 失败要点：成功后 LLM 该期望什么；error 时一般什么原因
+        description=(
+            "{一句话动词开头说做什么}。\n\n"
+            "**Use when**：\n"
+            "  - {场景 1：什么情况下用本工具最合适}\n"
+            "  - {场景 2}\n\n"
+            "**Do NOT use when**：\n"
+            "  - {反例 1} → 用 {另一个工具}\n"
+            "  - {反例 2} → 用 {另一种方式}\n\n"
+            "**关键参数**：\n"
+            "  - {param1}: {语义 / 单位 / 典型范围}\n"
+            "  - {param2}: {默认值的含义 / 何时改}\n\n"
+            "**返回**：{成功时 LLM 拿到什么}。{常见 error：什么场景 → 怎么改}。"
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "{param1}": {
+                    "type": "string",
+                    # ── 参数 description 也要 LLM 友好：单位 + 典型范围 / 1-2 例子 / enum 每个值的语义
+                    "description": (
+                        "{参数是什么 + 单位 / 典型值 / 例子}。"
+                        "例如 '...'。"
+                    ),
+                },
+                "{param2}": {
+                    "type": "integer",
+                    "default": 10,
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "{参数语义 + 默认值在做什么 + 何时该改}",
+                },
+            },
+            "required": ["{param1}"],
+        },
+        allowed_node_types=None,    # None = 任何节点都可以用
+        risk_level="low",            # low | medium | high
+    ),
+    _{tool_name},
+)
+
+
+# ── 给 LLM 看的 contract self-check（提交前过一遍，详见 docs/tool-spec.md § 3.6）────────
+#
+# [ ] description 含 "Use when" + "Do NOT use when" 段
+# [ ] 不显然参数（enum / threshold / mode）说了语义 + 典型值
+# [ ] 至少给一个典型调用例子（description 或 examples/）
+# [ ] error 信息 actionable（说"该试什么"，不只是"不对"）
+# [ ] 跟兄弟工具的边界写清楚
+# [ ] 没暴露实现细节（不说 sqlite / sqlalchemy 等）
+# [ ] 实跑 fixture 验证 LLM 选用情况符合预期

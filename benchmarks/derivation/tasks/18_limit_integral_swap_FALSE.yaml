@@ -1,0 +1,53 @@
+id: limit_integral_swap_FALSE
+title: "【假命题·L2】极限与积分可以无条件交换"
+domain: mathematics
+kind: false_proposition
+difficulty: L2
+
+prompt: |
+  命题：设 f_n(x) 是 [0,1] 上的一列可积函数，且对每个 x 都有 f_n(x) → f(x)。
+  则 lim_{n→∞} ∫_0^1 f_n(x) dx = ∫_0^1 f(x) dx。
+  请对这条命题给出裁决；若不成立，给出反例并说明需要补什么条件。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: limit_integral_swap_prereg
+    content: |
+      ## Research Questions
+
+      ### Q1: 逐点收敛能否保证极限与积分可交换？
+      - output_kind: 一条命题的裁决
+      - proposition: 逐点收敛即可交换极限与积分。
+      - 闭合条件:
+      ```yaml
+      - id: SWAP_VERDICT
+        statement: "对命题给出裁决；不成立则给出具体反例，并写出使交换合法的充分条件"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  expected_verdict: refuted
+  falsity_reason: |
+    逐点收敛**不足以**保证交换。经典反例：f_n(x) = n 在 [0,1/n] 上、其余为 0。
+    每个 n 都有 ∫f_n = 1，但 f_n(x) → 0 处处（对任意固定 x>0，n 足够大后
+    f_n(x)=0），所以 ∫lim f_n = 0 ≠ 1 = lim ∫f_n。
+    充分条件：控制收敛定理（存在可积控制函数 g 使 |f_n| ≤ g）、
+    单调收敛定理、或一致收敛。
+  refutation_markers:
+    - id: counterexample
+      why: "必须给出具体反例（尖峰族或等价构造）"
+      patterns: ["n.*\\[0, ?1/n\\]", "1/n", "尖峰", "spike", "反例",
+                 "counterexample", "n.*indicator", "移动.*峰"]
+    - id: sufficient_condition
+      why: "指出补什么条件才合法"
+      patterns: ["控制收敛", "dominated", "DCT", "单调收敛", "monotone",
+                 "一致收敛", "uniform.*converg", "可积控制", "控制函数"]
+  required_assumptions:
+    - id: pointwise_only
+      why: "辨明题目只给了逐点收敛（这正是缺口所在）"
+      patterns: ["逐点", "pointwise", "每个 ?x", "for each x", "点态"]

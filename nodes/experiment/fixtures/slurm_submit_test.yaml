@@ -1,0 +1,40 @@
+node_inputs:
+  path_roles:
+    experiment_root: /mnt/beegfs/lujy/ai4s-platform
+    run_root: /mnt/beegfs/lujy/ai4s-platform/jobs
+  experiment_focus: |
+    在 SLURM 集群上提交并运行一个最小作业，验证 experiment 节点的调度提交能力。
+    集群事实（已确认）：sinfo 分区 debug（默认）含 spr-cu04、spr-cu05，均 idle。
+    共享文件系统：/mnt/beegfs/lujy（提交主机与计算节点都可见）。作业 workdir 必须放共享盘。
+
+    步骤：
+    1. discover_resources 确认 slurm 可用、看到 debug 分区。
+    2. recommend_resources：scheduler=slurm，mpi_ranks=2，walltime_minutes=2。
+    3. submit_job(dry_run=true, scheduler=slurm, queue=debug,
+       workdir=/mnt/beegfs/lujy/ai4s-platform/jobs,
+       command='srun hostname; echo OK_$(date +%s)')
+       —— 检查生成的 sbatch 脚本（partition=debug / ntasks=2 / time=00:02:00）。
+    4. 经 request_human_input 说明 scheduler/分区/资源/walltime/脚本路径后，
+       submit_job(dry_run=false, ...) 真提交。
+    5. job_status(slurm, <job_id>) 轮询到完成；读作业 output 确认：运行节点是
+       spr-cu04 或 spr-cu05、returncode=0、含 OK_ 标记。
+    6. experiment_log 记录 job_id / 脚本路径 / 运行节点 / min-run(OK_) 结果。freeze 即可。
+
+upstream_artifacts:
+  - type: claim
+    name: H_slurm_submit
+    metadata: {claim_type: hypothesis, status: open, created_at: "2026-06-25T00:00:00+00:00"}
+    content: |
+      experiment 节点能经 discover/recommend/submit_job 把作业提交到 SLURM debug 分区，
+      作业真实运行在 spr-cu04/05 上并返回成功。
+  - type: pre_registration
+    name: SLURM_Submit_Test
+    metadata: {frozen: true, frozen_at: "2026-06-25T00:00:00+00:00", freeze_reason: "SLURM 提交链验证", requires_scheduler: true}
+    content: |
+      ## Pre-Registration: SLURM 提交验证
+      ### Hypothesis
+      experiment 节点能向 SLURM debug 分区提交作业并在 spr-cu04/05 上运行成功。
+      ### Setup
+      - 分区 debug（spr-cu04/05），ntasks=2，walltime 2min，workdir 在共享 /mnt/beegfs/lujy。
+      ### Expected
+      - 作业 returncode=0，output 含 spr-cu04/05 + OK_ 标记。

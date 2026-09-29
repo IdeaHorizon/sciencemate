@@ -1,0 +1,13 @@
+rubric_id: quantitative
+extends: base
+checks:
+  - axis and legend visibility
+  # 文字压文字。此前只查"图例/标注有没有盖住 marks" —— 护住了数据，没护住
+  # 标注。E2E v22 实测：写着 H2/H3 判定和 δTg_ratio 的标注框被图例压住基本
+  # 读不出来，VLM 按指令逐条查完给了 approve 零 findings（它没做错，是契约
+  # 少了这一条）。对科研图，判定标注就是正文，丢了它比丢一个数据点更严重。
+  - annotation-over-annotation occlusion (verdict/statistic text must stay fully readable)
+  - uncertainty visibility and distinguishability
+  - truncated-axis or nonlinear-scale disclosure
+  - visible continuity across missing intervals
+  - mark density and overplotting

@@ -1,0 +1,73 @@
+{
+  "task_id": "sqrt_subadditive_FALSE",
+  "arm": "A1",
+  "final_expression": "b→√2/2",
+  "final_expression_source": "guessed_from_last_step",
+  "main_result_statement": "命题「对一切实数 a、b：√(a+b) ≤ √a + √b」不成立：a<0 或 b<0 时 √a 或 √b 非实值（主值分支为纯虚数），不等式在实数域无定义。成立所需正确条件为 a ≥ 0 且 b ≥ 0，此时不等式恒成立，等号 ⟺ ab = 0。",
+  "verdict": "refuted",
+  "verification_evidence": [
+    {
+      "step": "S2",
+      "probe": "70f3c3fbeed08c6b",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S3",
+      "probe": "edb2c3f1bcb0c4eb",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S4",
+      "probe": "dd182a83afbfc354",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S5",
+      "probe": "b1ec1e9f758de85a",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S7",
+      "probe": "1de6af944cb96127",
+      "status": "verified",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 5,
+  "step_count": 11,
+  "assumptions": [
+    "A1: √ 主值分支；x<0 时 √x=i√|x|；任何分支下 √(−1) 均非实值，证伪结论对分支选择稳健",
+    "A2: 内部符号验证假设 a>0,b>0；边界 a=0/b=0 由 S7 单独覆盖",
+    "A3: 实数域框架：≤ 仅对实值表达式定义（不等式语义基础）"
+  ],
+  "unverified_steps": [
+    "S1",
+    "S3b",
+    "S6",
+    "S8",
+    "S9",
+    "S10"
+  ],
+  "validity_domain": [
+    "A1",
+    "A2",
+    "A3"
+  ],
+  "credibility": "证伪腿 S2/S3 符号确证 + S3b 序逻辑（演绎级）；正面腿 S4/S5/S7 符号确证 + S6 序公理自证 + S8/S9 拼接（演绎级）；不等式本体数值支持（32 点 50 位）+ 修正命题 480 点反例搜索无命中（支持性非承重）。主裁决演绎级；最脆 S6 一行自证，L1 可接受。",
+  "findings": [
+    "F1: 全称命题不成立根因是定义域而非方向：a,b≥0 上恒真，该区域无实值反例",
+    "F2: 正确条件 a≥0 ∧ b≥0；等号 ⟺ ab=0（内部严格 S5、边界等号 S7，均符号确证）",
+    "F3: 无假设反例搜索（480 点）未命中——失效模式是表达式非实值，随机实数点对定义域破绽不敏感；承重证伪是符号证据（S3）",
+    "F4: 不等式本体直接符号验证 sympy 未化出（数值支持 32 点 50 位）；承重论证是 S4+S6 完备演绎链，主裁决为演绎级",
+    "F5: 极限回归全部符合（b→0⁺:1；a→∞:1；a=b:√2/2）"
+  ],
+  "frozen": true,
+  "turns": 20,
+  "tool_calls": 30,
+  "elapsed_s": 436.8,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787420800-168ffe"
+}

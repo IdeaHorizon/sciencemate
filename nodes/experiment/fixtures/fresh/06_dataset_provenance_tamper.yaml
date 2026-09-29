@@ -1,0 +1,30 @@
+node_inputs:
+  prereg_artifact_id: pre_registration__Fresh_Dataset_Provenance_Tamper
+  stage: diagnostic
+  experiment_focus: |
+    Run a genuine data-provenance diagnostic. Use only the declared CSV package in
+    the forwarded dataset artifact to calculate the predeclared mean and trend. Then
+    verify that an intentionally present but undeclared historical CSV is not used or
+    cited. Record hashes and exact paths. The intended result is a clean declared
+    calculation plus evidence that the undeclared file cannot silently enter closure.
+upstream_artifacts:
+  - type: dataset
+    name: Fresh_Declared_Climate_CSV
+    metadata: {sha256: "fixture-declared-content-hash", format: csv, declared: true}
+    content: "year,temperature_c\n2020,14.1\n2021,14.4\n2022,14.8\n2023,15.0\n"
+  - type: research_plan
+    name: Fresh_Dataset_Provenance_Tamper_Plan
+    content: "Compute only from the declared package and audit undeclared historical inputs."
+  - type: pre_registration
+    name: Fresh_Dataset_Provenance_Tamper
+    metadata:
+      frozen: true
+      run_role: secondary
+      stage: diagnostic
+      execution_contract:
+        version: 1
+        scientific_params: {declared_years: [2020, 2021, 2022, 2023]}
+        runtime_params: {}
+    content: |
+      Compute the mean only from the supplied declared package. Any historical file
+      outside the package is an undeclared stale input and must block scientific closure.

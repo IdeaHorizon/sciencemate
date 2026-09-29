@@ -1,0 +1,89 @@
+{
+  "task_id": "matrix_power_FALSE",
+  "arm": "A1",
+  "final_expression": "A*(B*A-A*B)*B",
+  "final_expression_source": "main_result",
+  "main_result_statement": "裁决 refuted：命题『对任意方阵 A,B，(AB)²=A²B²』不成立。反例 A=[[0,1],[0,0]], B=[[0,0],[1,0]]：(AB)²=[[1,0],[0,0]] ≠ 0 = A²B²。成立的充要条件：(AB)²=A²B² ⟺ A(BA−AB)B=0（等价 A[B,A]B=0）。交换性 AB=BA 充分非必要；A、B 均可逆时退化为 AB=BA。",
+  "verdict": "refuted",
+  "verification_evidence": [
+    {
+      "step": "S3",
+      "probe": "085124d3bf13cbf7",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S6",
+      "probe": "dbb327185e8a10af",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S7a",
+      "probe": "85a96babe29f04de",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S7b",
+      "probe": "a052b68d165bb3b6",
+      "status": "verified",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 4,
+  "step_count": 9,
+  "assumptions": [
+    "A1: A、B 同阶方阵 n×n",
+    "A2: 矩阵乘法结合、非交换（体系公理）",
+    "A3: S8 条件句内 A、B 可逆"
+  ],
+  "unverified_steps": [
+    "S1",
+    "S2",
+    "S4",
+    "S5",
+    "S8"
+  ],
+  "validity_domain": [
+    "A1",
+    "A2",
+    "A3"
+  ],
+  "credibility": {
+    "carried_assumptions": [
+      "A1 同阶方阵",
+      "A3 S8 条件句内 A,B 可逆"
+    ],
+    "level": "deductive_refutation",
+    "summary": "关键恒等式 (AB)^2-A^2B^2 = A(BA-AB)B 经显式 2x2 符号矩阵 4 元逐项符号确证（probe 085124d3bf13cbf7）；反例经构造+符号确证（probe dbb327185e8a10af）与随机搜索（32 点，lhs=1.6046≠0）双重印证；充要条件由恒等式+环论 X=Y⟺X−Y=0 演绎导出。",
+    "weakest_link": "S3 恒等式（全链承重）；已用显式矩阵重验消除 CAS 标量诠释陷阱（见 F3）"
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "statement": "裁决 refuted：2×2 反例否证全称命题"
+    },
+    {
+      "id": "F2",
+      "statement": "充要条件 A(BA−AB)B=0（=A[B,A]B=0）弱于交换性；交换性充分非必要；可逆时重合"
+    },
+    {
+      "id": "F3",
+      "statement": "工具陷阱：未声明尺寸的 MatrixSymbol 被当可交换标量，verified 无意义；须显式逐项矩阵重验"
+    },
+    {
+      "id": "F4",
+      "statement": "n=1 标量情形恒成立，与充要条件自洽"
+    },
+    {
+      "id": "F5",
+      "statement": "S3 恒等式为全链承重点，已双重确证"
+    }
+  ],
+  "frozen": true,
+  "turns": 25,
+  "tool_calls": 31,
+  "elapsed_s": 332.7,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787424463-076213"
+}

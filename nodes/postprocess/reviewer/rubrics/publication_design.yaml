@@ -1,0 +1,11 @@
+rubric_id: publication_design
+extends: base
+checks:
+  - clear visual hierarchy without decorative competition
+  - deliberate whitespace and balanced information density
+  - consistent optical typography and stroke weight
+  - aligned plot areas labels legends and colorbars
+  - restrained semantic emphasis with no gratuitous effects
+  - unambiguous reading order at the declared final aspect ratio
+  - group identities distinguishable without relying on color alone
+  - panel and legend placement that does not waste or crowd scientific content

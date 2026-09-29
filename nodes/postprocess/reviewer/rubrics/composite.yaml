@@ -1,0 +1,9 @@
+rubric_id: composite
+extends: base
+checks:
+  - panel alignment
+  - visual hierarchy and reading order
+  - legend occlusion
+  - consistent typography and stroke weight
+  - panel-label order and placement
+  - cross-panel scale and color consistency when visibly comparable

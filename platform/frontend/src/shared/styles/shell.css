@@ -1,0 +1,518 @@
+/**
+ * Application shell styles (sidebar + main content).
+ *
+ * Used by shared/layout/AppShell. Visual language matches the legacy
+ * .product-shell in globals.css for parity during migration.
+ */
+
+/**
+ * 高度**定死在视口**，不是 min-height —— 滚动条属于右栏，不属于整页。
+ *
+ * min-height 下这个 grid 会被内容撑高（Projects 列表实测 3107px），两个格子
+ * 一起长；侧栏是 flex column、Settings 那块靠 `margin-top: auto` 沉底，于是
+ * 它沉到 3107px 处 —— 首屏根本看不见，要把整页滚到底才够得着。左栏是导航，
+ * 它在屏幕上的位置不该由右栏装了多少东西决定。
+ *
+ * `.app-main` 早就写了 `overflow: auto`，只是没有一个有界的高度可依，那句
+ * 声明一直没生效。这里把界补上。
+ */
+.app-shell {
+  display: grid;
+  grid-template-columns: 236px minmax(0, 1fr);
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+}
+
+.app-sidebar {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
+  /* 侧栏自己装不下时（项目内 11 条导航 + 最近会话 + 底部账号）滚它自己的，
+     不去推别人。min-height: 0 是 flex/grid 子项能收缩的前提。 */
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 14px 10px;
+  gap: 12px;
+}
+
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 4px 8px;
+  color: var(--color-fg);
+}
+.app-brand strong {
+  display: block;
+  /* 产品名含中英混排：英文按词折行，中文「科研平台」不许从中间断开。 */
+  word-break: keep-all;
+  font-size: var(--font-size-body);
+  font-weight: 600;
+}
+.app-brand span {
+  display: block;
+  font-size: var(--font-size-meta);
+  color: var(--color-fg-muted);
+}
+
+.app-workspace-switcher,
+.app-user-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 7px 8px;
+  color: var(--color-fg-muted);
+  text-align: left;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  font-size: var(--font-size-label);
+}
+.app-workspace-switcher { cursor: default; }
+
+.app-workspace-switcher > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.app-workspace-switcher strong {
+  overflow: hidden;
+  color: var(--color-fg);
+  font-size: var(--font-size-label);
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-workspace-switcher small {
+  color: var(--color-fg-subtle);
+  font-size: var(--font-size-caption);
+}
+
+.app-user-row:hover {
+  color: var(--color-fg);
+  background: var(--color-bg-overlay);
+}
+
+.app-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: none;
+}
+
+.app-nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--font-size-control);
+  color: var(--color-fg-muted);
+  position: relative;
+  border-radius: 5px;
+  text-decoration: none;
+  transition: color 120ms ease, background 120ms ease;
+}
+.app-nav-item > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-nav-item > small {
+  margin-left: auto;
+  color: var(--color-fg-subtle);
+  font-size: var(--font-size-caption);
+}
+.app-nav-item:hover {
+  color: var(--color-fg);
+  background: var(--color-bg-overlay);
+}
+.app-nav-item-active {
+  color: var(--color-fg);
+  background: var(--color-accent-bg);
+  font-weight: 500;
+}
+.app-nav-item-active::before {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 0;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--color-accent);
+  content: "";
+}
+
+.app-nav-section {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+  padding: 10px 8px 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.app-nav-section > span {
+  color: var(--color-fg-subtle);
+  font-size: var(--font-size-caption);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* 侧栏只有 ~199px 宽，「标题 + 一句状态」同一行放不下：末列原来是 `auto`，
+   没有上限，一句 "Status could not be confirmed" 的 max-content 就有 ~159px，
+   把 minmax(0,1fr) 的标题列挤到 20px，标题换行后溢出轨道压在状态上。
+   状态改成第二行 —— 两样都读得全，也不会再互相挤占。 */
+.app-recent-item {
+  display: grid;
+  grid-template-columns: 6px minmax(0, 1fr);
+  align-items: center;
+  gap: 1px 7px;
+  min-height: 30px;
+  padding: 3px 0;
+  color: var(--color-fg-muted);
+  font-size: var(--font-size-label);
+  text-decoration: none;
+}
+
+.app-recent-item > i { grid-area: 1 / 1; }
+.app-recent-title { grid-area: 1 / 2; }
+.app-recent-note { grid-area: 2 / 2; }
+
+.app-recent-item:hover {
+  color: var(--color-fg);
+}
+
+.app-recent-item i,
+.app-project-identity i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+
+.app-recent-title,
+.app-recent-note {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-recent-item small {
+  color: var(--color-fg-subtle);
+  font-size: var(--font-size-caption);
+}
+.app-recent-empty { padding: 5px 0; color: var(--color-fg-subtle); font-size: var(--font-size-caption); font-weight: 400; letter-spacing: 0; text-transform: none; }
+.app-recent-item i.run-status-completed { background: var(--color-success); }
+.app-recent-item i.run-status-waiting_human,
+.app-recent-item i.run-status-waiting_permission,
+.app-recent-item i.run-status-waiting_compute,
+.app-recent-item i.run-status-completed_with_warning { background: var(--color-warning); }
+.app-recent-item i.run-status-failed,
+.app-recent-item i.run-status-stale_unknown { background: var(--color-danger); }
+
+.app-project-back {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 7px;
+  color: var(--color-fg-muted);
+  font-size: var(--font-size-meta);
+  text-decoration: none;
+}
+
+.app-project-back:hover {
+  color: var(--color-fg);
+}
+
+.app-project-identity {
+  display: grid;
+  gap: 4px;
+  padding: 5px 8px 10px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.app-project-identity strong {
+  overflow: hidden;
+  color: var(--color-fg);
+  font-size: var(--font-size-body);
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-project-identity span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-fg-muted);
+  font-size: var(--font-size-meta);
+}
+
+.app-project-identity .project-identity-loading i { background: var(--color-fg-subtle); }
+.app-project-identity .project-identity-error i { background: var(--color-danger); }
+
+.app-sidebar-bottom {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-3);
+  margin-top: auto;
+  gap: 2px;
+}
+
+.app-user-context {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) 25px;
+  align-items: center;
+  gap: 7px;
+  margin-top: 4px;
+  padding: 7px 3px 2px;
+  border-top: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent);
+}
+
+.app-user-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 25px;
+  height: 25px;
+  color: var(--color-fg);
+  border: 1px solid var(--color-border);
+  border-radius: 50%;
+  background: var(--color-bg);
+  font-size: var(--font-size-caption);
+  font-weight: 650;
+}
+
+.app-user-context > span {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.app-user-context strong,
+.app-user-context small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-user-context strong { color: var(--color-fg); font-size: var(--font-size-meta); font-weight: 560; }
+.app-user-context small { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.app-user-context button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 25px;
+  height: 25px;
+  padding: 0;
+  color: var(--color-fg-subtle);
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+}
+.app-user-context button:hover { color: var(--color-fg); background: var(--color-bg-overlay); }
+
+.app-main {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+@media (max-width: 680px) {
+  .app-shell { grid-template-columns: 58px minmax(0, 1fr); }
+  .app-sidebar { padding: 10px 7px; align-items: stretch; }
+  .app-brand { justify-content: center; padding-inline: 0; }
+  .app-brand > div, .app-workspace-switcher, .app-nav-section, .app-project-identity { display: none; }
+  .app-nav-item { justify-content: center; padding-inline: 0; }
+  .app-nav-item span, .app-nav-item small { display: none; }
+  .app-project-back { justify-content: center; overflow: hidden; width: 34px; height: 30px; padding: 0; color: transparent; }
+  .app-project-back svg { flex: none; color: var(--color-fg-muted); }
+  .app-user-context { grid-template-columns: 1fr; justify-items: center; }
+  .app-user-context > span, .app-user-context button { display: none; }
+}
+
+.platform-index-page {
+  width: min(960px, calc(100% - 48px));
+  margin: 0 auto;
+  padding: 52px 0 80px;
+}
+
+.platform-index-page > header {
+  margin-bottom: 38px;
+}
+
+.platform-index-page > header > span {
+  color: var(--color-fg-subtle);
+  font-size: var(--font-size-caption);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.platform-index-page h1 {
+  margin: 5px 0 8px;
+  color: var(--color-fg);
+  font-size: 23px;
+  font-weight: 550;
+  letter-spacing: -0.02em;
+}
+
+.platform-index-page > header p {
+  max-width: 620px;
+  margin: 0;
+  color: var(--color-fg-muted);
+  font-size: var(--font-size-control);
+}
+
+.platform-index-page section + section {
+  margin-top: 38px;
+}
+
+.platform-section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.platform-section-heading h2 {
+  margin: 0;
+  font-size: var(--font-size-control);
+  font-weight: 550;
+}
+
+.platform-section-heading span {
+  color: var(--color-fg-subtle);
+  font-size: var(--font-size-caption);
+}
+
+.platform-index-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 58px;
+  padding: 8px 5px;
+  color: var(--color-fg-muted);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent);
+  text-decoration: none;
+}
+
+.platform-index-row:hover {
+  color: var(--color-fg);
+  background: var(--color-bg-elevated);
+}
+
+.platform-index-row > span:first-of-type {
+  display: grid;
+  gap: 3px;
+}
+
+.platform-index-row strong {
+  color: var(--color-fg);
+  font-size: var(--font-size-control);
+  font-weight: 550;
+}
+
+.platform-index-row small,
+.platform-index-row > span:not(:first-of-type) {
+  color: var(--color-fg-muted);
+  font-size: var(--font-size-meta);
+}
+
+.platform-empty-line {
+  padding: 18px 0;
+  border-top: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-fg-subtle);
+  font-size: var(--font-size-control);
+}
+
+@media (max-width: 800px) {
+  .app-shell {
+    grid-template-columns: 56px minmax(0, 1fr);
+  }
+
+  .app-sidebar {
+    gap: 10px;
+    padding: 10px 7px;
+    background: var(--color-bg-elevated);
+  }
+
+  .app-brand div,
+  .app-workspace-switcher,
+  .app-nav-item span,
+  .app-nav-item small,
+  .app-nav-section,
+  .app-project-back,
+  .app-project-identity,
+  .app-user-row span {
+    display: none;
+  }
+
+  .app-brand,
+  .app-nav-item,
+  .app-user-row {
+    justify-content: center;
+  }
+
+  .app-brand { min-height: 36px; color: var(--color-fg-muted); }
+  .app-brand > svg { display: none; }
+  .app-brand::after {
+    content: attr(data-mark);
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 24px;
+    color: var(--color-fg);
+    border: 1px solid var(--color-border-strong);
+    border-radius: 7px;
+    font-size: var(--font-size-caption);
+    font-weight: 680;
+  }
+  .app-nav-item { min-height: 38px; padding: 0; border-radius: 7px; }
+  .app-nav-item svg { width: 17px; height: 17px; opacity: .82; }
+  .app-nav-item:hover svg,
+  .app-nav-item-active svg { opacity: 1; }
+  .app-nav-item-active { color: var(--color-accent); background: var(--color-accent-bg); }
+  .app-nav-item-active::before { display: none; }
+  .app-sidebar-bottom { padding-top: 8px; }
+  .app-user-context { padding-top: 8px; }
+}
+
+/* Standard page padding inside .app-main */
+.page {
+  padding: var(--space-6) var(--space-8);
+  max-width: 1400px;
+}
+.page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-6);
+  gap: var(--space-4);
+}
+.page-title {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--color-fg);
+  margin: 0;
+}
+.page-subtitle {
+  font-size: var(--font-size-control);
+  color: var(--color-fg-muted);
+  margin-top: var(--space-1);
+}

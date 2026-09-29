@@ -1,0 +1,43 @@
+# E2E: operation scope + submit_job(scheduler=local) 全链路。
+# 目的是验证调度器提交链路（脚本生成 / 身份 preflight / bootstrap 日志 /
+# job_status / operation 三件套 / finalize_external_job）与 operation 收尾规则，不是科学实验。
+#
+#   python run_node.py --harness experiment --no-interactive --bypass-permissions \
+#     --fixture nodes/experiment/fixtures/e2e_local_scheduler_operation.yaml \
+#     --project-id e2e-local-sched-op
+
+node_inputs:
+  experiment_focus: |
+    这是一个【调度器提交链路探测】(operation)，不是科学实验。不要联网、不要安装依赖。
+
+    本任务一律使用 scheduler=local，**无论本机是否装有 SLURM**（不要用 SLURM）。
+    discover_resources 可能报告 sbatch/sinfo 存在，这不影响——本探测就是要验证 local
+    提交链路；也不要因为 SLURM 相关而判定任务失败。
+
+    必须执行以下流程：
+    1. 用 classify_experiment_scope 声明 scope=operation、operation_category=scheduler_probe。
+    2. discover_resources 探测本机资源，确认 slurm 不可用、local 可用。
+    3. submit_job(dry_run=true, scheduler="local", stage="diagnostic",
+       workdir=<注入的 run_root>,
+       command='echo PROBE_OK_scheduler_probe')
+       —— 用**单个命令**（不要 `;` 复合、不要 `$(...)` 子命令替换，否则会被解析成
+       compound 入口、无法与 declared_route 的 program 匹配）。把返回的 script_preview
+       完整读一遍，确认里面能看到真正要执行的 payload 命令（不是只有样板 preamble），
+       并把 script_path 记下来。声明 declared_route 时该步骤 action.program 填 "echo"。
+    4. submit_job(dry_run=false, ...) 同参数真提交。
+    5. job_status / wait_for_external_job 轮询到终态。
+    6. 读作业输出（local 调度器的 stdout 落在 jobs/*/…out，**不是** logs/*；声明
+       declared_route 步骤时若要写 expected_outputs 就用真实产物路径，或干脆留空——
+       本 probe 不产额外文件），确认 returncode=0 且 stdout 含 PROBE_OK_ 标记；
+       同时读一下 bootstrap 日志目录，确认身份 preflight 打出了
+       HARNESS_IDENTITY_PREFLIGHT status=pass。
+    7. 在 job 仍保留权威身份时，先以 record_operation_completion(
+       task_kind="external_job", outcome="success", job_ids=[<job_id>],
+       external_job_refs=[<submit_job 返回的 scheduler/job_id/namespace/launch_host/
+       scheduler_cluster/resource_uid/submission_nonce/container_runtime_id/route_attempt_id>])
+       原子生成并冻结 raw_results、clean_results 与 experiment_log；checks 必须逐项记录
+       script_path、身份 preflight、PROBE_OK 标记、returncode=0，以及 script_preview
+       确实包含 payload。
+    8. 三件套成功后，再用同一不可变 external-job identity 调 finalize_external_job 收尾。
+       operation 到此结束；不要 create_experiment，不要 preview_experiment_contract，
+       不要写 scientific verdict 或 sediment。

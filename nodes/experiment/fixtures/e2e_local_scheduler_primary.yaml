@@ -1,0 +1,106 @@
+# E2E: primary simulation + submit_job(scheduler=local)。
+# 相对 e2e_local_scheduler_scientific.yaml 的区别：prereg 声明 run_role=primary
+# + execution_contract v1 + 可解析的 Research Questions，因此会真正触发
+# verdict / sediment / resolve_prereg_hypotheses / measured_metrics 这几道最深的闸。
+#
+#   python run_node.py --harness experiment --no-interactive --bypass-permissions \
+#     --sandbox --fixture nodes/experiment/fixtures/e2e_local_scheduler_primary.yaml \
+#     --project-id e2e-local-sched-primary
+
+node_inputs:
+  prereg_artifact_id: pre_registration__Verlet_Energy_Drift_Primary
+  execution_params: {dt: 0.01, nsteps: 100000, max_rel_energy_drift_threshold: 0.001}
+  experiment_focus: |
+    按冻结 prereg 执行 primary simulation，用 scheduler=local 提交。
+
+    一律用 scheduler=local（无论本机是否装有 SLURM，不要用 SLURM）；
+    discover_resources 可能报告 sbatch 存在，这不影响，也不要因此判定不可行。
+    积分器源码在本 harness-framework 仓库的 nodes/experiment/fixtures/verlet_e2e_src/verlet.py
+    （先用 list_files 在仓库内定位其绝对路径；只读，不要修改或重写一份）。
+    python3 在 PATH 上，无需安装依赖。
+
+    流程：
+    1. classify_experiment_scope: scope=scientific。
+    2. 在任何 dry_run=false 的真提交前，declare_execution_route 必须冻结唯一 v2 step
+       `verlet_primary_simulation`：action.tool=submit_job、action.program=python3、
+       effects 至少包含 workspace_write/process_tree/external_job、workdir_role=run_root、
+       expected_outputs=["verlet_result.json"]。payload 必须直接用 python3 运行只读
+       verlet.py，不能包装成 shell script 或拆成第二个 external-job step。
+    3. 按 prereg 的 dt=0.01、nsteps=100000 提交：
+       submit_job(dry_run=true, scheduler="local", stage="simulation",
+                  workdir=<注入的 run_root>,
+                  command='python3 <verlet.py 的绝对路径> 0.01 100000 <run_root>/verlet_result.json')
+       （verlet.py 的绝对路径先用 list_files 在 nodes/experiment/fixtures/verlet_e2e_src/ 下定位）
+       检查 script_preview 含真正的 payload，再以
+       route_step_id=verlet_primary_simulation 执行 dry_run=false 真提交。
+    4. wait_for_external_job 到终态，读 verlet_result.json 与 stdout。
+    5. 把 max_rel_energy_drift 解析成 clean_results，对照 prereg 阈值判定。
+    6. 走完整 primary closure：preview_experiment_contract →
+       resolve_prereg_questions（把 drift_bound 记进 metadata.measured_metrics，
+       带阈值比较）→ 需要时 resolve_prereg_hypotheses → 写 verdict →
+       assess_sediment_candidate，并保存合格 finding 或调用 declare_no_sediment →
+       freeze_artifact → create_experiment。finalize 前必须读取同一受管作业的
+       job_submission 或 external_job_workflow：experiment_log.metadata.external_job_refs
+       逐字段复制其完整不可变身份 scheduler/job_id/namespace/launch_host/
+       scheduler_cluster/resource_uid/submission_nonce/process_group_id/
+       process_start_ticks/container_runtime_id（保留 null/空值；local 不得遗漏
+       submission_nonce 或 container_runtime_id，不能从 sandbox_state 或容器 hostname 猜）→
+       finalize_external_job →
+       再次 preview_experiment_contract 必须全绿。
+
+upstream_artifacts:
+  - type: claim
+    name: H_verlet_energy_drift_bounded
+    metadata: {claim_type: hypothesis, status: open, created_at: "2026-08-18T00:00:00+00:00"}
+    content: |
+      velocity-Verlet 作为辛积分器，在 dt=0.01、10^5 步的 1D 谐振子上，
+      相对能量漂移最大值有界且小于 1e-3。
+  - type: pre_registration
+    name: Verlet_Energy_Drift_Primary
+    metadata:
+      frozen: true
+      frozen_at: "2026-08-18T00:00:00+00:00"
+      freeze_reason: "E2E: scheduler 路径上的 primary scientific closure 验证"
+      run_role: primary
+      analysis_eligible: true
+      stage: simulation
+      requires_scheduler: true
+      execution_contract:
+        version: 1
+        scientific_params: {dt: 0.01, nsteps: 100000, max_rel_energy_drift_threshold: 0.001}
+        runtime_params: {threads: 1}
+    content: |
+      # Pre-Registration: velocity-Verlet 能量漂移有界性
+
+      ## Research Questions
+
+      ### H1: velocity-Verlet 在 dt=0.01 下能量漂移是否有界且低于 1e-3
+
+      - proposition: velocity-Verlet 作为辛积分器，积分 1D 谐振子（m=k=1, x0=1.0, v0=0.0, E0=0.5）时能量误差有界振荡而非单调累积，dt=0.01、nsteps=100000 下相对能量漂移最大值低于 1e-3。
+      - assumption: 参考实现 verlet.py 正确实现了 velocity-Verlet 递推，且 float64 舍入误差在 1e5 步内不主导能量误差。
+      - output_kind: numeric
+
+      #### Falsification criteria
+
+      ```yaml
+      - id: drift_bound
+        metric: max_rel_energy_drift
+        comparison: "<"
+        threshold: 0.001
+        rationale:
+          source_type: derivation
+          citation_or_derivation: 辛积分器的 shadow Hamiltonian 守恒给出 O(dt^2) 的有界误差，dt=0.01、omega=1 时量级约 dt^2/4 = 2.5e-5，取 1e-3 留一个数量级余量。
+          scientific_meaning: 漂移若超过该阈值，说明能量误差不再有界，辛性质在该步长下失效。
+      ```
+
+      ## Setup
+
+      - 积分器: 本 harness-framework 仓库 nodes/experiment/fixtures/verlet_e2e_src/verlet.py（只读）
+      - 参数: dt=0.01, nsteps=100000
+      - 执行: submit_job, scheduler=local, stage=simulation
+      - 输出: <run_root>/verlet_result.json，含 max_rel_energy_drift
+
+      ## Expected output
+
+      - verlet_result.json 可解析，含 e0/e_min/e_max/max_rel_energy_drift
+      - stdout 含 VERLET_OK 标记

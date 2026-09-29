@@ -1,0 +1,10 @@
+rubric_id: electronic_structure
+extends: base
+checks:
+  - band paths, orbital levels, or vibrational sticks remain separable at final size
+  - the energy reference line is visually distinct without obscuring nearby scientific marks
+  - high-symmetry labels, spin legend, axes, and physical units are legible and correctly aligned
+  - line density and opacity do not merge distinct bands into an uninterpretable block
+  - occupied and unoccupied orbital styling remains visibly distinguishable
+  - tick lines and background grid remain subordinate to the electronic-structure marks
+  - no curves, levels, reference labels, titles, or legends are clipped

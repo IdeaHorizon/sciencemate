@@ -1,0 +1,8 @@
+rubric_id: schematic
+extends: base
+checks:
+  - arrow direction visibility
+  - label and component correspondence
+  - causal or procedural reading flow
+  - edge crossings and ambiguous connections
+  - distinction among measured modeled and hypothesized elements

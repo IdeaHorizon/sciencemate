@@ -1,0 +1,349 @@
+node_inputs:
+  path_roles:
+    experiment_root: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-h2-fast-partial-work
+    run_root: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-h2-fast-partial-work/run
+  experiment_focus: |
+    这是 Hypothesis 2 (H2)：电化学工作条件破坏节点面拓扑并降低导电性的 fast/partial
+    experiment fixture。本 fixture 根据新的上游 artifacts：
+    `/mnt/beegfs/ai4s-test/ai4s-platform/test1_vasp/vasp-upstream-artifacts-new.zip`
+    中的 `research_plan__tC40_DFT_AIMD_Research_Plan.json` 和
+    `pre_registration__tC40_Topology_vs_Pore_Mechanism.json` 编写。
+
+    本次运行目标不是完整复现实验计划里的高精度 H2 全流程，而是尽快产出可交给后续
+    data/postprocess 节点的 H2 部分实验 artifacts。所有降精度和范围收缩必须写入
+    experiment_log；最终 per-experiment verdict 必须为 `inconclusive` 或
+    `evidence_generated_pending_postprocess`，不得声称 H2 validated/refuted。
+
+    H2 原始科学目标：
+    - 300 K AIMD + Na+ 嵌入 x>=0.3 的协同作用可能破坏 tC40 四重简并节点面。
+    - 目标后续指标包括 nodal surface gap、Fermi-level DOS、Wannier-Boltzmann 电导率。
+    - 原始 research plan 的严格路线包含 S9-S15：Na 嵌入、几何弛豫、8 ps AIMD、
+      平均结构、HSE06 band/DOS、Bader、Wannier/BoltzTraP。
+
+    本次 fast/partial 范围：
+    1. 复用已经完成的 case3 electron-phonon / DFPT 证据，不重跑 phonon/e-ph。
+    2. 新跑任务 A：pristine thermal directional supercell AIMD。
+       不再做 2x2x2 全扩包；改为三个方向分别做 2x1x1、1x2x1、1x1x2 supercell。
+    3. 新跑任务 B：Na-intercalated AIMD，使用新的 case2 输入包和候选 Na site。
+    4. 输出 VASP OUTCAR/OSZICAR/XDATCAR/CONTCAR/vasprun.xml 等硬证据，供后续节点继续做
+       snapshots、band/gap、DOS、transport 或更严格补算。
+
+    已有完成证据（只检查和归档，不重跑）：
+    - case3 electron-phonon workdir:
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work/run/electron_phonon`
+    - 应检查：
+      - `OUTCAR` 含 `General timing and accounting informations for this job`
+      - `DYNMAT` 存在
+      - `OSZICAR`、`OUTCAR`、`vasprun.xml` 存在
+      - 无 `vasp_std` 进程仍在运行
+    - 这些证据只能说明 phonon/e-ph 阶段已生成 artifacts；不能单独判定 H2。
+
+    输入包路径：
+    - 上游 artifacts zip:
+      `/mnt/beegfs/ai4s-test/ai4s-platform/test1_vasp/vasp-upstream-artifacts-new.zip`
+    - case1 pristine AIMD 输入包:
+      `/mnt/beegfs/ai4s-test/ai4s-platform/test1_vasp/aimd_simulations__temperature_300.zip`
+    - case2-new Na-intercalated AIMD 输入包:
+      `/mnt/beegfs/ai4s-test/ai4s-platform/test1_vasp/na_intercalated_aimd-new.zip`
+    - 已编译 gnr VASP:
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-gnr-build/vasp.6.5.1/bin/vasp_std`
+    - 本 run 共享 workdir:
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-h2-fast-partial-work`
+    - logs/scripts 目录:
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-h2-fast-partial-work/run/logs`
+
+    目标平台：
+    - gnr 平台，无 SLURM。
+    - 使用 passwordless SSH + Intel MPI `mpirun`。
+    - 默认 hosts: gnr-cu02, gnr-cu03, gnr-cu04。
+    - 每节点 192 CPU cores。
+    - 默认布局: 48 MPI ranks / node, 4 OpenMP threads / rank。
+    - total MPI ranks = 144，total CPU threads = 576。
+    - 如果用户另行指定只用部分节点，应重新 request_human_input 确认。
+    - 禁止使用 `submit_job`、`sbatch`、`srun`。
+    - 如果多节点 mpirun 分发失败，不允许自动降级为单节点继续跑；必须停止、记录 blocker，
+      并请求用户决定是否改为单节点、改资源或修复 SSH/MPI。
+    - 如果 VASP 发生 segmentation fault / SIGSEGV / signal 11，不要立刻判定科学失败；
+      先按运行环境问题处理，检查 MPI 分发、栈限制、OpenMP/MKL 线程绑定和节点一致性。
+
+    当前 continuation 优先级（2026-07-06 更新）：
+    - 已有 `pristine_1x1x2` 三节点运行证据位于：
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-h2-fast-partial-work/run/pristine_1x1x2`
+    - 该运行已产生 123/500 AIMD steps 和 123 帧 XDATCAR，随后在 MPI/PMPI_Allreduce runtime
+      崩溃；这不是 H2 科学失败。
+    - 旧证据必须保留，尤其是：
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-h2-fast-partial-work/run/pristine_1x1x2/backup_step123`
+    - 当前应先重跑 `pristine_1x1x2`，再跑 Na-intercalated 任务。
+    - 重跑必须使用新目录，避免覆盖旧证据，例如：
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-h2-fast-partial-work/run/pristine_1x1x2_rerun_2node`
+    - 不要重跑 `pristine_2x1x1` 或 `pristine_1x2x1`，除非用户之后明确要求。
+    - Na predecessor / Na AIMD 必须等 `pristine_1x1x2_rerun_2node` 完成、失败或用户明确跳过后再启动；
+      不允许和 pristine VASP 并发抢同一批 gnr 节点资源。
+
+    gnr preflight 必须检查：
+    - 在 gnr-cu02/gnr-cu03/gnr-cu04 上检查:
+      - `hostname`
+      - `whoami`
+      - `nproc`
+      - `free -h | head -2`
+      - `/mnt/beegfs/ai4s-test` 共享盘可见
+      - `source /opt/intel/oneapi/setvars.sh --force` 可用
+      - `which mpirun`
+      - `mpirun --version | head -2`
+      - `ldd --version | head -1`
+      - `ulimit -s`
+    - 在全部目标节点上验证 VASP:
+      `source /opt/intel/oneapi/setvars.sh --force; ldd <vasp_std> | grep "not found\|GLIBC_" || echo libs-ok`
+    - 若任一节点缺库或 ABI 不兼容，停止并记录 environment/toolchain blocker。
+
+    fast/partial 低精度参数策略（用户授权）：
+    - 本 fixture 允许在 workdir 运行副本中放宽输入参数；不得修改原始 zip。
+    - 推荐 fast relaxation 参数：
+      - `PREC = Normal`
+      - `ENCUT = 400`；如果 POTCAR ENMAX 或 VASP 报错要求更高，可提高到 450/520 并记录原因。
+      - `EDIFF = 1E-4`
+      - `EDIFFG = -0.05`
+      - `LREAL = Auto`
+      - `ALGO = Normal` 或 `ALGO = Fast`；若 SCF 不稳，回到 `Normal`。
+      - `NSW = 80` 到 `120`
+    - 推荐 fast AIMD 参数：
+      - `PREC = Normal`
+      - `ENCUT = 400`；必要时提高到 450/520。
+      - `EDIFF = 1E-4`
+      - `LREAL = Auto`
+      - `IBRION = 0`
+      - `MDALGO = 2`
+      - `TEBEG = 300`
+      - `TEEND = 300`
+      - `POTIM = 1.0`
+      - `NSW = 500` 到 `1000`，默认先 `NSW = 500`，作为 0.5 ps fast partial AIMD。
+    - 推荐 KPOINTS:
+      - fast/partial 默认 Gamma-only `1 1 1`。
+      - 这是明确降精度；必须在 experiment_log 中记录，后续节点不得把它当作严格 3x3x3 证据。
+    - 不要为了“跑通”伪造输出或改写 VASP 上游源码。
+
+    任务 A：pristine directional supercell AIMD（case1 fast replacement）
+    - 目标：只对 pristine/C-only 热扰动任务做更小的方向性扩包，替代原先 2x2x2=320 C 方案，
+      快速生成有限温度结构扰动证据。
+    - 注意：只有任务 A 需要生成方向性 supercell；任务 B 的 Na-intercalated 输入和已有 case3
+      electron-phonon 结果都不需要扩包。
+    - 需要生成三个 supercell variant：
+      - `pristine_2x1x1`
+      - `pristine_1x2x1`
+      - `pristine_1x1x2`
+    - 如果从 40 C primitive/reference 生成，上述三个 variant 都应为 80 C；不要生成 320 C 或更大体系。
+    - 每个 variant 使用独立目录：
+      - `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-h2-fast-partial-work/run/pristine_2x1x1`
+      - `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-h2-fast-partial-work/run/pristine_1x2x1`
+      - `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-h2-fast-partial-work/run/pristine_1x1x2`
+    - 优先从 case1 包中定位 C-only primitive/reference POSCAR。
+    - 如果 case1 包内 POSCAR 已经是 320 C 的 2x2x2 supercell，不要把它再扩成更大体系。
+      应先寻找 40 C primitive/reference 结构。
+    - 不要为了生成 supercell 安装 pymatgen/ASE；当前任务优先跑通，不新增依赖。
+    - 可以使用标准库 Python 处理 VASP POSCAR 的 Direct 坐标来生成 supercell，但生成前必须说明算法：
+      对每个原子分数坐标 `(x,y,z)` 和扩包因子 `(na,nb,nc)`，生成
+      `((x+i)/na, (y+j)/nb, (z+k)/nc)`，晶格向量按对应方向放大，元素计数同步乘以
+      `na*nb*nc`。
+    - scope_guard 约束：
+      - 不要写入 `gen_supercells.py`、`*.py` 或其他 source-like 文件到 workdir；
+      - 不要使用 `#!/usr/bin/env python3` shebang；
+      - 不要调用 `safe_execute_python` 执行含 shebang 或 `/usr` 字样的代码；
+      - 对 `INCAR`、`KPOINTS`、`POTCAR`、日志和运行脚本的写入/复制目标必须使用完整绝对路径，
+        不要用 `$WORKDIR`、`$RUNDIR`、`${LOGDIR}` 等变量作为重定向或复制目标；
+      - 应使用一次性 inline Python，例如 `safe_run_bash` 中执行 `python3 - <<'PY' ... PY`，
+        只把最终 POSCAR/INCAR/KPOINTS/POTCAR 和说明性 `README.txt`/`manifest.json` 写入
+        `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-h2-fast-partial-work/run/...`。
+      - 若 inline Python 仍被拦截，应改为在本地 sandbox 临时目录生成文本后用允许的
+        `safe_write_file` 分别写入目标 POSCAR，不要创建可执行脚本。
+    - 如果只能从 Na-intercalated case2 POSCAR 删除 Na 得到 C40 参考结构，可以在本 fast/partial
+      fixture 中作为 fallback 使用；必须：
+      - 确认 POSCAR 元素为 `C Na`、计数为 `40 1`；
+      - 删除 Na 坐标，只保留 40 个 C；
+      - 保留 C 原子顺序和原晶胞；
+      - 只写入 workdir；
+      - 在 experiment_log 标记为 `fast/partial fallback reference`，不是原始 case1 primitive。
+    - 如果无法可靠得到 40 C reference，不要从 320 C 反推 primitive；应 request_human_input 或
+      同步调用 data 节点补齐。
+    - 对每个 supercell：
+      1. 复制或生成 POSCAR 到对应目录；
+      2. 复制 case1 AIMD 的 POTCAR/INCAR/KPOINTS 到对应目录；
+      3. 在运行副本中应用 fast/partial 参数；
+      4. 必须把该运行副本的 KPOINTS 明确写成 Gamma-only `1 1 1`；
+         不要保留原始 `3 3 3`，因为本 fixture 的扩包任务目标是尽快跑通。
+      5. 运行前 `request_human_input`，说明 variant、原子数、参数降精度、hosts/ranks/threads、日志路径；
+      6. 生成 OUTCAR/OSZICAR/XDATCAR/CONTCAR 等证据。
+    - 为尽快跑通，可先跑一个方向作为 smoke 完整链路；但最终 H2 partial artifacts 至少应尽量完成
+      2x1x1、1x2x1、1x1x2 三个方向中的两个。若只完成一个，必须记录为 partial incomplete。
+    - 当前指定只跑 `pristine_1x1x2`：
+      - 旧三节点 partial 结果保留为 `partial incomplete` 证据；
+      - 本次重跑使用新目录 `pristine_1x1x2_rerun_2node`；
+      - 从原 `pristine_1x1x2` 复制 `POSCAR`、`INCAR`、`KPOINTS`、`POTCAR`，但不要复制旧
+        `OUTCAR`、`OSZICAR`、`XDATCAR`、`CONTCAR` 到重跑目录；
+      - 如果需要从旧 `CONTCAR` 继续，应先 request_human_input；默认从原始 80 C `POSCAR` 重新开始；
+      - 重跑前必须确认 gnr-cu02/gnr-cu03 无 `vasp_std`，并尽量确认 gnr-cu04 不被本任务占用。
+
+    任务 B：Na-intercalated AIMD（case2-new fast）
+    - 使用新的 case2 输入包 `na_intercalated_aimd-new.zip`。
+    - zip 内部顶层目录为 `na_intercalated_aimd/`。
+    - 包含四个候选 Na 插层结构：
+      - `candidates/site_01/POSCAR`
+      - `candidates/site_02/POSCAR`
+      - `candidates/site_03/POSCAR`
+      - `candidates/site_04/POSCAR`
+    - 必须读取 `candidate_structures.json`，先主观判断收敛可能性，从高到低尝试。
+    - 排序依据：
+      1. `hard_collision=false` 优先；
+      2. `geometry.valid=true` 优先；
+      3. `minimum_host_distance_angstrom` 越大越优先；
+      4. `minimum_pair_distance_angstrom` 异常短要降权并记录；
+      5. `selected_as_primary=true` 是 data 节点推荐，但不是绝对命令。
+    - 若无更强证据，默认尝试顺序为 `site_01 -> site_02 -> site_03 -> site_04`。
+    - 每个候选使用独立 predecessor 目录：
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-h2-fast-partial-work/run/na_intercalated/predecessor/site_XX`
+    - 每个候选 predecessor 使用 relaxed fast 参数；KPOINTS 可改为 1x1x1。
+    - 运行中如果明显不可能在合理时间内收敛，应主动建议切换下一个 site，而不是机械等待到 walltime：
+      - 多个 ionic step 后力/能量无下降趋势；
+      - SCF 长时间无进展；
+      - `DAV`/`RMM` 反复接近 `NELM`；
+      - `BRMIX`、`ZBRENT`、`EDDDAV`、`LAPACK`、NaN、segfault；
+      - 结构崩坏或 CONTCAR 空。
+    - 切换 site 前必须给出当前 candidate_id、OSZICAR/OUTCAR 证据、为什么继续等收益低、
+      下一个建议 candidate_id，并 request_human_input。
+    - 某个 site 的 predecessor 收敛或产生可接受 fast relaxed CONTCAR 后，将其复制为
+      Na AIMD 阶段 POSCAR：
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-h2-fast-partial-work/run/na_intercalated/aimd/POSCAR`
+    - Na AIMD 阶段使用 fast AIMD 参数，默认 NSW=500，KPOINTS=1x1x1。
+
+    多节点 mpirun 脚本要求：
+    - 每个正式阶段生成可审计脚本到 logs 目录，文件名包含阶段和时间戳。
+    - 推荐 Intel MPI 启动形式：
+      `mpirun -bootstrap ssh -hosts gnr-cu02,gnr-cu03,gnr-cu04 -ppn 48 -np 144 -genv OMP_NUM_THREADS 4 -genv MKL_NUM_THREADS 1 <vasp_std>`
+    - 当前 `pristine_1x1x2_rerun_2node` 必须使用更保守的两节点启动形式：
+      `mpirun -bootstrap ssh -hosts gnr-cu02,gnr-cu03 -ppn 48 -np 96 -genv OMP_NUM_THREADS 4 -genv MKL_NUM_THREADS 1 <vasp_std>`
+      - hosts: gnr-cu02, gnr-cu03
+      - ranks_per_node: 48
+      - total_ranks: 96
+      - OMP threads/rank: 4
+      - total CPU threads: 384
+      - 不使用 gnr-cu04 跑 pristine 重跑，除非用户明确改资源。
+    - 运行脚本必须包含：
+      - `set -eo pipefail`
+      - `ulimit -s unlimited`
+      - `source /opt/intel/oneapi/setvars.sh --force`
+      - `export OMP_NUM_THREADS=4`
+      - `export MKL_NUM_THREADS=1`
+      - `export OMP_STACKSIZE=1G`
+      - `export OMP_PROC_BIND=close`
+      - `export OMP_PLACES=cores`
+      - `export I_MPI_PIN=1`
+      - `export I_MPI_DEBUG=4`
+    - 如果出现 segmentation fault / SIGSEGV / signal 11，可在不修改科学输入的前提下尝试运行环境修复：
+      - 确认脚本里已有 `ulimit -s unlimited`；
+      - 增大 `OMP_STACKSIZE` 到 `1G`；
+      - 保持 `MKL_NUM_THREADS=1`，避免 MKL 额外嵌套线程；
+      - 降低 OpenMP threads，例如从 `48 ranks/node x 4 threads` 改为 `96 ranks/node x 2 threads`
+        或 `192 ranks/node x 1 thread`，但必须先 `request_human_input`；
+      - 检查三个节点是否都使用同一 oneAPI/MPI/ldd 环境；
+      - 如果仍重复 SIGSEGV，记录为 runtime/toolchain blocker，不伪造完成。
+    - stdout/stderr 必须写入固定绝对路径日志，不要用 `${LOGDIR}/${name}` 这类变量拼接重定向。
+    - 启动后 60 秒内必须检查每个目标节点都有 `vasp_std` 或 MPI worker 进程。
+    - 如果只有一个节点有进程，必须立即停止错误任务并记录 multi-node launch blocker；不得把单节点超卖运行写成成功。
+
+    人工确认要求：
+    - 每个新阶段正式启动前必须 `request_human_input`。
+    - 确认内容必须包含：
+      - 任务类型：pristine directional supercell / Na predecessor / Na AIMD
+      - variant 或 candidate_id
+      - hosts
+      - ranks_per_node / total ranks
+      - OMP threads
+      - VASP binary 路径
+      - workdir
+      - stdout/stderr 日志路径
+      - 低精度参数变更：PREC/ENCUT/EDIFF/EDIFFG/KPOINTS/NSW
+      - 本阶段是否可被视为 fast partial evidence
+    - `pristine_1x1x2_rerun_2node` 启动确认还必须明确：
+      - 这是旧三节点 123-step MPI crash 后的两节点重跑；
+      - 旧证据和 `backup_step123` 不会被覆盖；
+      - Na 任务不会并发启动；
+      - 环境变量包含 `ulimit -s unlimited`、`OMP_STACKSIZE=1G`、`MKL_NUM_THREADS=1`、
+        `OMP_PROC_BIND=close`、`OMP_PLACES=cores`、`I_MPI_PIN=1`。
+
+    监控要求：
+    - 不要使用长阻塞等待：单次 `sleep` 不超过 60 秒，单次 `safe_run_bash timeout` 不超过 90 秒。
+    - 长任务启动后给用户 watch 命令：
+      - `for h in gnr-cu02 gnr-cu03 gnr-cu04; do ssh $h "pgrep -af 'vasp_std|mpirun|hydra|pmi_proxy' || echo no-vasp"; done`
+      - `tail -f <stdout_log>`
+      - `tail -30 <run_dir>/OSZICAR`
+      - `ls -lh <run_dir>/OUTCAR <run_dir>/OSZICAR <run_dir>/XDATCAR <run_dir>/CONTCAR`
+    - 如果 mpirun 已在后台/远程运行，agent 不应重复启动第二个相同任务。
+
+    完成标准：
+    - 必须归档 case3 phonon/e-ph 已完成证据路径和文件状态。
+    - 任务 A 至少完成一个 directional pristine AIMD variant，最好完成三个方向；记录每个 variant 的
+      OUTCAR/OSZICAR/XDATCAR/CONTCAR 路径和实际步数。
+    - 任务 B 至少完成一个 Na candidate 的 fast predecessor，并尽量完成 Na AIMD fast partial run；
+      记录 candidate_id、OUTCAR/OSZICAR/XDATCAR/CONTCAR 路径和实际步数。
+    - experiment_log 必须明确写：
+      - H2 原始计划需要更严格 HSE06/DOS/Wannier/BoltzTraP；
+      - 本 run 是低精度 fast partial evidence generation；
+      - 哪些参数被放宽；
+      - `pristine_1x1x2` 旧三节点运行产生了 123/500 steps 和 123 帧 XDATCAR，随后
+        MPI/PMPI_Allreduce runtime crash；
+      - `pristine_1x1x2_rerun_2node` 的最终结果：完成、失败、步数、输出路径和错误模式；
+      - 哪些 artifacts 可交给后续 data/postprocess；
+      - verdict: inconclusive。
+    - 无论任务全部完成、部分完成、失败、超时还是被用户中止，只要已经产生任何运行证据，
+      都必须冻结 `experiment_log`，记录已完成/未完成阶段、日志路径、失败原因和下一步建议。
+      不允许因为未完成全部任务就跳过 experiment_log。
+
+upstream_artifacts:
+  - type: claim
+    name: H2_electrochemical_conditions_break_nodal_surface
+    metadata:
+      claim_type: hypothesis
+      status: open
+      derived_from: pre_registration__tC40_Topology_vs_Pore_Mechanism.json
+      source_section: "Hypothesis 2 (H2)"
+      note: "Fast partial experiment fixture; not sufficient for final H2 verdict"
+    content: |
+      H2: 在 300 K AIMD 和 Na+ 嵌入 x>=0.3 的协同作用下，tC40 的四重简并节点面可能打开
+      >=20 meV 能隙，导致 Fermi-level DOS 和室温电子电导率下降。
+
+      本 fixture 只生成 fast/partial VASP artifacts：已有 case3 phonon/e-ph 证据、方向性 pristine
+      supercell AIMD、Na-intercalated fast AIMD。最终 H2 validated/refuted 必须由后续 postprocess
+      提取 band/gap、DOS、transport 指标后判断。
+
+  - type: pre_registration
+    name: tC40_Topology_vs_Pore_Mechanism
+    metadata:
+      frozen: true
+      frozen_at: "2026-07-03T01:29:12.628854+00:00"
+      freeze_reason: "Imported upstream prereg for H2 fast partial experiment"
+      source_artifact: pre_registration__tC40_Topology_vs_Pore_Mechanism.json
+    content: |
+      上游 prereg artifact 位于：
+      /mnt/beegfs/ai4s-test/ai4s-platform/test1_vasp/vasp-upstream-artifacts-new.zip
+
+      H2 原始 falsification criterion:
+      - 若 Na_xC_12 (x>=0.3) 在 300 K AIMD 热平均后，四重节点面能隙 <20 meV，
+        或 Fermi-level DOS 下降 <25%，或 Wannier-Boltzmann 室温电导率仍 >5e3 S/m，
+        则 H2 被证伪。
+
+      本次运行只做快速部分证据生成，不直接评估上述 falsifier。
+
+  - type: research_plan
+    name: tC40_DFT_AIMD_Research_Plan
+    metadata:
+      source_artifact: research_plan__tC40_DFT_AIMD_Research_Plan.json
+      imported_for: H2_fast_partial_experiment
+    content: |
+      上游 research plan 中 H2 对应 S9-S15:
+      S9 Na doping substitution, S10 geometry relax, S11 300 K AIMD, S12 thermal average,
+      S13 HSE06 band/DOS, S14 Bader, S15 Wannier/BoltzTraP transport。
+
+      本 fixture 只执行其中低精度、快速可跑通的 VASP evidence-generation 子集：
+      - 已有 case3 phonon/e-ph 证据归档；
+      - pristine directional supercell AIMD: 2x1x1, 1x2x1, 1x1x2；
+      - Na-intercalated candidate predecessor + fast AIMD；
+      - 后续严谨判据仍交给 postprocess / 更高精度补算。

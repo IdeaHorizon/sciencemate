@@ -1,0 +1,109 @@
+# E2E（真实调用形态）：只给"目标 + 冻结 prereg 绑定"，其余全靠节点自己推。
+#
+# 与 e2e_local_scheduler_scientific.yaml 的分工：
+#   - scientific 那份是**脚本化回归载体**：逐工具带参数地指定 envelope/route/收尾顺序，
+#     用来确定性地压特定门（它自己写着"envelope 门的 E2E 回归载体"）。
+#   - 本 fixture 是**真实调用载体**：真实 orchestrator→experiment 往往只给一句目标
+#     （+ 科学 run 的 prereg id）。节点必须自己判断 scope、自己知道要先绑 envelope 与
+#     冻结 route、自己推出 secondary 闭包顺序、自己避开 primary-only 工具——这些在脚本版
+#     里全被 fixture 代劳了，因而节点自身 rules/skill 的缺陷会被掩盖。
+#
+# 因此本 fixture 的 experiment_focus **刻意不含**：工具名、参数值、步骤编号、
+# "不许调用 X" 之类的提示。加回这些就等于把答案抄给节点，测试随即失去意义
+# （test_e2e_fixture_contracts 里有一条测试机械地守住这一点）。
+#
+#   python run_node.py --harness experiment --no-interactive --bypass-permissions \
+#     --fixture nodes/experiment/fixtures/e2e_realistic_scientific.yaml \
+#     --project-id e2e-realistic-sci
+
+node_inputs:
+  prereg_artifact_id: pre_registration__Verlet_Energy_Drift_dt001
+  experiment_focus: |
+    按绑定的冻结 pre_registration 执行这次数值实验，并按本节点规程完成收尾。
+
+    本机用 scheduler=local（无论是否装有 SLURM 都用 local）。
+    积分器随预注册一起交付（见上游 artifact），按交付的实现原样跑，不要改动算法。
+    python3 在 PATH 上，无需安装依赖。
+
+upstream_artifacts:
+  - type: source_bundle
+    name: verlet_reference
+    metadata:
+      entrypoint: verlet.py
+      usage: "verlet.py <dt> <nsteps> <out.json>"
+      language: python3
+    content: |
+      #!/usr/bin/env python3
+      """1D 谐振子的 velocity-Verlet 积分，用于验证辛积分器的能量漂移有界。
+
+      m = k = 1, x0 = 1.0, v0 = 0.0 -> E0 = 0.5。
+      用法: verlet.py <dt> <nsteps> <out.json>
+      """
+      import json
+      import sys
+
+
+      def main() -> int:
+          dt, nsteps, out = float(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+          x, v = 1.0, 0.0
+          a = -x
+          e0 = 0.5 * v * v + 0.5 * x * x
+          e_min = e_max = e0
+          for _ in range(nsteps):
+              x += v * dt + 0.5 * a * dt * dt
+              a_new = -x
+              v += 0.5 * (a + a_new) * dt
+              a = a_new
+              e = 0.5 * v * v + 0.5 * x * x
+              e_min, e_max = min(e_min, e), max(e_max, e)
+          drift = max(abs(e_max - e0), abs(e_min - e0)) / e0
+          result = {"dt": dt, "nsteps": nsteps, "e0": e0, "e_min": e_min,
+                    "e_max": e_max, "max_rel_energy_drift": drift,
+                    "x_final": x, "v_final": v}
+          with open(out, "w", encoding="utf-8") as fh:
+              json.dump(result, fh, indent=2)
+          print(f"VERLET_OK max_rel_energy_drift={drift:.6e} out={out}")
+          return 0
+
+
+      if __name__ == "__main__":
+          sys.exit(main())
+  - type: claim
+    name: H_verlet_energy_drift_bounded
+    metadata: {claim_type: hypothesis, status: open, created_at: "2026-08-18T00:00:00+00:00"}
+    content: |
+      velocity-Verlet 作为辛积分器，在 dt=0.01、10^5 步的 1D 谐振子上，
+      相对能量漂移最大值有界且小于 1e-3。
+  - type: pre_registration
+    name: Verlet_Energy_Drift_dt001
+    metadata:
+      frozen: true
+      frozen_at: "2026-08-18T00:00:00+00:00"
+      freeze_reason: "E2E: scheduler 路径上的 scientific closure 验证"
+      run_role: secondary
+      analysis_eligible: false
+      stage: simulation
+      requires_scheduler: true
+    content: |
+      ## Pre-Registration: velocity-Verlet 能量漂移有界性
+
+      ### Hypothesis (H1)
+      velocity-Verlet 积分 1D 谐振子（m=k=1, x0=1.0, v0=0.0, E0=0.5）时，
+      能量误差有界振荡而非单调累积；dt=0.01、nsteps=100000 下相对能量漂移
+      最大值 max_rel_energy_drift < 1e-3。
+
+      ### Setup
+      - 积分器: 随本预注册交付的 source_bundle__verlet_reference（原样使用，不改算法）
+      - 参数: dt=0.01, nsteps=100000
+      - 执行: 本机单机跑完即可，不需要多节点或排队资源
+      - 输出: <run_root>/verlet_result.json，含 max_rel_energy_drift
+
+      ### Falsification criteria
+      - metric: max_rel_energy_drift
+      - op: <
+      - threshold: 1e-3
+      - 若 max_rel_energy_drift >= 1e-3 或作业 returncode != 0 → 假说被否证
+
+      ### Expected output
+      - verlet_result.json 可解析，含 e0/e_min/e_max/max_rel_energy_drift
+      - stdout 含 VERLET_OK 标记

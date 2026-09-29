@@ -1,0 +1,66 @@
+{
+  "task_id": "variance_additive_FALSE",
+  "arm": "A1",
+  "final_expression": "VarX + VarY + 2*CovXY",
+  "final_expression_source": "main_result",
+  "main_result_statement": "一般公式 Var(X+Y)=Var(X)+Var(Y)+2Cov(X,Y)；原命题为假，可加性 ⟺ Cov(X,Y)=0",
+  "verdict": "refuted",
+  "verification_evidence": [
+    {
+      "step": "S3",
+      "probe": "6584633dd410482b",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S4",
+      "probe": "6664cbe2f692e65a",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S5",
+      "probe": "a5944ad34695ad96",
+      "status": "verified",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 3,
+  "step_count": 6,
+  "assumptions": [
+    "A1: X、Y 二阶矩有限（E[X^2],E[Y^2]<∞，Cauchy-Schwarz 保证 E[XY] 有限，Var/Cov 良定义）",
+    "A2: 期望线性性 E[X+Y]=E[X]+E[Y]，E[X^2+2XY+Y^2]=E[X^2]+2E[XY]+E[Y^2]",
+    "A3: Var(Z) := E[(Z-E[Z])^2] = E[Z^2]-(E[Z])^2",
+    "A4: Cov(X,Y) := E[XY] - E[X]E[Y]",
+    "A5: 反例族中 Var(X)=v>0（非退化）"
+  ],
+  "unverified_steps": [
+    "S1",
+    "S2",
+    "S6"
+  ],
+  "validity_domain": [
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5"
+  ],
+  "credibility": {
+    "level": "derived_deductively",
+    "core_step_verified": "probe 6664cbe2f692e65a symbolic",
+    "weakest_step": "S4 代数归组（已被符号验证覆盖）",
+    "domain": "二阶矩有限 (A1)"
+  },
+  "findings": [
+    "反例族 Y=kX (k∉{0,1}, Var(X)>0) 直接证伪原命题",
+    "可加性 ⇔ 不相关（充要），比预注册要求的充分条件更强；独立 ⟹ 不相关 是充分非必要",
+    "证伪在二阶矩有限域内完成，比『任意随机变量』的声称更窄故反例更强",
+    "首轮验证因符号名 EX2 被 sympy 解析为 EX**2 污染，改用单字母矩符号重验"
+  ],
+  "frozen": true,
+  "turns": 19,
+  "tool_calls": 24,
+  "elapsed_s": 271.7,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787421237-0f9686"
+}

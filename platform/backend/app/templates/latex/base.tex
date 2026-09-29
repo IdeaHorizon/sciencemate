@@ -1,0 +1,127 @@
+% Base LaTeX Template — Agent Research Platform
+%
+% This is the default template. To add journal-specific templates:
+%   1. Copy this file to e.g. nature.tex, acs.tex, aps.tex
+%   2. Change \documentclass and packages to match the journal's .cls
+%   3. Adjust section structure as needed
+%   4. Set template name in project config or writing harness
+%
+% The writing agent fills in all content between BEGIN/END markers.
+% Packages below cover most scientific writing needs.
+
+\documentclass[11pt,a4paper]{article}
+
+% ── Core packages ──────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+% ── Page layout ────────────────────────────────────────────────────
+\usepackage[margin=1in]{geometry}
+\usepackage{setspace}
+\onehalfspacing
+
+% ── Math ───────────────────────────────────────────────────────────
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{mathtools}
+
+% ── Figures and tables ─────────────────────────────────────────────
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{float}
+\usepackage{subcaption}
+
+% ── Colors and links ──────────────────────────────────────────────
+\usepackage[dvipsnames]{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+
+% ── Citations ──────────────────────────────────────────────────────
+\usepackage[numbers,sort&compress]{natbib}
+\bibliographystyle{unsrtnat}
+
+% ── Code listings (optional) ──────────────────────────────────────
+\usepackage{listings}
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  captionpos=b,
+}
+
+% ── Algorithms (optional) ─────────────────────────────────────────
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+% ── SI units ───────────────────────────────────────────────────────
+\usepackage{siunitx}
+
+% ── Misc ───────────────────────────────────────────────────────────
+\usepackage{enumitem}
+\usepackage{appendix}
+
+% ══════════════════════════════════════════════════════════════════
+% CONTENT BEGINS HERE — the writing agent fills everything below
+% ══════════════════════════════════════════════════════════════════
+
+% ── Title block ────────────────────────────────────────────────────
+% TEMPLATE:TITLE
+\title{Paper Title}
+\author{Author Names\thanks{Affiliations and correspondence}}
+\date{}
+% /TEMPLATE:TITLE
+
+\begin{document}
+\maketitle
+
+% ── Abstract ───────────────────────────────────────────────────────
+% TEMPLATE:ABSTRACT
+\begin{abstract}
+Abstract text here (150--300 words).
+\end{abstract}
+% /TEMPLATE:ABSTRACT
+
+% ── Keywords (optional) ───────────────────────────────────────────
+% TEMPLATE:KEYWORDS
+\noindent\textbf{Keywords:} keyword1, keyword2, keyword3
+% /TEMPLATE:KEYWORDS
+
+% ── Main body ──────────────────────────────────────────────────────
+% TEMPLATE:BODY
+
+\section{Introduction}
+
+\section{Related Work}
+
+\section{Methodology}
+
+\section{Results}
+
+\section{Discussion}
+
+\section{Conclusion}
+
+% /TEMPLATE:BODY
+
+% ── Acknowledgments ───────────────────────────────────────────────
+% TEMPLATE:ACKNOWLEDGMENTS
+\section*{Acknowledgments}
+% /TEMPLATE:ACKNOWLEDGMENTS
+
+% ── References ─────────────────────────────────────────────────────
+% TEMPLATE:REFERENCES
+% Use \bibliography{references} if you have a .bib file, or
+% use thebibliography environment for inline references:
+\begin{thebibliography}{99}
+\bibitem{ref1} Author, ``Title,'' \textit{Journal}, vol.~X, pp.~Y--Z, Year.
+\end{thebibliography}
+% /TEMPLATE:REFERENCES
+
+% ── Appendix (optional) ───────────────────────────────────────────
+% TEMPLATE:APPENDIX
+% \begin{appendices}
+% \section{Supplementary Data}
+% \end{appendices}
+% /TEMPLATE:APPENDIX
+
+\end{document}

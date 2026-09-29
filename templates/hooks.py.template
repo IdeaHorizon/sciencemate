@@ -1,0 +1,83 @@
+"""nodes/{your_node}/hooks.py —— 节点专属 loop hook 注册（v2.1+）。
+
+bootstrap 启动时会自动 import `nodes/<node>/hooks.py`（如果存在）。
+你在这里调 `register_loop_hook(...)` 注册的 hook，要在你的
+harness.yaml 的 `loop_hooks: [your_hook_name]` 里启用才会真的跑。
+
+## 4 个钩子点（按 agent_loop 顺序）
+
+  on_turn_start(ctx)   每轮 LLM 调用前。返 list[LLMMessage] inject 进 messages
+  on_llm_response(ctx, response)   LLM 刚返回时（观察用，不能改 messages）
+  on_turn_end(ctx)     一轮 tool 调度完。返 list[LLMMessage] inject
+  on_end(ctx, result)  loop 完全结束时（观察 + 写 transcript 用）
+
+## 何时用 hook（vs 用 tool）
+
+  用 hook：要在**所有 LLM call** 里强制注入某条 system message（比如领域提醒、
+          状态检查、安全约束）。或者要在 turn 边界做事（计数、节流、检测死循环）。
+
+  用 tool：LLM **按需** 调用的能力（执行实验、查询、写 artifact）。
+
+## 见 core/loop_hooks_builtin.py 里 5 个内置 hook 作为参考实现：
+  - memory_delta              每轮 inject 新写入的 memory
+  - kb_delta                  每轮 inject 新写入的 KB
+  - producing_integration_reminder   pending curator integration 时强提醒
+  - dreaming_due_reminder     curator dreaming 过期时强提醒
+  - reflection                每 N 轮注一段自检 prompt
+"""
+from __future__ import annotations
+
+from core.llm import LLMMessage
+from core.loop_hooks import HookContext, LoopHook, register_loop_hook
+
+
+# ── Example 1：on_turn_start 注入一条提醒 ───────────────────────────────────
+
+def _my_reminder_on_turn_start(ctx: HookContext) -> list[LLMMessage] | None:
+    """每轮 LLM call 前提醒一下某领域约束。"""
+    # 可以读 ctx.state.list_artifacts() / state.search_memory() 等做条件判断
+    if ctx.turn % 3 == 0:                       # 每 3 轮一次
+        return [LLMMessage(
+            role="system",
+            content="提醒：本节点输出必须遵循 X 格式。",
+        )]
+    return None                                  # 返 None 不注入
+
+
+# ── Example 2：on_turn_end 检测死循环 ────────────────────────────────────────
+
+def _detect_loop_on_turn_end(ctx: HookContext) -> list[LLMMessage] | None:
+    """如果连续 3 轮都在调同一工具同一参数 → 警告。"""
+    records = getattr(ctx, "tool_call_records", []) or []
+    if len(records) < 2:
+        return None
+    # 这里只是 demo —— 真实实现要看 ctx.state.hook_state 跨轮 carry-over
+    if records[-1]["name"] == records[-2].get("name"):
+        return [LLMMessage(
+            role="system",
+            content="⚠️ 检测到你重复调同一工具。停下来想想是不是该换思路。",
+        )]
+    return None
+
+
+# ── 注册 ────────────────────────────────────────────────────────────────────
+
+register_loop_hook(LoopHook(
+    name="my_reminder",
+    description="每 3 轮注入一段领域提醒。配置：在 harness.yaml 的 loop_hooks 里加 'my_reminder'。",
+    on_turn_start=_my_reminder_on_turn_start,
+))
+
+register_loop_hook(LoopHook(
+    name="detect_repeated_tool_call",
+    description="检测连续重复同一工具调用 → 警告 LLM 换思路。",
+    on_turn_end=_detect_loop_on_turn_end,
+))
+
+
+# ── 在你节点的 harness.yaml 里启用： ─────────────────────────────────────────
+#   loop_hooks:
+#     - my_reminder
+#     - detect_repeated_tool_call
+#
+# 不写在 loop_hooks 里就不会跑（即使在这里 register 了）。

@@ -1,0 +1,57 @@
+id: damped_resonance_width
+title: 阻尼谐振子共振峰宽
+domain: classical_mechanics
+kind: normal
+
+prompt: |
+  受迫阻尼谐振子 x'' + gamma*x' + omega_0^2 x = F cos(omega t)。
+  推导振幅共振曲线的半高全宽 Delta_omega，并用品质因数 Q = omega_0/gamma 表示。
+  说清你在哪一步用了弱阻尼近似，以及它的适用范围。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: damped_resonance_width_prereg
+    content: |
+      ## Research Questions
+      
+      ### Q1: 受迫阻尼谐振子的共振峰宽是多少？
+      - output_kind: 一条命题的裁决
+      - proposition: 弱阻尼下振幅共振的半高全宽 Delta_omega = gamma = omega_0/Q。
+      - 闭合条件:
+      ```yaml
+      - id: FWHM
+        statement: "给出 Delta_omega 的表达式，并说清弱阻尼近似用在哪一步、适用范围是什么"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  final_expression: "sqrt(3)*omega_0/Q"
+  expression_note: |
+    ⚠️ 2026-08-23 修正：原 ground truth 写的是 omega_0/Q（= gamma），**那是错的**。
+
+    题目问的是**振幅**共振曲线的半高全宽。sympy 核算（近共振 A(δ)=F/(ω₀√(4δ²+γ²))）：
+      振幅半高 A_max/2  → δ = ±(√3/2)γ  → FWHM = √3·γ
+      功率半高 A²_max/2 → δ = ±γ/2      → FWHM = γ
+    原答案是**功率**的 FWHM，与题干不符。
+
+    这个错误的方向很要命：两个裸臂都给了 √3·γ（正确）被判成错，
+    而 A1 给了 γ（错误）被判成对 —— **判据的偏向恰好有利于 harness**。
+    详见 THREE_ARM_RESULT。
+  accepted_alternatives:
+    # 用 gamma 表达同一个量（Q ≡ ω₀/γ）
+    - "sqrt(3)*gamma"
+  symbol_definitions:
+    Q: "omega_0/gamma"
+  expected_verdict: derived
+  required_assumptions:
+    - id: weak_damping
+      why: "半高全宽=gamma 只在 gamma<<omega_0 成立，这是最容易被静默用掉的近似"
+      patterns: ["弱阻尼", "weak.?damp", "gamma *<< *omega", "小阻尼", "underdamp", "Q *>> *1"]
+    - id: steady_state
+      why: "共振曲线是稳态响应，暂态已衰减"
+      patterns: ["稳态", "steady.?state", "暂态", "transient", "长时间"]

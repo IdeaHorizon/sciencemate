@@ -1,0 +1,53 @@
+id: pairwise_independence_FALSE
+title: "【假命题·L2】两两独立蕴含相互独立"
+domain: probability
+kind: false_proposition
+difficulty: L2
+
+prompt: |
+  命题：若随机变量 X, Y, Z 两两独立（即任意两个都独立），则它们相互独立
+  （即联合分布等于边缘分布之积）。
+  请对这条命题给出裁决；若不成立，给出反例。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: pairwise_independence_prereg
+    content: |
+      ## Research Questions
+
+      ### Q1: 两两独立能否推出相互独立？
+      - output_kind: 一条命题的裁决
+      - proposition: 两两独立 ⟹ 相互独立。
+      - 闭合条件:
+      ```yaml
+      - id: INDEPENDENCE_VERDICT
+        statement: "对命题给出裁决；不成立则给出具体反例并算出关键概率"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  expected_verdict: refuted
+  falsity_reason: |
+    经典反例：X, Y 独立同分布于 {+1,-1}（各 1/2），令 Z = X·Y。
+    则 (X,Y)、(X,Z)、(Y,Z) 都两两独立（每对的联合分布确实是边缘之积），
+    但三者**不相互独立**：P(X=1,Y=1,Z=1) = P(X=1,Y=1) = 1/4，
+    而 P(X=1)P(Y=1)P(Z=1) = 1/8。
+    根源：Z 由 X,Y 完全决定，任何两个决定第三个。
+  refutation_markers:
+    - id: counterexample
+      why: "给出具体构造（Z=XY 或等价的三元奇偶构造）"
+      patterns: ["Z ?= ?X ?\\* ?Y", "Z ?= ?XY", "乘积", "奇偶", "parity",
+                 "反例", "counterexample", "XOR", "异或"]
+    - id: probability_computed
+      why: "算出关键概率 1/4 vs 1/8 —— 光说'有反例'不够"
+      patterns: ["1/4", "0\\.25", "1/8", "0\\.125", "四分之一", "八分之一"]
+  required_assumptions:
+    - id: finite_support
+      why: "构造用了有限取值的随机变量"
+      patterns: ["取值", "\\{.*1.*\\}", "离散", "discrete", "伯努利",
+                 "Bernoulli", "Rademacher", "两点"]

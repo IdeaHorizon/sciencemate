@@ -1,0 +1,121 @@
+{
+  "task_id": "sho_heat_capacity",
+  "arm": "A1",
+  "final_expression": "k_B*x**2*exp(x)/(exp(x)-1)**2",
+  "final_expression_source": "main_result",
+  "main_result_statement": "一维量子简谐振子在正则系综下的热容闭式 C(T) = k_B*x^2*e^x/(e^x-1)^2，x = ħω/(k_B T)；高温极限 lim_{x->0} C/k_B = 1，量子修正 C/k_B = 1 - x^2/12 + O(x^4)。适用域 T>0、ħω>0。",
+  "verdict": "derived",
+  "verification_evidence": [
+    {
+      "step": "B1a",
+      "probe": "3c3c960ec2c36421",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "B1b",
+      "probe": "eef9c37ddb9cf29d",
+      "status": "numerically_supported",
+      "in_ledger": true
+    },
+    {
+      "step": "B1",
+      "probe": "124daeb7f535863a",
+      "status": "numerically_supported",
+      "in_ledger": true
+    },
+    {
+      "step": "B3",
+      "probe": "ff29f4ae8afb87f9",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "C2",
+      "probe": "72dc3530e60aa65f",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "C3",
+      "probe": "d7c762fa43b375f7",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "C4a",
+      "probe": "f386931d805415ea",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "D1",
+      "probe": "56563d53f6000cc9",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "D2",
+      "probe": "0b2e2f0f2b2be5d2",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "D3",
+      "probe": "f0542ba2ef3c62d8",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "E2",
+      "probe": "1604d62b81107bda",
+      "status": "numerically_supported",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 11,
+  "step_count": 17,
+  "assumptions": [
+    "H1: beta>0（T>0）",
+    "H2: hbar*omega>0",
+    "H3: k_B>0",
+    "H4: x=beta*hbar*omega in (0,oo)"
+  ],
+  "unverified_steps": [
+    "A1",
+    "A2",
+    "B2",
+    "C1",
+    "C4b",
+    "E1"
+  ],
+  "validity_domain": [
+    "H1",
+    "H2",
+    "H3",
+    "H4"
+  ],
+  "credibility": {
+    "level": "high",
+    "summary": "承重代数链（B3,C3,C4a,C2）全部符号层 verified；三个极限（高温1、低温0、二阶修正1/12）均以 Limit 对象经 check_step 符号层 verified（另经 limit_check 佐证）；量纲检查 dimensional_check consistent（energy/temperature = joule/kelvin）。唯一未符号机械验证的承重步 A2 几何级数：教科书标准（A&S 1.2.4），收敛由 H1,H2 保证，数值截断求和支持。log 拆分 B1/B1b 数值支持+标准性质（A&S 4.1.5），不承重。独立数值 cross-check：<E> 一致到 4e-8，C/k_B 在 x<=8 一致到 1.3e-4。主结果判为演绎 derived。",
+    "weakest_steps": [
+      "A2 几何级数（inconclusive→cited_theorem+数值佐证）",
+      "B1/B1b log 拆分（numerically_supported→标准性质+32点支持）"
+    ]
+  },
+  "findings": [
+    "主结果 C(T)=k_B*x^2*e^x/(e^x-1)^2，x=ħω/(k_B T)，适用 T>0、ħω>0。",
+    "高温极限 lim_{x->0} C/k_B = 1（经典能均分 k_B），与预注册数值条一致；量子修正 C/k_B = 1 - x^2/12 + O(x^4)。",
+    "低温极限 lim_{x->oo} C/k_B = 0（量子冻结，附加判别性极限）。",
+    "C/k_B <= 1 对所有 x>0（量子压低热容；384 随机点无反例）。",
+    "独立数值路线（直接求和配分函数+数值微分）与闭式一致：<E> <= 4e-8，C/k_B 在 x<=8 <= 1.3e-4。",
+    "恒等式佐证 C/k_B = (x/2)^2*csch^2(x/2)，分步符号验证完整。",
+    "量纲检查：C 的量纲 = energy/temperature（dimensional_check consistent=true，matches expected joule/kelvin）。",
+    "D1/D2/D3 用 Limit 对象经 check_step 符号层 verified（probe 在账本），limit_check 作为同对象二次佐证；E1 因 dimensional_check 工具不返回 probe 而记 prose 步，量纲结论以上条 finding 为准。"
+  ],
+  "frozen": true,
+  "turns": 33,
+  "tool_calls": 60,
+  "elapsed_s": 650.7,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787414829-755177"
+}

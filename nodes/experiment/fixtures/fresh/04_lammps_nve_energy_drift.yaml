@@ -1,0 +1,84 @@
+node_inputs:
+  prereg_artifact_id: pre_registration__Fresh_LAMMPS_NVE_Energy_Drift
+  stage: simulation
+  experiment_focus: |
+    Run two genuine small native-LAMMPS Lennard-Jones NVE simulations with identical
+    initial conditions and timesteps 0.002 and 0.012. Generate inputs in run_root,
+    retain thermo output, calculate relative total-energy drift from actual output,
+    and report each timestep separately. Do not alter the step count or drift threshold
+    after seeing output. This fixture is H2-C scientific-only: it does not acquire,
+    extract, build, or install a solver. Before declaring a scientific route, select
+    the exact frozen H2-B operation raw_results and experiment_log from the same
+    Project worktree (or an explicitly forwarded frozen input). They must show
+    outcome=success, record_kind=operation, the controlled
+    source/final URL, receipt SHA-256, archive and executable SHA-256, ABI evidence,
+    lmp -h output, and the exact executable path. These are toolchain provenance only,
+    not this scientific preregistration or result.
+
+    A H2-B receipt does not itself mount or transfer a solver. Use the executable only
+    when the deployment provides a declared shared_filesystem storage binding and this
+    run can recheck the locator exists, remains executable, has the recorded SHA-256,
+    and produces the recorded lmp -h identity. This run must create a new evidence_bearing
+    execution envelope with environment_lock_artifact_ids containing the selected H2-B
+    raw_results and experiment_log. The envelope must use a deployment-provided
+    immutable target_profile_ref; discover_resources is observation only and cannot
+    invent one. It must not reuse the H2-B route or envelope. If any
+    receipt, storage continuity, hash, ABI, or version check is unavailable, write a
+    structured blocker and do not submit a scientific job. Do not substitute Python or
+    another solver or fabricate trajectories.
+upstream_artifacts:
+  - type: research_plan
+    name: Fresh_LAMMPS_NVE_Energy_Drift_Plan
+    content: "Compare numerical stability of two predeclared timesteps."
+  - type: pre_registration
+    name: Fresh_LAMMPS_NVE_Energy_Drift
+    metadata:
+      frozen: true
+      run_role: primary
+      analysis_eligible: true
+      stage: simulation
+      execution_contract:
+        version: 1
+        scientific_params: {timesteps: [0.002, 0.012], steps: 5000, max_relative_drift: 0.02, density: 0.8442, lattice_cells_per_axis: 4, initial_temperature: 1.0, velocity_seed: 4928459, pair_cutoff: 2.5, thermo_interval: 100}
+        runtime_params: {threads: 1, mpi_ranks: 1}
+    content: |
+      ## Research question Q1
+      Does timestep 0.002 retain relative total-energy drift below 0.02 over 5000
+      NVE steps, and is 0.012 reported under the same protocol?
+
+      ## Frozen local protocol
+      - H2-B boundary: the native solver is prepared by a separate operation
+        `toolchain_build` run. Before this scientific route, select its frozen
+        raw_results and experiment_log as toolchain evidence. They must state
+        outcome=success, record_kind=operation, source and
+        final URL, receipt SHA-256, archive/executable SHA-256, ABI, lmp -h identity,
+        exact executable path, and whether a deployment-provided shared filesystem
+        keeps that exact supply locator available. This operation evidence cannot
+        substitute for this frozen scientific preregistration or scientific result.
+      - H2-C revalidation: this run creates a new evidence_bearing execution envelope
+        that locks the selected frozen H2-B raw_results and experiment_log together
+        with its own preregistration and resource plan. It never reuses the H2-B route
+        or envelope. The executable is usable only if the declared shared_filesystem
+        binding makes the locator readable here and this run rechecks existence,
+        executable mode, SHA-256, ABI, and lmp -h output. Otherwise emit a structured
+        blocker before any scientific submission; do not acquire, extract, build,
+        install, or substitute another solver in H2-C.
+      - System: three-dimensional periodic atomic Lennard-Jones fluid in reduced
+        units; atom_style atomic; mass=1; fcc lattice density rho=0.8442; region
+        block 0 4 in each lattice coordinate (256 atoms); pair_style lj/cut 2.5 and
+        pair_coeff 1 1 1.0 1.0 2.5.
+      - Initial condition: each input independently creates that identical lattice and
+        velocities using `velocity all create 1.0 4928459 mom yes rot no dist gaussian`;
+        neighbor 0.3 bin and `neigh_modify every 1 delay 0 check yes`. No thermostat
+        or barostat is applied: `fix 1 all nve` starts immediately.
+      - For each timestep, the input uses `thermo 100` and `thermo_style custom step
+        temp pe ke etotal`, then runs exactly 5000 steps. The two inputs differ only
+        in `timestep 0.002` versus `timestep 0.012`.
+      - Drift formula: abs(TotEng(step=5000) - TotEng(step=0)) /
+        max(abs(TotEng(step=0)), 1e-12), taking TotEng from the retained native
+        LAMMPS thermo log. timestep=0.002 passes when drift < 0.02; timestep=0.012
+        is a same-protocol comparison and must report its value without a predeclared
+        pass/fail threshold.
+      - Before execution, freeze the generated input SHA-256 values, selected H2-B supply
+        evidence and frozen H2-B receipt, environment lock, and local fixed
+        resource plan. Do not amend these after observing output.

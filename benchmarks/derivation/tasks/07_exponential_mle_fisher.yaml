@@ -1,0 +1,52 @@
+id: exponential_mle_fisher
+title: 指数分布的 MLE 与 Fisher 信息
+domain: statistics
+kind: normal
+
+prompt: |
+  设 X_1..X_n iid ~ Exponential(lambda)，密度 f(x)=lambda*exp(-lambda*x)，x>0。
+  求 lambda 的最大似然估计，并给出单个观测的 Fisher 信息 I(lambda)。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: exponential_mle_fisher_prereg
+    content: |
+      ## Research Questions
+      
+      ### Q1: 指数分布参数的 MLE 与 Fisher 信息是什么？
+      - output_kind: 一条命题的裁决
+      - proposition: lambda_hat = 1/xbar，且 I(lambda) = 1/lambda^2。
+      - 闭合条件:
+      ```yaml
+      - id: FISHER_INFO
+        metric: "I(lambda) 乘以 lambda^2"
+        comparison: "=="
+        threshold: 1
+      - id: MLE
+        statement: "给出 MLE 的推导，并验证二阶条件（是极大不是极小）"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  final_expression: "1/lamda**2"
+  expression_note: "Fisher 信息；MLE 部分由 MLE 闭合条目单独判"
+  accepted_aliases:
+    # `lambda` 是 Python 关键字，parse_expr 解析它直接 SyntaxError ——
+    # ground truth 用 sympy 惯例的 lamda，模型的各种写法都规约到它
+    lamda: [lam, lambda_, lambda]
+  expected_verdict: derived
+  required_assumptions:
+    - id: iid
+      why: "似然连乘的依据"
+      patterns: ["独立", "iid", "i\\.i\\.d", "independen", "同分布"]
+    - id: support
+      why: "x>0 是指数分布的支撑集"
+      patterns: ["x *> *0", "支撑", "support", "正数", "非负"]
+    - id: second_order
+      why: "二阶导为负才是极大 —— 最常被跳过的一步"
+      patterns: ["二阶", "second.?deriv", "极大", "maxim", "凹", "concav", "负"]

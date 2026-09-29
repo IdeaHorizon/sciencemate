@@ -1,0 +1,20 @@
+rubric_id: base
+version: scientific-visual-v1
+authority: visible_observation_only
+checks:
+  - text legibility at final size
+  - clipping
+  - overlap and data occlusion
+  - color distinguishability
+  - label-to-mark correspondence
+output_fields:
+  - panel_id
+  - normalized_region
+  - visible_observation
+  - visible_elements
+forbidden_vlm_outputs:
+  - scientific correctness
+  - confidence score
+  - severity
+  - approval verdict
+  - prescribed fix

@@ -1,0 +1,116 @@
+"""nodes/<your_node>/agent_loop.py —— 自定 agent loop （**opt-in 高风险扩展位**）。
+
+⚠️ 慎用 ⚠️
+
+存在这个文件 = framework 用你的 `run_loop` 函数**替换默认 agent loop**。
+你接管之后，framework 不再保证以下功能默认成立：
+
+  □ transcript.jsonl 关键事件齐全 → `hf log` / `hf last-error` 解析可能不全
+  □ on_turn_start / on_llm_response / on_turn_end / on_end hook 调用
+    （含 memory_delta / kb_delta 这俩 always-on）
+  □ summarizer 在 token threshold 时自动触发
+  □ quality_checks 跑完（这部分在 executor，不在 loop，仍跑）
+  □ pause / resume 机制（依赖 PausedRunContext 写入）
+  □ tokens_used / tool_calls_made 计数（query_budget 工具读这些）
+
+## 决策：什么时候用？
+
+**90% 的差异化需求** 用 harness.yaml + hooks.py + summarizer.py 就能搞定，**不用碰这个文件**。
+
+只有以下场景才考虑：
+  - 节点需要**完全不同的 turn 结构**（如 multi-persona panel 并行 + aggregator）
+  - 需要 **async job** 长跑（提交 → 写 summary → 退出 → 外部触发回头跑）
+  - 想要 **outer retry policy**（整 loop 失败重跑 N 次）—— 这种用"包装模式"
+
+如果只是想"每轮 LLM 前注一段消息" → 用 hook，**不要**用这个。
+如果只是想"自定 context 压缩" → 用 summarizer.py，**不要**用这个。
+
+## 两种实现模式
+
+### 推荐：包装模式（保留 framework 所有保证 + 加 outer 行为）
+
+```python
+from core.agent_loop import run_loop as run_default
+
+async def run_loop(harness, state, messages, llm):
+    # 跑默认 loop，但失败重试 3 次
+    for attempt in range(3):
+        result = await run_default(harness, state, messages, llm)
+        if result.status == "completed":
+            return result
+        state.append_transcript("loop_retry", attempt=attempt + 1,
+                                  reason=result.status)
+    return result
+```
+
+### 完全替换（你接管所有）
+
+```python
+from core.agent_loop import LoopResult
+from core.harness import NodeHarness
+from core.llm import LLMClient, LLMMessage
+from core.state import State
+
+async def run_loop(
+    harness: NodeHarness,
+    state: State,
+    messages: list[LLMMessage],
+    llm: LLMClient,
+) -> LoopResult:
+    state.append_transcript("custom_loop_start")
+    # 自己实现 LLM call / tool dispatch / hook 调用 / summarizer 触发 / ...
+    # 完全你的事
+    state.append_transcript("custom_loop_end")
+    return LoopResult(
+        status="completed",
+        final_text="...",
+        turns=N,
+        tool_call_count=K,
+        last_response=None,
+        # ... 其它字段见 core.agent_loop.LoopResult 全列表
+    )
+```
+
+## Owner 责任清单（用了 override 必看）
+
+如果用**完全替换模式**，至少做：
+
+  1. 写 transcript：
+     state.append_transcript("llm_call_start", ...)
+     state.append_transcript("llm_call_end", ...)
+     state.append_transcript("tool_call_start", ...)
+     state.append_transcript("tool_call_end", ...)
+     让 `hf log` 仍能 parse
+
+  2. 调 always-on hook：
+     from core.loop_hooks import list_hooks, run_on_turn_start, ...
+     hooks = list_hooks(["memory_delta", "kb_delta"] + harness.loop_hooks)
+     在合适位置 await 调度
+     不调 = LLM 看不到新 memory / KB
+
+  3. 更新计数：
+     state.tokens_used += response.usage.get("total_tokens", 0)
+     state.tool_calls_made += 1   # 每次 tool dispatch
+     不更新 = query_budget 工具失效
+
+  4. 返回完整 LoopResult：
+     status / final_text / turns / tool_call_count / last_response
+
+太多了对吧？所以**优先包装模式**。
+"""
+from __future__ import annotations
+
+# Stub —— owner 改这里
+from core.agent_loop import run_loop as run_default
+# from core.agent_loop import LoopResult
+# from core.harness import NodeHarness
+# from core.llm import LLMClient, LLMMessage
+# from core.state import State
+
+
+async def run_loop(harness, state, messages, llm):
+    """节点 owner 实现自定 loop（必填）。
+
+    默认实现 = 跑 framework 默认 loop。owner 在前后加自定行为。
+    """
+    return await run_default(harness, state, messages, llm)

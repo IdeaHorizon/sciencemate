@@ -1,0 +1,584 @@
+schema_version: "1.0"
+suite_id: data_cross_domain_e2e
+title: Data 节点跨领域真实 E2E 测试集
+purpose: >-
+  通过平台现有 Orchestrator E2E 入口验证 Data 节点，而不是直接运行 Data。
+  只评价 Data 自己生成、审核、修订并写入当前项目工作区的交付物。
+
+execution_contract:
+  entrypoint: existing_orchestrator_e2e
+  isolation: fresh_project_and_session_per_case
+  direct_data_invocation_forbidden: true
+  orchestrator_may_generate_assets: false
+  experiment_role: consume_and_validate_only
+  count_experiment_generated_assets_as_data_success: false
+  data_dispatch:
+    expected_initial_calls: 1
+    internal_revision_required: true
+    orchestrator_redispatch_on_review_failure: false
+  artifact_rules:
+    current_project_workspace_only: true
+    stale_delivery_reuse_forbidden: true
+    manifest_must_match_files: true
+    requested_assets_take_priority: true
+    optional_logs_and_reproduction_files: only_when_requested_or_justified
+
+platform_instruction: |-
+  这是一次 Data 节点真实 E2E 验证。请读取
+  nodes/data/e2e_test_set.yaml，并只执行 case_id=<CASE_ID>。
+
+  将该 case 的 turns 按顺序作为用户请求执行。必须由 Orchestrator 调用 Data
+  完成前处理；Orchestrator、Experiment 和其他节点不得代替 Data 生成、修改或
+  补齐文件。Data 首次审核不通过时，应在同一次 Data 运行内依据审核意见修订并
+  复审，不得通过重新派发另一个 Data 运行掩盖问题。Experiment 仅在 case 明确
+  要求 consumer_check 时进行只读消费验证。
+
+  调用 Data 时必须保留当前 turn 的原文，并把 case.expected_assets 映射为
+  preprocessing_request.requested_assets，把 case.acceptance_focus 映射为
+  acceptance_criteria；authority.kind=user_request、authority.locked=true，且
+  non_goals 必须包含“不得用脚本或配置文件替代 requested_assets”。不要让需求
+  分析模型把测试集声明的最终产物改写成辅助脚本清单。
+
+  只以 Data 实际写入当前 E2E 项目工作区的文件为成功依据。不得复用不匹配本次
+  request/spec 的历史交付。完成后报告 Data 调用次数、内部修订次数、Data run_id、
+  产物目录、逐项验收结果、审核结论和未满足项。若失败，保留真实状态、审核意见
+  和 blocked report，不要改由其他节点完成。
+
+result_policy:
+  completed:
+    - requested assets exist and are non-empty
+    - artifacts satisfy the current request rather than a previous request
+    - files pass applicable parser or tool validation
+    - review checks request conformance before general quality
+    - manifest and lineage describe the delivered files accurately
+  needs_input:
+    - only correctness-critical missing authority may trigger it
+    - missing fields and resume_contract are concrete and reusable
+    - answering the request resumes the same Data run
+  externally_blocked:
+    - reserved for genuine access, licence, network, or unavailable-tool blockers
+    - blocked report identifies the external condition and a resumable next action
+  suite_failure:
+    - no Data child run was created
+    - another node produced or repaired Data assets
+    - Orchestrator launched a replacement Data run after an internal review failure
+    - Data reused an artifact whose request identity or content does not match
+    - final text claims success without matching workspace artifacts
+
+cases:
+  - id: engineering_openfoam_cylinder
+    domain: engineering_simulation
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: true
+    turns:
+      - |-
+        请生成一个可直接用于 OpenFOAM 的二维圆柱绕流非结构网格。圆柱直径 1 m；
+        计算域上游 10D、下游 20D、上下各 10D；采用合理默认密度，并在圆柱附近和
+        尾流区加密。交付 constant/polyMesh，检查边界命名、二维边界类型、负体积
+        单元和基本网格质量。不要复用任何历史几何的网格。
+    expected_assets:
+      - constant/polyMesh/points
+      - constant/polyMesh/faces
+      - constant/polyMesh/owner
+      - constant/polyMesh/neighbour
+      - constant/polyMesh/boundary
+    acceptance_focus:
+      - delivered geometry is a cylinder, not an airfoil
+      - OpenFOAM mesh parser or checkMesh succeeds
+      - cylinder wall, far-field/inlet-outlet, and 2D patches are coherent
+
+  - id: engineering_openfoam_airfoil
+    domain: engineering_simulation
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: true
+    turns:
+      - |-
+        请生成一个用于 OpenFOAM 的 NACA0012 二维非结构网格。弦长 1 m，远场边界
+        距离至少 20c，翼面和尾迹区域加密，并使用适合二维计算的前后边界。采用合理
+        默认网格参数，交付可直接使用的 constant/polyMesh 并完成质量审核。
+    expected_assets:
+      - constant/polyMesh/points
+      - constant/polyMesh/faces
+      - constant/polyMesh/boundary
+    acceptance_focus:
+      - geometry matches NACA0012
+      - far field and local refinement satisfy the request
+      - OpenFOAM validation succeeds
+
+  - id: engineering_abaqus_plate_with_hole
+    domain: engineering_simulation
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        请为 Abaqus 生成二维带圆孔矩形板的有限元输入文件。板长 200 mm、宽 100 mm、
+        中心圆孔半径 10 mm、厚度 1 mm；材料为线弹性钢，E=210000 MPa、泊松比 0.3；
+        左边固定，右边施加 100 MPa 均布拉应力。圆孔附近加密。交付一个可解析的
+        .inp 文件，并审核单位一致性、集合、材料、边界条件和载荷引用。
+    expected_assets:
+      - "*.inp"
+    acceptance_focus:
+      - geometry, mesh refinement, material, boundary, and load all exist
+      - node and element sets referenced by loads and constraints are defined
+
+  - id: engineering_plan_bound_thermal_plate
+    domain: engineering_simulation
+    mode: plan_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        这是冻结计划约束下的前处理任务：为二维稳态导热方板生成求解输入。方板尺寸
+        0.1 m×0.1 m，导热系数 45 W/(m·K)，左边界 400 K、右边界 300 K、上下绝热；
+        使用二阶三角形单元，目标单元尺寸 2 mm。不得改变这些冻结参数。交付网格和
+        一个包含材料与边界条件的通用 manifest，并审核计划参数逐项一致。
+    expected_assets:
+      - "*.msh"
+      - manifest.json
+    acceptance_focus:
+      - frozen geometry, units, material, temperatures, and element order are unchanged
+      - manifest references the actual mesh
+
+  - id: engineering_supplied_blade_geometry
+    domain: engineering_simulation
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        我的真实叶片几何已提供在
+        nodes/data/fixtures/geometry/twisted_blade_reference.step。
+        请严格使用该 STEP 实体生成三维四面体有限元网格，单位为 m，目标单元尺寸
+        15 mm、最小单元尺寸 4 mm；不允许用示意几何、参数化叶片或重新拟合的轮廓代替。
+        交付 Gmsh MSH4 文件，并审核网格确实来自该 STEP、包含非零体单元且不存在
+        重复节点、重复单元或孤立节点。
+    expected_assets:
+      - "*.msh"
+    acceptance_focus:
+      - imports the supplied STEP instead of constructing substitute geometry
+      - produces a non-empty three-dimensional tetrahedral volume mesh
+      - preserves source geometry extent and records source-file lineage
+      - has no duplicate nodes, duplicate elements, or isolated nodes
+
+  - id: weather_wrf_single_domain
+    domain: weather_simulation
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        请为 WRF 区域模拟生成 namelist.wps 和 namelist.input。区域中心为北京
+        39.9N、116.4E，单层区域，水平分辨率 9 km，网格 100×100，模拟时间为
+        2025-07-01 00:00 UTC 至 2025-07-02 00:00 UTC。采用适配该区域的投影与
+        合理默认物理配置，两个文件放在同一目录，并审核时间、区域、网格和时间步一致性。
+    expected_assets:
+      - namelist.wps
+      - namelist.input
+    acceptance_focus:
+      - both namelists are parseable and mutually consistent
+      - start/end times, grid dimensions, resolution, and domain center match
+
+  - id: weather_wrf_nested_domains
+    domain: weather_simulation
+    mode: plan_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        按以下冻结配置生成 WRF/WPS 双重嵌套区域配置：母域中心 31.2N、121.5E，
+        d01 分辨率 9 km、101×101；d02 分辨率 3 km、三倍嵌套比、100×100，位于
+        母域中心；时间为 2025-08-01 00:00 UTC 至 2025-08-02 00:00 UTC。
+        交付 namelist.wps 和 namelist.input，不得更改冻结网格参数，并审核父子域接口。
+    expected_assets:
+      - namelist.wps
+      - namelist.input
+    acceptance_focus:
+      - parent ratios and domain indices are legal
+      - time and nested-domain arrays agree across both files
+
+  - id: weather_era5_small_acquisition
+    domain: weather_simulation
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    network_policy: allowed
+    turns:
+      - |-
+        请获取并整理 ERA5 2025-01-01 00:00 UTC、北京附近 39–41N/115–117E 的
+        2 m 温度和 10 m U/V 风场，交付一个 CF 可解析的 NetCDF 文件与 manifest。
+        允许联网查找并使用权威数据接口；不得用随机或伪造数据代替。审核变量、坐标、
+        时间、单位、数据来源和文件哈希。
+    expected_assets:
+      - "*.nc"
+      - manifest.json
+    acceptance_focus:
+      - values originate from an authoritative external source
+      - requested variables, spatial subset, timestamp, units, and lineage match
+
+  - id: weather_cf_regrid
+    domain: weather_simulation
+    mode: request_bound
+    expected_outcome: needs_input
+    consumer_check: false
+    turns:
+      - |-
+        请把我的区域降水 NetCDF 重网格到 0.1°×0.1°并转换为 CF-compliant 文件。
+        必须保持原始时间范围和降水累计含义，但我还没有提供源文件。
+    expected_assets: []
+    acceptance_focus:
+      - requests the source NetCDF rather than inventing data
+      - identifies any required convention or variable information discoverable only from the file
+
+  - id: weather_mpas_streams
+    domain: weather_simulation
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        请为 MPAS-Atmosphere 的 24 小时冷启动试验生成 namelist.atmosphere 和
+        streams.atmosphere。积分步长 36 s，每 3 小时输出 history，每 6 小时写 restart；
+        起始时间 2025-06-01 00:00 UTC。只生成配置，不安装或运行 MPAS，并审核两个
+        文件的时间、输出间隔和流名称一致性。
+    expected_assets:
+      - namelist.atmosphere
+      - streams.atmosphere
+    acceptance_focus:
+      - configuration syntax and time intervals are coherent
+      - no runtime installation is attempted
+
+  - id: materials_vasp_rutile
+    domain: materials_simulation
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        请为金红石 TiO2 常规静态自洽计算生成 VASP 前处理包。在同一个目录交付
+        POSCAR、INCAR、KPOINTS 和 POTCAR.spec；POTCAR.spec 只声明所需赝势，不生成
+        或伪造受许可限制的 POTCAR。采用合理且明确记录的默认参数，审核元素顺序、
+        原子计数、晶格、ENCUT、收敛设置、K 点及文件间一致性。
+    expected_assets:
+      - POSCAR
+      - INCAR
+      - KPOINTS
+      - POTCAR.spec
+    acceptance_focus:
+      - all four files share one task directory
+      - POTCAR is not fabricated
+      - structure and parameter files are mutually consistent
+
+  - id: materials_vasp_silicon_relaxation
+    domain: materials_simulation
+    mode: plan_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        按冻结方案为金刚石结构 Si 的晶格和离子弛豫生成 VASP 输入：常规晶胞，
+        晶格常数 5.431 Å，PBE，ENCUT=500 eV，EDIFF=1E-6，EDIFFG=-0.02 eV/Å，
+        8×8×8 Gamma-centered K 点。交付 POSCAR、INCAR、KPOINTS、POTCAR.spec，
+        不得改动冻结参数，并完成交叉审核。
+    expected_assets:
+      - POSCAR
+      - INCAR
+      - KPOINTS
+      - POTCAR.spec
+    acceptance_focus:
+      - every frozen numerical parameter is represented exactly
+      - relaxation controls are compatible with the requested task
+
+  - id: materials_quantum_espresso_silicon
+    domain: materials_simulation
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        请为金刚石结构 Si 生成 Quantum ESPRESSO 的 pw.x 自洽计算输入。晶格常数
+        5.431 Å，使用 8×8×8 Monkhorst-Pack 网格，赝势文件只作为明确的外部依赖
+        声明，不伪造其内容。交付一个可解析输入文件和 manifest，并审核晶格、原子、
+        单位、截断能、K 点以及赝势引用。
+    expected_assets:
+      - "*.in"
+      - manifest.json
+    acceptance_focus:
+      - pw.x sections and cards are syntactically coherent
+      - pseudopotential dependency is explicit and truthful
+
+  - id: materials_cp2k_water_box
+    domain: materials_simulation
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        请生成一个 CP2K Quickstep 输入包，用于 32 个水分子周期性立方盒的单点 DFT
+        计算。盒长 9.86 Å，PBE-D3，DZVP-MOLOPT-SR-GTH 基组，GTH-PBE 赝势，
+        cutoff 400 Ry。交付结构坐标、CP2K 输入和外部基组/赝势依赖清单，审核原子数、
+        周期盒、方法、单位及文件引用。
+    expected_assets:
+      - "*.inp"
+      - "*.xyz"
+      - manifest.json
+    acceptance_focus:
+      - structure contains exactly 32 complete water molecules
+      - CP2K input references delivered structure and declared external dependencies
+
+  - id: materials_licensed_potcar
+    domain: materials_simulation
+    mode: request_bound
+    expected_outcome: externally_blocked
+    consumer_check: false
+    turns:
+      - |-
+        请直接从网络下载并交付 VASP 官方 PAW_PBE 目录中的 Ti_pv 和 O 的完整 POTCAR，
+        我没有提供许可证凭据或本地赝势路径。
+    expected_assets: []
+    acceptance_focus:
+      - does not fabricate, redistribute, or silently substitute licensed POTCAR content
+      - reports the licence/access blocker and accepts a local authorised path on resume
+
+  - id: md_lammps_argon
+    domain: molecular_dynamics
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        请生成液态氩 LAMMPS 前处理包：500 个 Ar 原子，周期性立方盒，目标温度 85 K，
+        Lennard-Jones 势，metal 单位制。将初始结构 data 文件和输入脚本放在同一目录；
+        只准备输入，不运行正式模拟。审核原子数量、盒尺寸、质量、单位制、势参数、
+        边界条件和脚本文件引用。
+    expected_assets:
+      - "*.data"
+      - "*.in"
+    acceptance_focus:
+      - atom count is 500 and coordinates lie inside the periodic box
+      - LAMMPS units and Lennard-Jones parameters are dimensionally consistent
+
+  - id: md_gromacs_water
+    domain: molecular_dynamics
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        请为 GROMACS 生成一个包含 216 个 TIP3P 水分子的周期性立方盒输入包，温度
+        300 K、压力 1 bar；生成结构、拓扑、能量最小化 mdp、NVT mdp 和 NPT mdp，
+        文件放在同一个任务目录。只准备输入，不运行。审核分子数、盒、力场水模型、
+        拓扑 include、阶段顺序和各文件引用。
+    expected_assets:
+      - "*.gro"
+      - "*.top"
+      - "*em*.mdp"
+      - "*nvt*.mdp"
+      - "*npt*.mdp"
+    acceptance_focus:
+      - all stages form one coherent GROMACS input bundle
+      - molecule count and topology agree with the structure
+
+  - id: md_openmm_alanine
+    domain: molecular_dynamics
+    mode: plan_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        按冻结方案准备 OpenMM 丙氨酸二肽显式溶剂模拟输入：Amber14SB、TIP3P，
+        立方水盒，溶质到盒边最小 1.0 nm，0.15 mol/L NaCl，300 K、1 bar、2 fs，
+        PME。交付初始结构、系统参数说明和可加载的序列化 system XML；不得改变冻结
+        科学参数，并审核拓扑、周期盒、力场、离子和约束的一致性。
+    expected_assets:
+      - "*.pdb"
+      - "*.xml"
+      - manifest.json
+    acceptance_focus:
+      - prepared system represents alanine dipeptide rather than a placeholder molecule
+      - frozen solvent, force field, thermodynamic, and PME settings are preserved
+
+  - id: md_lammps_copper_external_potential
+    domain: molecular_dynamics
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    network_policy: allowed
+    turns:
+      - |-
+        请为 LAMMPS 铜晶体 NPT 模拟准备输入。生成 10×10×10 FCC 常规晶胞，温度
+        300 K、压力 0 bar；允许联网获取一份来源明确且许可证允许再分发的 Cu EAM
+        势文件。交付 data、输入脚本、势文件和 lineage manifest，审核晶格、原子数、
+        units、pair_style/pair_coeff、文件哈希和来源。
+    expected_assets:
+      - "*.data"
+      - "*.in"
+      - manifest.json
+    acceptance_focus:
+      - potential file is actually acquired and its source is recorded
+      - input references the delivered potential by the correct relative path
+
+  - id: md_force_field_missing
+    domain: molecular_dynamics
+    mode: request_bound
+    expected_outcome: needs_input
+    consumer_check: false
+    turns:
+      - |-
+        请严格使用我们课题组自定义力场为聚合物生成分子动力学输入，参数不能使用公开
+        力场替代；但我尚未提供该自定义力场文件或参数表。
+    expected_assets: []
+    acceptance_focus:
+      - requests the authoritative custom force-field material
+      - does not infer or substitute scientific parameters
+      - returns a resumable input contract
+
+  - id: biology_sbml_michaelis_menten
+    domain: biological_simulation
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        请生成一个 SBML Level 3 模型，描述底物 S 转化为产物 P 的 Michaelis–Menten
+        动力学。S 初始浓度 10 mmol/L，P 为 0，Km=2 mmol/L，Vmax=1 mmol/(L·s)，
+        模拟时间单位为秒。交付 SBML XML 和 manifest，审核 XML/SBML 可解析性、物种、
+        反应引用、单位、初始值与动力学表达式。
+    expected_assets:
+      - "*.xml"
+      - manifest.json
+    acceptance_focus:
+      - kinetic law and units reproduce the requested model
+      - SBML identifiers and references resolve
+
+  - id: biology_sbml_repressilator
+    domain: biological_simulation
+    mode: plan_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        按冻结模型生成 Elowitz repressilator 的 SBML Level 3 文件：三个基因形成环形抑制，
+        使用无量纲形式，alpha=216、alpha0=0.216、beta=5、Hill 系数 n=2；三个 mRNA
+        初值均为 0，三个蛋白初值依次为 0、0、1。不得改动参数。交付 SBML 和参数
+        manifest，并审核三组反应、循环拓扑、参数与初值。
+    expected_assets:
+      - "*.xml"
+      - manifest.json
+    acceptance_focus:
+      - repression topology is cyclic and complete
+      - every frozen parameter and initial value appears exactly
+
+  - id: biology_cellml_fitzhugh_nagumo
+    domain: biological_simulation
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        请生成 CellML 2.0 格式的 FitzHugh–Nagumo 兴奋性模型。变量 v、w，方程
+        dv/dt=v-v^3/3-w+I，dw/dt=0.08*(v+0.7-0.8w)，I=0.5，初值 v=-1、w=1，
+        时间单位秒。交付一个 CellML 文件和 manifest，并审核 MathML、单位、变量引用、
+        方程和初值。
+    expected_assets:
+      - "*.cellml"
+      - manifest.json
+    acceptance_focus:
+      - equations and constants match the request
+      - CellML and MathML are structurally parseable
+
+  - id: biology_pdb_crambin_preparation
+    domain: biological_simulation
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    network_policy: allowed
+    turns:
+      - |-
+        请从权威 PDB 数据源获取 1CRN（crambin）结构，并准备一份适合后续生物分子
+        模拟建模的清理后 PDB：保留蛋白质，去除结晶水，补充可由标准残基模板确定的
+        氢原子；不得猜测缺失残基。交付原始结构、清理后结构和 lineage manifest，
+        审核 PDB ID、链、残基、原子记录、来源 URL 和哈希。
+    expected_assets:
+      - "*1crn*.pdb"
+      - manifest.json
+    acceptance_focus:
+      - source is an authoritative PDB record
+      - cleaned structure is derived from and traceable to the acquired structure
+
+  - id: biology_structure_missing
+    domain: biological_simulation
+    mode: request_bound
+    expected_outcome: needs_input
+    consumer_check: false
+    turns:
+      - |-
+        请严格按照我的新设计蛋白结构生成粗粒化动力学输入。该结构尚未公开，我也没有
+        提供序列、PDB/mmCIF 或坐标；不允许用同源结构替代。
+    expected_assets: []
+    acceptance_focus:
+      - asks for the private authoritative structure or sequence
+      - does not search for or substitute an unrelated public structure
+
+  - id: regression_request_identity_and_no_overwrite
+    domain: cross_domain_regression
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        请生成一个用于 OpenFOAM 的 NACA2412 二维非结构网格，采用合理默认参数，
+        交付可用 polyMesh 和必要质量报告。
+      - |-
+        现在请在同一项目中再生成一个二维圆柱绕流 OpenFOAM 网格，圆柱直径 1 m，
+        使用合理默认参数。这是新的独立请求：不得复用、覆盖或返回刚才的机翼网格。
+    expected_assets:
+      - "**/constant/polyMesh/points"
+      - "**/constant/polyMesh/boundary"
+    acceptance_focus:
+      - two requests have distinct request identities and distinct delivery directories
+      - second delivery is a cylinder and first delivery remains intact
+      - same-named visualization, audit, manifest, and mesh files do not overwrite each other
+
+  - id: regression_review_self_revision
+    domain: cross_domain_regression
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        请生成一个 GROMACS 能量最小化输入包，包含 64 个 SPC/E 水分子。结构、拓扑和
+        em.mdp 必须位于同一任务目录，并确保拓扑分子数和结构一致。如果内部审核发现
+        文件引用、格式或数量不一致，Data 必须在同一次运行中按审核意见修订并复审，
+        不要让调度器重新调用第二个 Data 节点。
+    expected_assets:
+      - "*.gro"
+      - "*.top"
+      - em.mdp
+    acceptance_focus:
+      - final bundle is internally consistent
+      - any revision occurs inside the original Data run
+
+  - id: regression_optional_artifacts
+    domain: cross_domain_regression
+    mode: request_bound
+    expected_outcome: completed
+    consumer_check: false
+    turns:
+      - |-
+        请为简单立方 Si 生成一个 4×4×4 Gamma-centered 的 VASP KPOINTS 文件。
+        我只需要这个文件；不要扩展为完整 VASP 输入包，也不要生成原始日志、可视化、
+        可执行复现脚本或其他非必要文件。审核文件格式和网格是否符合请求。
+    expected_assets:
+      - KPOINTS
+    forbidden_assets:
+      - POSCAR
+      - INCAR
+      - POTCAR
+      - "*.png"
+      - "*.log"
+    acceptance_focus:
+      - exactly the requested minimal asset is delivered
+      - no unrequested scientific parameters or package expansion are introduced

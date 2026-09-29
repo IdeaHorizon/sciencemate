@@ -1,0 +1,31 @@
+{
+  "task_id": "sho_correction_sign_FALSE",
+  "arm": "B0",
+  "model": "deepseek-v4-pro",
+  "final_expression": "k_B*x**2*exp(x)/(exp(x)-1)**2",
+  "verdict": "refuted",
+  "assumptions": [
+    "单个一维量子简谐振子，能级为 E_n = hbar*omega*(n+1/2)，n=0,1,2,...",
+    "采用正则系综，温度 T>0，beta=1/(k_B*T)",
+    "hbar*omega>0，使得配分函数几何级数公比 exp(-beta*hbar*omega)<1，级数收敛且分母非零",
+    "频率 omega 固定，热容定义为 C=dU/dT",
+    "零点能 hbar*omega/2 为常数，对热容无贡献",
+    "高温展开适用域为 x=hbar*omega/(k_B*T)<<1",
+    "泰勒展开中忽略 O(x^4) 及更高阶项"
+  ],
+  "unverified_steps": [
+    "几何级数求和采用标准公式，没有机械验证收敛性证明的每个细节；仅检查了公比小于 1",
+    "sinh y 的泰勒展开及其逆量的展开系数采用标准展开，没有机械验证余项界",
+    "未做数值验证"
+  ],
+  "reasoning_summary": "由配分函数得到精确热容 C=k_B*x^2*e^x/(e^x-1)^2；高温展开后得到 C/k_B=1-x^2/12+O(x^4)，因此命题中的正号错误，正确的首阶修正为 -x^2/12。",
+  "raw_text": "裁决：**命题不成立**。  \n正确的首阶修正是负号：  \n\\[\nC \\simeq k_B\\left(1-\\frac{x^2}{12}\\right)\n\\]\n\n下面逐步推导。\n\n---\n\n## 1. 配分函数\n\n一维量子简谐振子能级：\n\n\\[\nE_n=\\hbar\\omega\\left(n+\\frac12\\right),\\qquad n=0,1,2,\\dots\n\\]\n\n正则系综配分函数：\n\n\\[\nZ=\\sum_{n=0}^{\\infty} e^{-\\beta E_n}\n= e^{-\\beta\\hbar\\omega/2}\\sum_{n=0}^{\\infty}\\left(e^{-\\beta\\hbar\\omega}\\right)^n\n\\]\n\n因为 \\( \\beta=\\frac1{k_BT}>0 \\)，且设 \\(\\hbar\\omega>0\\)，所以：\n\n\\[\ne^{-\\beta\\hbar\\omega}<1\n\\]\n\n几何级数收敛，得到：\n\n\\[\nZ=\\frac{e^{-\\beta\\hbar\\omega/2}}{1-e^{-\\beta\\hbar\\omega}}\n\\]\n\n令：\n\n\\[\nx=\\beta\\hbar\\omega=\\frac{\\hbar\\omega}{k_BT}\n\\]\n\n---\n\n## 2. 内能\n\n统计物理内能：\n\n\\[\nU=-\\frac{\\partial}{\\partial\\beta}\\ln Z\n\\]\n\n先取对数：\n\n\\[\n\\ln Z=-\\frac12\\beta\\hbar\\omega-\\ln\\left(1-e^{-\\beta\\hbar\\omega}\\right)\n\\]\n\n所以：\n\n\\[\nU=\\frac{\\hbar\\omega}{2}+\\frac{\\hbar\\omega}{e^{\\beta\\hbar\\omega}-1}\n\\]\n\n零点能项 \\(\\frac12\\hbar\\omega\\) 是常数，对热容无贡献。\n\n因此：\n\n\\[\nU=\\frac{\\hbar\\omega}{2}+\\frac{\\hbar\\omega}{e^{x}-1}\n\\]\n\n---\n\n## 3. 热容的精确表达式\n\n热容：\n\n\\[\nC=\\frac{\\partial U}{\\partial T}\n\\]\n\n先对 \\(\\beta\\) 求导：\n\n\\[\n\\frac{\\partial U}{\\partial \\beta}\n=\n-\\frac{(\\hbar\\omega)^2 e^{\\beta\\hbar\\omega}}\n{\\left(e^{\\beta\\hbar\\omega}-1\\right)^2}\n\\]\n\n又有：\n\n\\[\n\\frac{d\\beta}{dT}=-\\frac{1}{k_BT^2}\n\\]\n\n所以：\n\n\\[\nC=\n\\frac{dU}{dT}\n=\n\\frac{dU}{d\\beta}\\frac{d\\beta}{dT}\n\\]\n\n代入得：\n\n\\[\nC=k_Bx^2\\frac{e^x}{(e^x-1)^2}\n\\]\n\n---\n\n## 4. 高温展开\n\n高温对应 \\(T\\to\\infty\\)，即 \\(x\\to0\\)。\n\n精确热容可改写为：\n\n\\[\n\\frac{C}{k_B}\n=\n\\frac{x^2e^x}{(e^x-1)^2}\n\\]\n\n利用：\n\n\\[\ne^x-1=2e^{x/2}\\sinh\\frac{x}{2}\n\\]\n\n所以：\n\n\\[\n\\frac{C}{k_B}\n=\n\\left(\\frac{x/2}{\\sinh(x/2)}\\right)^2\n\\]\n\n令：\n\n\\[\ny=\\frac{x}{2}\n\\]\n\n则：\n\n\\[\n\\frac{C}{k_B}\n=\n\\frac{y^2}{\\sinh^2 y}\n\\]\n\n泰勒展开：\n\n\\[\n\\sinh y=y+\\frac{y^3}{6}+O(y^5)\n\\]\n\n因此：\n\n\\[\n\\sinh^2 y\n=\ny^2+\\frac13y^4+O(y^6)\n\\]\n\n于是：\n\n\\[\n\\frac{y^2}{\\sinh^2 y}\n=\n\\frac{1}{1+\\frac13y^2+O(y^4)}\n=\n1-\\frac13 y^2+O(y^4)\n\\]\n\n代回 \\(y=x/2\\)：\n\n\\[\n\\frac{C}{k_B}\n=\n1-\\frac{1}{12}x^2+O(x^4)\n\\]\n\n所以正确的高温首阶修正是：\n\n\\[\nC\\simeq k_B\\left(1-\\frac{x^2}{12}\\right)\n\\]\n\n---\n\n## 结论\n\n题目中的表达式：\n\n\\[\nC\\approx k_B\\left(1+\\frac{x^2}{12}\\right)\n\\]\n\n**符号错**。正确形式是：\n\n\\[\nC\\approx k_B\\left(1-\\frac{x^2}{12}\\right)\n\\]\n\n正确系数为：\n\n\\[\n-\\frac{1}{12}\n\\]\n\n---\n\n```json\n{\n  \"final_expression\": \"k_B*x**2*exp(x)/(exp(x)-1)**2\",\n  \"verdict\": \"refuted\",\n  \"assumptions\": [\n    \"单个一维量子简谐振子，能级为 E_n = hbar*omega*(n+1/2)，n=0,1,2,...\",\n    \"采用正则系综，温度 T>0，beta=1/(k_B*T)\",\n    \"hbar*omega>0，使得配分函数几何级数公比 exp(-beta*hbar*omega)<1，级数收敛且分母非零\",\n    \"频率 omega 固定，热容定义为 C=dU/dT\",\n    \"零点能 hbar*omega/2 为常数，对热容无贡献\",\n    \"高温展开适用域为 x=hbar*omega/(k_B*T)<<1\",\n    \"泰勒展开中忽略 O(x^4) 及更高阶项\"\n  ],\n  \"unverified_steps\": [\n    \"几何级数求和采用标准公式，没有机械验证收敛性证明的每个细节；仅检查了公比小于 1\",\n    \"sinh y 的泰勒展开及其逆量的展开系数采用标准展开，没有机械验证余项界\",\n    \"未做数值验证\"\n  ],\n  \"reasoning_summary\": \"由配分函数得到精确热容 C=k_B*x^2*e^x/(e^x-1)^2；高温展开后得到 C/k_B=1-x^2/12+O(x^4)，因此命题中的正号错误，正确的首阶修正为 -x^2/12。\"\n}\n```",
+  "thinking_chars": 43020,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 175.0,
+  "tokens": 16946,
+  "parse_ok": true,
+  "repeat_index": 1
+}

@@ -1,0 +1,32 @@
+{
+  "task_id": "ols_variance",
+  "arm": "B0",
+  "model": "deepseek-v4-pro",
+  "final_expression": "sigma**2 * (X.T * X).inv()",
+  "verdict": "derived",
+  "assumptions": [
+    "y = X * beta + eps 是真实数据生成模型",
+    "X 是非随机设计矩阵",
+    "X 满列秩，因此 X'X 可逆",
+    "beta 是常数参数向量",
+    "eps 的二阶矩有限，协方差矩阵存在",
+    "Cov(eps) = sigma^2 * I_n，即同方差且各观测不相关",
+    "E(eps) 存在；题目给定的 E(eps)=0 对协方差公式不是必需的",
+    "sigma^2 为标量"
+  ],
+  "unverified_steps": [
+    "X'X 可逆性引用满列秩 Gram 矩阵可逆的线性代数结论，未做具体数值检查",
+    "X'X 逆矩阵的对称性引用标准矩阵性质，未逐一元素验证",
+    "线性期望运算与常数矩阵乘法的交换性使用标准概率论性质"
+  ],
+  "reasoning_summary": "将 beta_hat 写成 beta + A eps，其中 A=(X'X)^-1 X'；由 Cov(A eps)=A Cov(eps) A' 代入 Cov(eps)=sigma^2 I_n，化简后得到 sigma^2 (X'X)^-1。",
+  "raw_text": "结论：\n\n\\[\n\\operatorname{Cov}(\\hat\\beta)=\\sigma^2(X'X)^{-1}\n\\]\n\n下面逐步推导。\n\n---\n\n令\n\n\\[\nA=(X'X)^{-1}X'\n\\]\n\n这里要求 \\(X\\) 满列秩，所以 \\(X'X\\) 可逆，\\(A\\) 才有定义。\n\n---\n\n### 第 1 步：把 \\(\\hat\\beta\\) 写成 \\(\\beta + A\\varepsilon\\)\n\n由模型\n\n\\[\ny=X\\beta+\\varepsilon\n\\]\n\n代入 OLS 估计量：\n\n\\[\n\\hat\\beta=(X'X)^{-1}X'y=Ay\n\\]\n\n所以\n\n\\[\n\\hat\\beta=A(X\\beta+\\varepsilon)\n=AX\\beta+A\\varepsilon\n\\]\n\n而\n\n\\[\nAX=(X'X)^{-1}X'X=I\n\\]\n\n因此\n\n\\[\n\\hat\\beta=\\beta+A\\varepsilon\n\\]\n\n这一步用到了：\n\n- 模型形式 \\(y=X\\beta+\\varepsilon\\)；\n- \\(X'X\\) 可逆，所以 \\((X'X)^{-1}X'X=I\\)；\n- \\(\\beta\\) 被当作常数参数向量；\n- \\(X\\) 非随机，所以 \\(A=(X'X)^{-1}X'\\) 是常数矩阵。\n\n---\n\n### 第 2 步：中心化\n\n记\n\n\\[\n\\mu=E[\\varepsilon]\n\\]\n\n题目给定 \\(\\mu=0\\)，但这里先保留 \\(\\mu\\)，以说明零均值并非协方差公式的必要条件。\n\n由线性性：\n\n\\[\nE[\\hat\\beta]=\\beta+AE[\\varepsilon]=\\beta+A\\mu\n\\]\n\n于是\n\n\\[\n\\hat\\beta-E[\\hat\\beta]\n=(\\beta+A\\varepsilon)-(\\beta+A\\mu)\n=A(\\varepsilon-\\mu)\n\\]\n\n这一步用到了：\n\n- 期望的线性性；\n- \\(A\\) 是常数矩阵；\n- \\(\\varepsilon\\) 的期望存在。\n\n---\n\n### 第 3 步：用协方差定义计算\n\n\\[\n\\operatorname{Cov}(\\hat\\beta)\n=E\\left[(\\hat\\beta-E[\\hat\\beta])(\\hat\\beta-E[\\hat\\beta])'\\right]\n\\]\n\n代入上一步：\n\n\\[\n\\operatorname{Cov}(\\hat\\beta)\n=E\\left[A(\\varepsilon-\\mu)(\\varepsilon-\\mu)'A'\\right]\n\\]\n\n因为 \\(A\\) 非随机，可以提到期望外面：\n\n\\[\n\\operatorname{Cov}(\\hat\\beta)\n=A E\\left[(\\varepsilon-\\mu)(\\varepsilon-\\mu)'\\right] A'\n\\]\n\n括号内正是 \\(\\varepsilon\\) 的协方差矩阵：\n\n\\[\n\\operatorname{Cov}(\\hat\\beta)\n=A\\operatorname{Cov}(\\varepsilon)A'\n\\]\n\n这一步用到了：\n\n- 协方差矩阵的定义；\n- \\(A\\) 非随机；\n- \\(\\varepsilon\\) 的二阶矩有限，即 \\(\\operatorname{Cov}(\\varepsilon)\\) 存在。\n\n---\n\n### 第 4 步：代入 \\(\\operatorname{Cov}(\\varepsilon)=\\sigma^2I\\)\n\n\\[\n\\operatorname{Cov}(\\hat\\beta)\n=(X'X)^{-1}X'(\\sigma^2 I_n)X(X'X)^{-1}\n\\]\n\n把标量 \\(\\sigma^2\\) 提出来：\n\n\\[\n= \\sigma^2 (X'X)^{-1}X'X(X'X)^{-1}\n\\]\n\n因为\n\n\\[\n(X'X)^{-1}X'X=I\n\\]\n\n所以\n\n\\[\n\\operatorname{Cov}(\\hat\\beta)\n=\\sigma^2 (X'X)^{-1}\n\\]\n\n其中也隐含用到了：\n\n- \\(X'X\\) 是对称矩阵，因此其逆也是对称矩阵，所以  \n  \\[\n  A'=\\left((X'X)^{-1}X'\\right)'=X(X'X)^{-1}\n  \\]\n- 矩阵乘法结合律；\n- \\(\\sigma^2\\) 是标量。\n\n---\n\n## 用到的假设\n\n- \\(y=X\\beta+\\varepsilon\\) 是真实数据生成模型。\n- \\(X\\) 是非随机设计矩阵。\n- \\(X\\) 满列秩，从而 \\(X'X\\) 可逆。\n- \\(\\beta\\) 是常数参数向量。\n- \\(\\varepsilon\\) 的二阶矩有限，即协方差矩阵存在。\n- \\(\\operatorname{Cov}(\\varepsilon)=\\sigma^2 I_n\\)，即同方差且各观测不相关。\n- \\(E[\\varepsilon]\\) 存在；题目给出的 \\(E[\\varepsilon]=0\\) 对协方差公式不是必需的，它主要用于无偏性。\n- \\(\\sigma^2\\) 为标量。\n\n本推导没有用到正态性，也没有用到不同观测之间的独立性；只用到不相关和同方差。\n\n---\n\n## 未做机械验证的步骤\n\n- \\(X'X\\) 的可逆性由线性代数“满列秩 Gram 矩阵可逆”保证，未对具体数值 \\(X\\) 做数值可逆性检查。\n- \\(X'X\\) 的逆对称性引用标准矩阵性质，未重新证明。\n- 线性期望运算与矩阵乘法的交换性使用标准概率论性质，没有逐元素展开验证。\n\n---\n\n```json\n{\n  \"final_expression\": \"sigma**2 * (X.T * X).inv()\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"y = X * beta + eps 是真实数据生成模型\",\n    \"X 是非随机设计矩阵\",\n    \"X 满列秩，因此 X'X 可逆\",\n    \"beta 是常数参数向量\",\n    \"eps 的二阶矩有限，协方差矩阵存在\",\n    \"Cov(eps) = sigma^2 * I_n，即同方差且各观测不相关\",\n    \"E(eps) 存在；题目给定的 E(eps)=0 对协方差公式不是必需的\",\n    \"sigma^2 为标量\"\n  ],\n  \"unverified_steps\": [\n    \"X'X 可逆性引用满列秩 Gram 矩阵可逆的线性代数结论，未做具体数值检查\",\n    \"X'X 逆矩阵的对称性引用标准矩阵性质，未逐一元素验证\",\n    \"线性期望运算与常数矩阵乘法的交换性使用标准概率论性质\"\n  ],\n  \"reasoning_summary\": \"将 beta_hat 写成 beta + A eps，其中 A=(X'X)^-1 X'；由 Cov(A eps)=A Cov(eps) A' 代入 Cov(eps)=sigma^2 I_n，化简后得到 sigma^2 (X'X)^-1。\"\n}\n```",
+  "thinking_chars": 33766,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 187.9,
+  "tokens": 13266,
+  "parse_ok": true,
+  "repeat_index": 1
+}

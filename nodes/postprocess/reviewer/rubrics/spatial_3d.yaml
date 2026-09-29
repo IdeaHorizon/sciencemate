@@ -1,0 +1,17 @@
+rubric_id: spatial_3d
+extends: base
+checks:
+  - important geometry or field structure is not hidden by the camera, context mesh, opacity, or crop
+  - orientation triad and context make the coordinate directions and selected slice or subset understandable
+  - scalar bar is visible, legible at final size, and visually consistent with the rendered colormap
+  - log scale, diverging center, percentile clipping, and threshold or contour choices are visibly plausible and not misleading
+  - streamlines and glyphs reveal vector direction without excessive density, overlap, or decorative clutter
+  - deformed finite-element geometry remains distinguishable from the undeformed reference and does not imply an undisclosed true scale
+  - orthogonal slices, clipping planes, thresholds, and isosurfaces expose rather than conceal the claimed internal structure
+  - volume opacity and blending preserve interpretable boundaries and do not create unsupported apparent structures
+  - particle or point-cloud density is readable without saturation and screen-space points are not visually presented as measured physical radii
+  - title, time annotation, units, and colorbar do not overlap scientific marks
+  - lighting, background, edge treatment, and anti-aliasing are restrained and publication-appropriate
+  - planar vector layers remain crisp and directionally legible; hybrid 3D scenes do not show low-resolution rasterization at final size
+  - no visible rendering defects, empty regions caused by a bad camera, raster stair-stepping, clipped labels, or unreadable tiny text
+  - source-resolved finite-element or finite-volume mesh facets are not rendering defects and must not be "fixed" by inventing smoother geometry; flag only aliasing inconsistent with the documented topology

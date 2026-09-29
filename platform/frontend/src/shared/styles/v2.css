@@ -1,0 +1,340 @@
+/* V2 feature surfaces: hypothesis board, review panel, convergence dashboard, etc. */
+
+/* ── Hypothesis Verdict Board ─────────────────────────────────────── */
+.hypothesis-board-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.hypothesis-board-header h2 {
+  font-size: 18px;
+  margin: 0 0 var(--space-2) 0;
+  color: var(--color-fg);
+}
+.hypothesis-warn-text {
+  font-size: 13px;
+  color: var(--color-fg-muted);
+  line-height: 1.5;
+  margin-top: var(--space-2);
+}
+.hypothesis-columns {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-4);
+}
+.hypothesis-column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  background: var(--color-bg-elevated);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  min-height: 120px;
+}
+.hypothesis-column-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+.hypothesis-column-label { font-weight: 600; font-size: 13px; }
+.hypothesis-column-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.hypothesis-column-empty {
+  color: var(--color-fg-subtle);
+  font-size: 12px;
+  padding: var(--space-2);
+}
+.hypothesis-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-fg-muted);
+  margin-bottom: 4px;
+}
+.hypothesis-text { font-size: 13px; line-height: 1.4; }
+.hypothesis-evidence {
+  font-size: 11.5px;
+  color: var(--color-fg-muted);
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px dashed var(--color-border);
+}
+.hypothesis-effect {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-accent);
+  margin-top: 4px;
+}
+
+/* ── Review Panel ─────────────────────────────────────────────────── */
+.review-panel-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+.review-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+.review-panel-header h1 {
+  font-size: 22px;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.review-panel-recommendation {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-pill);
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.review-rec-accept { background: var(--color-success-bg); color: var(--color-success); }
+.review-rec-minor { background: var(--color-warning-bg); color: var(--color-warning); }
+.review-rec-major { background: var(--color-danger-bg); color: var(--color-warning); }
+.review-rec-reject { background: var(--color-danger-bg); color: var(--color-danger); }
+
+.review-panel-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-4);
+}
+@media (max-width: 900px) {
+  .review-panel-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 600px) {
+  .review-panel-grid { grid-template-columns: 1fr; }
+}
+.persona-card { display: flex; flex-direction: column; gap: var(--space-3); }
+.persona-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.persona-card-head-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.persona-card-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+}
+.persona-card-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+.persona-card-desc {
+  font-size: 11.5px;
+  color: var(--color-fg-muted);
+  line-height: 1.4;
+}
+.persona-card-fatal {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+}
+.persona-card-verdict {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--color-fg);
+}
+.persona-card-list {
+  margin: 0;
+  padding-left: var(--space-4);
+  font-size: 12px;
+  color: var(--color-fg-muted);
+  line-height: 1.5;
+}
+.persona-card-list-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-fg-subtle);
+  margin: var(--space-2) 0 var(--space-1) 0;
+}
+
+/* ── Convergence Dashboard ────────────────────────────────────────── */
+.convergence-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+.convergence-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-6);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+.convergence-hero-summary {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.convergence-hero-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0;
+}
+.convergence-hero-summary-zh {
+  font-size: 14px;
+  color: var(--color-fg-muted);
+}
+.verdict-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-5);
+  border-radius: var(--radius-pill);
+  font-weight: 700;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.verdict-accept { background: var(--color-success-bg); color: var(--color-success); border: 2px solid var(--color-success); }
+.verdict-plateau-good { background: var(--color-success-bg); color: var(--color-success); }
+.verdict-improving { background: var(--color-info-bg); color: var(--color-info); }
+.verdict-plateau-low { background: var(--color-warning-bg); color: var(--color-warning); }
+.verdict-diverging { background: var(--color-danger-bg); color: var(--color-danger); }
+.verdict-insufficient { background: var(--color-bg-overlay); color: var(--color-fg-muted); }
+.verdict-hard-limit { background: var(--color-warning-bg); color: var(--color-warning); }
+
+.convergence-trend {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: var(--space-4);
+}
+@media (max-width: 800px) {
+  .convergence-trend { grid-template-columns: 1fr; }
+}
+
+.score-trend-chart {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+.score-trend-svg { width: 100%; height: 180px; color: var(--color-accent); }
+.score-trend-axis {
+  font-size: 11px;
+  color: var(--color-fg-muted);
+  font-family: var(--font-mono);
+}
+
+.convergence-reasons {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 13px;
+  color: var(--color-fg-muted);
+}
+.convergence-reasons li {
+  padding: var(--space-2) 0;
+  border-bottom: 1px dashed var(--color-border);
+  line-height: 1.4;
+}
+.convergence-reasons li:last-child { border: none; }
+
+/* ── Convergence inline banner (above pause-event options) ─────── */
+.convergence-banner {
+  background: var(--color-bg-elevated);
+  border-left: 3px solid var(--color-accent);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* ── Project Assets Dashboard ────────────────────────────────────── */
+.assets-stats-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--space-3);
+}
+.assets-stat-card {
+  text-align: center;
+  padding: var(--space-4);
+}
+.assets-stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--color-fg);
+  font-family: var(--font-mono);
+  line-height: 1;
+}
+.assets-stat-label {
+  font-size: 12px;
+  color: var(--color-fg-muted);
+  margin-top: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.assets-stat-sub {
+  font-size: 11px;
+  color: var(--color-fg-subtle);
+  margin-top: 4px;
+}
+
+/* ── Inbox / Skill cards / Frozen lock ─────────────────────────── */
+.frozen-lock-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--color-warning);
+  background: var(--color-warning-bg);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+}
+.inbox-list { display: flex; flex-direction: column; gap: var(--space-2); }
+.inbox-item-actions { display: flex; gap: var(--space-2); }
+
+/* ── Venue selector ───────────────────────────────────────────── */
+
+
+/* ── Settings inputs ──────────────────────────────────────────── */
+.settings-input {
+  background: var(--color-bg);
+  color: var(--color-fg);
+  border: 1px solid var(--color-border);
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-family: var(--font-mono);
+}
+.settings-input:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}

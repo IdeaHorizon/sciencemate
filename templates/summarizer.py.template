@@ -1,0 +1,70 @@
+"""nodes/{your_node}/summarizer.py —— 节点专属 summarizer 覆盖（v2.1+）。
+
+bootstrap 启动时自动 import 这个文件。`register_summarizer({node_type}, fn)`
+注册的 summarizer 优先级**高于** harness.yaml 里写的 strategy 字段。
+
+## 你应该什么时候自己写 summarizer
+
+  - 默认 3 个策略（truncate / drop_tool_results / llm）不够用
+  - 节点的 messages 有特殊结构（嵌大量 LAMMPS log / Python output / etc.）需要 domain-aware 压缩
+  - 想用一个比通用 LLM 摘要更便宜的 deterministic 方法
+
+## 默认 3 个内置策略已经在 core/summarizer.py 实现
+
+  truncate           丢中间，保 head + tail + keep_tool_calls
+  drop_tool_results  tool result content 截到 200 字符（保 assistant 推理）
+  llm（默认）         中间段交给 LLM 压一段叙述
+
+只有真不够用时才需要自己写。
+
+## SummarizerContext 字段（你的函数收到的）
+
+  ctx.harness            NodeHarness（含 max_context_tokens / summarizer 配置等）
+  ctx.state              State（artifacts / KB / memory 都可读）
+  ctx.messages           当前完整 messages 列表
+  ctx.estimated_tokens   触发时估算的 token 数（char/4）
+  ctx.llm                DeepSeekClient（用 LLM 做压缩时调）
+  ctx.turn               触发时是哪一 turn
+
+## 返回 list[LLMMessage] —— **替换** ctx.messages 的新列表
+
+可以原地改 ctx.messages 也可以返新 list，框架会 replace。
+"""
+from __future__ import annotations
+
+from core.llm import LLMMessage
+from core.summarizer import SummarizerContext, register_summarizer
+from core.summarizer import split_for_compression   # 帮你切 head / middle / tail
+
+
+async def _my_summarizer(ctx: SummarizerContext) -> list[LLMMessage]:
+    """{your_node} 节点专属 summarizer。
+
+    例：保头部 + 末尾 N 轮 + 中间段所有 tool result 截到 100 字符。
+    """
+    cfg = ctx.harness.summarizer
+    head, middle, tail = split_for_compression(ctx.messages, cfg.keep_last_n_turns)
+
+    # 中间段：tool result 内容截短（保 assistant 推理完整）
+    new_middle: list[LLMMessage] = []
+    for m in middle:
+        if m.role == "tool" and m.content and len(m.content) > 100:
+            new_middle.append(LLMMessage(
+                role="tool",
+                tool_call_id=m.tool_call_id,
+                name=m.name,
+                content=m.content[:100] + "…[truncated]",
+            ))
+        else:
+            new_middle.append(m)
+
+    notice = LLMMessage(
+        role="system",
+        content=f"📦 历史已压缩（turn {ctx.turn}，节点专属 summarizer）。",
+    )
+    return [*head, notice, *new_middle, *tail]
+
+
+# ── 注册（必做）─────────────────────────────────────────────────────────────
+
+register_summarizer("{your_node}", _my_summarizer)

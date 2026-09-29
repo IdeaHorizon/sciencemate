@@ -1,0 +1,48 @@
+id: variance_additive_FALSE
+title: 【假命题】方差可加性无条件成立
+domain: statistics
+kind: false_proposition
+
+prompt: |
+  命题：对任意两个随机变量 X、Y，都有 Var(X+Y) = Var(X) + Var(Y)。
+  请对这条命题给出裁决 —— 成立就证明，不成立就证伪并给出正确的一般公式。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: variance_additive_FALSE_prereg
+    content: |
+      ## Research Questions
+      
+      ### Q1: 方差对任意两个随机变量都可加吗？
+      - output_kind: 一条命题的裁决
+      - proposition: 对任意 X、Y，Var(X+Y) = Var(X) + Var(Y)。
+      - 闭合条件:
+      ```yaml
+      - id: VARIANCE_VERDICT
+        statement: "对命题给出裁决，给出一般公式，并说清可加性成立的充分条件"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  expected_verdict: refuted
+  correct_expression: "Var(X) + Var(Y) + 2*Cov(X, Y)"
+  falsity_reason: |
+    一般公式是 Var(X+Y)=Var(X)+Var(Y)+2Cov(X,Y)。可加性只在 Cov(X,Y)=0
+    （不相关，独立是其充分条件）时成立。命题漏了这个条件。
+    注意：不相关比独立弱 —— 说"必须独立"不算错但不够精确。
+  refutation_markers:
+    - id: covariance_term
+      why: "必须指出缺的协方差项"
+      patterns: ["Cov", "协方差", "covarian", "2 *\\* *Cov", "相关"]
+    - id: condition
+      why: "说清可加性成立的条件（不相关/独立）"
+      patterns: ["不相关", "uncorrelat", "独立", "independen", "Cov.*= *0", "零协方差"]
+  required_assumptions:
+    - id: finite_variance
+      why: "方差存在有限"
+      patterns: ["有限", "finite", "存在", "exist", "二阶矩"]

@@ -1,0 +1,24 @@
+node_inputs:
+  stage: toolchain_build
+  experiment_focus: |
+    This is an operation, not a scientific experiment. In the framework-provided
+    build_root create a new minimal CMake C program with one executable and one CTest
+    test. Configure, build, execute its test suite, then package the executable and
+    README as a tarball in run_root and calculate SHA-256. Save a concise operation
+    experiment_log with commands, test result, artifact path and hash. Do not create
+    raw_results, clean_results, hypothesis verdicts, sediment, or scientific claims.
+upstream_artifacts:
+  - type: research_plan
+    name: Fresh_Operation_Build_Release_Plan
+    content: "Produce an auditable build artifact and verify it without scientific interpretation."
+  - type: pre_registration
+    name: Fresh_Operation_Build_Release
+    metadata:
+      frozen: true
+      run_role: secondary
+      stage: toolchain_build
+      execution_contract:
+        version: 1
+        scientific_params: {}
+        runtime_params: {build_system: cmake}
+    content: "Operational deliverable: a tested tarball with a SHA-256 manifest."

@@ -1,0 +1,421 @@
+{
+ "assertions": [
+  {
+   "derived_from": "业务层十个服务",
+   "equals": 10,
+   "id": "biz_count",
+   "kind": "node_count",
+   "selector": {
+    "role": "业务服务"
+   }
+  },
+  {
+   "derived_from": "接入层：CDN、WAF、API 网关、gRPC 网关",
+   "equals": 4,
+   "id": "access_count",
+   "kind": "node_count",
+   "selector": {
+    "role": "接入层"
+   }
+  },
+  {
+   "derived_from": "数据层：MySQL 主从、Redis 集群、Kafka、Elasticsearch、对象存储",
+   "equals": 5,
+   "id": "data_count",
+   "kind": "node_count",
+   "selector": {
+    "role": "数据层"
+   }
+  },
+  {
+   "derived_from": "可观测性侧挂：Prometheus、Grafana、Jaeger",
+   "equals": 3,
+   "id": "obs_count",
+   "kind": "node_count",
+   "selector": {
+    "role": "可观测性"
+   }
+  },
+  {
+   "derived_from": "订单调用支付、库存、风控、优惠券",
+   "equals": 4,
+   "id": "order_fanout",
+   "kind": "edge_count",
+   "source": {
+    "ids": [
+     "order"
+    ]
+   },
+   "target": {
+    "ids": [
+     "pay",
+     "stock",
+     "risk",
+     "coupon"
+    ]
+   }
+  },
+  {
+   "derived_from": "支付调用风控",
+   "equals": 1,
+   "id": "pay_fanout",
+   "kind": "edge_count",
+   "source": {
+    "ids": [
+     "pay"
+    ]
+   },
+   "target": {
+    "ids": [
+     "risk"
+    ]
+   }
+  },
+  {
+   "derived_from": "搜索读库存与订单",
+   "equals": 2,
+   "id": "search_reads",
+   "kind": "edge_count",
+   "source": {
+    "ids": [
+     "search"
+    ]
+   },
+   "target": {
+    "ids": [
+     "stock",
+     "order"
+    ]
+   }
+  }
+ ],
+ "blocks": [
+  {
+   "bands": [
+    [
+     "group:g_access"
+    ],
+    [
+     "group:g_biz"
+    ],
+    [
+     "group:g_data"
+    ]
+   ],
+   "edges": [
+    {
+     "from": "cdn",
+     "role": "流量转发",
+     "to": "waf"
+    },
+    {
+     "from": "waf",
+     "role": "流量转发",
+     "to": "apigw"
+    },
+    {
+     "from": "waf",
+     "role": "流量转发",
+     "to": "grpcgw"
+    },
+    {
+     "from": "apigw",
+     "role": "HTTP 调用",
+     "to": "biz"
+    },
+    {
+     "from": "grpcgw",
+     "role": "gRPC 调用",
+     "to": "biz"
+    },
+    {
+     "from": "biz",
+     "role": "读写",
+     "to": "mysql"
+    },
+    {
+     "from": "biz",
+     "role": "读写",
+     "to": "redis"
+    },
+    {
+     "from": "biz",
+     "role": "写",
+     "to": "kafka"
+    },
+    {
+     "from": "biz",
+     "role": "读写",
+     "to": "es"
+    },
+    {
+     "from": "biz",
+     "role": "读写",
+     "to": "oss"
+    },
+    {
+     "from": "biz",
+     "role": "上报指标",
+     "to": "prom"
+    },
+    {
+     "from": "biz",
+     "role": "上报链路",
+     "to": "jaeger"
+    },
+    {
+     "from": "prom",
+     "role": "查询展示",
+     "to": "grafana"
+    }
+   ],
+   "groups": [
+    {
+     "id": "g_access",
+     "label": "接入层",
+     "ranks": [
+      [
+       "cdn",
+       "waf",
+       "apigw",
+       "grpcgw"
+      ]
+     ]
+    },
+    {
+     "id": "g_biz",
+     "label": "业务层",
+     "ranks": [
+      [
+       "biz"
+      ]
+     ]
+    },
+    {
+     "id": "g_data",
+     "label": "数据层",
+     "ranks": [
+      [
+       "mysql",
+       "redis",
+       "kafka",
+       "es",
+       "oss"
+      ]
+     ]
+    }
+   ],
+   "kind": "diagram",
+   "nodes": [
+    {
+     "id": "cdn",
+     "label": "CDN",
+     "role": "接入层"
+    },
+    {
+     "id": "waf",
+     "label": "WAF",
+     "role": "接入层"
+    },
+    {
+     "id": "apigw",
+     "label": "API 网关",
+     "role": "接入层"
+    },
+    {
+     "id": "grpcgw",
+     "label": "gRPC 网关",
+     "role": "接入层"
+    },
+    {
+     "id": "biz",
+     "label": "业务层（10 个服务）",
+     "role": "业务层"
+    },
+    {
+     "id": "mysql",
+     "label": "MySQL 主从",
+     "role": "数据层"
+    },
+    {
+     "id": "redis",
+     "label": "Redis 集群",
+     "role": "数据层"
+    },
+    {
+     "id": "kafka",
+     "label": "Kafka",
+     "role": "数据层"
+    },
+    {
+     "id": "es",
+     "label": "Elasticsearch",
+     "role": "数据层"
+    },
+    {
+     "id": "oss",
+     "label": "对象存储",
+     "role": "数据层"
+    },
+    {
+     "id": "prom",
+     "label": "Prometheus",
+     "role": "可观测性",
+     "side": "right"
+    },
+    {
+     "id": "grafana",
+     "label": "Grafana",
+     "role": "可观测性",
+     "side": "right"
+    },
+    {
+     "id": "jaeger",
+     "label": "Jaeger",
+     "role": "可观测性",
+     "side": "right"
+    }
+   ],
+   "title": "① 三层全景（业务层折叠）"
+  },
+  {
+   "bands": [
+    [
+     "group:g_biz_detail"
+    ]
+   ],
+   "edges": [
+    {
+     "from": "order",
+     "role": "服务调用",
+     "to": "pay"
+    },
+    {
+     "from": "order",
+     "role": "服务调用",
+     "to": "stock"
+    },
+    {
+     "from": "order",
+     "role": "服务调用",
+     "to": "risk"
+    },
+    {
+     "from": "order",
+     "role": "服务调用",
+     "to": "coupon"
+    },
+    {
+     "from": "pay",
+     "role": "服务调用",
+     "to": "risk"
+    },
+    {
+     "from": "search",
+     "role": "读",
+     "to": "stock"
+    },
+    {
+     "from": "search",
+     "role": "读",
+     "to": "order"
+    }
+   ],
+   "groups": [
+    {
+     "id": "g_biz_detail",
+     "label": "业务层（10 个服务）",
+     "ranks": [
+      [
+       "user",
+       "auth",
+       "order",
+       "pay",
+       "stock",
+       "logi",
+       "risk",
+       "coupon",
+       "msg",
+       "search"
+      ]
+     ]
+    }
+   ],
+   "kind": "diagram",
+   "nodes": [
+    {
+     "id": "user",
+     "isolated": true,
+     "label": "用户",
+     "role": "业务服务"
+    },
+    {
+     "id": "auth",
+     "isolated": true,
+     "label": "鉴权",
+     "role": "业务服务"
+    },
+    {
+     "id": "order",
+     "label": "订单",
+     "role": "业务服务"
+    },
+    {
+     "id": "pay",
+     "label": "支付",
+     "role": "业务服务"
+    },
+    {
+     "id": "stock",
+     "label": "库存",
+     "role": "业务服务"
+    },
+    {
+     "id": "logi",
+     "isolated": true,
+     "label": "物流",
+     "role": "业务服务"
+    },
+    {
+     "id": "risk",
+     "label": "风控",
+     "role": "业务服务"
+    },
+    {
+     "id": "coupon",
+     "label": "优惠券",
+     "role": "业务服务"
+    },
+    {
+     "id": "msg",
+     "isolated": true,
+     "label": "消息",
+     "role": "业务服务"
+    },
+    {
+     "id": "search",
+     "label": "搜索",
+     "role": "业务服务"
+    }
+   ],
+   "title": "② 业务层内部调用关系"
+  },
+  {
+   "columns": 2,
+   "items": [
+    "订单 → 支付 / 库存 / 风控 / 优惠券",
+    "支付 → 风控",
+    "搜索 → 读库存 / 订单",
+    "全部业务服务 → 写 Kafka",
+    "用户/鉴权/订单/支付/库存/物流 → MySQL",
+    "用户/鉴权/订单/库存/优惠券 → Redis",
+    "搜索 → Elasticsearch",
+    "物流 / 消息 → 对象存储",
+    "全部业务服务 → 上报 Prometheus / Jaeger"
+   ],
+   "kind": "spec",
+   "title": "③ 存储与上报映射"
+  }
+ ],
+ "title": "微服务全景架构图"
+}

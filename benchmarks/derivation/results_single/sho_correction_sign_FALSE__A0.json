@@ -1,0 +1,29 @@
+{
+  "task_id": "sho_correction_sign_FALSE",
+  "arm": "A0",
+  "model": "deepseek-v4-flash",
+  "final_expression": "k_B*(1 - x**2/12)",
+  "verdict": "refuted",
+  "assumptions": [
+    "热平衡且温度 T > 0，可用正则系综。",
+    "一维量子谐振子能级为 E_n = ħω(n + 1/2)，n = 0,1,2,...；无非谐项、耦合或额外简并。",
+    "ħ > 0, ω > 0, k_B > 0，因此 x > 0，e^{-x} < 1，几何级数收敛，且 e^x - 1 ≠ 0。",
+    "只计算单个谐振子的热容；若为 N 个独立谐振子，总热容乘以 N。",
+    "高温展开适用域为 x << 1，只保留到 O(x^2)，忽略 O(x^4)。",
+    "热容按 C = dU/dT 定义，ω 固定，无额外自由度/做功项。"
+  ],
+  "unverified_steps": [
+    "标准能谱 E_n = ħω(n + 1/2) 由教科书的一维谐振子薛定谔方程解引用，未在本回答中从头解方程。",
+    "t/sinh t 的级数展开只手算到 O(t^2)；更高阶系数未验证，且不影响首阶修正。",
+    "没有用计算机代数系统做逐项符号展开验证；关键 O(x^2) 系数由手算展开给出。"
+  ],
+  "reasoning_summary": "由配分函数得精确热容 C = k_B x^2 e^x/(e^x-1)^2 = k_B (t/sinh t)^2，其中 t = x/2。在 x << 1 时展开 t/sinh t = 1 - t^2/6 + O(t^4)，平方得 C = k_B(1 - x^2/12 + O(x^4))，所以题中 +x^2/12 是错的，正确首阶修正是 -x^2/12。",
+  "raw_text": "裁决：命题不成立，正确首阶修正是 \\( -\\frac{x^2}{12} \\)。\n\n推导如下。\n\n令  \n\\[\n\\beta=\\frac1{k_B T},\\qquad x=\\beta \\hbar\\omega=\\frac{\\hbar\\omega}{k_B T}.\n\\]\n\n一维量子谐振子能级为  \n\\[\nE_n=\\hbar\\omega\\left(n+\\frac12\\right),\\quad n=0,1,2,\\dots\n\\]\n所以配分函数为  \n\\[\nZ=\\sum_{n=0}^\\infty e^{-\\beta E_n}\n=e^{-\\beta\\hbar\\omega/2}\\sum_{n=0}^\\infty (e^{-\\beta\\hbar\\omega})^n\n=\\frac{e^{-x/2}}{1-e^{-x}}.\n\\]\n这里要求 \\(x>0\\)，即 \\(\\hbar\\omega>0,\\ T>0\\)，几何级数才收敛。\n\n平均能量为  \n\\[\nU=-\\frac{\\partial \\ln Z}{\\partial \\beta}\n=\\frac{\\hbar\\omega}{2}+\\frac{\\hbar\\omega}{e^x-1}.\n\\]\n\n热容为  \n\\[\nC=\\frac{dU}{dT}.\n\\]\n因为  \n\\[\n\\frac{dx}{dT}=-\\frac{x}{T},\n\\]\n得到  \n\\[\nC\n=\\hbar\\omega\\frac{e^x}{(e^x-1)^2}\\frac{\\hbar\\omega}{k_B T^2}\n=k_B x^2\\frac{e^x}{(e^x-1)^2}.\n\\]\n再利用恒等式  \n\\[\n\\frac{x^2 e^x}{(e^x-1)^2}\n=\\frac{(x/2)^2}{\\sinh^2(x/2)},\n\\]\n可写成  \n\\[\nC=k_B\\left(\\frac{t}{\\sinh t}\\right)^2,\\qquad t=\\frac{x}{2}.\n\\]\n\n高温展开相当于 \\(t\\ll1\\)。  \n\\[\n\\frac{t}{\\sinh t}\n=\\frac{1}{1+\\frac{t^2}{6}+O(t^4)}\n=1-\\frac{t^2}{6}+O(t^4),\n\\]\n所以  \n\\[\n\\frac{C}{k_B}\n=\\left(1-\\frac{t^2}{6}+O(t^4)\\right)^2\n=1-\\frac{t^2}{3}+O(t^4)\n=1-\\frac{x^2}{12}+O(x^4).\n\\]\n\n因此题中“ \\(+x^2/12\\) ”的符号是错的，正确高温展开为  \n\\[\nC \\approx k_B\\left(1-\\frac{x^2}{12}\\right)+O(x^4).\n\\]\n\n```json\n{\n  \"final_expression\": \"k_B*(1 - x**2/12)\",\n  \"verdict\": \"refuted\",\n  \"assumptions\": [\n    \"热平衡且温度 T > 0，可用正则系综。\",\n    \"一维量子谐振子能级为 E_n = ħω(n + 1/2)，n = 0,1,2,...；无非谐项、耦合或额外简并。\",\n    \"ħ > 0, ω > 0, k_B > 0，因此 x > 0，e^{-x} < 1，几何级数收敛，且 e^x - 1 ≠ 0。\",\n    \"只计算单个谐振子的热容；若为 N 个独立谐振子，总热容乘以 N。\",\n    \"高温展开适用域为 x << 1，只保留到 O(x^2)，忽略 O(x^4)。\",\n    \"热容按 C = dU/dT 定义，ω 固定，无额外自由度/做功项。\"\n  ],\n  \"unverified_steps\": [\n    \"标准能谱 E_n = ħω(n + 1/2) 由教科书的一维谐振子薛定谔方程解引用，未在本回答中从头解方程。\",\n    \"t/sinh t 的级数展开只手算到 O(t^2)；更高阶系数未验证，且不影响首阶修正。\",\n    \"没有用计算机代数系统做逐项符号展开验证；关键 O(x^2) 系数由手算展开给出。\"\n  ],\n  \"reasoning_summary\": \"由配分函数得精确热容 C = k_B x^2 e^x/(e^x-1)^2 = k_B (t/sinh t)^2，其中 t = x/2。在 x << 1 时展开 t/sinh t = 1 - t^2/6 + O(t^4)，平方得 C = k_B(1 - x^2/12 + O(x^4))，所以题中 +x^2/12 是错的，正确首阶修正是 -x^2/12。\"\n}\n```",
+  "thinking_chars": 62226,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 197.9,
+  "tokens": 22176,
+  "parse_ok": true
+}

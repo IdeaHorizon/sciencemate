@@ -1,0 +1,184 @@
+[
+  {
+    "schemaVersion": 1,
+    "id": "active-001",
+    "sequence": 1,
+    "at": "2026-08-03T06:00:00.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-active",
+    "origin": "app_command",
+    "source": {},
+    "kind": "session.started",
+    "visibility": "summary",
+    "payload": { "title": "Review source material" }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "active-002",
+    "sequence": 2,
+    "at": "2026-08-03T06:00:01.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-active",
+    "origin": "app_command",
+    "source": {},
+    "kind": "session.message",
+    "visibility": "summary",
+    "payload": {
+      "role": "user",
+      "text": "Review the available source material, identify where the evidence is strongest, and produce a concise research brief."
+    }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "active-003",
+    "sequence": 3,
+    "at": "2026-08-03T06:00:02.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-active",
+    "runId": "run-active",
+    "origin": "raw_transcript",
+    "source": { "rawEvent": "assistant_message", "fileRef": "fixture-active-transcript", "byteOffset": 0 },
+    "kind": "session.message",
+    "visibility": "summary",
+    "payload": {
+      "role": "assistant",
+      "text": "I’ll first inventory the available material, then read the most relevant sources closely."
+    }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "active-004",
+    "sequence": 4,
+    "at": "2026-08-03T06:00:03.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-active",
+    "runId": "run-active",
+    "origin": "raw_transcript",
+    "source": { "rawEvent": "run_start", "fileRef": "fixture-active-transcript", "byteOffset": 188 },
+    "kind": "run.started",
+    "visibility": "trace",
+    "payload": { "title": "Source review run" }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "active-005",
+    "sequence": 5,
+    "at": "2026-08-03T06:00:04.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-active",
+    "runId": "run-review-material",
+    "parentRunId": "run-active",
+    "origin": "raw_transcript",
+    "source": { "rawEvent": "subagent_call_start", "fileRef": "fixture-active-transcript", "byteOffset": 320 },
+    "kind": "step.started",
+    "visibility": "summary",
+    "payload": {
+      "stepId": "step-review-material",
+      "title": "Review source material"
+    }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "active-006",
+    "sequence": 6,
+    "at": "2026-08-03T06:00:05.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-active",
+    "runId": "run-review-material",
+    "parentRunId": "run-active",
+    "origin": "raw_transcript",
+    "source": { "rawEvent": "tool_call", "fileRef": "fixture-active-transcript", "byteOffset": 506 },
+    "kind": "tool.started",
+    "visibility": "standard",
+    "payload": {
+      "stepId": "step-review-material",
+      "actionGroupId": "group-inventory",
+      "toolCallId": "tool-inventory",
+      "title": "Searching indexed sources",
+      "technicalName": "search_sources",
+      "detail": "scope: project sources · language: any",
+      "progress": { "mode": "elapsed_only", "elapsedMs": 0 }
+    }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "active-007",
+    "sequence": 7,
+    "at": "2026-08-03T06:00:19.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-active",
+    "runId": "run-review-material",
+    "parentRunId": "run-active",
+    "origin": "raw_transcript",
+    "source": { "rawEvent": "tool_result", "fileRef": "fixture-active-transcript", "byteOffset": 744 },
+    "kind": "tool.completed",
+    "visibility": "standard",
+    "payload": {
+      "stepId": "step-review-material",
+      "actionGroupId": "group-inventory",
+      "toolCallId": "tool-inventory",
+      "title": "Searched indexed sources",
+      "summary": "Searched 3 indexes · 18 records retained",
+      "summarySource": { "type": "mechanical", "eventIds": ["active-006", "active-007"] },
+      "durationMs": 14000,
+      "outputLines": [
+        "Project archive · 24 records · 9 retained",
+        "Shared collection · 31 records · 6 retained",
+        "Public index · 12 records · 3 retained"
+      ]
+    }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "active-008",
+    "sequence": 8,
+    "at": "2026-08-03T06:00:20.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-active",
+    "runId": "run-review-material",
+    "parentRunId": "run-active",
+    "origin": "raw_transcript",
+    "source": { "rawEvent": "tool_call", "fileRef": "fixture-active-transcript", "byteOffset": 1036 },
+    "kind": "tool.started",
+    "visibility": "standard",
+    "payload": {
+      "stepId": "step-review-material",
+      "actionGroupId": "group-reading",
+      "toolCallId": "tool-read-selection",
+      "title": "Reading selected material",
+      "technicalName": "read_sources",
+      "detail": "Comparing methods, evidence strength, and stated limitations",
+      "progress": { "mode": "elapsed_only", "elapsedMs": 41000 },
+      "outputLines": [
+        "Source 07 · methods and assumptions extracted",
+        "Source 11 · evidence table in progress",
+        "Source 14 · queued for close reading"
+      ]
+    }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "active-009",
+    "sequence": 9,
+    "at": "2026-08-03T06:01:01.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-active",
+    "runId": "run-active",
+    "origin": "raw_transcript",
+    "source": { "rawEvent": "llm_response.usage", "fileRef": "fixture-active-transcript", "byteOffset": 1370 },
+    "kind": "usage.updated",
+    "visibility": "trace",
+    "payload": {
+      "usage": { "tokens": 6842, "retries": 0, "coverage": "partial" }
+    }
+  }
+]

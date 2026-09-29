@@ -1,0 +1,33 @@
+{
+  "task_id": "sample_variance_unbiased",
+  "arm": "B0",
+  "model": "deepseek-v4-pro",
+  "final_expression": "sigma**2",
+  "verdict": "derived",
+  "assumptions": [
+    "n 是固定正整数且 n>=2，使分母 n-1 非零、样本方差有定义",
+    "X_1,...,X_n 是实值随机变量",
+    "X_1,...,X_n 独立同分布",
+    "共同均值 E[X_i]=mu 存在且有限",
+    "共同方差 Var(X_i)=sigma^2=E[(X_i-mu)^2] 存在且有限",
+    "样本均值定义为 Xbar=(1/n)*sum_i X_i",
+    "样本方差 S^2 使用分母 n-1",
+    "所有求和在 n 有限下进行，不涉及无穷级数收敛",
+    "期望算子具有线性性，且相关期望有限",
+    "独立随机变量和的方差等于方差和；推导中用于 Var(Xbar)"
+  ],
+  "unverified_steps": [
+    "期望线性性与独立和的方差公式作为标准概率论定理引用，未从测度论公理重新机械验证",
+    "未对 n=1 的无定义情形进行修补或推导"
+  ],
+  "reasoning_summary": "中心化平方和恒等式给出 sum_i(X_i-Xbar)^2=sum_i(X_i-mu)^2-n(Xbar-mu)^2；取期望后为 n*sigma^2-n*Var(Xbar)=n*sigma^2-sigma^2=(n-1)*sigma^2；除以 n-1 后得到无偏估计 sigma^2。",
+  "raw_text": "先说明：当 \\(n=1\\) 时 \\(S^2\\) 的分母为 \\(0\\)，表达式未定义。下面默认 \\(n\\ge 2\\)，所以 \\(n-1\\ne 0\\)。\n\n设样本均值为\n\n\\[\n\\bar X=\\frac1n\\sum_{i=1}^n X_i.\n\\]\n\n## 1. 把离差平方和写成相对 \\(\\mu\\) 的形式\n\n\\[\n\\sum_{i=1}^n (X_i-\\bar X)^2\n=\n\\sum_{i=1}^n [(X_i-\\mu)-(\\bar X-\\mu)]^2.\n\\]\n\n这一步只是把 \\(X_i-\\bar X\\) 改写成 \\((X_i-\\mu)-(\\bar X-\\mu)\\)，是纯代数变形。\n\n展开平方：\n\n\\[\n\\sum_{i=1}^n [(X_i-\\mu)-(\\bar X-\\mu)]^2\n=\n\\sum_{i=1}^n (X_i-\\mu)^2\n-2(\\bar X-\\mu)\\sum_{i=1}^n (X_i-\\mu)\n+n(\\bar X-\\mu)^2.\n\\]\n\n接着用样本均值定义：\n\n\\[\n\\sum_{i=1}^n (X_i-\\mu)\n=\n\\sum_{i=1}^n X_i-n\\mu\n=\nn\\bar X-n\\mu\n=\nn(\\bar X-\\mu).\n\\]\n\n代入后：\n\n\\[\n-2(\\bar X-\\mu)\\cdot n(\\bar X-\\mu)\n+\nn(\\bar X-\\mu)^2\n=\n-n(\\bar X-\\mu)^2.\n\\]\n\n所以得到恒等式：\n\n\\[\n\\sum_{i=1}^n (X_i-\\bar X)^2\n=\n\\sum_{i=1}^n (X_i-\\mu)^2\n-\nn(\\bar X-\\mu)^2.\n\\]\n\n这个恒等式不依赖分布假设，只依赖有限求和和实值随机变量的平方展开。\n\n---\n\n## 2. 取期望\n\n两边取期望：\n\n\\[\nE\\left[\\sum_{i=1}^n (X_i-\\bar X)^2\\right]\n=\nE\\left[\\sum_{i=1}^n (X_i-\\mu)^2\\right]\n-\nnE\\left[(\\bar X-\\mu)^2\\right].\n\\]\n\n### 第一项\n\n\\[\nE\\left[\\sum_{i=1}^n (X_i-\\mu)^2\\right]\n=\n\\sum_{i=1}^n E[(X_i-\\mu)^2].\n\\]\n\n这里用了期望线性性。又因为 \\(X_i\\) 同分布，且共同方差为 \\(\\sigma^2\\)，所以\n\n\\[\nE[(X_i-\\mu)^2]=\\operatorname{Var}(X_i)=\\sigma^2.\n\\]\n\n因此第一项为：\n\n\\[\n\\sum_{i=1}^n \\sigma^2=n\\sigma^2.\n\\]\n\n### 第二项\n\n先看\n\n\\[\nE[(\\bar X-\\mu)^2].\n\\]\n\n因为\n\n\\[\nE[\\bar X]\n=\n\\frac1n\\sum_{i=1}^n E[X_i]\n=\n\\frac1n\\cdot n\\mu\n=\n\\mu,\n\\]\n\n所以\n\n\\[\nE[(\\bar X-\\mu)^2]\n=\n\\operatorname{Var}(\\bar X).\n\\]\n\n这是“均值的期望误差平方”等于“均值方差”。\n\n计算 \\(\\operatorname{Var}(\\bar X)\\)：\n\n\\[\n\\operatorname{Var}(\\bar X)\n=\n\\operatorname{Var}\\left(\\frac1n\\sum_{i=1}^n X_i\\right)\n=\n\\frac1{n^2}\n\\operatorname{Var}\\left(\\sum_{i=1}^n X_i\\right).\n\\]\n\n由于 \\(X_i\\) 独立，和的方差等于方差和：\n\n\\[\n\\operatorname{Var}\\left(\\sum_{i=1}^n X_i\\right)\n=\n\\sum_{i=1}^n \\operatorname{Var}(X_i)\n=\nn\\sigma^2.\n\\]\n\n所以\n\n\\[\n\\operatorname{Var}(\\bar X)\n=\n\\frac1{n^2}\\cdot n\\sigma^2\n=\n\\frac{\\sigma^2}{n}.\n\\]\n\n因此第二项为：\n\n\\[\nnE[(\\bar X-\\mu)^2]\n=\nn\\cdot \\frac{\\sigma^2}{n}\n=\n\\sigma^2.\n\\]\n\n---\n\n## 3. 合并\n\n\\[\nE\\left[\\sum_{i=1}^n (X_i-\\bar X)^2\\right]\n=\nn\\sigma^2-\\sigma^2\n=\n(n-1)\\sigma^2.\n\\]\n\n于是\n\n\\[\nE[S^2]\n=\nE\\left[\\frac1{n-1}\\sum_{i=1}^n (X_i-\\bar X)^2\\right]\n=\n\\frac1{n-1}\nE\\left[\\sum_{i=1}^n (X_i-\\bar X)^2\\right].\n\\]\n\n因为 \\(n-1\\ne 0\\)，常数可以提出：\n\n\\[\nE[S^2]\n=\n\\frac1{n-1}\\cdot (n-1)\\sigma^2\n=\n\\sigma^2.\n\\]\n\n---\n\n## 4. \\(n-1\\) 这个分母从哪来？\n\n关键在恒等式：\n\n\\[\n\\sum_{i=1}^n (X_i-\\bar X)^2\n=\n\\sum_{i=1}^n (X_i-\\mu)^2\n-\nn(\\bar X-\\mu)^2.\n\\]\n\n取期望后：\n\n\\[\nE\\left[\\sum_{i=1}^n (X_i-\\bar X)^2\\right]\n=\nn\\sigma^2-\\sigma^2\n=\n(n-1)\\sigma^2.\n\\]\n\n也就是说，如果围绕真实均值 \\(\\mu\\) 取离差平方和，期望是 \\(n\\sigma^2\\)。但样本均值 \\(\\bar X\\) 不是真实的 \\(\\mu\\)，它本身有波动：\n\n\\[\n\\operatorname{Var}(\\bar X)=\\frac{\\sigma^2}{n}.\n\\]\n\n因此在恒等式中会减掉\n\n\\[\nn\\operatorname{Var}(\\bar X)\n=\nn\\cdot \\frac{\\sigma^2}{n}\n=\n\\sigma^2.\n\\]\n\n所以总期望从 \\(n\\sigma^2\\) 降到 \\((n-1)\\sigma^2\\)。为了得到 \\(\\sigma^2\\) 的无偏估计，就要除以 \\(n-1\\)，而不是 \\(n\\)。\n\n如果除以 \\(n\\)，则\n\n\\[\nE\\left[\\frac1n\\sum_{i=1}^n (X_i-\\bar X)^2\\right]\n=\n\\frac{n-1}{n}\\sigma^2\n<\n\\sigma^2,\n\\]\n\n所以分母用 \\(n\\) 会有系统性偏低。\n\n---\n\n```json\n{\n  \"final_expression\": \"sigma**2\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"n 是固定正整数且 n>=2，使分母 n-1 非零、样本方差有定义\",\n    \"X_1,...,X_n 是实值随机变量\",\n    \"X_1,...,X_n 独立同分布\",\n    \"共同均值 E[X_i]=mu 存在且有限\",\n    \"共同方差 Var(X_i)=sigma^2=E[(X_i-mu)^2] 存在且有限\",\n    \"样本均值定义为 Xbar=(1/n)*sum_i X_i\",\n    \"样本方差 S^2 使用分母 n-1\",\n    \"所有求和在 n 有限下进行，不涉及无穷级数收敛\",\n    \"期望算子具有线性性，且相关期望有限\",\n    \"独立随机变量和的方差等于方差和；推导中用于 Var(Xbar)\"\n  ],\n  \"unverified_steps\": [\n    \"期望线性性与独立和的方差公式作为标准概率论定理引用，未从测度论公理重新机械验证\",\n    \"未对 n=1 的无定义情形进行修补或推导\"\n  ],\n  \"reasoning_summary\": \"中心化平方和恒等式给出 sum_i(X_i-Xbar)^2=sum_i(X_i-mu)^2-n(Xbar-mu)^2；取期望后为 n*sigma^2-n*Var(Xbar)=n*sigma^2-sigma^2=(n-1)*sigma^2；除以 n-1 后得到无偏估计 sigma^2。\"\n}\n```",
+  "thinking_chars": 32866,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 161.3,
+  "tokens": 12807,
+  "parse_ok": true,
+  "repeat_index": 1
+}

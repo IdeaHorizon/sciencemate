@@ -1,0 +1,79 @@
+node_inputs:
+  path_roles:
+    experiment_root: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work
+    run_root: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work/run
+  experiment_focus: |
+    这是 VASP case3：electron_phonon_coupling_analysis 的 experiment 节点任务。
+    在 spr-cu01 提交，通过 SLURM 定向到 spr-cu05 计算；复用已经编译好的 VASP 6.5.1 `vasp_std`，
+    不重新编译 VASP，除非二进制不可执行或依赖缺失。
+
+    路径：
+    - 提交端仓库: /mnt/beegfs/ai4s-test/ai4s-platform/test_20260625/harness-framework
+    - case3 输入目录: /mnt/beegfs/ai4s-test/ai4s-platform/test1_vasp/case3.electron_phonon_coupling_analysis
+    - 已编译 VASP: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-spr-cu04-smoke-work/build_src/vasp.6.5.1/bin/vasp_std
+    - 本 run workdir: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work
+    - predecessor 运行目录: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work/run/predecessor
+    - electron-phonon 运行目录: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work/run/electron_phonon
+    - logs 目录: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work/run/logs
+
+    输入事实：
+    - case3/predecessor/POSCAR: C40，共 40 原子。
+    - case3/predecessor/INCAR/KPOINTS/POTCAR 是 predecessor 弛豫阶段输入。
+    - case3 根目录 INCAR/KPOINTS/POTCAR 是 electron-phonon 阶段输入，根目录 INCAR 使用 `IBRION=8`, `NSW=1`。
+    - case3/structure.pending.json 声明 electron-phonon 阶段的 POSCAR 应来自 predecessor/CONTCAR。
+    - 原始输入目录只读；所有复制、修改和输出都必须在本 run workdir 下完成。
+
+    执行要求：
+    - 先检查 `vasp_std` 存在、可执行、`ldd` 无 `not found`。
+    - 先运行 predecessor；只有 predecessor 产生合格 CONTCAR 后，才把 CONTCAR 复制为 electron-phonon 阶段 POSCAR。
+    - 所有计算运行必须通过 SLURM 提交到 spr-cu05；不要在登录节点直接运行 VASP。
+    - 正式提交前必须 `request_human_input`，说明 scheduler、partition、nodelist、mpi ranks、threads、walltime、
+      workdir、script_path、是否会编译 VASP、运行哪个阶段。
+    - 不要修改 `/mnt/beegfs/ai4s-test/ai4s-platform/test1_vasp/case3.electron_phonon_coupling_analysis` 下的原始输入。
+    - 不要修改 VASP 上游源码；本任务默认不编译。
+    - 等待 SLURM 作业时不要长阻塞：单次 `sleep` 不超过 60 秒，单次 `safe_run_bash timeout` 不超过 90 秒。
+
+    SLURM 目标：
+    - scheduler: slurm
+    - queue: debug
+    - nodelist: spr-cu05
+    - gpus: 0
+    - 建议资源: 4 MPI ranks x 4 OpenMP threads, 64 GB
+    - 脚本应包含 `ulimit -s unlimited`、`MKL_NUM_THREADS=1`、`OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK`。
+    - `srun` 需显式带 `--ntasks`、`--cpus-per-task`、`--cpu-bind=cores`；若 OUTCAR 显示只启动 1 mpi-rank，必须取消并修正脚本。
+
+    完成标准：
+    - predecessor: SLURM `COMPLETED 0:0`，`OSZICAR` 有 ionic-step 能量行，`CONTCAR` 非空且结构有效。
+    - electron-phonon 阶段: SLURM `COMPLETED 0:0`，保留 `OUTCAR`、`OSZICAR`、`vasprun.xml` 等输出。
+    - 冻结 `experiment_log`，记录每个阶段的输入、资源、job id、输出路径、完成状态或失败原因。
+
+upstream_artifacts:
+  - type: claim
+    name: H24_thermal_nodal_surface_robustness
+    metadata:
+      claim_type: hypothesis
+      status: open
+      derived_from: pre_registration__tC40_nodal_surface_SIB_anode_prereg.json
+      source_section: "Hypothesis H24"
+      note: "Derived summary, not a standalone upstream claim artifact file"
+    content: |
+      tC40 中 Γ 点四重简并节点面在 300 K 热扰动和 Na 嵌入下更脆弱；
+      case3 负责生成 electron-phonon coupling analysis 相关 VASP 输出。
+      最终 validated/refuted verdict 必须结合后续 postprocess 的定量证据。
+
+  - type: pre_registration
+    name: tC40_nodal_surface_SIB_anode_prereg
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-16T03:33:56+00:00"
+      freeze_reason: "Imported upstream hypothesis pre-registration for VASP case3 electron-phonon coupling experiment"
+      source_artifact: pre_registration__tC40_nodal_surface_SIB_anode_prereg.json
+    content: |
+      上游 prereg artifact 位于：
+      /mnt/beegfs/ai4s-test/ai4s-platform/test1_vasp/vasp-upstream-artifacts.zip
+
+      本次 case3 运行范围：
+      - 先运行 C40 predecessor 弛豫。
+      - predecessor/CONTCAR 合格后，作为 electron-phonon 阶段 POSCAR。
+      - 运行 case3 根目录给出的 electron-phonon VASP 阶段输入。
+      - experiment 节点只归档 VASP 运行证据，不做最终 band/gap/postprocess 判定。

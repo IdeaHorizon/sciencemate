@@ -1,0 +1,65 @@
+# 平台能力攻坚（非对比）：当前 experiment 平台能否【自主】用 GPU 编译并启动 E3SM 的
+# MPAS-Ocean 单组件（这是当年 164 轮空转、反复失败的原始难题）。
+#
+#   python run_node.py --harness experiment --stream \
+#   （⚠️ v0.11：EXPERIMENT_AUTONOMOUS=1 auto-answer 已移除，无人值守待框架 headless-hitl feature；
+#     交互式跑，遇 pause 人工应答）
+#     --fixture nodes/experiment/fixtures/e3sm_gpu_solo.yaml --project-id e3sm-gpu-solo
+#
+# 全能力 + autonomous + max_turns=300。GPU 已实测可用（见下）。
+# 源码原样（方案2）：子模块未初始化，需 agent 自己 git submodule update。
+
+node_inputs:
+  experiment_focus: |
+    目标：【自主】用 **GPU（nvfortran / OpenACC）** 从源码编译 E3SM 的 MPAS-Ocean 单组件
+    （standalone，不是完整耦合 E3SM），并让它**启动运行**（GPU 初始化 + 跑起来；有小测试算例则跑一个最小的）。
+    用 **MPI + GPU(OpenACC)**。
+
+    源码已就绪（无需重新 clone E3SM 主仓库，无需请求人工确认，直接开始）。源码树事实：
+      ~/experiments/e3sm-gpu-solo  （E3SM 部分检出，commit 399d430）
+        - components/mpas-ocean    （目标组件；含 Makefile / src / driver）
+        - components/mpas-framework
+        - externals/scorpio、externals/scorpio_classic
+        - 子模块未全部初始化（`git submodule status` 可见，以 `-` 标记的未检出）。
+          github 网络已通（经代理 + 已配 git https 改写）。
+
+    环境（已实测可用）：
+      - GPU：NVIDIA RTX 5070 Laptop 8GB（WSL2 可见，nvidia-smi 正常）
+      - 编译器：nvfortran/nvc/nvc++/nvcc 在 /opt/nvidia/hpc_sdk/Linux_x86_64/26.3/compilers/bin（NVHPC 26.3）
+      - CUDA 13.1；OpenACC 已冒烟验证可编译可在 GPU 运行
+      - MPI：mpif90/mpicc（conda gcc）；PnetCDF/NetCDF/NetCDF-Fortran 都在（pnetcdf-config/nc-config/nf-config）
+
+    工作区现状事实（沿用上轮，可直接用已有成果，先 ls/检查确认再决定是否复用）：
+      - ~/experiments/netcdf-c-nv ：已有用 nvfortran 编译安装的 NetCDF-C（libnetcdf.so.22）
+      - externals/scorpio、externals/scorpio_classic 子模块已拉取
+      - NetCDF-Fortran、PIO 构建产物、MPAS-Ocean 可执行：尚未完成（这是你要推进的部分）
+
+    要求：
+    1. 充分用平台能力：先侦察（source_recon / platform_profile）判断构建路线与依赖，定路线写 declared_route
+       （正文含 `target_path: <你构建出的可执行产物实际路径>`），再构建。
+    2. 缺什么依赖/子模块/库，自主诊断解决。这正是要测的能力。预算 300 轮，耐心。
+    3. 编译必须 **GPU（nvfortran -acc / OpenACC）+ MPI**，不要退化成纯 CPU。
+    4. 目标是**启动成功**：构建出 MPAS-Ocean 可执行后让它运行起来（GPU 初始化、读 namelist、开始执行）；
+       若有现成最小测试算例就跑一个最小的（短步数），确认 returncode 与日志/输出合理（无 NaN、无崩溃）。
+       可用 safe_execute_python 调 `from nodes.experiment.hooks import verify_min_run` 让框架核验启动命令。
+    5. experiment_log 如实总结：最终是否成功编译+启动、GPU 是否真用上、走了什么路线、解决了哪些失败、
+       卡在哪。成功与否都如实记录，绝不伪造。freeze。
+
+upstream_artifacts:
+  - type: pre_registration
+    name: E3SM_MPASO_GPU_Solo
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-17T00:00:00+00:00"
+      freeze_reason: "平台能力攻坚：自主 GPU 编译启动 MPAS-Ocean 单组件"
+    content: |
+      ## Pre-Registration: E3SM MPAS-Ocean GPU 单组件自主编译启动
+      ### 目标
+      验证当前 experiment 平台（全能力）能否自主用 GPU（nvfortran/OpenACC）+MPI 编译 E3SM
+      MPAS-Ocean 单组件并启动运行。原始动机难题（164 轮空转那次）。非对比实验。
+      ### Setup
+      - 源码 ~/experiments/e3sm-gpu-solo（commit 399d430，子模块未初始化，agent 自主拉）
+      - GPU RTX 5070 + NVHPC 26.3 + CUDA 13.1；预算 max_turns=300；全能力 + autonomous
+      ### 成功判据
+      - MPAS-Ocean 可执行编译成功（nvfortran GPU/OpenACC + MPI）
+      - 可执行启动运行（GPU 初始化、无即时崩溃），有测试算例则最小算例 returncode=0

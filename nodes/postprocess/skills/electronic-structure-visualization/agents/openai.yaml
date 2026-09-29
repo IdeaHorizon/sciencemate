@@ -1,0 +1,3 @@
+interface:
+  display_name: "Electronic Structure Visualization"
+  short_description: "Plan auditable DFT and quantum-chemistry figures"

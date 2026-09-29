@@ -1,0 +1,17 @@
+{
+  "sessionId": "c34278e5-2d8f-4925-8745-bf87745eb70c",
+  "projectId": "8fa49968-8948-478f-8358-0349a021356a",
+  "gitBranch": "session/c34278e5-2d8f-4925-8745-bf87745eb70c",
+  "gitBaseCommitSha": "c29fbc1e55e6bf58de7f042d9376e4b7172e1967",
+  "gitHeadCommitSha": "dda783c7552ad5138646477f9b69add211c1c6cd",
+  "aheadBy": 1,
+  "behindBy": 0,
+  "patch": "",
+  "additions": 0,
+  "deletions": 0,
+  "filesChanged": 0,
+  "worktreeClean": true,
+  "patchTruncated": false,
+  "changedPaths": [],
+  "conflicts": []
+}

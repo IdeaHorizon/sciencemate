@@ -1,0 +1,31 @@
+node_inputs:
+  prereg_artifact_id: pre_registration__Fresh_AI_GPU_Memory_Boundary
+  stage: diagnostic
+  experiment_focus: |
+    Perform a real GPU capability and memory-boundary diagnostic for a small tensor
+    workload. This is a secondary scientific diagnostic, not a primary scientific
+    verdict. First probe nvidia-smi and the installed Python ML runtime. If a CUDA
+    GPU is available, execute a deliberately oversized allocation, record the actual
+    OOM or success, then run a declared safe batch size and measure device, peak
+    memory, runtime, and output checksum. If no compatible CUDA runtime exists, do
+    not substitute CPU execution: produce an honest infeasible/blocked diagnostic
+    log with probe evidence. This is diagnostic evidence, not a scientific verdict.
+upstream_artifacts:
+  - type: research_plan
+    name: Fresh_AI_GPU_Memory_Boundary_Plan
+    content: "Determine whether an observed allocation boundary is correctly diagnosed and recorded."
+  - type: pre_registration
+    name: Fresh_AI_GPU_Memory_Boundary
+    metadata:
+      frozen: true
+      run_role: secondary
+      execution_mode: scientific
+      stage: diagnostic
+      requires_gpu: true
+      execution_contract:
+        version: 1
+        scientific_params: {oversized_batch: 131072, safe_batch: 256}
+        runtime_params: {requires_cuda: true}
+    content: |
+      This diagnostic must distinguish CUDA unavailability, OOM, and successful GPU
+      execution. CPU fallback is forbidden because it would answer a different task.

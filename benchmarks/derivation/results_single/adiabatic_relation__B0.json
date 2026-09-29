@@ -1,0 +1,37 @@
+{
+  "task_id": "adiabatic_relation",
+  "arm": "B0",
+  "model": "deepseek-v4-pro",
+  "final_expression": "T*V**(gamma-1)",
+  "verdict": "derived",
+  "assumptions": [
+    "封闭系统，物质的量 n 为常数，无化学反应或相变",
+    "过程是准静态的，中间态可视为热力学平衡态",
+    "过程是绝热的，δQ=0",
+    "只有体积功，无电功、磁功、表面功等其他功",
+    "体积功为 δW=-P dV，且无摩擦/耗散，气体压强等于外界压强",
+    "采用热力学第一定律 dU=δQ+δW 或等价符号约定",
+    "理想气体状态方程 PV=nRT 成立",
+    "理想气体焦耳定律成立：U=U(T)，即 (∂U/∂V)_T=0",
+    "定容热容 C_V 在积分区间内为常数",
+    "定压热容 C_P 在积分区间内为常数，因此 γ=C_P/C_V 为常数",
+    "理想气体 Mayer 关系 C_P-C_V=nR 成立",
+    "C_V≠0，T>0，V>0，使分母和对数有定义",
+    "积分路径连续可积，无奇异点，可用分离变量法"
+  ],
+  "unverified_steps": [
+    "PV=nRT 和 U=U(T) 作为理想气体物性假设/标准结果使用，未从第一定律机械推出",
+    "准静态绝热过程无耗散、机械平衡 p_ext=p 的实现条件仅按标准热力学设定陈述，未做力学或实验建模验证",
+    "C_V、C_P 在积分区间内为常数的假设未做实验或统计力学温度区间核验"
+  ],
+  "reasoning_summary": "从第一定律在准静态绝热条件下得到 dU=-P dV，代入理想气体的 dU=C_V dT 和 PV=nRT，再利用 Mayer 关系 C_P-C_V=nR 得到 dT/T+(γ-1)dV/V=0，积分即得 T V^(γ-1)=const。关键成立条件是热容、因而 γ 在积分区间内为常数。",
+  "raw_text": "下面按标准热力学约定推导。这里 \\(C_V,C_P\\) 表示气体的总热容；若用摩尔热容，只需把 \\(nR\\) 换成 \\(R\\)，结论不变。\n\n---\n\n### 第 1 步：写出热力学第一定律\n\n取第一定律为  \n\\[\ndU=\\delta Q+\\delta W\n\\]\n其中 \\(dU\\) 是内能增量，\\(\\delta Q\\) 是吸收的热量，\\(\\delta W\\) 是外界对系统做的功。\n\n这一步的依据是热力学第一定律本身。\n\n---\n\n### 第 2 步：考虑准静态绝热过程\n\n准静态意味着过程中系统始终可视为处于平衡态，气体压强 \\(P\\) 有定义；无摩擦、无耗散时外界压强等于气体压强。体积功为  \n\\[\n\\delta W=-P\\,dV\n\\]\n绝热意味着  \n\\[\n\\delta Q=0\n\\]\n所以第一定律变为  \n\\[\ndU=-P\\,dV\n\\tag{1}\n\\]\n\n这一步用了：\n\n- 过程绝热；\n- 过程准静态且无耗散；\n- 只有体积功。\n\n---\n\n### 第 3 步：引入理想气体的内能性质\n\n对理想气体，焦耳定律给出  \n\\[\nU=U(T)\n\\]\n即  \n\\[\n\\left(\\frac{\\partial U}{\\partial V}\\right)_T=0\n\\]\n因此  \n\\[\ndU=\\left(\\frac{\\partial U}{\\partial T}\\right)_V dT\n\\]\n定义定容热容  \n\\[\nC_V=\\left(\\frac{\\partial U}{\\partial T}\\right)_V\n\\]\n若 \\(C_V\\) 在积分区间内为常数，则  \n\\[\ndU=C_V\\,dT\n\\tag{2}\n\\]\n\n这一步用了：\n\n- 理想气体的焦耳定律 \\(U=U(T)\\)；\n- \\(C_V\\) 为常数。\n\n---\n\n### 第 4 步：使用理想气体状态方程\n\n理想气体状态方程为  \n\\[\nPV=nRT\n\\]\n于是  \n\\[\nP=\\frac{nRT}{V}\n\\tag{3}\n\\]\n代入式 (1) 和式 (2)：\n\\[\nC_V\\,dT=-\\frac{nRT}{V}\\,dV\n\\]\n\n这一步用了：\n\n- \\(PV=nRT\\)；\n- \\(n\\) 为常数，即封闭系统。\n\n---\n\n### 第 5 步：分离变量\n\n假设 \\(T>0\\)、\\(V>0\\)、\\(C_V\\neq 0\\)，可写为  \n\\[\n\\frac{dT}{T}=-\\frac{nR}{C_V}\\frac{dV}{V}\n\\tag{4}\n\\]\n\n这一步用了：\n\n- \\(T>0\\)、\\(V>0\\)，保证对数有意义；\n- \\(C_V\\neq 0\\)，保证可以除。\n\n---\n\n### 第 6 步：利用 Mayer 关系\n\n对理想气体有  \n\\[\nC_P-C_V=nR\n\\]\n这个关系可由第一定律和理想气体状态方程推出：等压过程\n\\[\n\\delta Q_P=dU+P\\,dV=C_V\\,dT+P\\,dV\n\\]\n而由 \\(PV=nRT\\)，等压时  \n\\[\nP\\,dV=nR\\,dT\n\\]\n所以  \n\\[\nC_P=\\left(\\frac{\\delta Q_P}{dT}\\right)_P=C_V+nR\n\\]\n于是  \n\\[\n\\frac{nR}{C_V}=\\frac{C_P-C_V}{C_V}=\\gamma-1\n\\]\n其中  \n\\[\n\\gamma=\\frac{C_P}{C_V}\n\\]\n\n这里要求 \\(C_P,C_V\\) 为常数，从而 \\(\\gamma\\) 为常数。\n\n---\n\n### 第 7 步：积分得到目标式\n\n式 (4) 变为  \n\\[\n\\frac{dT}{T}+(\\gamma-1)\\frac{dV}{V}=0\n\\]\n积分得  \n\\[\n\\ln T+(\\gamma-1)\\ln V=\\text{常数}\n\\]\n等价地  \n\\[\nT V^{\\gamma-1}=\\text{const}\n\\]\n\n---\n\n### 重要备注\n\n如果 \\(C_V\\)、\\(C_P\\) 随温度变化，则 \\(\\gamma\\) 不是常数，不能直接得到  \n\\[\nT V^{\\gamma-1}=\\text{const}\n\\]\n这时只能得到微分关系\n\\[\n\\frac{dT}{T}+\\frac{nR}{C_V(T)}\\frac{dV}{V}=0\n\\]\n或  \n\\[\n\\frac{dT}{T}+\\bigl[\\gamma(T)-1\\bigr]\\frac{dV}{V}=0\n\\]\n因此目标式成立的关键是热容、因而 \\(\\gamma\\) 在积分区间内为常数。\n\n---\n\n```json\n{\n  \"final_expression\": \"T*V**(gamma-1)\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"封闭系统，物质的量 n 为常数，无化学反应或相变\",\n    \"过程是准静态的，中间态可视为热力学平衡态\",\n    \"过程是绝热的，δQ=0\",\n    \"只有体积功，无电功、磁功、表面功等其他功\",\n    \"体积功为 δW=-P dV，且无摩擦/耗散，气体压强等于外界压强\",\n    \"采用热力学第一定律 dU=δQ+δW 或等价符号约定\",\n    \"理想气体状态方程 PV=nRT 成立\",\n    \"理想气体焦耳定律成立：U=U(T)，即 (∂U/∂V)_T=0\",\n    \"定容热容 C_V 在积分区间内为常数\",\n    \"定压热容 C_P 在积分区间内为常数，因此 γ=C_P/C_V 为常数\",\n    \"理想气体 Mayer 关系 C_P-C_V=nR 成立\",\n    \"C_V≠0，T>0，V>0，使分母和对数有定义\",\n    \"积分路径连续可积，无奇异点，可用分离变量法\"\n  ],\n  \"unverified_steps\": [\n    \"PV=nRT 和 U=U(T) 作为理想气体物性假设/标准结果使用，未从第一定律机械推出\",\n    \"准静态绝热过程无耗散、机械平衡 p_ext=p 的实现条件仅按标准热力学设定陈述，未做力学或实验建模验证\",\n    \"C_V、C_P 在积分区间内为常数的假设未做实验或统计力学温度区间核验\"\n  ],\n  \"reasoning_summary\": \"从第一定律在准静态绝热条件下得到 dU=-P dV，代入理想气体的 dU=C_V dT 和 PV=nRT，再利用 Mayer 关系 C_P-C_V=nR 得到 dT/T+(γ-1)dV/V=0，积分即得 T V^(γ-1)=const。关键成立条件是热容、因而 γ 在积分区间内为常数。\"\n}\n```",
+  "thinking_chars": 27972,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 121.3,
+  "tokens": 10753,
+  "parse_ok": true,
+  "repeat_index": 1
+}

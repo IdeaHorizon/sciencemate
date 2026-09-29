@@ -1,0 +1,25 @@
+{
+  "sessionId": "b0ed740c-5009-4889-a512-367e6dc6ad2b",
+  "projectId": "62c8650c-a505-4190-a9a2-3983c7f2143c",
+  "gitBranch": "session/b0ed740c-5009-4889-a512-367e6dc6ad2b",
+  "gitBaseCommitSha": "d6955ab1fb923ee273fdd328336a9fbec3afbb91",
+  "gitHeadCommitSha": "1873ed623eb6bb11553d83d2274c18d60ebc824a",
+  "aheadBy": 2,
+  "behindBy": 1,
+  "patch": "diff --git a/SHARED.md b/SHARED.md\nindex 0093825..d46bfb1 100644\n--- a/SHARED.md\n+++ b/SHARED.md\n@@ -1 +1 @@\n-main 那边\n+会话这边\ndiff --git a/literature/notes.md b/literature/notes.md\nnew file mode 100644\nindex 0000000..0ea0b2a\n--- /dev/null\n+++ b/literature/notes.md\n@@ -0,0 +1 @@\n+只有会话动过",
+  "additions": 2,
+  "deletions": 1,
+  "filesChanged": 2,
+  "worktreeClean": true,
+  "patchTruncated": false,
+  "changedPaths": [
+    "SHARED.md",
+    "literature/notes.md"
+  ],
+  "conflicts": [
+    {
+      "path": "SHARED.md",
+      "status": "open"
+    }
+  ]
+}

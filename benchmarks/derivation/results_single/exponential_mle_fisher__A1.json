@@ -1,0 +1,107 @@
+{
+  "task_id": "exponential_mle_fisher",
+  "arm": "A1",
+  "final_expression": "1/lam**2",
+  "final_expression_source": "main_result",
+  "main_result_statement": "Exp(lambda) 速率参数 MLE: lambda_hat = n/Sum(X_i) = 1/xbar；单观测 Fisher 信息 I(lambda) = 1/lambda^2，故 I(lambda)*lambda^2 == 1",
+  "verdict": "derived",
+  "verification_evidence": [
+    {
+      "step": "S1",
+      "probe": "960389a9313c2bc6",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S2",
+      "probe": "15a54ccb642fbb28",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S3",
+      "probe": "92fbf9b6d88e0252",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S4",
+      "probe": "25fc3f8bb6319094",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S5",
+      "probe": "b739a7981342a051",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S6",
+      "probe": "e984bd586fd81465",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S7",
+      "probe": "995c1c5e35275d21",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S8",
+      "probe": "3cab38f05eb4bd1b",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S9",
+      "probe": "b416ee39d2154acd",
+      "status": "verified",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 9,
+  "step_count": 11,
+  "assumptions": [
+    "A1: lambda>0",
+    "A2: x_i>0（指数支撑）",
+    "A3: n>=1 正整数",
+    "A4: S=Sum x_i>0（由 A2 蕴含）",
+    "A5: 正则性条件满足"
+  ],
+  "unverified_steps": [
+    "S10",
+    "S11"
+  ],
+  "validity_domain": [
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5"
+  ],
+  "credibility": {
+    "verification_level": "承重链 9 步全部 check_step 符号确证（verified/symbolic，均带 probe）；S7 为 definition（附得分方差路线交叉验证）；S10/S11 为 prose 回归体检（limit_check/dimensional_check 结果记录于 note，工具无 probe 故不作验证章）；反例搜索 2 条均 symbolically_verified 无反例",
+    "weakest_step": "S2 对数展开依赖定义域假设 A2（x_i>0）；其余各步均符号确证",
+    "assumptions_carried_into_conclusion": [
+      "lambda>0",
+      "x_i>0（指数支撑）",
+      "n>=1",
+      "正则性条件（S7）"
+    ],
+    "confidence": "high"
+  },
+  "findings": [
+    "ell 在 (0,oo) 严格凹，驻点即唯一全局极大，二阶条件由严格凹性一次性完成",
+    "MLE 与 Fisher 信息均参数化相关：速率参数下 lambda_hat=1/xbar、I=lambda=1/lambda^2，与给定密度一致",
+    "S2 首次验证失败的复数反例点在支撑域外，补定义域假设后符号确证——log 类步骤必须显式写支撑条件",
+    "Fisher 信息两条独立路线交叉验证一致",
+    "量纲自洽：I~[X]^2，lambda_hat~1/[X]；极限回归：lim I=0（lambda->oo）"
+  ],
+  "frozen": true,
+  "turns": 27,
+  "tool_calls": 43,
+  "elapsed_s": 297.0,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787417454-0dcd8f"
+}

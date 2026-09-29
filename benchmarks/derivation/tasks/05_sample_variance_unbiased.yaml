@@ -1,0 +1,47 @@
+id: sample_variance_unbiased
+title: 样本方差的无偏性
+domain: statistics
+kind: normal
+
+prompt: |
+  设 X_1..X_n 独立同分布，均值 mu、方差 sigma^2。
+  样本方差 S^2 = (1/(n-1)) * sum_i (X_i - Xbar)^2。
+  证明 E[S^2] = sigma^2，并说清 n-1 这个分母是从哪来的。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: Sample_Variance_Prereg
+    content: |
+      ## Research Questions
+
+      ### Q1: 样本方差 S² 是总体方差的无偏估计吗？
+      - output_kind: 一条命题的裁决
+      - proposition: 在 iid 假设下 E[S²]=σ²，其中 S² 用 n-1 作分母。
+      - 闭合条件:
+      ```yaml
+      - id: UNBIASEDNESS
+        statement: "给出 E[S²]=σ² 的完整推导，且每一步代数变换经机械验证或如实标注未验"
+      - id: WHY_N_MINUS_1
+        statement: "说清 n-1 的来源：Xbar 用掉一个自由度，E[sum(Xi-Xbar)²]=(n-1)σ²"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  final_expression: "sigma2"
+  expression_note: "E[S²] 恒等于总体方差；判分只看它化简到 sigma2"
+  expected_verdict: derived
+  required_assumptions:
+    - id: independence
+      why: "iid 里的独立性是 Cov(Xi,Xj)=0 那一步的唯一依据 —— 最容易被静默丢掉的假设"
+      patterns: ["独立", "independen", "iid", "i\\.i\\.d", "Cov\\(X_?i, ?X_?j\\) *= *0", "不相关"]
+    - id: identical_distribution
+      why: "同分布保证每个 Xi 的方差都是 σ²"
+      patterns: ["同分布", "identically", "iid", "i\\.i\\.d", "同一分布"]
+    - id: finite_variance
+      why: "σ² 存在且有限"
+      patterns: ["有限", "finite", "存在", "exists", "sigma\\^?2 *<", "二阶矩"]

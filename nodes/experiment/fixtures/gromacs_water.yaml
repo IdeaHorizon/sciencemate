@@ -1,0 +1,94 @@
+# experiment 节点 fixture —— GROMACS 水盒子 MD（使用已有安装）
+#
+# 运行：
+#   cd ~/2026-ai4s-platform-project/node4-experiment/harness-framework
+#   python run_node.py --harness experiment \
+#     --fixture nodes/experiment/fixtures/gromacs_water.yaml \
+#     --project-id test-gmx-01 \
+#     --stream
+#
+# 测试目标：节点用已有 GROMACS 安装，自主完成水盒子 MD 设置与运行，归档并判 verdict。
+# 诊断路径：通用 SKILL.md → FermiLink（GROMACS 在列表中）→ 五层诊断模型
+
+node_inputs:
+  experiment_focus: |
+    执行 prereg 指定的 GROMACS 水盒子 NPT MD 模拟。
+    按 harness.yaml 4 阶段工作流执行：
+    ① 确认 gmx 可用（已安装，无需编译）
+    ② 用 gmx 工具链准备体系并运行 MD
+    ③ 验证轨迹输出和温度稳定性
+    ④ 归档 experiment_log（含独立 ## Verdict 段），记录执行层评估并交给 Analysis
+
+upstream_artifacts:
+  - type: claim
+    name: H_GROMACS_water_NPT_stable
+    metadata:
+      claim_type: hypothesis
+      status: open
+      created_at: "2026-06-08T00:00:00+00:00"
+    content: |
+      GROMACS 能从源码编译并正确运行 TIP3P 水盒子 NPT MD，体系温度在
+      100 ps 内稳定（T = 300 ± 10 K），产出有效轨迹文件。
+
+  - type: pre_registration
+    name: GROMACS_Water_MD
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-08T00:00:00+00:00"
+      freeze_reason: "GROMACS from-scratch compilation + NPT water benchmark"
+    content: |
+      ## Pre-Registration: GROMACS TIP3P Water Box NPT MD
+
+      ### Hypothesis
+      GROMACS 能从源码编译并正确运行 TIP3P 水盒子 NPT MD，体系温度在
+      100 ps 模拟内稳定（T = 300 ± 10 K），产出有效轨迹。
+
+      ### Setup
+      - **Tool**: GROMACS 2025.4（/home/lujy/miniconda3/bin/gmx，已安装，直接使用，无需编译）
+      - **System**: TIP3P water box，3×3×3 nm 立方盒子，~900 molecules
+      - **Force field**: AMBER99SB-ILDN 或 OPLS-AA（gmx 内置）
+      - **Energy minimization**: steepest descent，≤ 1000 steps
+      - **Equilibration**: NVT 10 ps（V-rescale thermostat，300 K）
+      - **Production**: NPT 100 ps（2 fs timestep，50000 steps）
+        - Thermostat: V-rescale，τ_T = 0.1 ps，T_ref = 300 K
+        - Barostat: Parrinello-Rahman，τ_P = 2.0 ps，P_ref = 1.0 bar
+      - **Cutoffs**: rcoulomb = rvdw = 1.2 nm，PME electrostatics
+      - **Constraints**: all-bonds（LINCS）
+      - **Expected wall time**: < 10 分钟
+
+      ### Falsification criteria
+      - metric: returncode from mdrun (production)
+      - op: ==
+      - threshold: 0
+      - T_avg 从 .edr 用 `gmx energy` 提取，需在 [290, 310] K
+      - If 编译失败 OR mdrun returncode != 0 OR 无 .xtc OR T 超范围 → hypothesis refuted
+
+      ### Expected output
+      - `gmx` 或 `gmx_d` 可执行文件编译成功
+      - `prod.xtc` 轨迹文件（> 0 bytes）
+      - `prod.edr` 能量文件
+      - `gmx energy` 提取平均温度在 300 ± 10 K
+      - 无 Fatal error / segfault
+
+      ### Notes
+      - mdp 文件优先从 GROMACS 官方 tutorial 模板修改，不要从头手写
+      - 遇编译错误先 grep fermilink_packages.txt（GROMACS 在 FermiLink 列表中）
+      - 备用：~/gromacs-2025.2/bin/gmx_mpi（MPI 版，需 mpirun 调用）
+
+memory_entries:
+  - kind: directive
+    text: |
+      本机 GROMACS 安装（已验证，直接使用）：
+      - 主用：/home/lujy/miniconda3/bin/gmx（GROMACS 2025.4-conda_forge，单精度，AVX2_256）
+        `which gmx` 即可找到，无需配置路径
+      - 备用：/home/lujy/gromacs-2025.2/bin/gmx_mpi（MPI 版，需 mpirun 调用）
+      - 力场数据目录：/home/lujy/miniconda3/share/gromacs/top/
+      不需要重新编译，直接进入体系准备阶段。
+    tags: [gromacs, environment, verified]
+
+  - kind: directive
+    text: |
+      experiment_log 的 save_artifact content 字段必须包含独立的
+      "## Verdict" 段落，写明：verdict 结论、依据数值与阈值对比、对应 claim_id。
+      流程：freeze_artifact → 将测量、阈值比较和 replay evidence 交给 Analysis
+    tags: [verdict, compliance]

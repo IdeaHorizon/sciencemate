@@ -1,0 +1,35 @@
+{
+ "rootRunId": "run_2414d64806944e41ab7f39eb7ec657b7",
+ "runs": [
+  {
+   "id": "run_2414d64806944e41ab7f39eb7ec657b7",
+   "parentRunId": null,
+   "nodeType": "project_chat",
+   "status": "failed",
+   "summary": {}
+  }
+ ],
+ "lifecycle": [
+  {
+   "runId": "run_2414d64806944e41ab7f39eb7ec657b7",
+   "sequence": 1,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "project_chat",
+    "attemptNo": 1,
+    "owningRun": true,
+    "modelBackendName": "DeepSeek · node20"
+   }
+  },
+  {
+   "runId": "run_2414d64806944e41ab7f39eb7ec657b7",
+   "sequence": 6,
+   "kind": "run.failed",
+   "payload": {
+    "status": "failed",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  }
+ ]
+}

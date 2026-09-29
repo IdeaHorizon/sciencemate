@@ -1,0 +1,62 @@
+# 第6步 benchmark dry-run fixture —— 验证 A/B/C/D 测量体系（不是测应用）。
+#
+#   EXPERIMENT_BENCH_GROUP=A python run_node.py --harness experiment --no-interactive \
+#     --fixture nodes/experiment/fixtures/bench_dryrun.yaml --project-id bench-dry-A
+#   （B、C、D 同理换 group 与 project-id）
+#
+# 极小 CMake 工程（~/experiments/bench_dryrun_src），瞬间构建，专为验证管道：
+#   开关是否生效 / 三组是否无共享 / transcript 是否可提取指标 / _observed_route 是否污染指标。
+
+node_inputs:
+  experiment_focus: |
+    这是一个【benchmark 测量体系 dry-run】，构建一个极小 CMake 工程，重点是把构建流程跑完整。
+    源码：~/experiments/bench_dryrun_src（一个静态库 foo + 可执行 app）。
+    注意：build/ 已是干净状态，**无需请求人工确认清理，直接开始**。
+
+    按以下步骤：
+    1. 看一下源码：`ls -la ~/experiments/bench_dryrun_src && cat ~/experiments/bench_dryrun_src/CMakeLists.txt`
+    2. 配置 + 构建：
+       源码目录只读；使用 turn-1 注入的 `build_root` 做 out-of-source build，
+       不要删除或写入 `~/experiments/bench_dryrun_src/build`：
+       `cmake -S ~/experiments/bench_dryrun_src -B <build_root> && cmake --build <build_root>`
+       —— 若被 build gate 拦（C/D 组会拦），按提示 read_artifact 看 build_env/source_recon/platform_profile/build_graph。
+       D/provision-first 下 build_graph 可用后直接再 build；若 build_graph 不可得，才写 declared_route
+       JSON/YAML build contract 作为 fallback，expected_artifacts 含 `<build_root>/app`。
+       A/B 组不会被拦，直接构建即可。
+    3. min-run：在 v2 路线中声明独立运行步骤，用 `safe_run_bash` 传
+       `route_step_id` 执行 `<build_root>/app`；以 returncode、日志中的
+       `DRYRUN_OK` 和路线收据核验，禁止用 `verify_min_run` 隐式启动。
+    4. 在 experiment_log 总结：执行了哪些命令、build 产物、min-run 结果。由于这是平台机制
+       E2E，不对应可判定的科学 hypothesis；若 KB 中没有可更新的 hypothesis claim，必须写：
+       `verdict: inconclusive`，并说明需要正式注册 hypothesis 才能做科学 verdict。不能写
+       `verdict: validated` 来代替平台链路通过。然后 freeze。
+
+upstream_artifacts:
+  - type: claim
+    name: H_bench_measurement_ok
+    metadata:
+      claim_type: hypothesis
+      status: open
+      created_at: "2026-06-16T00:00:00+00:00"
+    content: |
+      A/B/C/D 能力开关确实生效、各组无共享状态、transcript 可提取全部指标、
+      _observed_route 误判不污染 major-build/no-progress 指标。
+
+  - type: pre_registration
+    name: Bench_DryRun
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-16T00:00:00+00:00"
+      freeze_reason: "第6步 dry-run：验证 benchmark 测量体系"
+    content: |
+      ## Pre-Registration: benchmark dry-run
+      ### Hypothesis
+      A/B/C/D 开关生效、无共享、指标可提取、_observed_route 不污染。
+      ### Setup
+      - 极小 CMake 工程 ~/experiments/bench_dryrun_src
+      - 四组各一次：EXPERIMENT_BENCH_GROUP=A/B/C/D，独立 project-id
+      ### Expected
+      - A：无 recon artifact / 无 gate 拦 / 无 milestone 打点 / 无完整日志落盘
+      - B：有 recon artifact、无 gate 阻断、无 milestone 打点
+      - C：recon + gate + milestone 全有
+      - D：provision-first artifact（build_env/build_graph/build_state）和 gate 指标可提取

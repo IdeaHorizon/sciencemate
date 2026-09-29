@@ -1,0 +1,29 @@
+{
+  "task_id": "matrix_power_FALSE",
+  "arm": "B0",
+  "model": "deepseek-v4-pro",
+  "final_expression": "A*(B*A - A*B)*B == 0",
+  "verdict": "refuted",
+  "assumptions": [
+    "A,B 为同阶方阵，使 AB 与 A^2 B^2 有定义",
+    "矩阵元素属于一个域（如实数或复数），使用通常矩阵加法与乘法",
+    "矩阵乘法满足结合律：(AB)C = A(BC)",
+    "矩阵乘法对加法/减法满足分配律：A(B±C)=AB±AC 且 (A±B)C=AC±BC",
+    "两矩阵相等等价于其差为零矩阵",
+    "仅在附加的可逆情形推论中：额外假定 A 和 B 均可逆"
+  ],
+  "unverified_steps": [
+    "反例中的矩阵乘法和矩阵平方为手算，未用 CAS 机械验证",
+    "代数化简 A(BA-AB)B = (AB)^2 - A^2B^2 为手算，未用符号计算软件验证"
+  ],
+  "reasoning_summary": "命题被反例推翻；一般正确结论是 (AB)^2-A^2B^2=A(BA-AB)B，因此等式成立当且仅当 A(BA-AB)B=0。若 A,B 均可逆，则该充要条件简化为 AB=BA。",
+  "raw_text": "裁决：原命题为假。矩阵乘法一般不交换，不能把 \\((AB)^2\\) 直接写成 \\(A^2B^2\\)。\n\n设 \\(A,B\\) 为同阶方阵。逐步推导如下：\n\n\\[\n(AB)^2=(AB)(AB)=ABAB\n\\]\n\n依据：乘方定义。\n\n再把 \\(ABAB\\) 用结合律重新分组：\n\n\\[\nABAB=A(BA)B\n\\]\n\n依据：矩阵乘法结合律。\n\n另一方面：\n\n\\[\nA^2B^2=(AA)(BB)=AABB=A(AB)B\n\\]\n\n依据：乘方定义与结合律。\n\n于是：\n\n\\[\n(AB)^2-A^2B^2=A(BA)B-A(AB)B\n\\]\n\n依据：左、右分配律。\n\n\\[\n=A(BA-AB)B\n\\]\n\n所以：\n\n\\[\n(AB)^2=A^2B^2\n\\]\n\n等价于：\n\n\\[\nA(BA-AB)B=0\n\\]\n\n其中 \\(0\\) 是同阶零矩阵。这就是一般情形下使等式成立的充要条件。\n\n---\n\n反例：\n\n取\n\n\\[\nA=\\begin{pmatrix}0&1\\\\0&0\\end{pmatrix},\\qquad\nB=\\begin{pmatrix}0&0\\\\1&0\\end{pmatrix}\n\\]\n\n则\n\n\\[\nAB=\\begin{pmatrix}1&0\\\\0&0\\end{pmatrix}\n\\]\n\n所以\n\n\\[\n(AB)^2=\\begin{pmatrix}1&0\\\\0&0\\end{pmatrix}\n\\]\n\n而\n\n\\[\nA^2=\\begin{pmatrix}0&0\\\\0&0\\end{pmatrix},\\qquad\nB^2=\\begin{pmatrix}0&0\\\\0&0\\end{pmatrix}\n\\]\n\n因此\n\n\\[\nA^2B^2=\\begin{pmatrix}0&0\\\\0&0\\end{pmatrix}\n\\]\n\n显然：\n\n\\[\n(AB)^2=\\begin{pmatrix}1&0\\\\0&0\\end{pmatrix}\n\\neq\n\\begin{pmatrix}0&0\\\\0&0\\end{pmatrix}\n=A^2B^2\n\\]\n\n所以原命题对任意方阵不成立。\n\n---\n\n补充说明：\n\n\\(AB=BA\\) 是充分条件，但不是必要条件。\n\n例如：\n\n\\[\nA=\\begin{pmatrix}1&0\\\\0&0\\end{pmatrix},\\qquad\nB=\\begin{pmatrix}0&1\\\\0&0\\end{pmatrix}\n\\]\n\n此时 \\(AB\\neq BA\\)，但：\n\n\\[\n(AB)^2=0,\\qquad A^2B^2=0\n\\]\n\n所以 \\((AB)^2=A^2B^2\\)。\n\n若额外假设 \\(A,B\\) 都可逆，则从\n\n\\[\nA(BA-AB)B=0\n\\]\n\n左乘 \\(A^{-1}\\)、右乘 \\(B^{-1}\\)，得到：\n\n\\[\nBA-AB=0\n\\]\n\n即\n\n\\[\nAB=BA\n\\]\n\n因此在 \\(A,B\\) 均可逆时，充要条件简化为 \\(AB=BA\\)。\n\n```json\n{\n  \"final_expression\": \"A*(B*A - A*B)*B == 0\",\n  \"verdict\": \"refuted\",\n  \"assumptions\": [\n    \"A,B 为同阶方阵，使 AB 与 A^2 B^2 有定义\",\n    \"矩阵元素属于一个域（如实数或复数），使用通常矩阵加法与乘法\",\n    \"矩阵乘法满足结合律：(AB)C = A(BC)\",\n    \"矩阵乘法对加法/减法满足分配律：A(B±C)=AB±AC 且 (A±B)C=AC±BC\",\n    \"两矩阵相等等价于其差为零矩阵\",\n    \"仅在附加的可逆情形推论中：额外假定 A 和 B 均可逆\"\n  ],\n  \"unverified_steps\": [\n    \"反例中的矩阵乘法和矩阵平方为手算，未用 CAS 机械验证\",\n    \"代数化简 A(BA-AB)B = (AB)^2 - A^2B^2 为手算，未用符号计算软件验证\"\n  ],\n  \"reasoning_summary\": \"命题被反例推翻；一般正确结论是 (AB)^2-A^2B^2=A(BA-AB)B，因此等式成立当且仅当 A(BA-AB)B=0。若 A,B 均可逆，则该充要条件简化为 AB=BA。\"\n}\n```",
+  "thinking_chars": 50016,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 194.7,
+  "tokens": 18840,
+  "parse_ok": true,
+  "repeat_index": 1
+}

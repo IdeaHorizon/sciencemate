@@ -1,0 +1,33 @@
+{
+  "task_id": "maxent_boltzmann",
+  "arm": "A0",
+  "model": "deepseek-v4-flash",
+  "final_expression": "p_i = exp(-beta*E_i)/Sum(exp(-beta*E_j), (j, 1, n)), beta = 1/(k_B*T)",
+  "verdict": "derived",
+  "assumptions": [
+    "状态指标 i 离散；若无限，要求配分函数 Z = Sum(exp(-beta*E_i), (i,1,n)) 收敛且 Z != 0。",
+    "最优解在可行域内点，p_i > 0，使得 ln p_i 可导；等价地，给定 U 在能谱内点，β 有限。",
+    "E_i 是给定常数，与 p_i 无关。",
+    "约束梯度 (1,...,1) 和 (E_1,...,E_n) 线性无关，即并非所有 E_i 都相同；否则能量约束不独立，μ/β 不唯一。",
+    "归一化约束与能量约束相容，可行域非空。",
+    "0 ln 0 按连续极限定义为 0；若最大值在边界，拉格朗日方程本身不覆盖边界点。",
+    "热力学关系 dS/dU = 1/T 被采用，用于把 β 识别为 1/(k_B*T)。",
+    "若 i 标记能级而非微观态，需另加简并度；这里按题目的 sum_i 理解为对微观态求和。",
+    "无限状态时允许交换求导和求和；有限状态无此问题。"
+  ],
+  "unverified_steps": [
+    "无限维概率单纯形上拉格朗日乘子法的泛函分析条件（Frechet 可微、约束流形正则性）没有做机械验证；有限维情形下严格成立。",
+    "由 U = -∂lnZ/∂β 确定 β 的存在唯一性没有完全机械证明；我只列出该方程。当能级不全同且方差非零时 U(β) 严格递减，但未展开。",
+    "dS/dU = 1/T 作为热力学定义/第二定律引用，未从微观动力学推导。",
+    "Hessian 负定性只用 Hessian = -k_B*diag(1/p_i) < 0 说明，未做完整凸分析或逐特征值验证。"
+  ],
+  "reasoning_summary": "对拉格朗日量关于 p_i 求导得到 p_i ∝ exp(-mu*E_i/k_B)，归一化后写为 p_i = exp(-beta*E_i)/Z；最大熵满足 S = k_B*ln(Z) + k_B*beta*U，所以 dS/dU = k_B*beta，与热力学 dS/dU = 1/T 比较得 beta = 1/(k_B*T)。",
+  "raw_text": "设 \\(i\\) 标记离散微观态，\\(U\\) 是平均能量约束 \\(\\sum_i p_iE_i=U\\)。用拉格朗日乘子法：\n\n\\[\nL=-k_B\\sum_i p_i\\ln p_i-\\lambda\\left(\\sum_i p_i-1\\right)-\\mu\\left(\\sum_i p_iE_i-U\\right)\n\\]\n\n对 \\(p_i\\) 求导：\n\n\\[\n\\frac{\\partial L}{\\partial p_i}\n=-k_B(\\ln p_i+1)-\\lambda-\\mu E_i=0\n\\]\n\n所以\n\n\\[\n\\ln p_i=-1-\\frac{\\lambda}{k_B}-\\frac{\\mu E_i}{k_B}\n\\]\n\n令 \\(A=e^{-1-\\lambda/k_B}\\)，则\n\n\\[\np_i=Ae^{-\\mu E_i/k_B}\n\\]\n\n由归一化 \\(\\sum_i p_i=1\\)，得\n\n\\[\nA=\\frac{1}{\\sum_i e^{-\\mu E_i/k_B}}\n\\]\n\n定义\n\n\\[\n\\beta=\\frac{\\mu}{k_B},\\qquad Z=\\sum_i e^{-\\beta E_i}\n\\]\n\n于是\n\n\\[\np_i=\\frac{e^{-\\beta E_i}}{Z}\n\\]\n\n能量约束自动给出\n\n\\[\nU=\\sum_i p_iE_i=-\\frac{\\partial \\ln Z}{\\partial \\beta}\n\\]\n\n最大熵满足\n\n\\[\nS=k_B\\ln Z+k_B\\beta U\n\\]\n\n因此\n\n\\[\n\\frac{dS}{dU}=k_B\\beta\n\\]\n\n热力学中 \\(\\frac{dS}{dU}=\\frac1T\\)，所以\n\n\\[\n\\beta=\\frac{1}{k_BT}\n\\]\n\n注意：若把能量约束的拉格朗日乘子本身记为 \\(\\beta\\)，则该乘子等于 \\(1/T\\)，而上面指数式里的 \\(\\beta\\) 是 \\(1/(k_BT)\\)。\n\n```json\n{\n  \"final_expression\": \"p_i = exp(-beta*E_i)/Sum(exp(-beta*E_j), (j, 1, n)), beta = 1/(k_B*T)\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"状态指标 i 离散；若无限，要求配分函数 Z = Sum(exp(-beta*E_i), (i,1,n)) 收敛且 Z != 0。\",\n    \"最优解在可行域内点，p_i > 0，使得 ln p_i 可导；等价地，给定 U 在能谱内点，β 有限。\",\n    \"E_i 是给定常数，与 p_i 无关。\",\n    \"约束梯度 (1,...,1) 和 (E_1,...,E_n) 线性无关，即并非所有 E_i 都相同；否则能量约束不独立，μ/β 不唯一。\",\n    \"归一化约束与能量约束相容，可行域非空。\",\n    \"0 ln 0 按连续极限定义为 0；若最大值在边界，拉格朗日方程本身不覆盖边界点。\",\n    \"热力学关系 dS/dU = 1/T 被采用，用于把 β 识别为 1/(k_B*T)。\",\n    \"若 i 标记能级而非微观态，需另加简并度；这里按题目的 sum_i 理解为对微观态求和。\",\n    \"无限状态时允许交换求导和求和；有限状态无此问题。\"\n  ],\n  \"unverified_steps\": [\n    \"无限维概率单纯形上拉格朗日乘子法的泛函分析条件（Frechet 可微、约束流形正则性）没有做机械验证；有限维情形下严格成立。\",\n    \"由 U = -∂lnZ/∂β 确定 β 的存在唯一性没有完全机械证明；我只列出该方程。当能级不全同且方差非零时 U(β) 严格递减，但未展开。\",\n    \"dS/dU = 1/T 作为热力学定义/第二定律引用，未从微观动力学推导。\",\n    \"Hessian 负定性只用 Hessian = -k_B*diag(1/p_i) < 0 说明，未做完整凸分析或逐特征值验证。\"\n  ],\n  \"reasoning_summary\": \"对拉格朗日量关于 p_i 求导得到 p_i ∝ exp(-mu*E_i/k_B)，归一化后写为 p_i = exp(-beta*E_i)/Z；最大熵满足 S = k_B*ln(Z) + k_B*beta*U，所以 dS/dU = k_B*beta，与热力学 dS/dU = 1/T 比较得 beta = 1/(k_B*T)。\"\n}\n```",
+  "thinking_chars": 41221,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 113.3,
+  "tokens": 15526,
+  "parse_ok": true
+}

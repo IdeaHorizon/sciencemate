@@ -1,0 +1,90 @@
+/* Graph + node detail styles. */
+
+.graph-stats {
+  display: flex;
+  gap: var(--space-4);
+  font-size: 12px;
+  color: var(--color-fg-muted);
+  margin-bottom: var(--space-4);
+}
+.graph-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.graph-skeleton-row { width: 100%; }
+.graph-node-row-link { text-decoration: none; color: inherit; }
+.graph-node-row { display: flex; flex-direction: column; gap: 6px; }
+.graph-node-row-head { display: flex; align-items: center; gap: var(--space-2); }
+.graph-node-row-type { font-size: 12px; color: var(--color-fg-muted); }
+.graph-node-row-title { font-size: 14px; color: var(--color-fg); }
+.graph-node-row-stats {
+  display: flex;
+  gap: var(--space-3);
+  font-size: 11px;
+  color: var(--color-fg-subtle);
+  font-family: var(--font-mono);
+}
+
+.node-detail { display: flex; flex-direction: column; gap: var(--space-4); }
+.node-detail-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--color-fg-muted);
+  text-decoration: none;
+  width: fit-content;
+}
+.node-detail-back:hover { color: var(--color-fg); }
+.node-detail-header {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+}
+.node-detail-icon {
+  width: 40px; height: 40px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-md);
+  background: var(--color-accent-bg);
+  color: var(--color-accent);
+  flex-shrink: 0;
+}
+.node-detail-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.node-detail-desc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-fg-muted);
+  white-space: pre-wrap;
+}
+
+.metadata-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-2);
+  margin: 0;
+}
+.metadata-row {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: var(--space-3);
+  font-size: 12px;
+}
+.metadata-row dt {
+  color: var(--color-fg-muted);
+  font-weight: 500;
+  margin: 0;
+}
+.metadata-row dd {
+  color: var(--color-fg);
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}

@@ -1,0 +1,253 @@
+node_inputs:
+  path_roles:
+    experiment_root: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-new-gnr-work
+    run_root: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-new-gnr-work/run
+  experiment_focus: |
+    这是 VASP case2-new：Na intercalated tC40 AIMD 的 gnr 平台 SSH + mpirun 任务。
+    本任务使用新的输入包 `case2.na_intercalated_aimd-new.zip`，复用已经在 gnr 平台编译好的
+    VASP 6.5.1 `vasp_std`，不重新编译 VASP；通过免密 SSH 在 gnr-cu03/gnr-cu04 上直接
+    用 mpirun 启动计算，不使用 SLURM。
+
+    关键要求：
+    - 目标节点固定为 gnr-cu03, gnr-cu04。
+    - 每节点 192 CPU cores。
+    - 使用已编译好的 gnr VASP:
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-gnr-build/vasp.6.5.1/bin/vasp_std`
+    - 不得使用 spr 平台旧二进制。
+    - 不得调用 `submit_job`、`sbatch`、`srun`。
+    - 如果两节点 mpirun 分发失败，不允许自动降级成单节点继续跑；必须停止、记录 blocker，
+      并 `request_human_input` 让用户决定是否改为单节点或改资源。
+
+    科学目标：
+    1. 解压新的 case2 输入包，确认 zip 内部顶层目录为 `na_intercalated_aimd/`。
+    2. 使用 `predecessor/` 阶段输入先完成 Na-intercalated tC40 predecessor 弛豫。
+    3. predecessor 产生合格 `CONTCAR` 后，将其复制为 AIMD 阶段的 `POSCAR`。
+    4. 使用根目录 AIMD 输入参数运行 Na-intercalated 300 K AIMD。
+    5. 冻结 `experiment_log`，记录 predecessor/AIMD 是否完成、关键输出路径、失败原因或 blocker。
+    6. 本节点只产出 VASP predecessor/AIMD 运行证据；不做 snapshots band/gap postprocess，
+       也不得仅凭本 run 声称 H24 validated/refuted。
+
+    路径：
+    - 提交端仓库: /mnt/beegfs/ai4s-test/ai4s-platform/test_20260625/harness-framework
+    - 本地参考输入包: /home/lujy/2026-ai4s-platform-project/test1-vasp/case2.na_intercalated_aimd-new.zip
+    - 集群 case2-new 输入包: /mnt/beegfs/ai4s-test/ai4s-platform/test1_vasp/case2.na_intercalated_aimd-new.zip
+    - zip 内部输入目录: na_intercalated_aimd
+    - 已编译 VASP: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-gnr-build/vasp.6.5.1/bin/vasp_std
+    - 本 run 共享 workdir: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-new-gnr-work
+    - 解压输入副本目录: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-new-gnr-work/run/input/na_intercalated_aimd
+    - predecessor 运行目录: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-new-gnr-work/run/predecessor
+    - AIMD 运行目录: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-new-gnr-work/run/aimd
+    - logs/scripts 目录: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-new-gnr-work/run/logs
+
+    输入事实：
+    - zip 内含 `na_intercalated_aimd/predecessor/POSCAR`，元素为 `C Na`，原子数 `40 1`。
+    - `candidate_structures.json` 中包含 `site_01`、`site_02`、`site_03`、`site_04` 四个 Na 插层候选结构。
+    - `candidate_structures.json` 中 `site_01` 的 `selected_as_primary=true`。
+    - `predecessor/INCAR` 包含:
+      `ENCUT=520`、`PREC=Accurate`、`EDIFF=1E-6`、`EDIFFG=-0.02`、
+      `IBRION=1`、`ISIF=2`、`NSW=120`、`POTIM=0.3`、`ISYM=0`。
+    - AIMD `INCAR` 包含:
+      `ENCUT=520`、`PREC=Accurate`、`EDIFF=1E-6`、`IBRION=0`、
+      `ISIF=2`、`MDALGO=2`、`NSW=5000`、`POTIM=1.0`。
+    - predecessor 和 AIMD 的 `KPOINTS` 均为 Gamma-centered `3 3 3`。
+    - `structure.pending.json` 声明 AIMD `POSCAR` 应来自 `predecessor/CONTCAR`。
+    - 原始输入 zip 只读；所有解压、复制、运行输出都必须在 workdir 中完成。
+
+    参数边界：
+    - 本 fixture 默认保持 `KPOINTS=3 3 3`，不要改成 `1 1 1`，除非用户另行明确授权。
+    - 不要修改原始输入包。
+    - 不要修改 `ENCUT=520`、`PREC=Accurate`、`EDIFF=1E-6`、AIMD 温度/时间步/NSW 等科学参数。
+    - 如果为了 preflight 临时缩短 `NSW`，必须单独标注为 smoke/preflight，不得作为正式 AIMD 结果。
+
+    候选结构选择策略：
+    - 这些 candidates 是 data 节点给出的备选前处理结构，用于处理不同 Na 插层位点的收敛风险。
+    - experiment 节点应先读取并解析 `candidate_structures.json`，按主观收敛可能性从高到低排序后尝试。
+    - 排序依据必须写入 scratchpad 和 experiment_log，至少考虑：
+      1. `hard_collision=false` 优先于有硬碰撞的候选；
+      2. `geometry.valid=true` 优先；
+      3. `minimum_host_distance_angstrom` 越大通常越不容易发生初始几何冲突，优先级越高；
+      4. `minimum_pair_distance_angstrom` 过小可能表示宿主结构本身有短键风险，需记录；
+      5. `selected_as_primary=true` 是 data 节点推荐，但如果几何指标明显更差，可以降级并说明理由。
+    - 当前输入中已观察到的局部信息：
+      - `site_01`: selected_as_primary=true, hard_collision=false, valid=true, minimum_host_distance_angstrom≈6.041067
+      - `site_02`: hard_collision=false, valid=true, minimum_host_distance_angstrom≈6.041067
+      - `site_03`: hard_collision=false, valid=true, minimum_host_distance_angstrom≈6.039695
+      - `site_04`: 必须从 `candidate_structures.json` 读取后补全判断
+    - 如果多个候选几何指标几乎相同，优先使用 data 节点标记的 `selected_as_primary=true` 候选。
+    - 推荐默认尝试顺序：先按 `candidate_structures.json` 计算排序；若无更强证据，使用
+      `site_01 -> site_02 -> site_03 -> site_04`。
+    - 每个候选必须使用独立 predecessor 目录：
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-new-gnr-work/run/predecessor/site_XX`
+    - 尝试候选时，应把对应 `candidates/site_XX/POSCAR` 复制为该候选 predecessor 的 `POSCAR`，
+      并复制相同的 predecessor `INCAR/KPOINTS/POTCAR`。
+    - 如果某个候选 predecessor 失败、SCF 不收敛、结构崩坏、VASP 报几何/数值 blocker，
+      必须记录证据路径、最后 OSZICAR/OUTCAR 摘要和失败原因，再请求人工确认是否尝试下一个候选。
+    - 运行中如果出现明显“不可能在合理时间内收敛”的信号，不要机械等待到 walltime 或 NSW 用尽；
+      应主动暂停、总结证据，并建议切换到下一个 site 方案。
+    - 主动建议切换 site 的参考判据包括但不限于：
+      1. 多个 ionic step 后最大力或能量没有下降趋势，且远高于 `EDIFFG=-0.02`；
+      2. 单个 SCF step 长时间卡住，`OSZICAR`/`OUTCAR` 无进展，且 CPU 仍在消耗；
+      3. `DAV`/`RMM` 反复达到 `NELM` 或接近 `NELM=160`，`rms(c)` 不降反升；
+      4. `OUTCAR` 出现 ZBRENT、BRMIX、sub-space matrix、EDDDAV、ZHEGV、LAPACK、NaN、segmentation fault 等数值异常；
+      5. 结构出现异常短距离、体积/晶格非物理变化、CONTCAR 空或明显损坏；
+      6. 同一候选已经经历一次保守重启仍重复同类失败。
+    - 主动建议切换时，agent 必须给出：
+      - 当前 candidate_id；
+      - 已完成 ionic steps / SCF iterations；
+      - 最后一段 OSZICAR 摘要；
+      - OUTCAR 中的错误或停滞证据；
+      - 为什么判断继续等待收益低；
+      - 下一个建议 candidate_id 及排序理由。
+    - 未经用户确认，不得擅自杀掉正在运行的 VASP 或切换到下一个 site；
+      但如果确认是单节点误分发、明显崩溃、输出损坏或 runaway 进程，可以先停止错误任务并记录原因。
+    - 不要通过随意改变科学参数来“救”一个坏候选；优先切换到排序中下一个候选。
+    - 只有某个候选 predecessor 收敛并产生有效 `CONTCAR` 后，才能进入 AIMD 阶段。
+    - AIMD 阶段必须记录最终采用的 `candidate_id`，并把该候选的 predecessor `CONTCAR` 复制为 AIMD `POSCAR`。
+
+    目标节点与 preflight：
+    - 目标 hosts: gnr-cu03, gnr-cu04
+    - 调度器: 无；本任务使用 passwordless SSH + mpirun
+    - 每个目标节点必须先检查:
+      - `hostname`
+      - `whoami`
+      - `nproc`
+      - `free -h | head -2`
+      - `/mnt/beegfs/ai4s-test` 共享盘可见
+      - `source /opt/intel/oneapi/setvars.sh --force` 可用
+      - `which mpirun`
+      - `mpirun --version | head -2`
+      - `ldd --version | head -1`
+      - `ulimit -s`
+    - 必须确认 VASP 二进制存在且可执行。
+    - 必须在 gnr-cu03/gnr-cu04 上分别运行:
+      `source /opt/intel/oneapi/setvars.sh --force; ldd <vasp_std> | grep "not found\|GLIBC_" || echo libs-ok`
+    - 若任一节点出现 `not found`、`GLIBC_* not found` 或 MPI/oneAPI 运行时缺失，停止任务并冻结
+      environment/toolchain blocker。
+
+    推荐初始资源布局：
+    - 每节点 192 CPU cores
+    - 初始布局: 48 MPI ranks / node, 4 OpenMP threads / rank
+    - total MPI ranks = 96
+    - total CPU threads = 384
+    - `OMP_NUM_THREADS=4`
+    - `MKL_NUM_THREADS=1`
+    - 如 preflight 显示某节点不是 192 cores 或负载异常，必须降低 ranks_per_node 或 threads_per_rank 后再请求用户确认。
+
+    非 SLURM mpirun 脚本要求：
+    - 在 logs/scripts 目录生成可审计脚本，例如：
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-new-gnr-work/run/logs/run_case2_new_gnr.sh`
+    - 生成 hostfile，例如：
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-new-gnr-work/run/logs/hosts.gnr`
+      内容应按确认后的 ranks_per_node 写入 gnr-cu03/gnr-cu04。
+    - 推荐 Intel MPI 启动形式:
+      `mpirun -bootstrap ssh -hosts gnr-cu03,gnr-cu04 -ppn 48 -np 96 -genv OMP_NUM_THREADS 4 -genv MKL_NUM_THREADS 1 <vasp_std>`
+    - 运行脚本必须包含:
+      - `set -eo pipefail`
+      - `ulimit -s unlimited`
+      - `source /opt/intel/oneapi/setvars.sh --force`
+      - `export MKL_NUM_THREADS=1`
+      - `export OMP_STACKSIZE=512M`
+      - `export OMP_PROC_BIND=close`
+      - `export OMP_PLACES=cores`
+    - stdout/stderr 必须写入 logs 目录，文件名包含阶段名和时间戳。
+    - 为避免 scope_guard 误判 heredoc 中的变量路径，运行脚本里的日志重定向必须使用固定绝对路径，
+      不要使用 `${WORKDIR}/${STDOUT_LOG}`、`${LOGDIR}/${name}` 这类变量拼接路径。
+    - 如果启动后发现只有一个节点存在 `vasp_std` 进程，必须立即停止该错误任务并记录 blocker；
+      不得把单节点超卖运行写成成功。
+
+    执行顺序：
+    1. 检查集群输入 zip 是否存在；在 workdir/input 中解压，忽略 `__MACOSX` 和 `.DS_Store`。
+    2. 确认解压后存在:
+       - `na_intercalated_aimd/predecessor/INCAR`
+       - `na_intercalated_aimd/predecessor/POSCAR`
+       - `na_intercalated_aimd/predecessor/KPOINTS`
+       - `na_intercalated_aimd/predecessor/POTCAR`
+       - `na_intercalated_aimd/INCAR`
+       - `na_intercalated_aimd/KPOINTS`
+       - `na_intercalated_aimd/POTCAR`
+       - `na_intercalated_aimd/structure.pending.json`
+       - `na_intercalated_aimd/candidate_structures.json`
+    3. 创建 declared route / workspace 记录，声明:
+       - workdir: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-new-gnr-work
+       - input_dir: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-new-gnr-work/run/input/na_intercalated_aimd
+       - run_dir: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-new-gnr-work/run
+       - logs_dir: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-new-gnr-work/run/logs
+    4. 解析 `candidate_structures.json`，给出候选收敛可能性排序和理由。
+    5. 按排序为第一个候选创建独立 predecessor 目录，例如 `run/predecessor/site_01`，
+       复制 `predecessor/INCAR/KPOINTS/POTCAR`，并把 `candidates/site_01/POSCAR` 复制为该目录 `POSCAR`。
+    6. 运行该 candidate 的 predecessor；若已有有效 `run/predecessor/site_XX/CONTCAR`，可先验证并复用。
+    7. 若当前 candidate predecessor 失败，记录证据并 `request_human_input`，再按排序尝试下一个 candidate。
+    8. 某个 candidate predecessor 完成后，复制其 `CONTCAR` 为 workdir/run/aimd/POSCAR。
+    9. 复制根目录 AIMD 输入到 workdir/run/aimd，保持 KPOINTS=3 3 3。
+    10. 启动每个正式 mpirun 阶段前必须 `request_human_input`，说明:
+       - hosts
+       - ranks_per_node
+       - total MPI ranks
+       - OpenMP threads
+       - 是否会编译 VASP（本 fixture 默认不会）
+       - VASP binary 路径
+       - 当前 candidate_id
+       - predecessor/AIMD workdir
+       - stdout/stderr 日志路径
+       - KPOINTS 保持 3x3x3
+       - AIMD `NSW=5000` 可能是长任务
+    11. 用户确认后用 SSH + mpirun 启动；不要重复启动相同阶段。
+    12. 启动后必须在 60 秒内检查 gnr-cu03 和 gnr-cu04 都有 `vasp_std` 或 MPI worker 进程；
+        若只有一个节点有进程，立即停止并记录 multi-node launch blocker。
+
+    监控要求：
+    - 不要使用长阻塞等待：单次 `sleep` 不超过 60 秒，单次 `safe_run_bash timeout` 不超过 90 秒。
+    - 长任务启动后给用户 watch 命令，例如：
+      - `for h in gnr-cu03 gnr-cu04; do ssh $h "pgrep -af 'vasp_std|mpirun|hydra|pmi_proxy' || echo no-vasp"; done`
+      - `tail -f <stdout_log>`
+      - `tail -30 <run_dir>/OSZICAR`
+      - `ls -lh <run_dir>/OUTCAR <run_dir>/OSZICAR <run_dir>/XDATCAR <run_dir>/CONTCAR`
+    - 如果 mpirun 已在后台/远程运行，agent 不应重复启动第二个相同任务。
+
+    完成标准：
+    - predecessor:
+      - mpirun 正常退出 0，或日志中有明确可解释的完成状态；
+      - `OUTCAR` 包含结构弛豫收敛证据，或 `OSZICAR` 有 ionic-step 能量行并有非空有效 `CONTCAR`；
+      - `CONTCAR` 非空且结构有效。
+      - 必须记录采用的 candidate_id；失败候选也要记录失败证据。
+    - AIMD:
+      - mpirun 正常退出 0，或达到明确可解释的阶段性输出；
+      - `OUTCAR`、`OSZICAR`、`XDATCAR`、`CONTCAR` 至少一组可归档；
+      - experiment_log 记录实际完成步数、是否完整达到 `NSW=5000`、hosts/ranks/threads。
+    - 若任一阶段失败，必须记录最后一个真实错误、日志路径、资源配置和下一步建议，不得伪造完成。
+    - 冻结 `experiment_log`；若没有后续 postprocess 证据，verdict 必须为 `inconclusive`。
+
+upstream_artifacts:
+  - type: claim
+    name: H24_thermal_nodal_surface_robustness
+    metadata:
+      claim_type: hypothesis
+      status: open
+      derived_from: pre_registration__tC40_nodal_surface_SIB_anode_prereg.json
+      source_section: "Hypothesis H24"
+      note: "Derived summary, not a standalone upstream claim artifact file"
+    content: |
+      tC40 中 Γ 点四重简并节点面在 300 K 热扰动和 Na 嵌入下更脆弱；
+      case2-new 负责生成 Na-intercalated 300 K AIMD 轨迹和相关 VASP 输出，供后续
+      snapshots band/gap postprocess 使用。
+      最终 validated/refuted verdict 必须结合后续 postprocess 的定量证据。
+
+  - type: pre_registration
+    name: tC40_nodal_surface_SIB_anode_prereg
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-16T03:33:56+00:00"
+      freeze_reason: "Imported upstream hypothesis pre-registration for VASP case2-new Na-intercalated AIMD experiment"
+      source_artifact: pre_registration__tC40_nodal_surface_SIB_anode_prereg.json
+    content: |
+      上游 prereg artifact 位于：
+      /mnt/beegfs/ai4s-test/ai4s-platform/test1_vasp/vasp-upstream-artifacts.zip
+
+      本次 case2-new 运行范围：
+      - 解压新的 `case2.na_intercalated_aimd-new.zip` 输入包。
+      - 使用 `na_intercalated_aimd/predecessor` 完成 Na-intercalated tC40 predecessor 弛豫。
+      - predecessor 优先使用 data 节点给出的 candidate 结构；先主观评估收敛可能性，再从高到低尝试。
+      - predecessor/CONTCAR 合格后，作为 300 K AIMD 阶段 POSCAR。
+      - 保持 KPOINTS=3x3x3，运行 Na-intercalated 300 K AIMD 并归档 VASP 输出。
+      - 归档结果供后续 data/postprocess 节点提取 snapshots 和 band/gap 证据。
+      - experiment 节点不做最终 band/gap 判定。

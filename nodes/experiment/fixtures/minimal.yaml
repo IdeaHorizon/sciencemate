@@ -1,0 +1,72 @@
+# experiment 节点的 fixture —— WRF 基本场景：单域 12km、24h 模拟
+#
+# 运行：
+#   python run_node.py --harness experiment --sandbox \
+#     --fixture nodes/experiment/fixtures/minimal.yaml
+#
+# 预期产出：
+#   - frozen experiment_log artifact
+#   - 可选 create_experiment 登记；执行完成以冻结证据三件套验收
+#
+# 注意：实际跑 WRF 需要本地安装 WRF + MPI。
+# fixture 默认只测"节点能否按 prereg 正确准备输入文件"。
+
+node_inputs:
+  experiment_focus: |
+    跑 prereg 指定的 WRF 单域 12km CONUS 24h 模拟，验证 experiment 节点能
+    正确执行 → 监控 → 诊断 → 归档的全流程。
+
+upstream_artifacts:
+  - type: pre_registration
+    name: WRF_CONUS_12km_24h_baseline
+    metadata:
+      frozen: true
+      frozen_at: "2026-05-27T10:00:00+00:00"
+      freeze_reason: "ready for execution — Phase 1 minimal verification"
+    content: |
+      ## Pre-Registration: WRF CONUS 12km 24h baseline
+
+      ### Hypothesis (H1)
+      experiment 节点能够正确执行 WRF 单域 CONUS 12km 分辨率 24h 模拟，
+      全程无 CFL violation，输出完整的 wrfout_d01 文件。
+
+      ### Setup
+      - **Computational tool**: WRF (Weather Research and Forecasting Model), V4.x
+      - **Domain**: Single domain, CONUS (continental US)
+      - **Resolution**: dx=dy=12000 m (12km)
+      - **Grid**: e_we=250, e_sn=200, e_vert=40
+      - **Simulation length**: 24 hours (run_hours=24)
+      - **Timestep**: dt=72 seconds
+      - **Input data**: GFS 0.25deg analysis
+      - **Physics**: 
+        - mp_physics=8 (Thompson)
+        - ra_lw_physics=4 (RRTMG)
+        - ra_sw_physics=4 (RRTMG)
+        - sf_sfclay_physics=1 (Monin-Obukhov)
+        - sf_surface_physics=2 (Noah LSM)
+        - bl_pbl_physics=1 (YSU)
+        - cu_physics=3 (Grell-Freitas)
+      - **Boundary conditions**: spec_bdy_width=5
+      - **MPI**: 8 processes (mpirun -np 8)
+      - **Expected wall time**: ~30-45 minutes on 8 cores
+      - **Output**: wrfout_d01_2026-01-01_00:00:00 (hourly output)
+
+      ### Falsification criteria
+      - metric: simulation_completed
+      - op: ==
+      - threshold: true
+      - If returncode != 0 OR no wrfout_d01 file → hypothesis refuted
+
+      ### Expected output
+      - wrfout_d01_2026-01-01_00:00:00 (approximately 500 MB)
+      - rsl.out.0000 + rsl.error.0000
+      - returncode = 0
+      - wall time ≤ 45 minutes
+
+memory_entries:
+  - kind: directive
+    text: "WRF 12km CONUS baseline 已做预注册。后续 WRF 实验以本场景为 sanity check——如果 baseline 都跑不通，说明环境或配置有问题。"
+    tags: [experiment, wrf, baseline]
+  - kind: decision
+    text: "选 WRF 而非其他 NWP 模型作为 Phase 1 验证目标 — WRF 是 NWP 社区标准，文档成熟，错误模式清晰（CFL/rsl.error），适合验证 experiment 节点的监控+诊断能力。"
+    tags: [tooling, wrf]

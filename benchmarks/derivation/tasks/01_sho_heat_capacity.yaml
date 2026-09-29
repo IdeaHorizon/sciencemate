@@ -1,0 +1,52 @@
+id: sho_heat_capacity
+title: 一维量子简谐振子热容
+domain: statistical_physics
+kind: normal
+
+prompt: |
+  推导一维量子简谐振子在正则系综下的热容 C(T)，并给出高温极限。
+  记 x = ħω/(k_B T)。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: SHO_Heat_Capacity_Prereg
+    content: |
+      ## Research Questions
+
+      ### Q1: 一维量子简谐振子的热容如何随温度变化？
+      - output_kind: 一条命题的裁决
+      - proposition: 量子简谐振子热容 C(T) 有闭式解，且在 k_B*T >> ħω 时退化为经典能均分值 k_B。
+      - 闭合条件:
+      ```yaml
+      - id: CLOSED_FORM_C
+        statement: "给出 C(T) 的闭式表达式，且每一步代数变换经机械验证（未验步骤须逐一列出并说明为何未验）"
+      - id: CLASSICAL_LIMIT
+        metric: "lim_{x->0} C/k_B"
+        comparison: "=="
+        threshold: 1
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  final_expression: "k_B*x**2*exp(x)/(exp(x)-1)**2"
+  expression_note: "x = hbar*omega/(k_B*T)；判分时把 k_B 当自由符号"
+  symbol_definitions:
+    x: "hbar*omega/(k_B*T)"
+  accepted_aliases:
+    k_B: [kB, k_b]
+  expected_verdict: derived
+  required_assumptions:
+    - id: quantized_levels
+      why: "能级量子化 E_n=ħω(n+1/2) 是整个推导的前提"
+      patterns: ["能级", "E_n", "quantiz", "n\\+1/2", "n \\+ 1/2", "hbar\\*omega"]
+    - id: canonical_ensemble
+      why: "正则系综/玻尔兹曼权重"
+      patterns: ["正则", "canonical", "玻尔兹曼", "boltzmann", "exp\\(-beta", "e\\^\\{-\\\\beta"]
+    - id: convergence
+      why: "配分函数级数收敛要求 x>0（T>0）"
+      patterns: ["收敛", "converg", "x *> *0", "T *> *0", "beta *> *0", "正温"]

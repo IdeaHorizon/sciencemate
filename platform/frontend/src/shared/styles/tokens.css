@@ -1,0 +1,313 @@
+/**
+ * Design tokens — single source of truth for color/spacing/typography/motion.
+ *
+ * Imported once in app/globals.css. All custom CSS should reference vars
+ * here rather than literal values, so theme switching is free.
+ *
+ * ── 为什么分成「调色板」和「映射」两段 ──────────────────────────────
+ * 主题有三态：显式 dark、显式 light、以及什么都没标的 system（只有
+ * `prefers-color-scheme` 能区分）。原来亮色的**取值**被抄了两份（一份给
+ * `[data-theme="light"]`，一份给 system 态），两份已经分叉了——system 那份
+ * 漏掉全部 5 个 `--color-score-*`，于是 system + 亮色的用户在白底上拿到的是
+ * 暗色主题的分数配色，而且不报错。
+ *
+ * 所以取值（`--dark-*` / `--light-*`）在本文件只出现一次，下面三处只做映射。
+ * 映射行漏一条会立刻可见（token 回落到另一主题的值），而取值漏一条不会。
+ * tokens-theme-parity.test.ts 机械检查三态声明的 token 名字集合完全一致。
+ */
+:root {
+  /* ══ 调色板：取值只在这里出现一次 ══════════════════════════════ */
+
+  /* 暗色 */
+  --dark-bg: #0d1117;
+  --dark-bg-elevated: #161b22;
+  --dark-bg-overlay: #1c2128;
+  --dark-bg-input: #0d1117;
+  /* 悬停/选中这类「比所在面再浅一点」的底：用半透明叠色，压在 bg 或
+     bg-elevated 上都成立，不用为每层面各配一个值。 */
+  --dark-bg-subtle: rgba(255, 255, 255, 0.06);
+  --dark-fg: #e6edf3;
+  --dark-fg-muted: #8b949e;
+  /* 说明文字用的是 11–12px，需 4.5:1。原 #6e7681 只有 4.12:1（对 bg）/
+     3.77:1（对 bg-elevated）—— 而它正好用在最小号的那批字上。 */
+  --dark-fg-subtle: #8b939c;
+  /* 分两档，因为两档的要求不一样：
+     - border 是装饰性分隔线（面板之间、列表行之间），不受 3:1 硬约束，但原
+       #30363d 对底色只有 1.55:1，边界近乎消失 —— 这是整体观感「发糊」的主因。
+       提到 2.2:1，看得见又不至于变成线框图。
+     - border-strong 用在输入框、可聚焦控件这类**有意义的**边界上，那才是
+       非文字 3:1 的适用面。求解到刚好 3.04:1。 */
+  --dark-border: #464d53;
+  --dark-border-strong: #596269;
+  --dark-accent: #58a6ff;
+  --dark-accent-bg: rgba(56, 139, 253, 0.15);
+  /* 实色 accent 上压白字只有 2.53:1。要「填充底色 + 可读文字」这一对时用
+     accent-fill / accent-fill-fg，别直接拿 --color-accent 当底色配 #fff。 */
+  --dark-accent-fill: #1f3f66;
+  --dark-accent-fill-fg: #dce9fb;
+  --dark-success: #3fb950;
+  --dark-success-bg: rgba(63, 185, 80, 0.15);
+  --dark-warning: #d29922;
+  --dark-warning-bg: rgba(210, 153, 34, 0.15);
+  --dark-danger: #f85149;
+  --dark-danger-bg: rgba(248, 81, 73, 0.15);
+  --dark-info: #79c0ff;
+  --dark-info-bg: rgba(121, 192, 255, 0.15);
+  --dark-score-excellent: #3fb950;
+  --dark-score-good: #56d364;
+  --dark-score-fair: #d29922;
+  --dark-score-weak: #f0883e;
+  --dark-score-bad: #f85149;
+  --dark-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --dark-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.35);
+  --dark-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+
+  /* 亮色 */
+  --light-bg: #ffffff;
+  --light-bg-elevated: #f6f8fa;
+  --light-bg-overlay: #ffffff;
+  --light-bg-input: #ffffff;
+  --light-bg-subtle: rgba(0, 0, 0, 0.04);
+  --light-fg: #1f2328;
+  --light-fg-muted: #59636e;
+  /* 对白底 4.80:1、对 elevated 4.51:1 —— 两个面都得过，说明文字是 11–12px。 */
+  --light-fg-subtle: #6c737b;
+  --light-border: #a5b0bc;
+  --light-border-strong: #8c959f;
+  --light-accent: #0969da;
+  --light-accent-bg: rgba(9, 105, 218, 0.1);
+  --light-accent-fill: #dbeafe;
+  --light-accent-fill-fg: #0a3069;
+  --light-success: #1a7f37;
+  --light-success-bg: rgba(26, 127, 55, 0.1);
+  --light-warning: #9a6700;
+  --light-warning-bg: rgba(154, 103, 0, 0.1);
+  --light-danger: #d1242f;
+  --light-danger-bg: rgba(209, 36, 47, 0.1);
+  --light-info: #0969da;
+  --light-info-bg: rgba(9, 105, 218, 0.1);
+  --light-score-excellent: #1a7f37;
+  --light-score-good: #2da44e;
+  --light-score-fair: #9a6700;
+  --light-score-weak: #bc4c00;
+  --light-score-bad: #d1242f;
+  --light-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --light-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.1);
+  --light-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
+
+  /* ══ 与主题无关 ══════════════════════════════════════════════ */
+  --interface-font-scale: 1;
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* Radius */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 999px;
+
+  /* Typography */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
+  --font-size-caption: calc(11px * var(--interface-font-scale));
+  --font-size-meta: calc(12px * var(--interface-font-scale));
+  --font-size-label: calc(13px * var(--interface-font-scale));
+  --font-size-control: calc(14px * var(--interface-font-scale));
+  --font-size-body: calc(16px * var(--interface-font-scale));
+  --font-size-title: calc(17px * var(--interface-font-scale));
+
+  /* Z-index */
+  --z-dropdown: 100;
+  --z-modal: 200;
+  --z-toast: 300;
+
+  /* ══ 动效 ════════════════════════════════════════════════════
+     本文件此前有色彩/间距/字号/圆角/阴影五套 scale，独缺动效——于是全站
+     19 条 transition 不写曲线（拿浏览器内置的，对刻意的动效太弱）、9 条写
+     `transition: all`、时长散落在 0.1s/0.12s/0.15s/120ms/160ms 之间。 */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  --duration-hover: 120ms;
+  --duration-press: 140ms;
+  --duration-popover: 180ms;
+  --duration-panel: 240ms;
+
+  /* 位移幅度的开关。带位移的动画一律写成 calc(<距离> * var(--motion-shift))，
+     减少动效时把它归零 —— 动画照跑（透明度、颜色都还在），只是不再移动。
+     这比把 animation-duration 归零、iteration-count 砍成 1 好，那样会把
+     「正在跑」的脉冲点和 spinner 一起停掉——那砍掉的是功能信号，不是装饰。 */
+  --motion-shift: 1;
+  /* 状态类循环动画的周期。减少动效时放慢而不是关掉。 */
+  --motion-status-cycle: 1.4s;
+  /* 按压反馈的缩放量。0.95–0.98 之间才不显廉价；减少动效时归 1。 */
+  --press-scale: 0.97;
+}
+
+/* ── 映射：默认暗色 ─────────────────────────────────────────── */
+:root,
+:root[data-theme="dark"] {
+  --color-bg: var(--dark-bg);
+  --color-bg-elevated: var(--dark-bg-elevated);
+  --color-bg-overlay: var(--dark-bg-overlay);
+  --color-bg-input: var(--dark-bg-input);
+  --color-bg-subtle: var(--dark-bg-subtle);
+  --color-fg: var(--dark-fg);
+  --color-fg-muted: var(--dark-fg-muted);
+  --color-fg-subtle: var(--dark-fg-subtle);
+  --color-border: var(--dark-border);
+  --color-border-strong: var(--dark-border-strong);
+  --color-accent: var(--dark-accent);
+  --color-accent-bg: var(--dark-accent-bg);
+  --color-accent-fill: var(--dark-accent-fill);
+  --color-accent-fill-fg: var(--dark-accent-fill-fg);
+  --color-success: var(--dark-success);
+  --color-success-bg: var(--dark-success-bg);
+  --color-warning: var(--dark-warning);
+  --color-warning-bg: var(--dark-warning-bg);
+  --color-danger: var(--dark-danger);
+  --color-danger-bg: var(--dark-danger-bg);
+  --color-info: var(--dark-info);
+  --color-info-bg: var(--dark-info-bg);
+  --color-score-excellent: var(--dark-score-excellent);
+  --color-score-good: var(--dark-score-good);
+  --color-score-fair: var(--dark-score-fair);
+  --color-score-weak: var(--dark-score-weak);
+  --color-score-bad: var(--dark-score-bad);
+  --shadow-sm: var(--dark-shadow-sm);
+  --shadow-md: var(--dark-shadow-md);
+  --shadow-lg: var(--dark-shadow-lg);
+}
+
+/* ── 映射：显式选了亮色 ─────────────────────────────────────── */
+:root[data-theme="light"] {
+  --color-bg: var(--light-bg);
+  --color-bg-elevated: var(--light-bg-elevated);
+  --color-bg-overlay: var(--light-bg-overlay);
+  --color-bg-input: var(--light-bg-input);
+  --color-bg-subtle: var(--light-bg-subtle);
+  --color-fg: var(--light-fg);
+  --color-fg-muted: var(--light-fg-muted);
+  --color-fg-subtle: var(--light-fg-subtle);
+  --color-border: var(--light-border);
+  --color-border-strong: var(--light-border-strong);
+  --color-accent: var(--light-accent);
+  --color-accent-bg: var(--light-accent-bg);
+  --color-accent-fill: var(--light-accent-fill);
+  --color-accent-fill-fg: var(--light-accent-fill-fg);
+  --color-success: var(--light-success);
+  --color-success-bg: var(--light-success-bg);
+  --color-warning: var(--light-warning);
+  --color-warning-bg: var(--light-warning-bg);
+  --color-danger: var(--light-danger);
+  --color-danger-bg: var(--light-danger-bg);
+  --color-info: var(--light-info);
+  --color-info-bg: var(--light-info-bg);
+  --color-score-excellent: var(--light-score-excellent);
+  --color-score-good: var(--light-score-good);
+  --color-score-fair: var(--light-score-fair);
+  --color-score-weak: var(--light-score-weak);
+  --color-score-bad: var(--light-score-bad);
+  --shadow-sm: var(--light-shadow-sm);
+  --shadow-md: var(--light-shadow-md);
+  --shadow-lg: var(--light-shadow-lg);
+}
+
+/* ── 映射：跟随系统（没标 data-theme，或显式选了 system）───────── */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]),
+  :root[data-theme="system"] {
+    --color-bg: var(--light-bg);
+    --color-bg-elevated: var(--light-bg-elevated);
+    --color-bg-overlay: var(--light-bg-overlay);
+    --color-bg-input: var(--light-bg-input);
+    --color-bg-subtle: var(--light-bg-subtle);
+  --color-bg-subtle: var(--light-bg-subtle);
+    --color-fg: var(--light-fg);
+    --color-fg-muted: var(--light-fg-muted);
+    --color-fg-subtle: var(--light-fg-subtle);
+    --color-border: var(--light-border);
+    --color-border-strong: var(--light-border-strong);
+    --color-accent: var(--light-accent);
+    --color-accent-bg: var(--light-accent-bg);
+    --color-accent-fill: var(--light-accent-fill);
+    --color-accent-fill-fg: var(--light-accent-fill-fg);
+    --color-success: var(--light-success);
+    --color-success-bg: var(--light-success-bg);
+    --color-warning: var(--light-warning);
+    --color-warning-bg: var(--light-warning-bg);
+    --color-danger: var(--light-danger);
+    --color-danger-bg: var(--light-danger-bg);
+    --color-info: var(--light-info);
+    --color-info-bg: var(--light-info-bg);
+    --color-score-excellent: var(--light-score-excellent);
+    --color-score-good: var(--light-score-good);
+    --color-score-fair: var(--light-score-fair);
+    --color-score-weak: var(--light-score-weak);
+    --color-score-bad: var(--light-score-bad);
+    --shadow-sm: var(--light-shadow-sm);
+    --shadow-md: var(--light-shadow-md);
+    --shadow-lg: var(--light-shadow-lg);
+  }
+}
+
+/**
+ * ── 减少动效 ──────────────────────────────────────────────────
+ * 两个来源要给同样的结果：应用内的 Reduce motion 开关，和操作系统级偏好。
+ * 原来只有前者接了全局，后者只有 3 个组件零散响应 —— 没进过外观设置的用户
+ * 照样吃到全部 9 个无限循环动画。
+ *
+ * 「减少」不是「归零」：位移去掉，透明度/颜色留下，状态类循环放慢但不停。
+ * 原来那把梭（animation-duration: .01ms + iteration-count: 1）把 spinner 和
+ * 「正在跑」的脉冲点一起停掉了 —— 在这个产品里那个脉冲就是 run 还活着的
+ * 唯一提示，砍掉的是功能信号。
+ */
+:root[data-reduce-motion="true"] {
+  --motion-shift: 0;
+  --motion-status-cycle: 3s;
+  --press-scale: 1;
+  --duration-hover: 1ms;
+  --duration-press: 1ms;
+  --duration-popover: 1ms;
+  --duration-panel: 1ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-reduce-motion="false"]) {
+    --motion-shift: 0;
+    --motion-status-cycle: 3s;
+  --press-scale: 1;
+    --duration-hover: 1ms;
+    --duration-press: 1ms;
+    --duration-popover: 1ms;
+    --duration-panel: 1ms;
+  }
+}
+
+/* 还没改用 --duration-* 的旧 transition 兜底：缩短，不归零。 */
+:root[data-reduce-motion="true"] *,
+:root[data-reduce-motion="true"] *::before,
+:root[data-reduce-motion="true"] *::after {
+  scroll-behavior: auto !important;
+  transition-duration: 1ms !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-reduce-motion="false"]) *,
+  :root:not([data-reduce-motion="false"]) *::before,
+  :root:not([data-reduce-motion="false"]) *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 1ms !important;
+  }
+}

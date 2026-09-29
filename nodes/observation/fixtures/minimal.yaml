@@ -1,0 +1,35 @@
+# observation 节点的最小 fixture。
+# 运行:  python run_node.py --harness observation --fixture fixtures/minimal.yaml
+#
+# 取的是英国饮食那趟的真实形状：闭合条件几乎全是陈述条、证据靠检视既有记录，
+# 没有任何需要"让世界产生新数据"的步骤 —— 这正是 experiment 覆盖不到的那类。
+
+node_inputs:
+  research_questions: "Q1"
+  search_scope: >
+    19 世纪英国饮食的同时代记述；语种限英语与法语；
+    一手史料（旅行书写、膳食记录）与二手食物史专著分开计。
+  saturation_hint: "连续 2 个新检索源没有带来新的相关一手材料即算搜够。"
+
+upstream_artifacts:
+  - type: pre_registration
+    name: UK_Food_Culture_Prereg
+    content: |
+      ## Research Questions
+
+      ### Q1: 英国饮食"匮乏"声誉是如何形成的？
+      - output_kind: 一条命题的裁决
+      - proposition: 该声誉形成于 19 世纪工业革命后的城市化与工人阶级 plain fare，
+        并被外部观察者的旅行书写固化，与实际饮食多样性脱节。
+      - 闭合条件:
+      ```yaml
+      - statement: "定位声誉形成的时间点：若史料显示 18 世纪及以前该声誉已是主流负面评价，则时间定位被证伪"
+      - statement: "识别书写主体与传播机制：若找不到外部观察者将英国饮食书写为'匮乏'的一手史料，则'外部叙事'机制被削弱"
+      ```
+    metadata:
+      frozen: true
+
+memory_entries:
+  - kind: directive
+    text: "取样纪律：协议先冻再取证；覆盖度必须报分母；找不到一手史料就如实写 failed，不要用二手转述顶替。"
+    tags: [methodology]

@@ -1,0 +1,80 @@
+{
+  "task_id": "reduced_mass",
+  "arm": "A1",
+  "final_expression": "m_1*m_2/(m_1 + m_2)",
+  "final_expression_source": "main_result",
+  "main_result_statement": "二体中心力问题化为等效单体问题后的约化质量 μ；坐标分离成立的条件为 A1-A5（正质量、中心力、惯性系无外力、非相对论、势可导）",
+  "verdict": "derived",
+  "verification_evidence": [
+    {
+      "step": "S3",
+      "probe": "886fecdfe76dbfda",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S4",
+      "probe": "cf98d7d36495fd25",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S5",
+      "probe": "160121b3ae5b9a62",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S7",
+      "probe": "a6a84735b18b0264",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S8",
+      "probe": "5f0b7914006199f9",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S14",
+      "probe": "c07ae01940d8425e",
+      "status": "verified",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 6,
+  "step_count": 15,
+  "assumptions": [
+    "A1: m1>0, m2>0（正质量）⇒ M=m1+m2≠0，坐标变换可逆",
+    "A2: 相互作用势只依赖相对坐标：V(r1,r2)=V(|r1-r2|)=V(|r|)（任务前提）",
+    "A3: 惯性参考系、无外力场 ⇒ 质心坐标 R 是循环坐标",
+    "A4: 非相对论牛顿框架：动能 T=(1/2)m|v|^2，质量守恒",
+    "A5: 势 V 可导（欧拉-拉格朗日方程需要）"
+  ],
+  "unverified_steps": [
+    "S1",
+    "S2",
+    "S6",
+    "S9",
+    "S10",
+    "S11",
+    "S12",
+    "S13",
+    "S15"
+  ],
+  "validity_domain": [
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5"
+  ],
+  "credibility": "所有代数恒等式符号级 verified（8 条 check_step + 量纲/极限/特例体检）；E-L 套用环节标 cited_theorem（Goldstein 3rd ed. §2.2,§3.1）。两条独立路线（拉格朗日坐标变换 vs 牛顿方程）汇合于同一 μ。结论适用域 = A1-A5。教科书级标准结果，最脆环节无。",
+  "findings": "F1（变换可逆，雅可比=-1≠0）；F2（动能二次型块对角化 diag(M,mu)）；F3（势能仅耦合相对坐标，中心力假设的实质内容）；F4（L 可加⇒E-L 解耦，R 循环坐标；分离条件=A1-A5 合取）；F5（双路线交叉验证）；F6（credibility：8 条 check_step verified + 体检通过，E-L 套用为 cited_theorem 标准结果）",
+  "frozen": true,
+  "turns": 18,
+  "tool_calls": 26,
+  "elapsed_s": 242.7,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787419793-9cea4a"
+}

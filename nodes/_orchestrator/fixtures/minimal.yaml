@@ -1,0 +1,26 @@
+# _orchestrator 节点的 fixture —— orchestrator 通常由 chat.py REPL 驱动，没有
+# "上游 artifact"。这个 fixture 只是给 orchestrator 一个清晰的 user 指令模拟，
+# 让它判断意图 + 选 run_node 调起合适子节点。
+#
+# 运行：
+#   python run_node.py --harness _orchestrator --sandbox --fixture nodes/_orchestrator/fixtures/minimal.yaml
+#
+# 预期产出：
+#   - run_node 工具调用（调起 literature 或 hypothesis）
+#   - 可能 memory_write（宪法/叙事）或 memory_note（手册，直接入册）
+#
+# 注：orchestrator 真实工作流推荐用 `python chat.py --project ...`，而不是
+# 单次 run_node。本 fixture 仅做"orchestrator 路由决策"的微测。
+
+node_inputs:
+  user_message: |
+    我想研究 Lennard-Jones MD 里 thermostat 选择对温度稳态收敛速度的影响。
+    具体想对比 Nosé-Hoover chain vs single Nosé-Hoover 在高密度下哪个更快。
+    先帮我做 literature survey。
+
+upstream_artifacts: []
+
+memory_entries:
+  - kind: directive
+    text: 'user 不明确表达"做研究"前不要直接调 run_node；先确认 scope + 评估资源。'
+    tags: [orchestrator, intent_routing]

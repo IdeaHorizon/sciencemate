@@ -1,0 +1,344 @@
+{
+ "assertions": [
+  {
+   "derived_from": "调度器下面并列六个执行节点（数据、实验、分析、写作、审稿、出图）",
+   "equals": 6,
+   "id": "six-exec",
+   "kind": "node_count",
+   "selector": {
+    "role": "执行节点"
+   }
+  },
+  {
+   "derived_from": "这些节点共用三样基础设施：对象存储、关系数据库、向量索引",
+   "equals": 3,
+   "id": "three-infra",
+   "kind": "node_count",
+   "selector": {
+    "role": "基础设施"
+   }
+  },
+  {
+   "derived_from": "调度器负责派发到六个执行节点",
+   "equals": 6,
+   "id": "sched-fanout",
+   "kind": "neighbors",
+   "node": "sched",
+   "within": {
+    "role": "执行节点"
+   }
+  },
+  {
+   "derived_from": "模型服务被调度器和全部执行节点调用",
+   "equals": 6,
+   "id": "model-called-by-all",
+   "kind": "neighbors",
+   "node": "model",
+   "within": {
+    "role": "执行节点"
+   }
+  }
+ ],
+ "blocks": [
+  {
+   "bands": [
+    [
+     "node:fe"
+    ],
+    [
+     "node:gw"
+    ],
+    [
+     "node:sched"
+    ],
+    [
+     "group:exec"
+    ],
+    [
+     "group:infra"
+    ]
+   ],
+   "edges": [
+    {
+     "from": "fe",
+     "label": "HTTP 请求",
+     "role": "调用",
+     "to": "gw"
+    },
+    {
+     "from": "gw",
+     "label": "转发",
+     "role": "调用",
+     "to": "sched"
+    },
+    {
+     "from": "sched",
+     "role": "派发",
+     "to": "data"
+    },
+    {
+     "from": "sched",
+     "role": "派发",
+     "to": "exp"
+    },
+    {
+     "from": "sched",
+     "role": "派发",
+     "to": "ana"
+    },
+    {
+     "from": "sched",
+     "role": "派发",
+     "to": "write"
+    },
+    {
+     "from": "sched",
+     "role": "派发",
+     "to": "review"
+    },
+    {
+     "from": "sched",
+     "role": "派发",
+     "to": "viz"
+    },
+    {
+     "from": "data",
+     "role": "读写",
+     "to": "oss"
+    },
+    {
+     "from": "data",
+     "role": "读写",
+     "to": "rdb"
+    },
+    {
+     "from": "data",
+     "role": "读写",
+     "to": "vec"
+    },
+    {
+     "from": "exp",
+     "role": "读写",
+     "to": "oss"
+    },
+    {
+     "from": "exp",
+     "role": "读写",
+     "to": "rdb"
+    },
+    {
+     "from": "exp",
+     "role": "读写",
+     "to": "vec"
+    },
+    {
+     "from": "ana",
+     "role": "读写",
+     "to": "oss"
+    },
+    {
+     "from": "ana",
+     "role": "读写",
+     "to": "rdb"
+    },
+    {
+     "from": "ana",
+     "role": "读写",
+     "to": "vec"
+    },
+    {
+     "from": "write",
+     "role": "读写",
+     "to": "oss"
+    },
+    {
+     "from": "write",
+     "role": "读写",
+     "to": "rdb"
+    },
+    {
+     "from": "write",
+     "role": "读写",
+     "to": "vec"
+    },
+    {
+     "from": "review",
+     "role": "读写",
+     "to": "oss"
+    },
+    {
+     "from": "review",
+     "role": "读写",
+     "to": "rdb"
+    },
+    {
+     "from": "review",
+     "role": "读写",
+     "to": "vec"
+    },
+    {
+     "from": "viz",
+     "role": "读写",
+     "to": "oss"
+    },
+    {
+     "from": "viz",
+     "role": "读写",
+     "to": "rdb"
+    },
+    {
+     "from": "viz",
+     "role": "读写",
+     "to": "vec"
+    },
+    {
+     "from": "sched",
+     "label": "调用",
+     "role": "模型调用",
+     "to": "model"
+    },
+    {
+     "from": "data",
+     "role": "模型调用",
+     "to": "model"
+    },
+    {
+     "from": "exp",
+     "role": "模型调用",
+     "to": "model"
+    },
+    {
+     "from": "ana",
+     "role": "模型调用",
+     "to": "model"
+    },
+    {
+     "from": "write",
+     "role": "模型调用",
+     "to": "model"
+    },
+    {
+     "from": "review",
+     "role": "模型调用",
+     "to": "model"
+    },
+    {
+     "from": "viz",
+     "role": "模型调用",
+     "to": "model"
+    }
+   ],
+   "groups": [
+    {
+     "id": "exec",
+     "label": "执行节点",
+     "ranks": [
+      [
+       "data",
+       "exp",
+       "ana",
+       "write",
+       "review",
+       "viz"
+      ]
+     ]
+    },
+    {
+     "id": "infra",
+     "label": "基础设施",
+     "ranks": [
+      [
+       "oss",
+       "rdb",
+       "vec"
+      ]
+     ]
+    }
+   ],
+   "kind": "diagram",
+   "nodes": [
+    {
+     "id": "fe",
+     "label": "浏览器前端",
+     "role": "前端",
+     "sublabel": "会话页 · 产物页 · 知识库页"
+    },
+    {
+     "id": "gw",
+     "label": "API 网关",
+     "role": "网关",
+     "sublabel": "鉴权 · 限流"
+    },
+    {
+     "id": "sched",
+     "label": "调度器",
+     "role": "调度",
+     "sublabel": "局面路由 · 派发"
+    },
+    {
+     "id": "data",
+     "label": "数据",
+     "role": "执行节点",
+     "shape": "chip"
+    },
+    {
+     "id": "exp",
+     "label": "实验",
+     "role": "执行节点",
+     "shape": "chip"
+    },
+    {
+     "id": "ana",
+     "label": "分析",
+     "role": "执行节点",
+     "shape": "chip"
+    },
+    {
+     "id": "write",
+     "label": "写作",
+     "role": "执行节点",
+     "shape": "chip"
+    },
+    {
+     "id": "review",
+     "label": "审稿",
+     "role": "执行节点",
+     "shape": "chip"
+    },
+    {
+     "id": "viz",
+     "label": "出图",
+     "role": "执行节点",
+     "shape": "chip"
+    },
+    {
+     "id": "oss",
+     "label": "对象存储",
+     "role": "基础设施",
+     "shape": "bar"
+    },
+    {
+     "id": "rdb",
+     "label": "关系数据库",
+     "role": "基础设施",
+     "shape": "bar"
+    },
+    {
+     "id": "vec",
+     "label": "向量索引",
+     "role": "基础设施",
+     "shape": "bar"
+    },
+    {
+     "id": "model",
+     "label": "模型服务",
+     "role": "外部服务",
+     "side": "right",
+     "sublabel": "外部依赖"
+    }
+   ],
+   "title": "系统分层架构"
+  }
+ ],
+ "title": "分层系统架构"
+}

@@ -1,0 +1,14 @@
+# literature 节点的最小 fixture。
+# 运行:  python run_node.py --harness literature --fixture fixtures/literature_minimal.yaml
+
+node_inputs:
+  research_question: >
+    近期最强的成果有哪些、方法学上的空白点在哪里、对小团队来说哪个空白点
+    最容易切入?
+
+upstream_artifacts: []      # literature 通常是入口节点
+
+memory_entries:
+  - kind: directive
+    text: "初始范围:聚焦 2024-01-01 至 2026-08-14 的工作（按当前日期换算的近 3 年）；不要使用 2022-2025。"
+    tags: [methodology]

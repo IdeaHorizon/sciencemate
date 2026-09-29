@@ -1,0 +1,26 @@
+{
+  "task_id": "sqrt_subadditive_FALSE",
+  "arm": "B0",
+  "model": "deepseek-v4-pro",
+  "final_expression": "(a >= 0) & (b >= 0) & (sqrt(a+b) <= sqrt(a)+sqrt(b))",
+  "verdict": "refuted",
+  "assumptions": [
+    "sqrt 表示实数算术平方根，仅对 x>=0 有定义，且 sqrt(x)>=0",
+    "a、b 是实数；不等式 <= 只用于实数值之间比较",
+    "平方函数在非负实数上保持不等式方向，可由 v^2-u^2=(v-u)(v+u)>=0 直接验证",
+    "对 a,b>=0，有 sqrt(a)*sqrt(b)=sqrt(a*b)，因为两边均非负且平方后都等于 ab",
+    "a,b>=0 时推出 a+b>=0 且 ab>=0",
+    "原命题的全称量词覆盖负数，因此包含使 sqrt(a) 或 sqrt(b) 无定义的输入"
+  ],
+  "unverified_steps": [],
+  "reasoning_summary": "原命题对一切实数不成立：取 a=-1,b=4 时，左边 sqrt(3) 存在但右边 sqrt(-1) 在实数范围无定义。实数平方根的定义域迫使 a,b>=0；在该条件下平方比较可得 sqrt(a+b)<=sqrt(a)+sqrt(b)。",
+  "raw_text": "按通常实数算术平方根约定，`sqrt(x)` 仅对 `x≥0` 有定义。因此原命题说“对一切实数 a、b”是有问题的。\n\n## 1. 原命题不成立\n\n取反例：\n\n- 设 `a = -1`，`b = 4`。\n- 则 `a+b = 3`，所以左边 `sqrt(a+b) = sqrt(3)` 是实数。\n- 但右边需要 `sqrt(a) = sqrt(-1)`，这在实数范围内无定义。\n\n所以原命题对一切实数 `a,b` 不成立。  \n不能只要求 `a+b≥0`，因为 `a=-1,b=4` 已经说明：左端有定义但右端仍可能无定义。\n\n## 2. 正确条件：`a,b ≥ 0`\n\n在 `a,b ≥ 0` 时，不等式成立。\n\n设\n\n\\[\nL = \\sqrt{a+b}, \\qquad R = \\sqrt{a}+\\sqrt{b}.\n\\]\n\n### 步骤\n\n1. 因为 `a≥0` 且 `b≥0`，所以 `a+b≥0`。  \n   因此 `L` 和 `R` 都有定义，且\n\n   \\[\n   L≥0,\\qquad R≥0.\n   \\]\n\n2. 计算 `R² - L²`：\n\n   \\[\n   R^2 - L^2\n   = (\\sqrt{a}+\\sqrt{b})^2 - (a+b).\n   \\]\n\n   这一步用的是普通二项式展开：\n\n   \\[\n   (x+y)^2 = x^2 + 2xy + y^2.\n   \\]\n\n3. 继续展开：\n\n   \\[\n   (\\sqrt{a}+\\sqrt{b})^2\n   = a + 2\\sqrt{a}\\sqrt{b} + b.\n   \\]\n\n   所以\n\n   \\[\n   R^2 - L^2\n   = a + b + 2\\sqrt{a}\\sqrt{b} - (a+b)\n   = 2\\sqrt{a}\\sqrt{b}.\n   \\]\n\n4. 又因为 `a,b ≥ 0`，有\n\n   \\[\n   \\sqrt{a}\\sqrt{b} = \\sqrt{ab}.\n   \\]\n\n   这一步用到实算术平方根的性质：两个非负数的平方根之积等于它们乘积的平方根。\n\n5. 因为 `ab ≥ 0`，所以\n\n   \\[\n   \\sqrt{ab} ≥ 0.\n   \\]\n\n   因此\n\n   \\[\n   R^2 - L^2 = 2\\sqrt{ab} ≥ 0.\n   \\]\n\n   即\n\n   \\[\n   L^2 ≤ R^2.\n   \\]\n\n6. 因为 `L≥0` 且 `R≥0`，并且平方函数在 `[0,∞)` 上保持不等式方向，所以由\n\n   \\[\n   L^2 ≤ R^2\n   \\]\n\n   可推出\n\n   \\[\n   L ≤ R.\n   \\]\n\n   也就是\n\n   \\[\n   \\sqrt{a+b} ≤ \\sqrt{a}+\\sqrt{b}.\n   \\]\n\n## 3. 正确结论\n\n原命题按题面“对一切实数 a,b”不成立。  \n正确的命题是：\n\n\\[\n\\boxed{\\text{对一切 } a,b≥0,\\quad \\sqrt{a+b} ≤ \\sqrt{a}+\\sqrt{b}.}\n\\]\n\n这也可以说成：实数平方根函数在非负实数上是“次可加”的。\n\n```json\n{\n  \"final_expression\": \"(a >= 0) & (b >= 0) & (sqrt(a+b) <= sqrt(a)+sqrt(b))\",\n  \"verdict\": \"refuted\",\n  \"assumptions\": [\n    \"sqrt 表示实数算术平方根，仅对 x>=0 有定义，且 sqrt(x)>=0\",\n    \"a、b 是实数；不等式 <= 只用于实数值之间比较\",\n    \"平方函数在非负实数上保持不等式方向，可由 v^2-u^2=(v-u)(v+u)>=0 直接验证\",\n    \"对 a,b>=0，有 sqrt(a)*sqrt(b)=sqrt(a*b)，因为两边均非负且平方后都等于 ab\",\n    \"a,b>=0 时推出 a+b>=0 且 ab>=0\",\n    \"原命题的全称量词覆盖负数，因此包含使 sqrt(a) 或 sqrt(b) 无定义的输入\"\n  ],\n  \"unverified_steps\": [],\n  \"reasoning_summary\": \"原命题对一切实数不成立：取 a=-1,b=4 时，左边 sqrt(3) 存在但右边 sqrt(-1) 在实数范围无定义。实数平方根的定义域迫使 a,b>=0；在该条件下平方比较可得 sqrt(a+b)<=sqrt(a)+sqrt(b)。\"\n}\n```",
+  "thinking_chars": 44685,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 173.1,
+  "tokens": 15063,
+  "parse_ok": true,
+  "repeat_index": 1
+}

@@ -1,0 +1,45 @@
+# minimal fixture: 审一个 hypothesis 节点产的 pre_registration artifact。
+#
+# 跑法：
+#   python run_node.py --harness _reviewer --fixture nodes/_reviewer/fixtures/minimal.yaml
+#
+# reviewer 启动后会：
+#   1. read_artifact('pre_registration__minimal_test')
+#   2. read_file('nodes/hypothesis/review_spec.md') 加载 owner spec
+#   3. 按 owner spec 审 prereg
+#   4. save review_critique artifact
+
+node_inputs:
+  artifact_id: pre_registration__minimal_test
+  source_node_type: hypothesis
+  producer_run_id: r_fake_producer_for_fixture     # 不存在；按需调 read_producer_transcript 会返 error，reviewer 应忽略
+
+upstream_artifacts:
+  - type: pre_registration
+    name: minimal_test
+    content: |
+      # Pre-registration: LJ NVT MD Thermal Equilibration
+
+      ## Hypothesis 1 (H1)
+
+      在 T*=1.0, ρ*=0.85, N=864 LJ 流体，跑 NVT MD 1000 步，温度在
+      500 步内达到稳态。
+
+      ### Falsification criteria
+      - 取 step 500-1000 的温度 50-step block-averaged
+      - 若 max(|T_block - 1.0|) >= 0.05 → refuted
+
+      ### Predicted outcome
+      max deviation 在 0.01-0.03 范围内（1-3%）
+
+      ### Statistical design
+      跑 1 个 seed（seed=42）
+
+      ## Hypothesis 2 (H2)
+
+      H2 留待后续 prereg。
+    metadata:
+      frozen: true
+      n_atoms: 864
+      seeds_planned: 20
+      seeds_executed: 1

@@ -1,0 +1,53 @@
+# _curator 节点的 fixture —— Mode 1（integration）：注入若干上游 artifact，让
+# curator 抽 KB candidate + 跑 Mode 3 per-write 整合。
+#
+# 运行：
+#   python run_node.py --harness _curator --sandbox --fixture nodes/_curator/fixtures/minimal.yaml
+#
+# 预期产出：
+#   - 若干 create_concept / create_claim / create_experiment 调用入 KB
+#   - 可能写 propose（争议 / 高风险动作）
+#
+# 注：_curator 在生产里通常由 orchestrator 主动调起，传 artifact_ids；本 fixture
+# 模拟一个"上游刚跑完，现在 curator 整合" 的场景。
+
+node_inputs:
+  mode: integration
+  artifact_focus: |
+    上游分析节点刚跑完。我们已经有 prereg / experiment_log / analysis_report 三件。
+    任务：抽 concept（NHC / single-NH / LJ / 等）、写 claim（speedup ratio finding /
+    methodological decision「dense LJ 默认用 NHC」）、把 experiment_log freeze → chunk → 入 KB。
+
+upstream_artifacts:
+  - type: pre_registration
+    name: LJ_NHC_vs_NH_convergence
+    metadata:
+      frozen: true
+    content: |
+      H1: NHC chain ≥ 20% faster than single NH on ρ=0.85 LJ NVT.
+      Falsifier: ratio < 1.20. Predicted: ratio ∈ [1.3, 1.6].
+
+  - type: experiment_log
+    name: LJ_NVT_NHC_vs_NH
+    metadata:
+      frozen: true
+    content: |
+      ## SUMMARY
+      NHC (chain=3): convergence 6.28 ± 0.20 ps (3 seeds)
+      single NH:     convergence 10.85 ± 0.37 ps (3 seeds)
+      ratio = 1.73, p = 1.8e-5
+
+  - type: analysis_report
+    name: NHC_vs_NH_analysis
+    content: |
+      H1 verdict: **supported**.
+      Methodological takeaway: 对 ρ ≥ 0.85 的 LJ NVT，**默认应该用 NHC chain**。
+      Robustness：threshold 0.3% / 0.5% / 1.0% 都给 ratio > 1.5。
+
+memory_entries:
+  - kind: directive
+    text: "高 confidence flip（如把 validated claim 翻 refuted）必走 propose，不要 AUTO 直写。"
+    tags: [curator, safety]
+  - kind: directive
+    text: "create_claim 前必先 search_kb 看是否有近义 claim；同名内容寻址会自动 merge sources。"
+    tags: [curator, dedup]

@@ -1,0 +1,39 @@
+# Fresh acceptance case: no existing fixture is reused.
+node_inputs:
+  prereg_artifact_id: pre_registration__Fresh_AI_CPU_Seed_Repro
+  stage: simulation
+  experiment_focus: |
+    Run a real CPU-only reproducibility experiment. In this run's run_root, write a
+    dependency-free Python program which creates a fixed 2-class synthetic dataset,
+    trains a logistic-regression classifier by deterministic batch gradient descent,
+    and emits one JSON record for seeds 17, 17, and 23. Do not use a precomputed
+    answer or network access. Record dataset hash, code hash, seed, loss, accuracy,
+    and model-weight hash. The two seed-17 records must have identical hashes; seed
+    23 must be separately reported. Create raw_results and clean_results from the
+    actual JSON output, then honestly close the primary simulation.
+upstream_artifacts:
+  - type: research_plan
+    name: Fresh_AI_CPU_Seed_Repro_Plan
+    content: "Execute the frozen deterministic-training protocol and compare repeated seeds."
+  - type: analysis_recommendation
+    name: Fresh_AI_CPU_Seed_Repro_Recommendation
+    content: "Analysis will assess only the recorded hash equality; do not upgrade a result after observing it."
+  - type: pre_registration
+    name: Fresh_AI_CPU_Seed_Repro
+    metadata:
+      frozen: true
+      run_role: primary
+      analysis_eligible: true
+      stage: simulation
+      execution_contract:
+        version: 1
+        scientific_params: {seeds: [17, 17, 23], samples: 128, iterations: 200}
+        runtime_params: {device: cpu}
+    content: |
+      ## Research question Q1
+      Does the declared deterministic CPU training procedure reproduce bit-identical
+      model weights for repeated identical seeds?
+      ## Falsification criteria
+      metric: repeated_seed_hash_equal
+      op: ==
+      threshold: true

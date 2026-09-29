@@ -1,0 +1,811 @@
+{
+  "schema_version": 1,
+  "registry_id": "experiment_phase1_cross_owner_non_goals",
+  "entries": [
+    {
+      "id": "experiment-cross-owner-001",
+      "title": "Core typed first-turn node_inputs receipt",
+      "status": "open",
+      "upstream_issues": [
+        1084
+      ],
+      "symptom": "Experiment can identify task prose only by reconstructing structure from Core-rendered Markdown, whose field headings can be forged inside another input value.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "nodes/experiment/tests/probes/probe_c3a_anchor_reachable.py",
+          "symbol": "_forged_task_heading_rejected",
+          "claim": "The forged_task_heading lane reproduces a non-task input value that imitates the rendered task heading."
+        },
+        {
+          "kind": "source",
+          "path": "nodes/experiment/tools/resource_manager.py",
+          "symbol": "_rendered_task_prose_source_from_seed",
+          "claim": "The compatibility boundary parses rendered node-input headings with a regular expression."
+        }
+      ],
+      "true_owner": {
+        "state": "assigned",
+        "owner": {
+          "domain": "core",
+          "component": "context_engine"
+        }
+      },
+      "current_node_workaround": "The first-turn hook records a private task-prose receipt before model tools run and cross-checks it against the startup manifest; ambiguous, forged, repeated, or late rendered fields fail closed.",
+      "deletion_condition": {
+        "mode": "all",
+        "checks": [
+          {
+            "id": "typed-receipt-contract-present",
+            "kind": "source_match_count",
+            "paths": [
+              "core/context_engine.py"
+            ],
+            "pattern": "typed_first_turn_node_inputs_receipt",
+            "expect": {
+              "operator": "gte",
+              "value": 1
+            }
+          },
+          {
+            "id": "typed-receipt-integrity-tested",
+            "kind": "pytest_node",
+            "node_id": "tests/test_context_engine.py::test_first_turn_node_inputs_receipt_is_typed_and_immutable"
+          },
+          {
+            "id": "legacy-support-window-closed",
+            "kind": "pytest_node",
+            "node_id": "nodes/experiment/tests/test_task_prose_inputs.py::test_legacy_rendered_input_parser_support_window_is_closed"
+          },
+          {
+            "id": "rendered-parser-removed",
+            "kind": "source_match_count",
+            "paths": [
+              "nodes/experiment/hooks.py",
+              "nodes/experiment/task_prose_inputs.py",
+              "nodes/experiment/tools/resource_manager.py"
+            ],
+            "pattern": "_RENDERED_NODE_INPUT|first_task_prose_source",
+            "expect": {
+              "operator": "eq",
+              "value": 0
+            }
+          }
+        ]
+      },
+      "registered_by": "review",
+      "registered_on": "2026-09-16"
+    },
+    {
+      "id": "experiment-cross-owner-002",
+      "title": "Typed planned-stop authorization",
+      "status": "open",
+      "upstream_issues": [
+        1084
+      ],
+      "symptom": "planned_stop accepts a verbatim task quote but has no typed fact proving that the quoted text actually authorizes stopping or cancelling the job.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "nodes/experiment/tools/resource_manager.py",
+          "symbol": "_anchored_expected_termination",
+          "claim": "The declaration is anchored to task text but has no typed planned-stop policy identity."
+        }
+      ],
+      "true_owner": {
+        "state": "assigned",
+        "owner": {
+          "domain": "core",
+          "component": "run_contract"
+        }
+      },
+      "current_node_workaround": "Experiment intentionally has no keyword or semantic-regex workaround; the missing authorization remains an explicit Core contract gap.",
+      "deletion_condition": {
+        "mode": "all",
+        "checks": [
+          {
+            "id": "planned-stop-policy-identity-present",
+            "kind": "source_match_count",
+            "paths": [
+              "core/context_engine.py",
+              "core/state.py"
+            ],
+            "pattern": "planned_stop_policy_id",
+            "expect": {
+              "operator": "gte",
+              "value": 1
+            }
+          },
+          {
+            "id": "planned-stop-policy-required",
+            "kind": "pytest_node",
+            "node_id": "tests/test_run_contract.py::test_planned_stop_requires_typed_policy_identity"
+          }
+        ]
+      },
+      "registered_by": "review",
+      "registered_on": "2026-09-16"
+    },
+    {
+      "id": "experiment-cross-owner-003",
+      "title": "Managed-job zombie reaping owner",
+      "status": "open",
+      "upstream_issues": [
+        1085
+      ],
+      "symptom": "A managed-job supervisor can remain as a zombie after either cancellation or natural payload completion when no parent in the supervisor chain performs waitpid, especially in containers whose PID 1 does not reap orphans.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "shared/lib/process_control.py",
+          "line": 195,
+          "claim": "The liveness helper correctly treats zombies as stopped, but that observation does not reap them."
+        },
+        {
+          "kind": "source",
+          "path": "shared/lib/process_control.py",
+          "symbol": "daemonize",
+          "claim": "The POSIX double fork detaches the final supervisor from the submitting process, leaving reaping to its adopted parent."
+        },
+        {
+          "kind": "source",
+          "path": "core/isolation/_native_job.py",
+          "symbol": "_run",
+          "claim": "After a payload exits naturally, the detached supervisor records the terminal state and calls Group.terminate on the POSIX process group containing itself; after the double fork, only the supervisor's adopted parent can reap it."
+        },
+        {
+          "kind": "source",
+          "path": "nodes/experiment/tests/test_planned_stop.py",
+          "symbol": "test_identity_aware_stop_oracle_treats_a_zombie_as_stopped_while_kill_zero_does_not",
+          "claim": "The identity-aware stop oracle has a concrete zombie-state regression case."
+        }
+      ],
+      "true_owner": {
+        "state": "unresolved",
+        "resolution_owner": {
+          "domain": "core",
+          "component": "native_job_backend"
+        },
+        "candidates": [
+          {
+            "domain": "core",
+            "component": "native_job_backend"
+          },
+          {
+            "domain": "platform",
+            "component": "container_runtime"
+          }
+        ]
+      },
+      "current_node_workaround": "Experiment records that a zombie has stopped executing and uses an identity-aware test oracle, but it does not claim to own or perform production reaping.",
+      "deletion_condition": {
+        "mode": "all",
+        "checks": [
+          {
+            "id": "reaping-owner-assigned",
+            "kind": "pytest_node",
+            "node_id": "tests/test_native_job.py::test_terminal_supervisor_has_one_assigned_reaping_owner"
+          },
+          {
+            "id": "terminal-supervisor-reaped",
+            "kind": "pytest_node",
+            "node_id": "tests/test_native_job.py::test_terminal_supervisor_is_reaped_within_bound"
+          }
+        ]
+      },
+      "registered_by": "review",
+      "registered_on": "2026-09-16"
+    },
+    {
+      "id": "experiment-cross-owner-004",
+      "title": "Core local-process birth identity",
+      "status": "open",
+      "upstream_issues": [
+        1085
+      ],
+      "symptom": "Local managed-job records persist PID and process-group numbers without an immutable birth token, so PID reuse can make inspect or cancel target a later process.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "core/isolation/_native_job.py",
+          "line": 95,
+          "claim": "The native-job record writes status and started_at but no supervisor birth identity."
+        },
+        {
+          "kind": "source",
+          "path": "core/sandbox.py",
+          "line": 1055,
+          "claim": "The stop_container lifecycle owns signalling the restored local process identity."
+        },
+        {
+          "kind": "source",
+          "path": "nodes/experiment/tests/test_planned_stop.py",
+          "symbol": "test_identity_aware_stop_oracle_does_not_treat_a_reused_pid_as_the_original_process",
+          "claim": "The node test oracle distinguishes a reused PID from the original process."
+        }
+      ],
+      "true_owner": {
+        "state": "assigned",
+        "owner": {
+          "domain": "core",
+          "component": "native_job_backend"
+        }
+      },
+      "current_node_workaround": "Experiment does not create a second production identity system; its tests freeze independent process start ticks only as an oracle, while production cancellation remains a declared Core risk.",
+      "deletion_condition": {
+        "mode": "all",
+        "checks": [
+          {
+            "id": "birth-identity-persisted-and-consumed",
+            "kind": "source_match_count",
+            "paths": [
+              "core/isolation/_native_job.py",
+              "core/sandbox.py"
+            ],
+            "pattern": "birth_identity|process_start_ticks|create_time",
+            "expect": {
+              "operator": "gte",
+              "value": 2
+            }
+          },
+          {
+            "id": "birth-identity-matrix-tested",
+            "kind": "pytest_node",
+            "node_id": "tests/test_native_job.py::test_stop_checks_birth_identity_before_signal"
+          }
+        ]
+      },
+      "registered_by": "impl",
+      "registered_on": "2026-09-16"
+    },
+    {
+      "id": "experiment-cross-owner-005",
+      "title": "Separate task-outcome axis in Core summary",
+      "status": "open",
+      "upstream_issues": [
+        1086
+      ],
+      "symptom": "Core finalization has one status axis, so it cannot separately express healthy closure and a failed, blocked, partial, or cancelled node task outcome.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "core/executor.py",
+          "line": 1390,
+          "line_end": 1392,
+          "claim": "finalize_run derives its single final status from missing outputs and blockers."
+        },
+        {
+          "kind": "source",
+          "path": "nodes/experiment/hooks.py",
+          "symbol": "experiment_contract_audit_on_end",
+          "claim": "The C8 compatibility adapter projects non-success task outcomes into a Core blocker."
+        },
+        {
+          "kind": "source",
+          "path": "nodes/experiment/tests/probes/probe_c8_nonsuccess_visible.py",
+          "symbol": "_assert_nonsuccess_visible",
+          "claim": "The C8 probe verifies the compatibility blocker remains visible upstream."
+        }
+      ],
+      "true_owner": {
+        "state": "assigned",
+        "owner": {
+          "domain": "core",
+          "component": "run_summary"
+        }
+      },
+      "current_node_workaround": "Experiment's C8 adapter writes experiment_operation_nonsuccess_outcome as a durable blocker, preventing false completed status while necessarily collapsing distinct non-success outcomes into blocked.",
+      "deletion_condition": {
+        "mode": "all",
+        "checks": [
+          {
+            "id": "task-outcome-axis-persisted",
+            "kind": "source_match_count",
+            "paths": [
+              "core/executor.py"
+            ],
+            "pattern": "node_task_outcome",
+            "expect": {
+              "operator": "gte",
+              "value": 1
+            }
+          },
+          {
+            "id": "task-and-closure-axes-tested",
+            "kind": "pytest_node",
+            "node_id": "tests/test_executor.py::test_final_summary_keeps_closure_status_and_task_outcome_separate"
+          },
+          {
+            "id": "experiment-compatibility-blocker-removed",
+            "kind": "source_match_count",
+            "paths": [
+              "nodes/experiment/hooks.py"
+            ],
+            "pattern": "experiment_operation_nonsuccess_outcome",
+            "expect": {
+              "operator": "eq",
+              "value": 0
+            }
+          }
+        ]
+      },
+      "registered_by": "impl-2",
+      "registered_on": "2026-09-16"
+    },
+    {
+      "id": "experiment-cross-owner-006",
+      "title": "High-risk approval replay uses local managed submission as its vehicle",
+      "status": "closed",
+      "symptom": "tests/test_highrisk_approval_retry_contract.py replays the whole approval chain through _submit_job(scheduler=\"local\", command=HARMLESS, dry_run=False) and asserts a pause_event. Experiment issue #897 separated lifecycle ownership from human confirmation: a local managed submission whose command carries no high-risk category no longer raises a confirmation card, because routing a forking local build through submit_job must not make it look like it escaped the local cgroup. The framework test therefore loses its vehicle, while the approval-retry contract it protects is unchanged — the nine cases in the same file that do not call _submit still pass.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "tests/test_highrisk_approval_retry_contract.py",
+          "line": 133,
+          "claim": "Resolved upstream by #1071 (b1c221d6): the replay vehicle is now a local submission whose command carries a high-risk category, so it still raises the confirmation card under the #897 rule; scheduler stayed local."
+        },
+        {
+          "kind": "source",
+          "path": "tests/test_highrisk_approval_retry_contract.py",
+          "line": 242,
+          "claim": "#1071 pins why the vehicle pauses: test_the_replay_carrier_is_actually_a_high_risk_command fails first if the classifier or the confirmation rule stops producing a card."
+        },
+        {
+          "kind": "source",
+          "path": "nodes/experiment/tools/resource_manager.py",
+          "symbol": "_managed_job_confirmation_category",
+          "claim": "_managed_job_confirmation_category still returns None only for a local submit with no high-risk category; the #897 split is unchanged."
+        }
+      ],
+      "true_owner": {
+        "state": "assigned",
+        "owner": {
+          "domain": "core",
+          "component": "highrisk_confirmation"
+        }
+      },
+      "current_node_workaround": "Closed 2026-09-17. The framework owner kept the #897 split (commit message: the split is correct) and changed the test vehicle to a local high-risk command in #1071, so both contracts now hold at once. Correction to this entry as first registered: its deletion condition required the vehicle to stop using scheduler=\"local\". That encoded a guessed fix, not the invariant, and could never be met by the fix that actually landed. It is replaced below by the invariant: the vehicle must really be high-risk, the replay must still pass, and the node's local exemption must still hold.",
+      "deletion_condition": {
+        "mode": "all",
+        "checks": [
+          {
+            "id": "replay-vehicle-is-high-risk",
+            "kind": "pytest_node",
+            "node_id": "tests/test_highrisk_approval_retry_contract.py::test_the_replay_carrier_is_actually_a_high_risk_command"
+          },
+          {
+            "id": "approval-replay-green",
+            "kind": "pytest_node",
+            "node_id": "tests/test_highrisk_approval_retry_contract.py::test_the_deny_option_index_still_denies"
+          },
+          {
+            "id": "local-exemption-still-held",
+            "kind": "pytest_node",
+            "node_id": "nodes/experiment/tests/test_resource_manager.py::test_local_non_highrisk_submission_skips_confirmation_protocol"
+          }
+        ]
+      },
+      "registered_by": "review",
+      "registered_on": "2026-09-17"
+    },
+    {
+      "id": "experiment-cross-owner-007",
+      "title": "Reopen failure silently falls back to a fresh run",
+      "status": "open",
+      "upstream_issues": [
+        1081
+      ],
+      "symptom": "run_node(resume_run_id=...) reopens the child run through State.reopen; when that raises FileNotFoundError or OSError the executor logs a warning and starts a brand new run instead. The caller asked to continue one specific run and is not told it got a different one. For the run-authority design decided in task 018 this is a bypass: the fresh run has a new root, therefore no experiment_input_authority_bound event, therefore the resolver re-derives authority from the project as it stands now — and a preregistration frozen since the original run began can be picked up by the unique auto-claim rule as an authority the original run never bound. The node cannot close this from inside: by the time Experiment code runs, the substitution has already happened.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "core/executor.py",
+          "line": 211,
+          "claim": "State.reopen failure is caught and replaced by State.new without telling the caller."
+        },
+        {
+          "kind": "source",
+          "path": "nodes/experiment/tools/run_contract.py",
+          "symbol": "load_run_contract",
+          "claim": "The unique auto-claim rule binds whatever single frozen prereg the project holds at the moment load_run_contract runs."
+        }
+      ],
+      "true_owner": {
+        "state": "assigned",
+        "owner": {
+          "domain": "core",
+          "component": "executor"
+        }
+      },
+      "current_node_workaround": "None available. Task 018 records the write-once input authority as holding only for a run whose own transcript survives; this path produces a run with no transcript history at all, so the guarantee is stated with this exception rather than silently assumed.",
+      "deletion_condition": {
+        "mode": "all",
+        "checks": [
+          {
+            "id": "reopen-failure-not-swallowed",
+            "kind": "source_match_count",
+            "paths": [
+              "core/executor.py"
+            ],
+            "pattern": "续跑失败，改为新开|resume failed, starting fresh",
+            "expect": {
+              "operator": "eq",
+              "value": 0
+            }
+          },
+          {
+            "id": "reopen-failure-surfaced-to-caller",
+            "kind": "pytest_node",
+            "node_id": "tests/test_executor.py::test_resume_failure_is_reported_instead_of_silently_fresh"
+          }
+        ]
+      },
+      "registered_by": "review",
+      "registered_on": "2026-09-17"
+    },
+    {
+      "id": "experiment-cross-owner-008",
+      "title": "Runtime REVISE of an experiment run silently dispatches nothing and reports success",
+      "status": "open",
+      "upstream_issues": [
+        1082
+      ],
+      "symptom": "When a human or auto-approve chooses REVISE for an experiment run, the pause driver re-runs the node itself with node_inputs {mode, reviewer_feedback, human_directive}. None of those keys is declared in experiment's expected_inputs, so run_node's input-contract check returns {status: error} for a zero-key overlap. That is a returned value, not an exception, and the dispatcher only handles exceptions, so it falls through to return True. The authorized revision is recorded as dispatched while no experiment run starts; the flow entry stays action_authorized and the orchestrator is then prompted to start the node itself. Verified by reading the four cited sites on HEAD; the failure path has been present since d79e0aa0 (2026-08-19), when dispatch already passed {mode, reviewer_feedback} with zero overlap; it was not introduced by the node changes or by the 99ccdf39 merge.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "core/pause_driver.py",
+          "line": 443,
+          "claim": "The runtime REVISE dispatch passes node_inputs mode / reviewer_feedback / human_directive to the target node."
+        },
+        {
+          "kind": "source",
+          "path": "core/pause_driver.py",
+          "line": 460,
+          "claim": "_execute_authorized_action catches exceptions only and returns True without inspecting the returned status."
+        },
+        {
+          "kind": "source",
+          "path": "shared/tools/run_node.py",
+          "line": 1638,
+          "claim": "run_node returns an error result when node_inputs share no key with the child's declared expected_inputs."
+        },
+        {
+          "kind": "source",
+          "path": "nodes/experiment/harness.yaml",
+          "symbol": "expected_inputs",
+          "claim": "Experiment's expected_inputs declare experiment_spec, prereg_artifact_id, stage, dataset_artifact_id, input_package_artifact_id, execution_params, run_role and path_roles; none of the three REVISE keys."
+        }
+      ],
+      "true_owner": {
+        "state": "assigned",
+        "owner": {
+          "domain": "core",
+          "component": "pause_driver"
+        }
+      },
+      "current_node_workaround": "None. Declaring reviewer_feedback / human_directive in experiment's expected_inputs would only move the failure: the node has no defined behaviour for a runtime revise request, and the dispatcher would still report success for any other returned error. The silent success is the part that must be fixed first, and it is in core.",
+      "deletion_condition": {
+        "mode": "all",
+        "checks": [
+          {
+            "id": "revise-dispatch-error-is-not-success",
+            "kind": "pytest_node",
+            "node_id": "tests/test_pause_driver.py::test_authorized_action_dispatch_error_result_is_not_reported_as_success"
+          }
+        ]
+      },
+      "registered_by": "review",
+      "registered_on": "2026-09-17"
+    },
+    {
+      "id": "experiment-cross-owner-009",
+      "title": "Shared read_artifact overflow guidance names a tool unavailable to Experiment",
+      "status": "open",
+      "symptom": "The shared read_artifact tool unconditionally tells callers to process an over-limit artifact with execute_python. The execute_python registry deliberately excludes Experiment, which exposes safe_execute_python instead, so an Experiment model that follows the returned recovery instruction reaches an unavailable tool.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "shared/tools/builtin.py",
+          "line": 493,
+          "line_end": 497,
+          "claim": "Both branches of the over-limit result instruction direct the caller to execute_python without considering the calling node's available tools."
+        },
+        {
+          "kind": "source",
+          "path": "shared/tools/builtin.py",
+          "line": 511,
+          "claim": "The registered read_artifact description repeats the unconditional execute_python recovery route."
+        },
+        {
+          "kind": "source",
+          "path": "shared/tools/library/python_exec.py",
+          "line": 461,
+          "line_end": 464,
+          "claim": "The execute_python registration excludes Experiment from the shared raw-Python path and routes Experiment compute through governed job submission."
+        }
+      ],
+      "true_owner": {
+        "state": "assigned",
+        "owner": {
+          "domain": "shared",
+          "component": "builtin_tools"
+        }
+      },
+      "current_node_workaround": "None in node-owned code. Task 028 corrects the separate Experiment-owned fetch_resource description, but must not rewrite the shared read_artifact result or description; an env model can recover only if it independently translates execute_python to safe_execute_python.",
+      "deletion_condition": {
+        "mode": "all",
+        "checks": [
+          {
+            "id": "overflow-guidance-tool-is-available",
+            "kind": "pytest_node",
+            "node_id": "tests/test_output_spill.py::test_read_artifact_overflow_guidance_names_an_available_tool_for_each_node"
+          }
+        ]
+      },
+      "registered_by": "impl-2",
+      "registered_on": "2026-09-18"
+    },
+    {
+      "id": "experiment-cross-owner-010",
+      "title": "Immutable task authority for Experiment dispatch",
+      "status": "open",
+      "upstream_issues": [
+        1080
+      ],
+      "symptom": "Core's project TaskList exposes mutable last-write-wins Txx aliases, while run_node accepts only an optional task_id and execute_node does not persist an immutable task contract revision or parent dispatch identity in child State. Across retries, resumes, and multiple tasks in one project, Experiment therefore cannot prove which immutable objective, intended use, and exact preregistration binding authorized a run.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "core/tasks.py",
+          "symbol": "TaskList",
+          "claim": "The user-facing task store is append plus last-write-wins per Txx alias; it is mutable workflow state rather than an immutable task-authority revision."
+        },
+        {
+          "kind": "source",
+          "path": "shared/tools/run_node.py",
+          "symbol": "_run_node_tool",
+          "claim": "Experiment dispatch accepts an optional task_id alias but no task_instance_uuid, contract revision/digest, or parent dispatch identity."
+        },
+        {
+          "kind": "source",
+          "path": "core/executor.py",
+          "symbol": "execute_node",
+          "claim": "Child State construction carries project/session/run context but no immutable task-authority tuple."
+        }
+      ],
+      "true_owner": {
+        "state": "assigned",
+        "owner": {
+          "domain": "core",
+          "component": "task_contract"
+        }
+      },
+      "current_node_workaround": "Experiment can freeze and reuse governing input authority within one surviving run, but it cannot create a project-wide task identity or repair a missing dispatch identity from inside the node. The Core-owned pytest node ids below cover each numbered acceptance behavior from issue #1080 and must be synchronized to the landed Core test names.",
+      "deletion_condition": {
+        "mode": "all",
+        "checks": [
+          {
+            "id": "task-instance-uuid-is-modeled",
+            "kind": "source_match_count",
+            "paths": [
+              "core/tasks.py",
+              "core/state.py"
+            ],
+            "pattern": "task_instance_uuid",
+            "expect": {
+              "operator": "gte",
+              "value": 2
+            }
+          },
+          {
+            "id": "contract-revision-is-modeled",
+            "kind": "source_match_count",
+            "paths": [
+              "core/tasks.py",
+              "core/state.py"
+            ],
+            "pattern": "contract_revision",
+            "expect": {
+              "operator": "gte",
+              "value": 2
+            }
+          },
+          {
+            "id": "contract-digest-is-modeled",
+            "kind": "source_match_count",
+            "paths": [
+              "core/tasks.py",
+              "core/state.py"
+            ],
+            "pattern": "contract_digest",
+            "expect": {
+              "operator": "gte",
+              "value": 2
+            }
+          },
+          {
+            "id": "parent-dispatch-id-crosses-dispatch",
+            "kind": "source_match_count",
+            "paths": [
+              "shared/tools/run_node.py",
+              "core/executor.py",
+              "core/state.py"
+            ],
+            "pattern": "parent_dispatch_id",
+            "expect": {
+              "operator": "gte",
+              "value": 3
+            }
+          },
+          {
+            "id": "concurrent-create-is-unique",
+            "kind": "pytest_node",
+            "node_id": "tests/test_task_contract.py::test_concurrent_create_assigns_unique_uuid_alias_and_preserves_every_task"
+          },
+          {
+            "id": "contract-revisions-are-immutable",
+            "kind": "pytest_node",
+            "node_id": "tests/test_task_contract.py::test_contract_revisions_are_immutable_concurrent_and_digest_selected"
+          },
+          {
+            "id": "dispatch-requires-task-instance",
+            "kind": "pytest_node",
+            "node_id": "tests/test_task_contract.py::test_experiment_dispatch_rejects_missing_task_instance_uuid"
+          },
+          {
+            "id": "child-preserves-dispatch-identity",
+            "kind": "pytest_node",
+            "node_id": "tests/test_task_contract.py::test_child_state_and_run_start_preserve_exact_task_contract_and_parent_dispatch"
+          },
+          {
+            "id": "resume-checks-exact-task-identity",
+            "kind": "pytest_node",
+            "node_id": "tests/test_task_contract.py::test_resume_requires_exact_task_contract_identity"
+          },
+          {
+            "id": "task-status-and-contract-are-independent",
+            "kind": "pytest_node",
+            "node_id": "tests/test_task_contract.py::test_task_status_changes_and_contract_revisions_are_independent"
+          },
+          {
+            "id": "tasks-do-not-cross-bind-preregistrations",
+            "kind": "pytest_node",
+            "node_id": "tests/test_task_contract.py::test_repeated_and_distinct_tasks_keep_exact_preregistration_bindings"
+          }
+        ]
+      },
+      "registered_by": "review",
+      "registered_on": "2026-09-18"
+    },
+    {
+      "id": "experiment-cross-owner-011",
+      "title": "Cascade resume records parent recovery and propagates the child terminal summary",
+      "status": "open",
+      "upstream_issues": [
+        1083
+      ],
+      "symptom": "After a paused leaf child reaches a terminal state, drive_pause_chain hand-builds a reduced run_node result, clears the paused parent, and calls run_loop directly. The parent therefore has no durable cascade-resume record and does not receive the canonical finalized child terminal summary. Issue #1083 reports that, in its pipeline_stop_point reproduction, Experiment froze a complete blocked three-artifact delivery and ended incomplete while the root run remained waiting_human/parked instead of converging to a terminal state; this registry independently verifies the source call chain, not that live-run observation.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "core/agent_loop.py",
+          "symbol": "resume_loop",
+          "claim": "loop_resume is recorded only when this function resumes the paused context."
+        },
+        {
+          "kind": "source",
+          "path": "core/pause_driver.py",
+          "symbol": "drive_pause_chain",
+          "claim": "The leaf uses resume_loop, but cascade recovery clears the parent pause and calls run_loop directly after replacing the tool result with a hand-built subset."
+        },
+        {
+          "kind": "source",
+          "path": "core/executor.py",
+          "symbol": "finalize_run",
+          "claim": "The canonical child summary contains terminal, blocker, artifact, and closure facts that the cascade's hand-built payload does not propagate."
+        }
+      ],
+      "true_owner": {
+        "state": "assigned",
+        "owner": {
+          "domain": "core",
+          "component": "pause_driver"
+        }
+      },
+      "current_node_workaround": "Experiment can honestly freeze its own blocked delivery, but it cannot settle or rewrite the parent/root control state. The source tokens below are existing public transcript/result fields named by issue #1083, and the Core-owned pytest node ids cover all four numbered acceptance behaviors; the placeholders must be synchronized to the landed Core test names.",
+      "deletion_condition": {
+        "mode": "all",
+        "checks": [
+          {
+            "id": "cascade-propagates-child-status",
+            "kind": "source_match_count",
+            "paths": [
+              "core/pause_driver.py"
+            ],
+            "pattern": "child_status",
+            "expect": {
+              "operator": "gte",
+              "value": 1
+            }
+          },
+          {
+            "id": "parent-resume-transition-is-owned",
+            "kind": "pytest_node",
+            "node_id": "tests/test_pause_driver.py::test_cascade_resume_records_parent_run_resumed_transition"
+          },
+          {
+            "id": "cascade-and-direct-summary-match",
+            "kind": "pytest_node",
+            "node_id": "tests/test_pause_driver.py::test_cascade_and_direct_paths_match_status_child_status_blockers_and_end_event"
+          },
+          {
+            "id": "public-parked-view-is-actionable",
+            "kind": "pytest_node",
+            "node_id": "tests/test_pause_driver.py::test_public_parked_view_has_reason_recheck_and_waiting_human_has_pause"
+          },
+          {
+            "id": "auto-answered-pipeline-terminates",
+            "kind": "pytest_node",
+            "node_id": "tests/test_pause_driver.py::test_auto_answered_pipeline_leaves_child_incomplete_and_root_not_waiting_human"
+          }
+        ]
+      },
+      "registered_by": "review",
+      "registered_on": "2026-09-18"
+    },
+    {
+      "id": "experiment-cross-owner-012",
+      "title": "Core native-job records expose cgroup OOM termination facts",
+      "status": "open",
+      "symptom": "The native managed-job supervisor persists status and exit_code but does not read the job cgroup memory.events oom_kill counter, and inspect_container consequently cannot distinguish an observed non-OOM exit from an unobservable OOM fact.",
+      "evidence": [
+        {
+          "kind": "source",
+          "path": "core/isolation/_native_job.py",
+          "symbol": "_run",
+          "claim": "The native supervisor records terminal status and exit_code without a cgroup memory.events OOM observation."
+        },
+        {
+          "kind": "source",
+          "path": "core/sandbox.py",
+          "symbol": "inspect_container",
+          "claim": "The public native-job inspection projection returns no oom_killed or oom_observable field."
+        }
+      ],
+      "true_owner": {
+        "state": "assigned",
+        "owner": {
+          "domain": "core",
+          "component": "native_job_backend"
+        }
+      },
+      "current_node_workaround": "Experiment reports oom_killed as null and oom_observable as false for native local jobs, keeps success and expected-termination decisions identical to the former absent-field behavior, and does not invent a second cgroup observer.",
+      "deletion_condition": {
+        "mode": "all",
+        "checks": [
+          {
+            "id": "native-job-oom-fact-is-persisted-and-projected",
+            "kind": "source_match_count",
+            "paths": [
+              "core/isolation/_native_job.py",
+              "core/sandbox.py"
+            ],
+            "pattern": "memory\\.events|oom_kill",
+            "expect": {
+              "operator": "gte",
+              "value": 2
+            }
+          },
+          {
+            "id": "native-job-oom-fact-is-tested",
+            "kind": "pytest_node",
+            "node_id": "tests/test_native_job.py::test_native_job_terminal_record_persists_cgroup_oom_kill_fact"
+          }
+        ]
+      },
+      "registered_by": "impl",
+      "registered_on": "2026-09-19"
+    }
+  ]
+}

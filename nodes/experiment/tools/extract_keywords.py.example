@@ -1,0 +1,94 @@
+"""extract_keywords —— dummy example tool（不真注册）。
+
+⚠️ 这个文件以 .example 结尾，不会被 `tools/__init__.py` 自动 import → 不会真注册。
+⚠️ owner 想真用：拷成 `extract_keywords.py`（去掉 .example），再去 `tools/__init__.py`
+   加 `from . import extract_keywords`。
+
+跟着 docs/tool-spec.md §3 + §6 一起读，这是 step-by-step 里的"完成态"。
+
+## 这个工具做什么
+
+简单词频提取 —— 从一段英文文本里抽出出现频率最高的 N 个单词（≥3 字母）。
+纯 Python，零依赖，零成本，跑得快。
+
+适合演示工具规范，不适合生产用（实际场景用 sklearn / spacy / KeyBERT）。
+"""
+from __future__ import annotations
+
+import re
+from collections import Counter
+from typing import Any
+
+from core.state import State
+from core.tool_registry import ToolDefinition, register_tool
+
+
+# ── 实现 ────────────────────────────────────────────────────────────────────
+
+async def _extract_keywords(
+    state: State,             # ★ 必须：第一个 keyword arg 是 state
+    text: str,                # 跟 parameters_schema 一致
+    top_n: int = 5,
+    **_: Any,                 # ★ 必须：兜底 LLM 多传字段
+) -> dict:
+    """提取出现频率最高的 N 个单词。
+
+    返 dict 必须含 status（success / error / pause）。
+    """
+    if not text or not isinstance(text, str):
+        return {"status": "error", "error": "text 必须是非空字符串"}
+
+    # top_n 的 1-50 区间只在下面的 schema 里声明；派发口按 schema 核取值并把
+    # 合法范围报给模型，工具体内不再手写同一件事（判决拆除第三波·刀1）。
+
+    # 抽词：≥3 字母的 ASCII 单词
+    words = re.findall(r"\b[a-zA-Z]{3,}\b", text.lower())
+    if not words:
+        return {
+            "status": "success",
+            "keywords": [],
+            "total_words": 0,
+            "note": "没匹配到 ≥3 字母的英文单词",
+        }
+
+    top = Counter(words).most_common(top_n)
+    return {
+        "status": "success",
+        "keywords": [{"word": w, "count": c} for w, c in top],
+        "total_words": len(words),
+        "unique_words": len(set(words)),
+    }
+
+
+# ── 注册 ────────────────────────────────────────────────────────────────────
+
+register_tool(
+    ToolDefinition(
+        name="extract_keywords",     # 必须匹配 ^[a-zA-Z0-9_-]{1,64}$
+        description=(
+            "从一段英文文本里抽取出现频率最高的 N 个单词（≥3 字母）。"
+            "适合快速看一段长文本的主题分布。"
+            "返回 keywords 列表 + total_words / unique_words 统计。"
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "要分析的英文文本（建议 < 5000 字符）",
+                },
+                "top_n": {
+                    "type": "integer",
+                    "default": 5,
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "返回前 N 个最高频词",
+                },
+            },
+            "required": ["text"],
+        },
+        risk_level="low",                    # 纯计算无 side effect
+        allowed_node_types=None,              # None = 任何节点可用
+    ),
+    _extract_keywords,
+)

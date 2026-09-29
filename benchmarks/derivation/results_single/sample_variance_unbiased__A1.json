@@ -1,0 +1,98 @@
+{
+  "task_id": "sample_variance_unbiased",
+  "arm": "A1",
+  "final_expression": "sigma**2",
+  "final_expression_source": "main_result",
+  "main_result_statement": "在 iid、二阶矩有限假设下，样本方差 S²=(1/(n-1))Σ(X_i-Xbar)² 是无偏估计：E[S²]=σ²。n-1 来源：残差向量受约束 Σ(X_i-Xbar)=0（落在 n-1 维超平面）；代数上 E[Σ(X_i-Xbar)²]=(n-1)σ²。",
+  "verdict": "derived",
+  "verification_evidence": [
+    {
+      "step": "S2",
+      "probe": "f3d610018385ea9b",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S3",
+      "probe": "126fd1ce5feb9a8a",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S4",
+      "probe": "b7a705a64ce60533",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S7",
+      "probe": "ec38262d554bbc25",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S8",
+      "probe": "de2a771b3594f38b",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S9",
+      "probe": "899fdc2170bdc902",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S11",
+      "probe": "c5b93ddd774bbe7b",
+      "status": "verified",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 7,
+  "step_count": 11,
+  "assumptions": [
+    "A1: n >= 2 且为整数（S² 分母 n-1 必须非零；n=1 时 S² 未定义）",
+    "A2: E[X_i]=mu、Var(X_i)=sigma² 均有限（任务前提；sigma²>=0，mu 任意实数）",
+    "A3: X_i 相互独立（用于 Var(Xbar)=sigma²/n 与 E[ΣX_i²]=n·E[X_1²]）；任务前提（iid）",
+    "A4: 期望线性：E[Σa_i X_i]=Σa_i E[X_i]、E[cX]=cE[X]（概率公理，非新增假设，显式记账）",
+    "A5: check_step 符号化简 ((n-1)s²)/(n-1)=s² 隐含 n≠0；由 A1（n>=2）自动满足，显式记账"
+  ],
+  "unverified_steps": [
+    "S1",
+    "S5",
+    "S6",
+    "S10"
+  ],
+  "validity_domain": [
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5"
+  ],
+  "credibility": {
+    "algebraic_core": "12 条 check_step 全部 verified（0 failed）；3 条关键恒等式 find_counterexample 符号层面确证（32 点抽查，无反例）",
+    "level": "derived（演绎证明）",
+    "probabilistic_steps": "期望线性、独立性、方差公式为概率论公理与定义，以 cited_theorem 标注并附教科书锚点（Casella & Berger 2002 §2.2/§2.3/§4.2/§4.3），非机械验证但属标准承重引用",
+    "robustness_checks": [
+      "n=2、n=3 具体展开 verified",
+      "量纲检查 3/3 通过（length^2）",
+      "极限一致性 (n-1)σ²/n → σ² (n→∞) 通过",
+      "分母 n 的偏差对比 verified"
+    ],
+    "weakest_link": "S5（Var(Xbar)=σ²/n）依赖独立性假设 A3 —— 若 X_i 相关则公式不成立（结论适用域 = iid，与任务前提一致）"
+  },
+  "findings": [
+    "n-1 双来源：代数 E[Σ(X_i-Xbar)²]=(n-1)σ² 与自由度（残差超平面 n-1 维；Xbar 波动消耗 n·Var(Xbar)=σ²）互相印证",
+    "工具坑：多字符标识符（xbar/S2/EX2/x1…）须显式传 symbols 声明单符号，否则 sympy 解析为字母乘积导致误报 failed（首轮 3 条 failed 均为此因，修正后全 verified）",
+    "dimensional_check 对同单位符号线性组合会数值代入 0 化误报无量纲，需等价展开形式复核（3/3 通过 length²）",
+    "分母 n 低估 -σ²/n，量化 n-1 校正的必要性",
+    "结论适用域：iid + 二阶矩有限；mu 具体值不影响无偏性（推导中 mu 项组合时消去）"
+  ],
+  "frozen": true,
+  "turns": 15,
+  "tool_calls": 36,
+  "elapsed_s": 302.4,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787416826-661f73"
+}

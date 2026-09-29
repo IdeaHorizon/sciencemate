@@ -1,0 +1,34 @@
+# Experiment 自主路线 E2E：只给自然语言目标，不提供内部阶段、路线结构或构建命令。
+#
+# 建议运行方式：
+#   python run_node.py --harness experiment --sandbox --no-interactive --bypass-permissions \
+#     --fixture nodes/experiment/fixtures/e2e_autonomous_cmake_goal.yaml \
+#     --project-id e2e-autonomous-cmake-goal
+#
+# 本 fixture 当前只用于轻量 E2E 设计与 YAML/schema 校验；运行真实 LLM E2E 前应使用独立 project id。
+
+node_inputs:
+  path_roles:
+    source_baseline_root:
+      path: /home/lujy/2026-ai4s-platform-project/node4-experiment/review-managed-lifecycle/harness-framework/nodes/experiment/fixtures/toolchain_smoke_src
+      writable: false
+  experiment_spec: |
+    这是一个非科学的本地软件构建与最小运行任务。请自主判断完成目标所需的调查、计划、
+    构建、运行和验收步骤，并诚实守护到成功、明确失败或形成可恢复 blocker。
+
+    目标源码位于只读目录：
+    /home/lujy/2026-ai4s-platform-project/node4-experiment/review-managed-lifecycle/harness-framework/nodes/experiment/fixtures/toolchain_smoke_src
+
+    本任务禁止联网、禁止安装系统依赖、禁止修改源码基线。需要写入的构建和运行内容只能
+    放在框架为本 run 授权的目录中。请先从当前源码及其构建描述确认该版本的官方构建路线，
+    不要因为测试名称或以往经验直接假设命令；也不要把自动源码侦察当作官方文档的替代品。
+
+    资源预算：最多使用 2 个 CPU 核、2 GiB 内存，预计 5 分钟内结束。保持日志和进程树受管；
+    若环境能力不足，应在产生失控进程前给出带证据的环境或依赖 blocker，不得改用联网安装。
+
+    成功判据：
+    - 源码基线在任务前后内容一致；
+    - 构建产物位于授权的构建目录，而不是源码目录；
+    - 最小运行返回成功，标准输出包含 `HF_TOOLCHAIN_SMOKE_OK`；
+    - 最终以 operation 结果诚实记录实际证据、产物位置和验证结论；
+    - 不把本任务写成科学假设验证，也不生成科学 verdict。

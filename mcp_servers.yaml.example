@@ -1,0 +1,34 @@
+# MCP server 配置示例。复制为 mcp_servers.yaml 后修改。
+# 如果文件不存在，runner 会跳过 MCP（不影响其他功能）。
+#
+# 每个 server 一条记录。
+# - command：启动 server 的命令行（数组形式，第一个是可执行文件）
+# - prefix：注册进 tool_registry 时的命名空间（避免重名）
+#   注册名格式：{prefix}__{server_exposed_tool_name}
+#   例如 prefix=fetch 时，server 的 `fetch` 工具会注册为 `fetch__fetch`
+# - env：可选环境变量
+# - risk_level：注册时的 risk_level（默认 medium）
+
+servers:
+  # ── 示例 1：HTTP fetch（拉网页内容）─────────────────────────────────────
+  # npm 包：@modelcontextprotocol/server-fetch
+  # owner 在 harness yaml 写：tools: [fetch__fetch]
+  - name: fetch
+    prefix: fetch
+    command: ["npx", "-y", "@modelcontextprotocol/server-fetch"]
+    risk_level: low
+
+  # ── 示例 2：文件系统访问（限定某个目录）─────────────────────────────────
+  # owner 在 harness yaml 写：tools: [fs__read_file, fs__list_directory]
+  # - name: filesystem
+  #   prefix: fs
+  #   command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp/agent-workdir"]
+  #   risk_level: medium
+
+  # ── 示例 3：Python 包 server（如果用 uv 装的）────────────────────────────
+  # - name: github
+  #   prefix: gh
+  #   command: ["uvx", "mcp-server-github"]
+  #   env:
+  #     GITHUB_TOKEN: "${GITHUB_TOKEN}"
+  #   risk_level: medium

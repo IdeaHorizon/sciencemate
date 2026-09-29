@@ -1,0 +1,48 @@
+# nodes/{your_node}/fixtures/{scenario_name}.yaml
+#
+# Fixture = 单跑节点时的预置环境。用 run_node.py 跑：
+#
+#   python run_node.py --harness {your_node} --fixture nodes/{your_node}/fixtures/{scenario_name}.yaml
+#
+# 用途：
+#   - 不起 orchestrator + 整条 pipeline，直接给本节点喂上游 artifact 单测
+#   - 快速迭代 prompt / tools / rules 而不用每次烧整条 pipeline
+#   - regression：每次改完用 fixture 跑一遍验证行为
+
+# ── 节点级输入（如果 harness yaml expected_inputs 声明了的字段）─────────────
+node_inputs:
+  {field_name_1}: "{字面值或描述}"
+  {field_name_2}: 42
+
+# ── 上游 artifact 预先注入（模拟"上游节点已经跑完产出了这些"）─────────────
+upstream_artifacts:
+  - type: pre_registration              # artifact_type
+    name: my_h1                          # artifact name
+    content: |                           # artifact 完整 content（markdown / JSON / 等）
+      Hypothesis: 在 T=1.0 条件下，方法 A 误差 < 5%。
+      Falsification: 若误差 >= 5%，refuted。
+    metadata:
+      frozen: true                       # 可选 metadata
+      n_atoms: 1000
+
+  - type: dataset                        # 多个 artifact 可以分别列
+    name: lj_864_init
+    content: |
+      LAMMPS init script 内容...
+
+# ── 预先注入 memory（可选，v2.1 schema）─────────────────────────────────────
+memory_entries:
+  - kind: directive                      # directive / observation / decision / todo
+    text: "本次实验 dt 固定 0.005，不要试别的值"
+    tags: [methodology]
+    applies_to_node: experiment           # 可选；不填 = 全节点
+
+  - kind: observation
+    text: "上次同条件下 wall time = 1.2s"
+    tags: [perf, lj-nvt]
+
+# ── 项目持久化（可选）─────────────────────────────────────────────────────
+#   传了 project_id 时 memory + KB 跨 run 持久化到
+#   ~/.harness-framework/projects/<project_id>/
+#   不传 = 临时 run，自己一个人
+# 用法：python run_node.py --harness X --fixture Y --project my_test_project

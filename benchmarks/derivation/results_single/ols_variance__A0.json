@@ -1,0 +1,27 @@
+{
+  "task_id": "ols_variance",
+  "arm": "A0",
+  "model": "deepseek-v4-flash",
+  "final_expression": "sigma**2 * (X.T * X)**(-1)",
+  "verdict": "derived",
+  "assumptions": [
+    "模型设定正确：y = X*beta + eps，误差可加",
+    "X 是 n×p 非随机设计矩阵",
+    "X 满列秩，因此 X.T*X 可逆（矩阵版本的分母非零条件）",
+    "beta 是固定未知参数，或在给定 beta 的条件下讨论",
+    "E[eps] = 0",
+    "Cov(eps) = sigma**2 * I：二阶矩存在、同方差、误差项互不相关",
+    "矩阵维数相容，所有求和为有限和，不需要级数收敛假设",
+    "不需要 eps 的独立性或正态性假设"
+  ],
+  "unverified_steps": [],
+  "reasoning_summary": "把 beta_hat 写成 beta + A*eps，其中 A=(X.T*X)**(-1)*X.T；由于 X 非随机且 E[eps]=0，beta_hat 的离差就是 A*eps。用 Cov(A*eps)=A*Cov(eps)*A.T，代入 Cov(eps)=sigma**2*I，化简得 sigma**2*(X.T*X)**(-1)。",
+  "raw_text": "设 \\(C=X'X\\)，并令 \\(A=(X'X)^{-1}X'=C^{-1}X'\\)。  \n因为 \\(X\\) 满列秩，所以 \\(C=X'X\\) 可逆，\\(A\\) 有意义。\n\n代入模型：\n\n\\[\n\\hat\\beta=(X'X)^{-1}X'y\n=C^{-1}X'(X\\beta+\\varepsilon)\n=C^{-1}X'X\\beta+C^{-1}X'\\varepsilon\n=\\beta+A\\varepsilon.\n\\]\n\n这里用了 \\(C^{-1}C=I\\)。\n\n由于 \\(X\\) 非随机、\\(\\beta\\) 固定，且 \\(E[\\varepsilon]=0\\)：\n\n\\[\nE[\\hat\\beta]=\\beta+A E[\\varepsilon]=\\beta.\n\\]\n\n所以\n\n\\[\n\\hat\\beta-E[\\hat\\beta]=A\\varepsilon.\n\\]\n\n于是由协方差定义：\n\n\\[\n\\operatorname{Cov}(\\hat\\beta)\n=E[(\\hat\\beta-E[\\hat\\beta])(\\hat\\beta-E[\\hat\\beta])']\n=E[(A\\varepsilon)(A\\varepsilon)'].\n\\]\n\n展开并利用 \\(A\\) 非随机：\n\n\\[\n\\operatorname{Cov}(\\hat\\beta)\n=A E[\\varepsilon\\varepsilon']A'.\n\\]\n\n因为 \\(E[\\varepsilon]=0\\)，所以 \\(E[\\varepsilon\\varepsilon']=\\operatorname{Cov}(\\varepsilon)=\\sigma^2 I\\)。因此\n\n\\[\n\\operatorname{Cov}(\\hat\\beta)\n=A(\\sigma^2 I)A'\n=\\sigma^2 AA'.\n\\]\n\n又因为 \\(C=X'X\\) 对称，所以 \\((C^{-1})'=C^{-1}\\)，故\n\n\\[\nA'=X C^{-1}.\n\\]\n\n因此\n\n\\[\nAA'=C^{-1}X'XC^{-1}\n=C^{-1}C C^{-1}\n=C^{-1}.\n\\]\n\n所以\n\n\\[\n\\operatorname{Cov}(\\hat\\beta)\n=\\sigma^2 (X'X)^{-1}.\n\\]\n\n注意：推导只用了误差项同方差且互不相关，即 \\(\\operatorname{Cov}(\\varepsilon)=\\sigma^2 I\\)，没有用到正态性或独立性。\n\n```json\n{\n  \"final_expression\": \"sigma**2 * (X.T * X)**(-1)\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"模型设定正确：y = X*beta + eps，误差可加\",\n    \"X 是 n×p 非随机设计矩阵\",\n    \"X 满列秩，因此 X.T*X 可逆（矩阵版本的分母非零条件）\",\n    \"beta 是固定未知参数，或在给定 beta 的条件下讨论\",\n    \"E[eps] = 0\",\n    \"Cov(eps) = sigma**2 * I：二阶矩存在、同方差、误差项互不相关\",\n    \"矩阵维数相容，所有求和为有限和，不需要级数收敛假设\",\n    \"不需要 eps 的独立性或正态性假设\"\n  ],\n  \"unverified_steps\": [],\n  \"reasoning_summary\": \"把 beta_hat 写成 beta + A*eps，其中 A=(X.T*X)**(-1)*X.T；由于 X 非随机且 E[eps]=0，beta_hat 的离差就是 A*eps。用 Cov(A*eps)=A*Cov(eps)*A.T，代入 Cov(eps)=sigma**2*I，化简得 sigma**2*(X.T*X)**(-1)。\"\n}\n```",
+  "thinking_chars": 43947,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 136.1,
+  "tokens": 15307,
+  "parse_ok": true
+}

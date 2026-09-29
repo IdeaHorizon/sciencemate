@@ -1,0 +1,51 @@
+# OpenMC closure-only E2E: reuses frozen evidence; no Monte Carlo is permitted.
+node_inputs:
+  prereg_artifact_id: pre_registration__PE_Shielding_Thermal_Neutron
+  run_role: secondary
+  stage: diagnostic
+  experiment_focus: |
+    Run a closure-only continuation for the PE shielding OpenMC study.
+    Do not run OpenMC, create input decks, or submit a compute job. Reuse only
+    the frozen evidence and the three already-adjudicated claims below. Verify
+    each cited claim exists, write one canonical experiment log with an
+    inconclusive closure verdict, freeze it, then perform the two-phase
+    closure audit. Record the result honestly: citation binding is repaired
+    only if the framework validation passes; otherwise remain blocked.
+
+upstream_artifacts:
+  - type: pre_registration
+    name: PE_Shielding_Thermal_Neutron
+    metadata:
+      frozen: true
+      frozen_at: "2026-08-05T01:11:01+00:00"
+      freeze_reason: "Original frozen plan, forwarded for closure-only E2E."
+      execution_contract:
+        version: "1"
+        scientific_params:
+          thickness_cm: [0, 2, 5, 10, 15, 20]
+          histories_per_thickness: 100000
+          thermal_energy_max_ev: 0.625
+    content: |
+      Frozen OpenMC PE-shielding preregistration. H2 tests exponential decay
+      for 5--20 cm at R2 >= 0.95; H3 tests for a 2--5 cm buildup peak; H4
+      tests adjacent thickness differences at p < 0.05. This run is only
+      closure and must not modify these scientific parameters.
+  - type: clean_results
+    name: PE_Shielding_Thermal_Flux_v2
+    metadata:
+      frozen: true
+      source_run_id: 1785901670-02aafd
+    content: |
+      {"status":"completed","results":{"R2":0.9942},"replay_manifest":{"source_hashes":{"results.json":"historical-frozen-evidence"}}}
+  - type: claim
+    name: H2_exponential_attenuation
+    metadata: {claim_id: claim_bfe23e3b1fd0, status: validated}
+    content: "H2 validated using frozen chunk_0e1183aaceed."
+  - type: claim
+    name: H3_buildup_peak
+    metadata: {claim_id: claim_a3a17e966554, status: refuted}
+    content: "H3 refuted using frozen chunk_0e1183aaceed."
+  - type: claim
+    name: H4_statistical_significance
+    metadata: {claim_id: claim_761771fdc11e, status: validated}
+    content: "H4 validated using frozen chunk_0e1183aaceed."

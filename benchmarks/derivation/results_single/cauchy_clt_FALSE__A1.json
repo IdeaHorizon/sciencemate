@@ -1,0 +1,101 @@
+{
+  "task_id": "cauchy_clt_FALSE",
+  "arm": "A1",
+  "final_expression": "e^{-√n|t|}→0(t≠0) 且 φ(0)=1 ⟹ 极限不连续非 CF ⟹ √n·X̄_n 不依分布收敛（Lévy 连续性；Durrett 5ed Thm 3.3.6；Feller Vol.2 §XV.1）",
+  "final_expression_source": "guessed_from_last_step",
+  "main_result_statement": "对每个 n∈ℕ，X̄_n 精确服从标准柯西（φ=e^{-|t|}）；命题'X̄_n 依分布收敛到正态，标准差~1/√n'被推翻（refuted）：收敛目标是柯西而非正态，σ 不存在，1/√n 衰减无意义，√n·X̄_n 亦不依分布收敛",
+  "verdict": "refuted",
+  "verification_evidence": [
+    {
+      "step": "S2a",
+      "probe": "99822f0e9794b88c",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S2b",
+      "probe": "56b25b79325aeb90",
+      "status": "numerically_supported",
+      "in_ledger": true
+    },
+    {
+      "step": "S4",
+      "probe": "87c0d69d4dc76921",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S7a",
+      "probe": "7768229b361cc99c",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S7b",
+      "probe": "ab81ac24032a23c6",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S8a",
+      "probe": "c320d010b3de76cd",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S8b",
+      "probe": "5af40d345ff6ac7e",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S10",
+      "probe": "f888692cb016652b",
+      "status": "verified",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 8,
+  "step_count": 17,
+  "assumptions": [
+    "A1: X_i iid 标准柯西（密度 1/(π(1+x²))）",
+    "A2: n∈ℕ, n≥1",
+    "A3: t∈ℝ",
+    "A4: x∈ℝ；密度归一",
+    "A5: cos 偶性：t>0 已验证情形外推到 t<0",
+    "A6: n≠0（由 A2 保证）"
+  ],
+  "unverified_steps": [
+    "S1",
+    "S2c",
+    "S3",
+    "S5",
+    "S6",
+    "S7c",
+    "S8c",
+    "S9",
+    "S11"
+  ],
+  "validity_domain": [
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A6"
+  ],
+  "credibility": "主结果（X̄_n 精确柯西）演绎链完备。验证水平披露：S2b（∫sin(tx)/(1+x²)dx=0）仅有数值支持（numerically_supported，32 点 50 位精度），其结论由被积函数关于 x 的奇偶性严格保证（prose 论证），数值支持仅为旁证——该步不承重，主结果无任何承重步骤依赖纯数值证据；其余承重步骤均符号验证（verified）或带外部锚点的 cited_theorem。最脆为 S2a CF 恒等式（教科书标准结果，符号验证覆盖 t>0 主情形，t<0 由偶性覆盖）。refuted 为强结论，多条独立路线互证。",
+  "findings": [
+    "主结果：X̄_n 对每个 n 精确服从 Cauchy(0,1)，分布完全不随 n 变化——比'收敛到别的分布'更强的否定",
+    "CLT 不满足的条件：有限二阶矩；事实上有限一阶矩也不满足（E|X|=∞，E[X] 仅主值为 0；主值≠均值存在）",
+    "1/√n 两种死法：σ 不存在；√n·X̄_n 质量逃逸、不依分布收敛",
+    "最脆步骤 S2a CF 恒等式：外部锚点+符号验证+奇偶性，承重无缺口",
+    "工具备注：limit_check 对 oo=oo 报 matches=false（假阴性），check_step(limit(),oo) 复核均为 verified",
+    "数值旁证（非承重）：mpmath 积分与 e^{-|t|} 粗一致，残差来自振荡积分截断误差"
+  ],
+  "frozen": true,
+  "turns": 20,
+  "tool_calls": 31,
+  "elapsed_s": 462.4,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787423448-19bb96"
+}

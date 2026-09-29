@@ -1,0 +1,145 @@
+/* 右栏：标签条 + 文件预览。
+ *
+ * 分栏容器 / 拖拽把手 / 栏本身的样式仍在 sessions.css（`.session-canvas-split`
+ * `.session-inspector` `.session-inspector-resizer`）—— 那些没变，变的是这栏
+ * 里现在可以装不止一样东西。 */
+
+/* 主内容那一列。原来这条规则写死在 `.session-document-canvas` 上，而那个类
+ * 承担的是聊天排版；文件页要的是同样的分栏行为、完全不同的排版。 */
+.session-canvas-split > .workspace-split-main { flex: 1 1 auto; min-width: 0; }
+.project-files-main { display: flex; flex-direction: column; min-height: 0; overflow-y: auto; padding: 0 4px; }
+
+/* 分栏要有**确定的**高度，右栏才撑得开。`.page` 默认块级、高度=内容，于是
+ * 右栏塌成内容高，PDF 只剩 iframe 的 min-height 那一条缝（实测 519px 容器里
+ * 一份 11 页论文只露 420px）。会话页不需要这条：那条路由自己是 grid + 100%。
+ *
+ * 百分比 min-height 能生效是因为父级 `.project-shell-body` 有确定高度
+ * （flex:1 + min-height:0）。 */
+.page-fills-height { display: flex; flex-direction: column; min-height: 100%; }
+.page-fills-height > .session-canvas-split { flex: 1 1 auto; min-height: 0; }
+
+.workspace-panel-tabbar { display: flex; align-items: center; gap: 6px; min-height: 30px; margin-bottom: 6px; border-bottom: 1px solid var(--color-border); }
+.workspace-panel-tabs { display: flex; flex: 1 1 auto; min-width: 0; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+.workspace-panel-tabs::-webkit-scrollbar { display: none; }
+
+.workspace-panel-tabs > button,
+.workspace-panel-tab > button {
+  display: inline-flex; align-items: center; gap: 5px;
+  max-width: 190px; padding: 5px 8px;
+  border: 0; border-bottom: 2px solid transparent; background: transparent;
+  color: var(--color-fg-subtle); font-size: var(--font-size-meta);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;
+}
+.workspace-panel-tabs > button:hover,
+.workspace-panel-tab > button:hover { color: var(--color-fg); }
+.workspace-panel-tabs > button[aria-selected="true"],
+.workspace-panel-tab.is-active > button { color: var(--color-fg); border-bottom-color: var(--color-fg); }
+
+/* 关闭按钮和切换按钮是两个兄弟，共享一条底边 —— 套起来的话点关闭会先切过去。 */
+.workspace-panel-tab { display: inline-flex; align-items: center; border-bottom: 2px solid transparent; }
+.workspace-panel-tab.is-active { border-bottom-color: var(--color-fg); }
+.workspace-panel-tab > button { border-bottom: 0; padding-right: 2px; }
+.workspace-panel-tab-close {
+  display: inline-flex; align-items: center; padding: 3px 5px 3px 1px;
+  border: 0; background: transparent; color: var(--color-fg-subtle); cursor: pointer;
+}
+.workspace-panel-tab-close:hover { color: var(--color-fg); }
+.workspace-panel-collapse {
+  flex: 0 0 auto; display: inline-flex; padding: 3px; margin-left: 2px;
+  border: 0; border-radius: 5px; background: transparent; color: var(--color-fg-subtle); cursor: pointer;
+}
+.workspace-panel-collapse:hover { background: var(--color-bg-subtle); color: var(--color-fg); }
+
+/* min-height: 0 是 flex 子项能滚动的前提；少了它内容会把整栏撑长而不是滚。 */
+.workspace-panel-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.session-inspector-content { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+
+/* ── 文件预览 ─────────────────────────────────────────────────────────── */
+
+.file-preview { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.file-preview-bar { display: flex; align-items: center; gap: 8px; padding: 4px 0 8px; }
+.file-preview-bar > code {
+  flex: 1 1 auto; min-width: 0; overflow: hidden;
+  color: var(--color-fg-subtle); font-size: var(--font-size-caption);
+  direction: rtl; text-align: left; text-overflow: ellipsis; white-space: nowrap;
+}
+.file-preview-bar-actions { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; }
+.file-preview-bar-actions button,
+.file-preview-bar-actions a {
+  display: inline-flex; padding: 4px; border: 0; border-radius: 5px;
+  background: transparent; color: var(--color-fg-subtle); cursor: pointer;
+}
+.file-preview-bar-actions button:hover,
+.file-preview-bar-actions a:hover { background: var(--color-bg-subtle); color: var(--color-fg); }
+.file-preview-bar-actions button:disabled { cursor: default; opacity: .5; }
+.file-preview-size { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.file-preview-bar-actions .is-spinning { animation: file-preview-spin 900ms linear infinite; }
+@keyframes file-preview-spin { to { transform: rotate(360deg); } }
+
+.file-preview-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding-bottom: 16px; }
+
+/* 图按栏宽缩放，不裁切。棋盘底色让透明 PNG 的边界看得见 —— 白底白图在暗色
+ * 主题下会变成"什么都没有"。 */
+.file-preview-image {
+  display: grid; place-items: center; min-height: 120px; padding: 8px;
+  border: 1px solid var(--color-border); border-radius: 8px;
+  background:
+    repeating-conic-gradient(var(--color-bg-subtle) 0 25%, transparent 0 50%) 0 0 / 16px 16px;
+}
+.file-preview-image img { max-width: 100%; height: auto; }
+
+/* iframe 要显式给高度：flex 容器里 100% 高度对 replaced element 不生效，
+ * 结果是 PDF 只露出一条缝。 */
+.file-preview-frame {
+  width: 100%; height: 100%; min-height: 420px;
+  border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-bg);
+}
+
+.file-preview-text { font-size: var(--font-size-meta); }
+.file-preview-text pre {
+  margin: 0; padding: 10px 12px; overflow-x: auto;
+  border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-bg-subtle);
+}
+.file-preview-text pre code { font-size: var(--font-size-caption); line-height: 1.6; white-space: pre; }
+.file-preview-fallback { padding: 14px 2px; color: var(--color-fg-subtle); font-size: var(--font-size-meta); }
+.file-preview-fallback p { margin: 0 0 6px; }
+.file-preview-error { padding: 12px 2px; color: var(--color-danger); font-size: var(--font-size-meta); }
+
+/* ── 可点的文件名 ─────────────────────────────────────────────────────── */
+
+/* 树里的文件行、对话卡片里的产出名 —— 两处都是"点开在右栏看"，所以看起来
+ * 一样：平时是普通文本，悬停才显出可点。 */
+.project-files-open,
+.chat-run-file-open {
+  padding: 0; border: 0; background: transparent; color: inherit;
+  font: inherit; text-align: left; cursor: pointer;
+}
+.project-files-open { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.project-files-open:hover code,
+.chat-run-file-open:hover code {
+  color: var(--color-fg);
+  text-decoration: underline; text-underline-offset: 2px; text-decoration-style: dotted;
+}
+
+/* ── 消息正文里内联的工作区图 ─────────────────────────────────────────── */
+
+/* button 而不是裸 img：点开在右栏看大图，所以它本来就是个可点的东西。
+ * display:block + margin 让它在段落里独占一行 —— 一张图夹在文字中间行高会
+ * 被撑得七零八落。 */
+.inline-workspace-image {
+  display: block; max-width: 100%; margin: 8px 0; padding: 4px;
+  border: 1px solid var(--color-border); border-radius: 8px;
+  background: var(--color-bg); cursor: zoom-in;
+}
+.inline-workspace-image:hover { border-color: var(--color-border-strong, var(--color-fg-subtle)); }
+/* 高度封顶：正文里是"看一眼"，要细看点开右栏。不封顶的话一张 900×1800 的
+ * 竖图会把整屏对话顶下去。
+ *
+ * 420 是实测定的：科研图往往是方的且信息密集（一张 944×944 的 QQ 图在
+ * 340px 下坐标轴标签已经糊了，等于放了个没用的缩略图）。420 能读个大概，
+ * 又不至于把对话挤走。 */
+.inline-workspace-image img { display: block; max-width: 100%; max-height: 420px; height: auto; margin: 0 auto; }
+.inline-workspace-image.is-loading {
+  padding: 6px 10px; border-style: dashed; color: var(--color-fg-subtle);
+  font-size: var(--font-size-meta); cursor: default;
+}

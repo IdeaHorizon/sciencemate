@@ -1,0 +1,15 @@
+# writing 节点的最小 fixture（重建后，2026-09-18）。
+# 运行:  python run_node.py --harness writing --fixture nodes/writing/fixtures/minimal.yaml
+# 真实夹具（yuankk 的 ASTRA-sim 论文材料）不进仓库，用 scripts/writing_fixture.py 跑。
+
+node_inputs:
+  research_question: >
+    将一篇已有中文论文草稿改写成 SCI 论文风格的中文稿件。
+    1. 文章整体风格参考 SCI 论文的格式，使用学术化的组织方式和表达习惯。
+    2. 对结论进行保守化表述：所有结论限定在本文的仿真设定之下。
+    3. 图内文字全部改为英文；正文、图题和标题保留中文。
+    4. 参考文献不少于 40 篇，每句引用都要在论文中找到出处。
+
+upstream_artifacts: []      # 用户材料走项目工作区的 sources/，不走上游 artifact
+
+memory_entries: []

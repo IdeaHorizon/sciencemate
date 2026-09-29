@@ -1,0 +1,314 @@
+.kb-concepts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--space-3);
+}
+.kb-claims-list, .kb-synth-list, .kb-library-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.memory-row-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: 6px;
+}
+.memory-topic {
+  font-size: 11px;
+  color: var(--color-fg-subtle);
+  margin-left: auto;
+}
+/* 这里原有一条同名规则，其每一条属性都被 app/globals.css 里的同选择器规则
+   覆盖（globals 的 @import 在文件头，自身规则在后，等特异性下 globals 胜）。
+   删掉的是死代码：留着只会让人以为改这里有效。globals 那份仍在，渲染不变。 */
+.evidence-project-select {
+  background: var(--color-bg-elevated);
+  color: var(--color-fg);
+  border: 1px solid var(--color-border);
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+}
+.evidence-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.evidence-row-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.evidence-claim { font-size: 13px; margin: 0; line-height: 1.5; }
+.evidence-sub-count {
+  font-size: 11px;
+  color: var(--color-fg-subtle);
+  margin-top: 6px;
+}
+.tools-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-3);
+}
+
+/* ── Research state（v2.1 P3c：Analysis 的裁决总账）────────────────────── */
+.stack-md {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.rs-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: 6px;
+}
+.rs-version {
+  font-size: 12px;
+  color: var(--color-fg-subtle);
+  margin-left: auto;
+}
+.rs-summary {
+  font-size: 13px;
+  margin: 0;
+  color: var(--color-fg);
+}
+.rs-change {
+  font-size: 12px;
+  margin: 6px 0 0;
+  color: var(--color-fg-muted);
+}
+.rs-section {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-fg-subtle);
+  margin: 0 0 var(--space-2);
+}
+/* 宽表格自己横向滚动，页面本体不横滚 */
+.rs-table-scroll {
+  overflow-x: auto;
+}
+.rs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.rs-table th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-fg-subtle);
+  padding: 0 var(--space-2) 6px 0;
+  white-space: nowrap;
+}
+.rs-table td {
+  padding: 6px var(--space-2) 6px 0;
+  border-top: 1px solid var(--color-border);
+  vertical-align: top;
+}
+.rs-ev {
+  display: inline-block;
+  margin-right: 6px;
+  font-size: 11px;
+}
+.rs-dim {
+  color: var(--color-fg-subtle);
+}
+.rs-list {
+  margin: 0;
+  padding-left: 1.1em;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* ── Blocker 面板（v2.1：节点报阻塞是一等机制）───────────────────────── */
+.blocker-panel {
+  margin-bottom: var(--space-4);
+}
+.blocker-panel .platform-section-heading h2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-warning);
+}
+.blocker-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.blocker-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.blocker-node {
+  font-size: 11px;
+  color: var(--color-fg-muted);
+}
+.blocker-link {
+  margin-left: auto;
+  font-size: 12px;
+}
+.blocker-summary {
+  margin: 0;
+  font-size: 13px;
+}
+.blocker-action {
+  margin: 6px 0 0;
+  font-size: 13px;
+}
+.blocker-evidence {
+  margin: 6px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--color-fg-subtle);
+}
+
+/* ── agent 每轮写的说明（2026-08-11）─────────────────────────────────────
+ * 用户原话：「每一步具体在干啥，我感觉看的一头雾水」。工具名答不了
+ * "它为什么突然搜圣诞布丁"，而模型第 3 轮就写了"前两轮查得太宽泛，换精准词"。
+ * 视觉上比最终答复轻一档：它是过程，不是结论。 */
+.execution-agent-narration {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.75rem 0 1rem;
+  padding-left: 0.875rem;
+  border-left: 2px solid var(--color-border);
+}
+.execution-agent-line {
+  margin: 0;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: var(--color-fg-muted);
+}
+.execution-agent-turn {
+  display: inline-block;
+  margin-right: 0.5rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 4px;
+  background: var(--color-bg-elevated);
+  font-size: 0.75rem;
+  color: var(--color-fg-subtle);
+}
+
+/* ── 子节点各成一组，跑完收起（2026-08-11）───────────────────────────────
+ * wangd：「literature 都结束了，然后开始 hypothesis 了，它还是在下面显示
+ * 一大坨」。之前所有动作平铺在一个 Research activity 列表里。 */
+.execution-child-run {
+  margin: 0.5rem 0;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.execution-child-run > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.625rem 0.875rem;
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+.execution-child-node { font-weight: 600; }
+.execution-child-status {
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  background: var(--color-bg-elevated);
+  color: var(--color-fg-subtle);
+}
+.execution-child-run-running > summary .execution-child-status { background: var(--color-info-bg); color: var(--color-info); }
+.execution-child-run-failed  > summary .execution-child-status { background: var(--color-danger-bg); color: var(--color-danger); }
+.execution-child-count { margin-left: auto; font-size: 0.75rem; color: var(--color-fg-subtle); }
+.execution-child-actions {
+  margin: 0;
+  padding: 0 0.875rem 0.75rem 2rem;
+  font-size: 0.8125rem;
+  color: var(--color-fg-muted);
+}
+.execution-child-kind { font-family: var(--font-mono, ui-monospace), monospace; font-size: 0.75rem; }
+.execution-child-detail { margin-left: 0.5rem; }
+.execution-agent-preview {
+  margin-left: 0.4rem;
+  padding: 0.02rem 0.35rem;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  background: var(--color-bg-elevated);
+  color: var(--color-fg-subtle);
+}
+
+/* 唯一的「Technical details」抽屉里，run 级失败原文排最前。 */
+.chat-run-failure-raw pre {
+  margin: 0.35rem 0 0;
+  padding: 0.5rem 0.625rem;
+  max-height: 18rem;
+  overflow: auto;
+  border-radius: 6px;
+  background: var(--color-bg-elevated);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.chat-run-failure-raw code { font-size: 0.72rem; }
+
+/* Project files 独立页：计数是页面副标题，不是可点的折叠头。 */
+.project-files-count {
+  margin: 0 0 0.75rem;
+  font-size: 0.8125rem;
+  color: var(--color-fg-subtle);
+}
+
+/* 平台记账：列出来但默认收起，且视觉上退到后面。 */
+.project-files-bookkeeping {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-border);
+}
+.project-files-bookkeeping > summary {
+  cursor: pointer;
+  font-size: 0.8125rem;
+  color: var(--color-fg-subtle);
+}
+.project-files-bookkeeping > summary small { margin-left: 0.4rem; opacity: 0.8; }
+
+/* agent 每轮写的人话：工具名之上的那一层"它为什么这么做"。 */
+.chat-run-narration { margin: 0 0 0.5rem; }
+.chat-run-narration p {
+  margin: 0 0 0.4rem;
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  color: var(--color-fg-muted);
+}
+.chat-run-narration-turn {
+  margin-right: 0.4rem;
+  padding: 0.02rem 0.35rem;
+  border-radius: 4px;
+  background: var(--color-bg-elevated);
+  font-size: 0.7rem;
+  color: var(--color-fg-subtle);
+}
+.chat-run-narration-preview {
+  margin-left: 0.4rem;
+  padding: 0.02rem 0.35rem;
+  border-radius: 4px;
+  background: var(--color-bg-elevated);
+  font-size: 0.7rem;
+  color: var(--color-fg-subtle);
+}

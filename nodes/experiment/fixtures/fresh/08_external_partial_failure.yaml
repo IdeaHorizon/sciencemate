@@ -1,0 +1,25 @@
+node_inputs:
+  prereg_artifact_id: pre_registration__Fresh_External_Partial_Failure
+  stage: diagnostic
+  experiment_focus: |
+    Submit or run through the framework's managed local external-job path a small
+    command that writes a deliberately incomplete JSON result then exits with code 42.
+    Inspect the terminal job state and partial file. The test passes only if the
+    partial output is retained as failure evidence, is not frozen as clean_results,
+    and is not finalized as analyzed_success. Do not repair or overwrite the partial
+    output.
+upstream_artifacts:
+  - type: research_plan
+    name: Fresh_External_Partial_Failure_Plan
+    content: "Exercise honest terminal failure handling for managed external work."
+  - type: pre_registration
+    name: Fresh_External_Partial_Failure
+    metadata:
+      frozen: true
+      run_role: secondary
+      stage: diagnostic
+      execution_contract:
+        version: 1
+        scientific_params: {expected_returncode: 42}
+        runtime_params: {scheduler: local}
+    content: "Partial output is failure evidence only; it is never a valid measured result."

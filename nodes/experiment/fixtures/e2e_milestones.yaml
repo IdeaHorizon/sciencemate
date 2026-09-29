@@ -1,0 +1,64 @@
+# experiment 节点 fixture —— 第5步真实 E2E：最小里程碑（A 确定性判 + B 兜底 min-run）
+#
+#   python run_node.py --harness experiment --no-interactive \
+#     --fixture nodes/experiment/fixtures/e2e_milestones.yaml --project-id test-e2e-milestones
+#
+# 验证：真实 CMake 构建过程中，框架确定性识别命名里程碑
+#   - configured：出现 CMakeCache.txt
+#   - dependency-generated：build 目录出现本轮新生成的 .o/.a/.mod
+#   - target-built：框架从 build_graph/产物路径或 fallback declared_route 核验真实存在且本轮生成
+# 观察点：run 日志出现 "milestone 达成: ..."；里程碑推进时不触发"连续无里程碑" soft 提示。
+
+node_inputs:
+  experiment_focus: |
+    这是一个【里程碑识别测试】，目的是观察框架能否在真实构建过程中确定性识别构建里程碑。
+    源码：~/experiments/E3SM_Ocean_GPU/ParallelIO-pio2_6_7（纯 CMake）
+
+    注意：build/ 目录已是干净状态（外部已清理），**无需请求人工确认清理，直接开始构建**。
+
+    按以下步骤（受控测试，构建是否完全成功不是重点，重点是里程碑被识别）：
+    1. 尝试构建：`cd ~/experiments/E3SM_Ocean_GPU/ParallelIO-pio2_6_7 && mkdir -p build && cd build && cmake .. && make`
+       —— 若被 build gate 拦，按提示读 source_recon / platform_profile。
+    2. read_artifact 查看 build_env/platform_profile/source_recon/build_graph。若 build_graph 未能覆盖目标，
+       才 save_artifact 写 fallback declared_route contract，并在 expected_artifacts 中声明
+       `~/experiments/E3SM_Ocean_GPU/ParallelIO-pio2_6_7/build/src/clib/libpioc.a`。
+    3. build 放行后真正执行 cmake 配置（应产生 CMakeCache.txt → configured 里程碑）。
+    4. 执行 make 编译（应产生 .o/.a → dependency-generated / target-built 里程碑）。
+       即使部分目标失败也没关系，只要有产物生成即可观察里程碑。
+    5. min-run：把符号核验声明为当前 v2 路线的独立步骤，通过 `safe_run_bash`
+       传该步骤 `route_step_id` 执行；工作目录用 `cwd` 参数，不得借
+       `safe_execute_python` 或 `verify_min_run` 间接启动子进程。以工具 returncode、
+       完整日志和路线收据作为客观证据。
+    6. 在 experiment_log 总结：执行了哪些命令、build 目录出现了哪些产物、
+       你是否在过程中看到框架对里程碑的反馈（含 verify_min_run 的核验结果）。freeze 即可。
+
+upstream_artifacts:
+  - type: claim
+    name: H_named_milestones_detected
+    metadata:
+      claim_type: hypothesis
+      status: open
+      created_at: "2026-06-16T00:00:00+00:00"
+    content: |
+      框架能在真实构建中确定性识别命名里程碑（configured / dependency-generated /
+      target-built），只统计本轮新生成、位于 build 目录的产物；里程碑推进时不误报
+      "连续无里程碑" soft 提示。
+
+  - type: pre_registration
+    name: E2E_Milestones_Test
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-16T00:00:00+00:00"
+      freeze_reason: "第5步 E2E：验证最小里程碑确定性识别"
+    content: |
+      ## Pre-Registration: 最小里程碑识别测试
+      ### Hypothesis
+      真实 CMake 构建中框架确定性识别 configured / dependency-generated / target-built。
+      ### Setup
+      - 源码：~/experiments/E3SM_Ocean_GPU/ParallelIO-pio2_6_7（纯 CMake）
+      - 受控测试，不要求构建完全成功，重点观察里程碑识别
+      ### Expected
+      - cmake 配置 → configured（CMakeCache.txt）
+      - make → dependency-generated（本轮新 .o/.a）
+      - 声明 target_path 且生成 → target-built
+      - run 日志出现 "milestone 达成"，无误报"连续无里程碑"

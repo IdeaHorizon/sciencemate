@@ -1,0 +1,27 @@
+{
+  "task_id": "sqrt_subadditive_FALSE",
+  "arm": "A0",
+  "model": "deepseek-v4-flash",
+  "final_expression": "Implies(And(a >= 0, b >= 0), sqrt(a + b) <= sqrt(a) + sqrt(b))",
+  "verdict": "refuted",
+  "assumptions": [
+    "√表示实数的非负平方根，只在被开方数非负时有实数值",
+    "原命题按字面取 a,b 为全体实数，会出现无定义或复数，实数序≤不适用",
+    "修正后的正确条件为 a≥0 且 b≥0",
+    "a,b≥0 时自动有 a+b≥0，所以 √(a+b) 也有实数值",
+    "对非负实数 x,y，x≤y 等价于 x²≤y²",
+    "(√a+√b)²=a+b+2√a√b，由二项展开得到",
+    "√a≥0 且 √b≥0，故 2√a√b≥0",
+    "本题不涉及分母非零、级数收敛、统计独立性等假设"
+  ],
+  "unverified_steps": [],
+  "reasoning_summary": "原命题把平方根的定义域错写成全体实数；实平方根要求 a,b≥0。在 a,b≥0 时两边非负，平方后得到 a+b≤a+b+2√a√b，恒成立，因此正确命题是带条件 a≥0,b≥0 的不等式。",
+  "raw_text": "按实值非负平方根理解：\\(\\sqrt{x}\\) 只在 \\(x\\ge0\\) 时有实数意义。\n\n字面命题“对一切实数 \\(a,b\\)”不成立；正确说法是：\n\n\\[\n\\forall a\\ge0,\\ \\forall b\\ge0,\\quad \\sqrt{a+b}\\le \\sqrt a+\\sqrt b.\n\\]\n\n证明如下。\n\n1. 若 \\(a\\ge0,\\ b\\ge0\\)，则 \\(a+b\\ge0\\)，所以 \\(\\sqrt{a+b}\\)、\\(\\sqrt a\\)、\\(\\sqrt b\\) 都是实数，且两边都非负。\n2. 对非负实数 \\(x,y\\)，有  \n   \\[\n   x\\le y \\iff x^2\\le y^2.\n   \\]\n   理由：\\(y^2-x^2=(y-x)(y+x)\\)，而 \\(y+x\\ge0\\)。\n3. 因此要证原式，只需证：\n   \\[\n   (\\sqrt{a+b})^2\\le(\\sqrt a+\\sqrt b)^2.\n   \\]\n4. 计算：\n   \\[\n   (\\sqrt{a+b})^2=a+b,\n   \\]\n   \\[\n   (\\sqrt a+\\sqrt b)^2=a+b+2\\sqrt a\\sqrt b.\n   \\]\n5. 因为 \\(a,b\\ge0\\)，所以 \\(\\sqrt a,\\sqrt b\\ge0\\)，从而\n   \\[\n   2\\sqrt a\\sqrt b\\ge0.\n   \\]\n   故\n   \\[\n   a+b\\le a+b+2\\sqrt a\\sqrt b.\n   \\]\n6. 由第 2 步的等价性，得到\n   \\[\n   \\sqrt{a+b}\\le\\sqrt a+\\sqrt b.\n   \\]\n\n所以正确条件是：\\(a\\ge0\\) 且 \\(b\\ge0\\)。等号当且仅当 \\(a=0\\) 或 \\(b=0\\)。\n\n```json\n{\n  \"final_expression\": \"Implies(And(a >= 0, b >= 0), sqrt(a + b) <= sqrt(a) + sqrt(b))\",\n  \"verdict\": \"refuted\",\n  \"assumptions\": [\n    \"√表示实数的非负平方根，只在被开方数非负时有实数值\",\n    \"原命题按字面取 a,b 为全体实数，会出现无定义或复数，实数序≤不适用\",\n    \"修正后的正确条件为 a≥0 且 b≥0\",\n    \"a,b≥0 时自动有 a+b≥0，所以 √(a+b) 也有实数值\",\n    \"对非负实数 x,y，x≤y 等价于 x²≤y²\",\n    \"(√a+√b)²=a+b+2√a√b，由二项展开得到\",\n    \"√a≥0 且 √b≥0，故 2√a√b≥0\",\n    \"本题不涉及分母非零、级数收敛、统计独立性等假设\"\n  ],\n  \"unverified_steps\": [],\n  \"reasoning_summary\": \"原命题把平方根的定义域错写成全体实数；实平方根要求 a,b≥0。在 a,b≥0 时两边非负，平方后得到 a+b≤a+b+2√a√b，恒成立，因此正确命题是带条件 a≥0,b≥0 的不等式。\"\n}\n```",
+  "thinking_chars": 66684,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 206.8,
+  "tokens": 22952,
+  "parse_ok": true
+}

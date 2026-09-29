@@ -1,0 +1,47 @@
+id: adiabatic_relation
+title: 理想气体绝热过程关系式
+domain: thermodynamics
+kind: normal
+
+prompt: |
+  从热力学第一定律出发，推导理想气体准静态绝热过程满足 T*V^(gamma-1) = const，
+  其中 gamma = C_p/C_V。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: adiabatic_relation_prereg
+    content: |
+      ## Research Questions
+      
+      ### Q1: 理想气体准静态绝热过程的 T-V 关系是什么？
+      - output_kind: 一条命题的裁决
+      - proposition: T*V^(gamma-1) = const。
+      - 闭合条件:
+      ```yaml
+      - id: TV_RELATION
+        statement: "给出 T-V 关系的完整推导，每步代数变换经机械验证或如实标注未验"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  final_expression: "T*V**(gamma-1)"
+  expression_note: "判它等于常数，比对表达式本身"
+  expected_verdict: derived
+  required_assumptions:
+    - id: ideal_gas
+      why: "PV=nRT 是换元的依据"
+      patterns: ["理想气体", "ideal.?gas", "PV *= *nRT", "pV *= *NkT", "状态方程"]
+    - id: adiabatic
+      why: "dQ=0"
+      patterns: ["绝热", "adiabat", "dQ *= *0", "Q *= *0", "无热交换"]
+    - id: quasistatic
+      why: "准静态才能用 dW=-PdV"
+      patterns: ["准静态", "quasi.?static", "可逆", "reversib", "缓慢"]
+    - id: constant_cv
+      why: "C_V 与温度无关（否则积不出这个形式）"
+      patterns: ["C_?V *不变", "常数", "constant", "与温度无关", "温度无关", "independent of T"]

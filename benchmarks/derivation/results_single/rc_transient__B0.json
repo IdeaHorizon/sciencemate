@@ -1,0 +1,33 @@
+{
+  "task_id": "rc_transient",
+  "arm": "B0",
+  "model": "deepseek-v4-pro",
+  "final_expression": "V0*(1 - exp(-t/(R*C)))",
+  "verdict": "derived",
+  "assumptions": [
+    "t>=0 后开关闭合，回路为单一 RC 串联回路；电路为集总参数模型",
+    "理想直流电压源：t>=0 时源电压恒为 V0",
+    "理想线性电阻：R>0，满足 v_R=R i",
+    "理想线性电容：C>0，满足 i=C dv_C/dt，且 v_C 对 t>0 可微",
+    "电容初始电压 v_C(0)=0；无冲激电流，v_C 在 t=0 连续",
+    "忽略电源内阻、导线电阻、寄生电感/电容、电容漏电等非理想因素",
+    "R 与 C 为非零有限值，允许除以 RC 并定义 τ=RC",
+    "积分因子 exp(t/τ) 在 t>=0 上非零且光滑，积分运算对有限 t 成立",
+    "推导未使用级数展开，因此无级数收敛条件"
+  ],
+  "unverified_steps": [
+    "KVL 对理想阶跃激励/集总电路的物理适用性未从 Maxwell 方程机械验证",
+    "一阶线性常微分方程解的存在唯一性未机械证明，仅引用标准 ODE 理论",
+    "电容电压在 t=0 的连续性/无冲激电流未机械验证，仅作为电路理论标准假设"
+  ],
+  "reasoning_summary": "对 RC 串联回路列 KVL 得到 RC dV_C/dt + V_C = V0，结合初始条件 V_C(0)=0 解得 V_C=V0*(1-exp(-t/(R*C)))。时间常数为 τ=RC；量纲分析表明 RC 具有时间量纲。",
+  "raw_text": "结论：在标准理想 RC 串联模型下，该命题成立。主结果为\n\n\\[\n\\boxed{V_C(t)=V_0\\left(1-e^{-t/(RC)}\\right),\\quad t\\ge 0}\n\\]\n\n时间常数为\n\n\\[\n\\boxed{\\tau=RC}\n\\]\n\n下面逐步推导并列出假设。\n\n---\n\n## 推导前先列出关键假设\n\n1. **集总参数电路**：电路可用 KVL、KCL，不涉及波传播。\n2. **理想直流电压源**：\\(t\\ge 0\\) 后源电压恒为 \\(V_0\\)。\n3. **理想线性电阻**：\\(R>0\\)，满足 \\(v_R=R i\\)。\n4. **理想线性电容**：\\(C>0\\)，满足 \\(i=C\\frac{dv_C}{dt}\\)。\n5. **电容初始电压为 0**：\\(v_C(0)=0\\)。\n6. **无冲激电流**：电容电压在 \\(t=0\\) 连续，因此 \\(v_C(0^+)=v_C(0^-)=0\\)。\n7. **忽略非理想效应**：忽略电源内阻、导线电阻、寄生电感/电容、电容漏电等。\n8. **\\(RC\\neq 0\\)**：因为 \\(R>0,C>0\\)，所以可以除以 \\(RC\\)。\n9. 推导中不使用级数展开，因此不涉及级数收敛条件。\n\n---\n\n## 1. 列 KVL\n\n设串联回路电流为 \\(i(t)\\)，电阻电压为 \\(v_R(t)\\)，电容电压为 \\(v_C(t)\\)，采用关联参考方向。\n\n对 \\(t\\ge 0\\)，沿回路列 KVL：\n\n\\[\nV_0-v_R-v_C=0\n\\]\n\n因此\n\n\\[\nv_R+v_C=V_0\n\\]\n\n**依据**：集总参数电路中的基尔霍夫电压定律。\n\n---\n\n## 2. 写元件约束\n\n电阻：\n\n\\[\nv_R=Ri\n\\]\n\n电容：\n\n\\[\ni=C\\frac{dv_C}{dt}\n\\]\n\n**依据**：理想线性电阻和理想线性电容的定义。\n\n---\n\n## 3. 得到微分方程\n\n将 \\(v_R=Ri\\) 和 \\(i=C\\frac{dv_C}{dt}\\) 代入 KVL：\n\n\\[\nR C \\frac{dv_C}{dt}+v_C=V_0\n\\]\n\n令\n\n\\[\n\\tau=RC\n\\]\n\n则\n\n\\[\n\\frac{dv_C}{dt}+\\frac{1}{\\tau}v_C=\\frac{V_0}{\\tau}\n\\]\n\n**依据**：代数代入；因为 \\(RC\\neq 0\\)，可作除法。\n\n---\n\n## 4. 解一阶线性微分方程\n\n这是一个一阶线性常微分方程。乘以积分因子 \\(e^{t/\\tau}\\)：\n\n\\[\ne^{t/\\tau}\\frac{dv_C}{dt}+\\frac{1}{\\tau}e^{t/\\tau}v_C\n=\n\\frac{V_0}{\\tau}e^{t/\\tau}\n\\]\n\n左边正好是全导数：\n\n\\[\n\\frac{d}{dt}\\left(v_C e^{t/\\tau}\\right)\n=\n\\frac{V_0}{\\tau}e^{t/\\tau}\n\\]\n\n**依据**：指数函数 \\(e^{t/\\tau}\\) 非零且光滑；用乘积导数识别全导数。\n\n从 \\(0\\) 到 \\(t\\) 积分：\n\n\\[\nv_C(t)e^{t/\\tau}-v_C(0)\n=\nV_0\\left(e^{t/\\tau}-1\\right)\n\\]\n\n**依据**：微积分基本定理；右侧 \\(\\int_0^t \\frac{V_0}{\\tau}e^{s/\\tau}\\,ds\n=\nV_0\\left(e^{t/\\tau}-1\\right)\\)。\n\n代入初始条件 \\(v_C(0)=0\\)：\n\n\\[\nv_C(t)e^{t/\\tau}\n=\nV_0\\left(e^{t/\\tau}-1\\right)\n\\]\n\n所以\n\n\\[\nv_C(t)\n=\nV_0\\left(1-e^{-t/\\tau}\\right)\n\\]\n\n代回 \\(\\tau=RC\\)：\n\n\\[\n\\boxed{\nV_C(t)\n=\nV_0\\left(1-e^{-t/(RC)}\\right),\\quad t\\ge 0\n}\n\\]\n\n---\n\n## 5. 时间常数\n\n由微分方程整理过程可知时间常数为\n\n\\[\n\\boxed{\\tau=RC}\n\\]\n\n工程上，当 \\(t=\\tau\\) 时：\n\n\\[\nV_C(\\tau)=V_0(1-e^{-1})\\approx 0.632V_0\n\\]\n\n即电容电压充到 \\(V_0\\) 的约 63.2\\%。\n\n---\n\n## 6. 量纲分析验证\n\n电阻量纲：\n\n\\[\n[R]=\\frac{\\text{电压}}{\\text{电流}}\n\\]\n\n电容量纲：\n\n\\[\n[C]=\\frac{\\text{电荷}}{\\text{电压}}\n=\n\\frac{\\text{电流}\\times\\text{时间}}{\\text{电压}}\n\\]\n\n所以\n\n\\[\n[RC]\n=\n\\left(\\frac{\\text{电压}}{\\text{电流}}\\right)\n\\left(\\frac{\\text{电流}\\times\\text{时间}}{\\text{电压}}\\right)\n=\n\\text{时间}\n\\]\n\n用 SI 单位表示：\n\n\\[\n\\Omega = \\mathrm{V/A}\n\\]\n\n\\[\n\\mathrm{F}\n=\n\\mathrm{C/V}\n=\n\\mathrm{A\\cdot s/V}\n\\]\n\n因此\n\n\\[\n\\Omega\\cdot \\mathrm{F}\n=\n\\frac{\\mathrm{V}}{\\mathrm{A}}\n\\cdot\n\\frac{\\mathrm{A\\cdot s}}{\\mathrm{V}}\n=\n\\mathrm{s}\n\\]\n\n所以 \\(RC\\) 确实具有时间量纲，时间常数 \\(\\tau=RC\\) 在量纲上是合法的。\n\n---\n\n## 7. 未机械验证的步骤\n\n以下步骤主要依靠标准电路理论或常微分方程理论，没有在本推导中从更基础公理机械验证：\n\n1. KVL 对理想阶跃激励、集总电路的适用性。\n2. 一阶线性常微分方程解的存在唯一性。\n3. 电容电压在 \\(t=0\\) 的连续性，即无冲激电流假设。\n\n---\n\n```json\n{\n  \"final_expression\": \"V0*(1 - exp(-t/(R*C)))\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"t>=0 后开关闭合，回路为单一 RC 串联回路；电路为集总参数模型\",\n    \"理想直流电压源：t>=0 时源电压恒为 V0\",\n    \"理想线性电阻：R>0，满足 v_R=R i\",\n    \"理想线性电容：C>0，满足 i=C dv_C/dt，且 v_C 对 t>0 可微\",\n    \"电容初始电压 v_C(0)=0；无冲激电流，v_C 在 t=0 连续\",\n    \"忽略电源内阻、导线电阻、寄生电感/电容、电容漏电等非理想因素\",\n    \"R 与 C 为非零有限值，允许除以 RC 并定义 τ=RC\",\n    \"积分因子 exp(t/τ) 在 t>=0 上非零且光滑，积分运算对有限 t 成立\",\n    \"推导未使用级数展开，因此无级数收敛条件\"\n  ],\n  \"unverified_steps\": [\n    \"KVL 对理想阶跃激励/集总电路的物理适用性未从 Maxwell 方程机械验证\",\n    \"一阶线性常微分方程解的存在唯一性未机械证明，仅引用标准 ODE 理论\",\n    \"电容电压在 t=0 的连续性/无冲激电流未机械验证，仅作为电路理论标准假设\"\n  ],\n  \"reasoning_summary\": \"对 RC 串联回路列 KVL 得到 RC dV_C/dt + V_C = V0，结合初始条件 V_C(0)=0 解得 V_C=V0*(1-exp(-t/(R*C)))。时间常数为 τ=RC；量纲分析表明 RC 具有时间量纲。\"\n}\n```",
+  "thinking_chars": 33196,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 152.9,
+  "tokens": 13212,
+  "parse_ok": true,
+  "repeat_index": 1
+}

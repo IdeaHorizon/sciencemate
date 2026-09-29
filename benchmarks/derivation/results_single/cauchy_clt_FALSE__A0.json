@@ -1,0 +1,32 @@
+{
+  "task_id": "cauchy_clt_FALSE",
+  "arm": "A0",
+  "model": "deepseek-v4-flash",
+  "final_expression": "1/(pi*(1+x**2))",
+  "verdict": "refuted",
+  "assumptions": [
+    "X_i 相互独立",
+    "X_i 同分布，且公共密度为 1/(pi*(1+x**2))",
+    "n 是正整数，所以分母 n 非零",
+    "t 取实数；|exp(i*t*x)|=1，所以特征函数积分绝对收敛",
+    "独立变量乘积的期望等于期望的乘积，因此可以分解特征函数",
+    "同分布假设使得各因子可合并为同一个特征函数",
+    "特征函数唯一决定分布（Lévy 唯一性定理）",
+    "经典中心极限定理需要有限二阶矩；柯西分布不满足",
+    "没有使用泰勒或级数展开，因此不涉及展开适用域；若在 t=0 展开会因矩不存在而失效"
+  ],
+  "unverified_steps": [
+    "标准柯西特征函数 phi_X(t)=exp(-|t|) 是通过围道积分或标准傅里叶变换表得到的，此处未逐项验算该积分",
+    "特征函数唯一决定分布（Lévy 唯一性定理）作为已知定理引用，未重新证明",
+    "经典中心极限定理的有限方差条件作为已知定理条件引用，未重述其证明"
+  ],
+  "reasoning_summary": "标准柯西分布的特征函数为 exp(-|t|)，因此样本均值的特征函数恒为 exp(-|t|)，说明对任意 n 样本均值都服从标准柯西分布，而不是正态分布。经典 CLT 因方差不存在而不能适用，标准差衰减的说法也无定义。",
+  "raw_text": "命题是**错误**的。标准柯西分布没有有限方差，经典中心极限定理的前提不满足；而且样本均值的精确分布仍是标准柯西分布，不会趋向正态。\n\n设 \\(X\\sim \\text{Cauchy}(0,1)\\)，即密度为  \n\\[\np(x)=\\frac{1}{\\pi(1+x^2)}.\n\\]\n\n其特征函数为：\n\\[\n\\phi_X(t)=\\mathbb E[e^{itX}]\n=\\int_{-\\infty}^{\\infty}\\frac{e^{itx}}{\\pi(1+x^2)}\\,dx\n=e^{-|t|}.\n\\]\n\n对样本均值\n\\[\n\\bar X_n=\\frac1n\\sum_{i=1}^n X_i\n\\]\n有\n\\[\n\\phi_{\\bar X_n}(t)\n=\\mathbb E\\left[\\exp\\left(it\\frac1n\\sum_{i=1}^n X_i\\right)\\right]\n=\\mathbb E\\left[\\prod_{i=1}^n \\exp\\left(i\\frac{t}{n}X_i\\right)\\right].\n\\]\n\n由独立性，\n\\[\n\\phi_{\\bar X_n}(t)\n=\\prod_{i=1}^n \\mathbb E\\left[\\exp\\left(i\\frac{t}{n}X_i\\right)\\right].\n\\]\n\n由同分布，\n\\[\n\\phi_{\\bar X_n}(t)\n=\\left[\\phi_X\\left(\\frac tn\\right)\\right]^n.\n\\]\n\n代入标准柯西特征函数：\n\\[\n\\phi_X\\left(\\frac tn\\right)=e^{-|t|/n},\n\\]\n所以\n\\[\n\\phi_{\\bar X_n}(t)\n=\\left(e^{-|t|/n}\\right)^n\n=e^{-|t|}.\n\\]\n\n因此对任意 \\(n\\)，\n\\[\n\\bar X_n \\sim \\text{Cauchy}(0,1),\n\\]\n密度仍为\n\\[\n\\frac{1}{\\pi(1+x^2)}.\n\\]\n\n也就是说，样本均值的分布根本不随 \\(n\\) 变化，更不会变成正态分布。  \n标准柯西分布的一阶绝对矩发散：\n\\[\n\\mathbb E|X|=\\frac{2}{\\pi}\\int_0^\\infty \\frac{x}{1+x^2}\\,dx=\\infty,\n\\]\n所以方差和标准差都不存在，所谓“标准差以 \\(1/\\sqrt n\\) 衰减”也不成立。\n\n```json\n{\n  \"final_expression\": \"1/(pi*(1+x**2))\",\n  \"verdict\": \"refuted\",\n  \"assumptions\": [\n    \"X_i 相互独立\",\n    \"X_i 同分布，且公共密度为 1/(pi*(1+x**2))\",\n    \"n 是正整数，所以分母 n 非零\",\n    \"t 取实数；|exp(i*t*x)|=1，所以特征函数积分绝对收敛\",\n    \"独立变量乘积的期望等于期望的乘积，因此可以分解特征函数\",\n    \"同分布假设使得各因子可合并为同一个特征函数\",\n    \"特征函数唯一决定分布（Lévy 唯一性定理）\",\n    \"经典中心极限定理需要有限二阶矩；柯西分布不满足\",\n    \"没有使用泰勒或级数展开，因此不涉及展开适用域；若在 t=0 展开会因矩不存在而失效\"\n  ],\n  \"unverified_steps\": [\n    \"标准柯西特征函数 phi_X(t)=exp(-|t|) 是通过围道积分或标准傅里叶变换表得到的，此处未逐项验算该积分\",\n    \"特征函数唯一决定分布（Lévy 唯一性定理）作为已知定理引用，未重新证明\",\n    \"经典中心极限定理的有限方差条件作为已知定理条件引用，未重述其证明\"\n  ],\n  \"reasoning_summary\": \"标准柯西分布的特征函数为 exp(-|t|)，因此样本均值的特征函数恒为 exp(-|t|)，说明对任意 n 样本均值都服从标准柯西分布，而不是正态分布。经典 CLT 因方差不存在而不能适用，标准差衰减的说法也无定义。\"\n}\n```",
+  "thinking_chars": 42047,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 129.1,
+  "tokens": 13588,
+  "parse_ok": true
+}

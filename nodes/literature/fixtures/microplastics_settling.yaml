@@ -1,0 +1,15 @@
+# literature 节点的 fixture — 海洋微塑料沉降过程模拟调研
+
+node_inputs:
+  research_question: >
+    海洋微塑料的沉降过程模拟是一个热门前沿课题。请使用 search_papers 工具检索中英文文献，
+    包括微塑料形状(球形/纤维/碎片/薄膜)对沉降速度的影响、实验室和野外观测方法、
+    CFD/DEM 等数值模拟方法、以及机器学习预测模型。
+    检索后请使用 classify_papers 工具对结果进行主题聚类，并生成 survey_report。
+
+upstream_artifacts: []
+
+memory_entries:
+  - kind: directive
+    text: "聚焦 2018-2026 年的文献，包含中英文。优先检索微塑料形状对沉降的影响。"
+    tags: [microplastics, settling, simulation]

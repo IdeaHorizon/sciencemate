@@ -1,0 +1,100 @@
+{
+  "task_id": "sho_correction_sign_FALSE",
+  "arm": "A1",
+  "final_expression": "kB*(1 - (hbar*omega/(kB*T))**2/12)",
+  "final_expression_source": "main_result",
+  "main_result_statement": "一维量子简谐振子热容高温展开首阶修正为负：C ≈ k_B(1 − x²/12)，系数 −1/12；受审命题 +x²/12 不成立",
+  "verdict": "refuted",
+  "verification_evidence": [
+    {
+      "step": "S1a",
+      "probe": "7df212dd493bee9e",
+      "status": "numerically_supported",
+      "in_ledger": true
+    },
+    {
+      "step": "S1b",
+      "probe": "24b26aee00298fab",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S2",
+      "probe": "ff29f4ae8afb87f9",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S3",
+      "probe": "d994ac37beb05784",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S3p",
+      "probe": "74e59fce82b208d1",
+      "status": "numerically_supported",
+      "in_ledger": true
+    },
+    {
+      "step": "S4",
+      "probe": "9c746485a8fd746d",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S5",
+      "probe": "96443ab8f27bf27e",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S5p",
+      "probe": "1e739065eefe3b69",
+      "status": "numerically_supported",
+      "in_ledger": true
+    },
+    {
+      "step": "S8",
+      "probe": "bb840ec60d00230f",
+      "status": "verified",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 9,
+  "step_count": 9,
+  "assumptions": [
+    "A1: βħω = x > 0（T>0、ħω>0），几何级数收敛",
+    "A2: 一维简谐振子能级 E_n = ħω(n+1/2)，正则系综（玻尔兹曼统计）",
+    "A3: 热容 C = ∂E/∂T，E = −∂lnZ/∂β",
+    "A4: 渐近展开 f(x)=1-x^2/12+x^4/240+O(x^6)，适用域 x ≪ 1（高温）",
+    "A5: f 在 x=0 解析（可去奇点 f(0)=1），极限/展开合法"
+  ],
+  "unverified_steps": [],
+  "validity_domain": [
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5"
+  ],
+  "credibility": {
+    "verdict_level": "symbolic verified for leading coefficient -1/12 and next order +1/240",
+    "counterexample": "exact at 50-digit precision, found at x=1.102 (32 pts)",
+    "weakest_step": "S1a 有限几何级数部分和（教科书定理 A&S §3.1.10 + 归纳证明 + 数值支持；非承重，S1b 极限为符号 verified）",
+    "scope": "高温渐近 x≪1（A4）；结论不承诺任意温度",
+    "note": "承重结论（系数符号、反例）不依赖任何 numerically_supported 步骤"
+  },
+  "findings": [
+    "受审命题符号错误：首阶修正为负（−x²/12）非正（+x²/12）；量子化使热容从下方逼近经典值 k_B（反例中 f<1 而命题值>1）",
+    "正确展开：C/k_B = 1 − x²/12 + x⁴/240 − x⁶/6048 + O(x⁸)（sympy series 至 O(x⁸) 确证前三项）",
+    "量纲检查通过：C = kB*x^2*exp(x)/(exp(x)-1)^2 量纲为 energy/temperature（dimensional_check consistent，matches_expected=true）—— 体检项，非推导链步骤",
+    "与标准文献一致（Pathria & Beale, Statistical Mechanics 3rd ed. 量子谐振子热容展开；本推导自第一性原理独立完成）",
+    "方法：S5 次阶极限交叉验证 —— 首阶系数若有任何符号/数值错误，次阶极限不可能恰好落在 +1/240"
+  ],
+  "frozen": true,
+  "turns": 21,
+  "tool_calls": 33,
+  "elapsed_s": 319.0,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787420481-0b79e1"
+}

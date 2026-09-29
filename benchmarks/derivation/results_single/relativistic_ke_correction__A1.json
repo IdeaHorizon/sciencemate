@@ -1,0 +1,79 @@
+{
+  "task_id": "relativistic_ke_correction",
+  "arm": "A1",
+  "final_expression": "m*v**2/2 + 3*m*v**4/(8*c**2)",
+  "final_expression_source": "main_result",
+  "main_result_statement": "相对论动能低能展开 K = m v^2/2 + (3/8)m v^4/c^2 + O(m v^6/c^4)；经典项 mv^2/2 之后的首阶修正项为 (3/8)m v^4/c^2，系数 3/8 = 0.375（以 m v^4/c^2 为单位）",
+  "verdict": "derived",
+  "verification_evidence": [
+    {
+      "step": "S1",
+      "probe": "e4687a5adfe64650",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S2",
+      "probe": "2349f53ccafea0eb",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S3",
+      "probe": "2527897b617111f6",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S4",
+      "probe": "8965918378260154",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S5",
+      "probe": "6bbb70a221c27e4e",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S6",
+      "probe": "13539f2aa8075dcc",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S7",
+      "probe": "fa2ab2430a8cf8aa",
+      "status": "numerically_supported",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 7,
+  "step_count": 7,
+  "assumptions": [
+    "A1: m > 0, c > 0, 0 < v < c（级数收敛域 |v^2/c^2|<1，物理上 v<c 恒成立）",
+    "A2: 截断到 x^2 阶（x=v^2/c^2），丢弃 O(x^3)=O(v^6/c^4)",
+    "A3: 实用近似域 v << c（v^2/c^2 << 1），误差由 S7 上界控制"
+  ],
+  "unverified_steps": [],
+  "validity_domain": [
+    "A1",
+    "A2",
+    "A3"
+  ],
+  "credibility": "主结果（首阶修正项与系数 3/8=0.375）所有承重步骤符号确证（verified）：二项式系数（S1/S2 双路线）、代数化简（S3）、余项阶数（S4）、极限回归（S5）、数值等式（S6）。O(v^6/c^4) 量级与首项系数 5/16 由 S4 符号确证。误差上界引理（S7）有演绎证明（二项式系数单调性）+ 数值支持（check_step 64 点 + find_counterexample 480 点，非承重）。标准教科书结果，推导链无脆弱环节。适用域：m>0, c>0, 0<v<c，实用域 v<<c。",
+  "findings": [
+    "首阶修正系数 3/8 = 0.375 符号确证（S6），与预注册阈值一致（measured）",
+    "被丢弃项量级 O(m v^6/c^4)，首项 (5/16)m v^6/c^4（S4 符号确证）；相对首阶修正为 O(v^2/c^2)（=5/6*v^2/c^2），相对经典项为 O(v^4/c^4)",
+    "适用域：级数收敛域 |v|<c；实用截断域 v<<c；v=0.1c 时截断相对误差约 0.83%，v=0.5c 时约 21%（截断失效）",
+    "严格误差上界 0 <= R <= (5/16)m v^6/c^4*(1-v^2/c^2)^-1（S7 演绎证明 + 数值支持）",
+    "量纲：mc^2 与两阶截断 mv^2/2+3mv^4/(8c^2) 均为能量（dimensional_check matches）；完整 K 表达式直接检查时工具在 v=c 奇异点求值塌缩返回 zoo，属求值假象，分量检查确认正确",
+    "S1/S2 双路线交叉验证二项式系数（广义二项式定理 vs 中心二项系数生成函数）"
+  ],
+  "frozen": true,
+  "turns": 16,
+  "tool_calls": 27,
+  "elapsed_s": 273.3,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787416553-2c4a84"
+}

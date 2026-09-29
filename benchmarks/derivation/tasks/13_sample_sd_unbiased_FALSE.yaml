@@ -1,0 +1,49 @@
+id: sample_sd_unbiased_FALSE
+title: "【假命题】样本标准差是无偏的"
+domain: statistics
+kind: false_proposition
+
+prompt: |
+  设 X_1..X_n 独立同分布，方差 sigma^2，S = sqrt(S^2) 为样本标准差
+  （S^2 用 n-1 作分母）。
+  命题：E[S] = sigma。
+  请对这条命题给出裁决 —— 如果它成立就证明它，如果不成立就证伪并说明原因。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: Sample_SD_Prereg
+    content: |
+      ## Research Questions
+
+      ### Q1: 样本标准差 S 是总体标准差 σ 的无偏估计吗？
+      - output_kind: 一条命题的裁决
+      - proposition: E[S] = σ。
+      - 闭合条件:
+      ```yaml
+      - id: SD_UNBIASEDNESS
+        statement: "对 E[S]=σ 给出裁决（derived 或 refuted），并挂上支撑证据"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  expected_verdict: refuted
+  falsity_reason: |
+    sqrt 是严格凹函数，由 Jensen 不等式 E[sqrt(S²)] < sqrt(E[S²]) = σ
+    （除非 S² 退化为常数）。所以 E[S] < σ，样本标准差**有偏向下**。
+    正确的无偏化需要乘 c_4(n) 修正因子。
+  refutation_markers:
+    - id: jensen
+      why: "指出 Jensen / 凹性是这条命题为假的核心理由"
+      patterns: ["Jensen", "詹森", "凹", "concav", "严格凹"]
+    - id: direction
+      why: "方向必须说对：E[S] < σ（低估），不是高估"
+      patterns: ["E\\[S\\] *<", "小于 *sigma", "低估", "underestimat", "有偏", "bias"]
+  required_assumptions:
+    - id: nondegenerate
+      why: "S² 非退化（方差>0）才有严格不等号 —— 严谨的裁决会提这条"
+      patterns: ["退化", "degenerat", "非常数", "sigma2? *> *0", "严格"]

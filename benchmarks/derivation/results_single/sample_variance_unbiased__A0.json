@@ -1,0 +1,32 @@
+{
+  "task_id": "sample_variance_unbiased",
+  "arm": "A0",
+  "model": "deepseek-v4-flash",
+  "final_expression": "sigma**2",
+  "verdict": "derived",
+  "assumptions": [
+    "n 是整数且 n>=2，保证分母 n-1 非零；n=1 时 S^2 无定义",
+    "X_1,...,X_n 是同一概率空间上的实值随机变量",
+    "X_1,...,X_n 独立同分布",
+    "mu = E[X_i] 存在且有限",
+    "sigma^2 = Var(X_i) = E[(X_i-mu)^2] 存在且有限，因此 E[X_i^2]<∞",
+    "样本均值定义为 Xbar=(1/n)sum_i X_i",
+    "样本方差按题中公式定义，分母为 n-1",
+    "所有求和都是有限项，无需级数收敛条件，期望线性可直接用于有限和",
+    "平方展开对任意实数取值成立，不要求正态性等额外分布假设"
+  ],
+  "unverified_steps": [
+    "期望线性、Var(aX)=a^2 Var(X)、独立随机变量和的方差分解作为标准概率论性质直接引用，未在题解中逐条重证",
+    "由 sigma^2 有限推出相关二阶矩存在，按标准事实引用，未单独做 Lebesgue 积分判别",
+    "未做数值模拟验证；本结论是解析推导"
+  ],
+  "reasoning_summary": "利用恒等式 sum_i(X_i-Xbar)^2 = sum_i(X_i-mu)^2 - n(Xbar-mu)^2。第一项期望为 n*sigma^2，第二项期望为 sigma^2，所以残差平方和期望为 (n-1)*sigma^2；除以 n-1 后得到 sigma^2。n-1 来自样本均值替换总体均值造成的一个方差损失。",
+  "raw_text": "先补一个前提：命题成立需要 \\(n\\ge 2\\)，否则 \\(n-1=0\\)，\\(S^2\\) 没有定义。下面在 \\(n\\ge2\\)、\\(\\sigma^2<\\infty\\) 的通常条件下证明。\n\n## 假设\n\n1. \\(n\\) 是整数，且 \\(n\\ge2\\)，保证分母 \\(n-1\\neq0\\)。\n2. \\(X_1,\\dots,X_n\\) 是同一概率空间上的实值随机变量。\n3. \\(X_1,\\dots,X_n\\) 独立同分布。\n4. \\(\\mu=E[X_i]\\) 存在且有限。\n5. \\(\\sigma^2=\\operatorname{Var}(X_i)=E[(X_i-\\mu)^2]\\) 存在且有限。\n6. 样本均值定义为 \\(\\bar X=\\frac1n\\sum_i X_i\\)。\n7. 样本方差按题中定义：\\(S^2=\\frac1{n-1}\\sum_i(X_i-\\bar X)^2\\)。\n8. 所有求和都是有限项，不涉及级数收敛问题；期望的线性可以直接用于有限和。\n9. 平方展开对任意实数取值都成立，不需要正态性等额外分布假设。\n\n## 推导\n\n令\n\\[\nSS=\\sum_{i=1}^n(X_i-\\bar X)^2.\n\\]\n\n### 第一步：代数恒等式\n\n因为\n\\[\n\\sum_{i=1}^n(X_i-\\bar X)=\\sum_i X_i-n\\bar X=0,\n\\]\n所以\n\\[\n\\begin{aligned}\n\\sum_i(X_i-\\mu)^2\n&=\\sum_i\\bigl[(X_i-\\bar X)+(\\bar X-\\mu)\\bigr]^2\\\\\n&=\\sum_i(X_i-\\bar X)^2\n+2(\\bar X-\\mu)\\sum_i(X_i-\\bar X)\n+n(\\bar X-\\mu)^2\\\\\n&=\\sum_i(X_i-\\bar X)^2+n(\\bar X-\\mu)^2.\n\\end{aligned}\n\\]\n\n因此\n\\[\n\\sum_i(X_i-\\bar X)^2\n=\n\\sum_i(X_i-\\mu)^2\n-\nn(\\bar X-\\mu)^2.\n\\]\n\n> 这一步的理由：插入并减去 \\(\\bar X\\)，展开平方；交叉项因为 \\(\\sum_i(X_i-\\bar X)=0\\) 消失。\n\n### 第二步：取期望\n\n两边取期望：\n\\[\nE[SS]\n=\nE\\left[\\sum_i(X_i-\\mu)^2\\right]\n-\nnE\\left[(\\bar X-\\mu)^2\\right].\n\\]\n\n> 这一步的理由：期望是线性的，且右边两个期望都有限。\n\n### 第三步：计算第一项\n\n\\[\nE\\left[\\sum_i(X_i-\\mu)^2\\right]\n=\n\\sum_i E[(X_i-\\mu)^2]\n=\nn\\sigma^2.\n\\]\n\n> 这一步的理由：方差定义，以及同分布假设。\n\n### 第四步：计算第二项\n\n先有\n\\[\nE[\\bar X]=E\\left[\\frac1n\\sum_i X_i\\right]\n=\\frac1n\\sum_iE[X_i]\n=\\mu.\n\\]\n所以\n\\[\nE[(\\bar X-\\mu)^2]=\\operatorname{Var}(\\bar X).\n\\]\n\n又因为 \\(X_i\\) 独立，\n\\[\n\\operatorname{Var}(\\bar X)\n=\n\\operatorname{Var}\\left(\\frac1n\\sum_i X_i\\right)\n=\n\\frac1{n^2}\\operatorname{Var}\\left(\\sum_i X_i\\right)\n=\n\\frac1{n^2}\\sum_i \\operatorname{Var}(X_i)\n=\n\\frac1{n^2}n\\sigma^2\n=\n\\frac{\\sigma^2}{n}.\n\\]\n\n> 这一步的理由：方差的性质、独立性，以及同分布假设。\n\n### 第五步：合并\n\n\\[\nE[SS]\n=\nn\\sigma^2\n-\nn\\cdot\\frac{\\sigma^2}{n}\n=\n(n-1)\\sigma^2.\n\\]\n\n因此\n\\[\nE[S^2]\n=\nE\\left[\\frac{1}{n-1}SS\\right]\n=\n\\frac1{n-1}(n-1)\\sigma^2\n=\n\\sigma^2.\n\\]\n\n## \\(n-1\\) 的分母从哪来\n\n如果已知总体均值 \\(\\mu\\)，那么\n\\[\nE\\left[\\frac1n\\sum_i(X_i-\\mu)^2\\right]=\\sigma^2.\n\\]\n但实际用样本均值 \\(\\bar X\\) 代替 \\(\\mu\\) 时，\n\\[\n\\sum_i(X_i-\\bar X)^2\n=\n\\sum_i(X_i-\\mu)^2\n-\nn(\\bar X-\\mu)^2.\n\\]\n\n取期望后，第二项贡献了\n\\[\nnE[(\\bar X-\\mu)^2]=n\\cdot\\frac{\\sigma^2}{n}=\\sigma^2.\n\\]\n\n也就是说，用 \\(\\bar X\\) 代替 \\(\\mu\\)，会让平方和平均“损失”一个 \\(\\sigma^2\\)。因此残差平方和的期望不是 \\(n\\sigma^2\\)，而是\n\\[\n(n-1)\\sigma^2.\n\\]\n\n所以要估计 \\(\\sigma^2\\)，应该除以 \\(n-1\\)，而不是除以 \\(n\\)。这就是 \\(n-1\\) 这个分母的来源。\n\n如果错误地除以 \\(n\\)，则\n\\[\nE\\left[\\frac1n\\sum_i(X_i-\\bar X)^2\\right]\n=\n\\frac{n-1}{n}\\sigma^2,\n\\]\n会系统性偏小。\n\n```json\n{\n  \"final_expression\": \"sigma**2\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"n 是整数且 n>=2，保证分母 n-1 非零；n=1 时 S^2 无定义\",\n    \"X_1,...,X_n 是同一概率空间上的实值随机变量\",\n    \"X_1,...,X_n 独立同分布\",\n    \"mu = E[X_i] 存在且有限\",\n    \"sigma^2 = Var(X_i) = E[(X_i-mu)^2] 存在且有限，因此 E[X_i^2]<∞\",\n    \"样本均值定义为 Xbar=(1/n)sum_i X_i\",\n    \"样本方差按题中公式定义，分母为 n-1\",\n    \"所有求和都是有限项，无需级数收敛条件，期望线性可直接用于有限和\",\n    \"平方展开对任意实数取值成立，不要求正态性等额外分布假设\"\n  ],\n  \"unverified_steps\": [\n    \"期望线性、Var(aX)=a^2 Var(X)、独立随机变量和的方差分解作为标准概率论性质直接引用，未在题解中逐条重证\",\n    \"由 sigma^2 有限推出相关二阶矩存在，按标准事实引用，未单独做 Lebesgue 积分判别\",\n    \"未做数值模拟验证；本结论是解析推导\"\n  ],\n  \"reasoning_summary\": \"利用恒等式 sum_i(X_i-Xbar)^2 = sum_i(X_i-mu)^2 - n(Xbar-mu)^2。第一项期望为 n*sigma^2，第二项期望为 sigma^2，所以残差平方和期望为 (n-1)*sigma^2；除以 n-1 后得到 sigma^2。n-1 来自样本均值替换总体均值造成的一个方差损失。\"\n}\n```",
+  "thinking_chars": 39419,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 135.5,
+  "tokens": 15092,
+  "parse_ok": true
+}

@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+
+# Node
+node_modules/
+.next/
+out/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+pgdata/
+redisdata/
+miniodata/
+
+# Test
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Build
+*.log
+
+# Runtime
+backend/cache/
+backend/logs/
+backend/output/
+backend/data/harness_runtime*/
+backend/data/project_repositories/
+backend/data/project_worktrees/
+
+# Claude
+.claude/
+
+# Binary docs
+*.pptx
+*.docx
+*.legacy.bak
+
+# Local dev
+*.tsbuildinfo
+.turbo/
+
+# Composite local development checkout (the Harness is its own Git repository)
+harness-framework/

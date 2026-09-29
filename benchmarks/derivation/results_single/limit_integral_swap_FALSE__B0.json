@@ -1,0 +1,31 @@
+{
+  "task_id": "limit_integral_swap_FALSE",
+  "arm": "B0",
+  "model": "deepseek-v4-pro",
+  "final_expression": "Eq(Limit(Integral(f_n(x), (x, 0, 1)), n, oo), Integral(f(x), (x, 0, 1)))  # under DCT",
+  "verdict": "refuted",
+  "assumptions": [
+    "f_n(x) is defined as n on (0,1/n) and 0 otherwise, with f_n(0)=0.",
+    "For fixed n, f_n is a bounded function with finitely many discontinuities, hence integrable.",
+    "Single-point/endpoint changes do not affect the Riemann/Lebesgue integral.",
+    "The interval (0,1/n) has length 1/n.",
+    "For every fixed x>0, there exists an integer N>1/x (Archimedean property).",
+    "Correction with DCT: there exists an integrable g on [0,1] such that |f_n(x)| <= g(x) a.e. for all n.",
+    "Correction with DCT: f_n are measurable/integrable and f_n(x) -> f(x) a.e."
+  ],
+  "unverified_steps": [
+    "Dominated convergence theorem is cited as a standard theorem, not re-proved.",
+    "Measurability of pointwise limits of measurable functions is used as standard.",
+    "Integrability of a bounded function with finitely many discontinuities is used as standard/trivial."
+  ],
+  "reasoning_summary": "The proposition is refuted by a tall, shrinking spike: f_n=n on (0,1/n) and 0 otherwise converges pointwise to 0, but every integral is 1. Pointwise convergence alone cannot prevent mass from concentrating on vanishing intervals; a dominating integrable function (DCT) or uniform integrability is needed to interchange limit and integral.",
+  "raw_text": "命题不成立。逐点收敛本身不能保证积分和极限交换。\n\n**反例：**\n\n定义\n\\[\nf_n(x)=\n\\begin{cases}\nn,& 0<x<\\frac1n,\\\\[4pt]\n0,& x=0 \\text{ 或 } x\\ge \\frac1n.\n\\end{cases}\n\\]\n\n**1. 验证每个 \\(f_n\\) 可积：**\n\n对每个固定的 \\(n\\)，\\(f_n\\) 是有界函数，至多在 \\(0\\) 和 \\(1/n\\) 两点有间断，因此 Riemann 可积，也是 Lebesgue 可积的。其积分为\n\\[\n\\int_0^1 f_n(x)\\,dx\n= n\\cdot \\lambda\\left(\\left(0,\\frac1n\\right)\\right)\n= n\\cdot \\frac1n\n=1.\n\\]\n这一步用到：区间长度 \\(1/n\\)，且单点/端点变化不影响积分。\n\n**2. 验证逐点收敛：**\n\n- 当 \\(x=0\\) 时，\\(f_n(0)=0\\)，所以 \\(f_n(0)\\to 0\\)。\n- 当 \\(x>0\\) 时，由 Archimedean 性质，存在 \\(N>1/x\\)。当 \\(n\\ge N\\) 时，\\(\\frac1n<x\\)，于是 \\(x\\notin(0,\\frac1n)\\)，所以 \\(f_n(x)=0\\)。\n\n因此对每个 \\(x\\in[0,1]\\)，都有\n\\[\nf_n(x)\\to 0.\n\\]\n即 \\(f(x)\\equiv 0\\)。\n\n**3. 比较极限与积分：**\n\\[\n\\lim_{n\\to\\infty}\\int_0^1 f_n(x)\\,dx\n= \\lim_{n\\to\\infty}1\n=1,\n\\]\n但\n\\[\n\\int_0^1 f(x)\\,dx\n=\\int_0^1 0\\,dx\n=0.\n\\]\n所以\n\\[\n\\lim_{n\\to\\infty}\\int_0^1 f_n(x)\\,dx \\neq \\int_0^1 f(x)\\,dx.\n\\]\n\n因此原命题被证伪。\n\n**需要补的条件：**\n\n最常用的是 **Lebesgue 控制收敛定理**：\n\n若还有一个可积函数 \\(g\\in L^1([0,1])\\)，使得对几乎每个 \\(x\\) 和所有 \\(n\\)，都有\n\\[\n|f_n(x)|\\le g(x),\n\\]\n且 \\(f_n(x)\\to f(x)\\) 几乎处处成立，则\n\\[\n\\lim_{n\\to\\infty}\\int_0^1 f_n(x)\\,dx\n=\n\\int_0^1 f(x)\\,dx.\n\\]\n\n在有限测度空间 \\([0,1]\\) 上，逐点收敛加上 **一致可积性** 也是交换极限与积分的精确条件。这个反例之所以失效，是因为质量集中在一个长度趋于 \\(0\\) 的区间上，没有被任何可积函数控制。\n\n```json\n{\n  \"final_expression\": \"Eq(Limit(Integral(f_n(x), (x, 0, 1)), n, oo), Integral(f(x), (x, 0, 1)))  # under DCT\",\n  \"verdict\": \"refuted\",\n  \"assumptions\": [\n    \"f_n(x) is defined as n on (0,1/n) and 0 otherwise, with f_n(0)=0.\",\n    \"For fixed n, f_n is a bounded function with finitely many discontinuities, hence integrable.\",\n    \"Single-point/endpoint changes do not affect the Riemann/Lebesgue integral.\",\n    \"The interval (0,1/n) has length 1/n.\",\n    \"For every fixed x>0, there exists an integer N>1/x (Archimedean property).\",\n    \"Correction with DCT: there exists an integrable g on [0,1] such that |f_n(x)| <= g(x) a.e. for all n.\",\n    \"Correction with DCT: f_n are measurable/integrable and f_n(x) -> f(x) a.e.\"\n  ],\n  \"unverified_steps\": [\n    \"Dominated convergence theorem is cited as a standard theorem, not re-proved.\",\n    \"Measurability of pointwise limits of measurable functions is used as standard.\",\n    \"Integrability of a bounded function with finitely many discontinuities is used as standard/trivial.\"\n  ],\n  \"reasoning_summary\": \"The proposition is refuted by a tall, shrinking spike: f_n=n on (0,1/n) and 0 otherwise converges pointwise to 0, but every integral is 1. Pointwise convergence alone cannot prevent mass from concentrating on vanishing intervals; a dominating integrable function (DCT) or uniform integrability is needed to interchange limit and integral.\"\n}\n```",
+  "thinking_chars": 44315,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 163.2,
+  "tokens": 15272,
+  "parse_ok": true,
+  "repeat_index": 1
+}

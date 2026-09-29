@@ -1,0 +1,83 @@
+{
+  "task_id": "sample_sd_unbiased_FALSE",
+  "arm": "A1",
+  "final_expression": "sigma*sqrt(2/(n-1))*gamma(n/2)/gamma((n-1)/2)",
+  "final_expression_source": "main_result",
+  "main_result_statement": "命题 E[S]=σ 不成立（refuted）：对任意 n≥2、σ²>0 的非退化 iid 样本 E[S]<σ（样本标准差系统性低估总体标准差）。上式为正态闭式 E[S]=σ·c4(n)，c4(n)=sqrt(2/(n-1))*Gamma(n/2)/Gamma((n-1)/2)<1，n→∞ 渐近无偏。",
+  "verdict": "refuted",
+  "verification_evidence": [
+    {
+      "step": "S2",
+      "probe": "ebf59a6a0e96d634",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S4",
+      "probe": "7af7f38fa59e17ff",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S13",
+      "probe": "a5aba7f97ee75b1b",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S14a",
+      "probe": "9e63524acfff475d",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S14b",
+      "probe": "5882b45eb1982017",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S14c",
+      "probe": "0c1e5912ce771c4f",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S14d",
+      "probe": "f95860c716b0aa13",
+      "status": "verified",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 9,
+  "step_count": 19,
+  "assumptions": [
+    "A1: n>=2 整数（样本量）",
+    "A2: X1..Xn iid 且 E[Xi^2]<oo",
+    "A3: sigma^2>0（非退化；退化时 E[S]=sigma=0 平凡成立，不在适用域）",
+    "A4: Xi~N(mu,sigma^2)（仅附加闭式节）",
+    "A5: 隐含条件：sqrt 定义域 [0,oo)；E[S]<oo 自洽；Gamma 参数>0（n>=2）"
+  ],
+  "unverified_steps": [],
+  "validity_domain": [
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5"
+  ],
+  "credibility": "主结论 E[S]<sigma 为完整演绎证明：代数步骤全部符号 verified，Jensen/等号条件/支撑事实为标准定理（cited_theorem + prose 标注）。附加正态闭式经符号验证（c4(2),c4(3),c4(5),c4(10)<1）、极限回归（c4(n)->1）与量纲检查。数值反例 c4(4)=0.9213!=1 作为对目标命题的独立确认。唯一未经机器验证的是 S6/S7 两条标准测度论事实（已在 findings 标注）。",
+  "findings": [
+    "主结论（演绎证明）：对任意 n>=2、sigma^2>0 非退化 iid 样本，E[S]<sigma。机制：sqrt 严格凹 + Jensen + 等号排除（连续函数支撑论证）",
+    "无偏性不传播的典型例子：S2 无偏但 S 有偏，偏置符号由 sqrt 凹性固定为负（系统性低估）",
+    "正态闭式 E[S]=sigma*c4(n)：c4(2)=sqrt(2/pi)=0.798（相对偏置 -20.2%），c4(3)=0.886，c4(5)=0.940，c4(10)=0.973；c4 单调增、极限 1：有限 n 严格有偏，n->oo 渐近无偏",
+    "最脆环节：S6 等号条件与 S7 支撑事实为 cited_theorem/prose（标准事实）；代数与闭式全部机械确证",
+    "平凡例外：sigma^2=0（A3）下 E[S]=sigma=0 成立，适用域外边界",
+    "推导刻意避开四阶矩/Var(S2) 公式，只用二阶矩 + 支撑论证，对重尾分布（mu4=oo）同样成立"
+  ],
+  "frozen": false,
+  "turns": 19,
+  "tool_calls": 29,
+  "elapsed_s": 445.2,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787420036-d174f9"
+}

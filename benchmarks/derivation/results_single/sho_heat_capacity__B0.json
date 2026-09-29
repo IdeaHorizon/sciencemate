@@ -1,0 +1,31 @@
+{
+  "task_id": "sho_heat_capacity",
+  "arm": "B0",
+  "model": "deepseek-v4-pro",
+  "final_expression": "k_B*x**2*exp(x)/(exp(x)-1)**2",
+  "verdict": "derived",
+  "assumptions": [
+    "单个一维量子简谐振子，ω>0，能级为 E_n=ℏω(n+1/2) 且非简并",
+    "系统处于正则系综，T>0，Boltzmann 分布适用",
+    "x=ℏω/(k_BT)>0，保证几何级数收敛且分母非零",
+    "热容定义为固定 ω 下的 C=dU/dT，无体积/压强功",
+    "使用标准正则系综关系 U=-∂ ln Z/∂β",
+    "求导与级数求和可交换，依据标准一致收敛/解析性结论",
+    "高温极限使用 x→0+ 时 e^x 的 Taylor 展开"
+  ],
+  "unverified_steps": [
+    "谐振子能谱引用标准量子力学结果，未重新解薛定谔方程",
+    "求导与级数求和交换未做显式 epsilon-N 验证",
+    "高温 Taylor 展开余项未显式估计"
+  ],
+  "reasoning_summary": "由正则配分函数 Z=e^{-x/2}/(1-e^{-x}) 得到平均能量 U=ℏω/2+ℏω/(e^x-1)，再对 T 求导得到 C=k_B*x^2*e^x/(e^x-1)^2；高温 x→0 时 C→k_B。",
+  "raw_text": "设 \\(\\beta=1/(k_BT)\\)，\\(x=\\beta\\hbar\\omega=\\hbar\\omega/(k_BT)\\)。\n\n## 1. 能谱\n\n一维量子简谐振子能级为\n\n\\[\nE_n=\\hbar\\omega\\left(n+\\frac12\\right),\\qquad n=0,1,2,\\dots\n\\]\n\n这一步用到标准谐振子解：\\(\\omega>0\\)，能级非简并。\n\n## 2. 正则配分函数\n\n正则系综中：\n\n\\[\nZ=\\sum_{n=0}^\\infty e^{-\\beta E_n}\n\\]\n\n代入能级：\n\n\\[\nZ=\\sum_{n=0}^\\infty e^{-\\beta\\hbar\\omega(n+1/2)}\n= e^{-\\beta\\hbar\\omega/2}\\sum_{n=0}^\\infty (e^{-\\beta\\hbar\\omega})^n\n\\]\n\n因为 \\(x=\\beta\\hbar\\omega>0\\)，所以 \\(0<e^{-x}<1\\)，几何级数收敛：\n\n\\[\nZ=\\frac{e^{-x/2}}{1-e^{-x}}\n\\]\n\n这里分母 \\(1-e^{-x}\\neq 0\\)，因为 \\(x>0\\)。\n\n## 3. 平均能量\n\n\\[\n\\ln Z=-\\frac{x}{2}-\\ln(1-e^{-x})\n\\]\n\n对 \\(\\beta\\) 求导可得平均能量：\n\n\\[\nU=-\\frac{\\partial \\ln Z}{\\partial\\beta}\n\\]\n\n注意 \\(x=\\beta\\hbar\\omega\\)，所以\n\n\\[\nU=-\\hbar\\omega\\frac{d\\ln Z}{dx}\n\\]\n\n计算：\n\n\\[\n\\frac{d\\ln Z}{dx}\n=-\\frac12-\\frac{e^{-x}}{1-e^{-x}}\n=-\\frac12-\\frac{1}{e^x-1}\n\\]\n\n因此：\n\n\\[\nU=\\hbar\\omega\\left(\\frac12+\\frac{1}{e^x-1}\\right)\n\\]\n\n零点能 \\(\\hbar\\omega/2\\) 是常数，不会影响热容。\n\n## 4. 热容\n\n热容定义为固定 \\(\\omega\\) 下平均能量对温度求导：\n\n\\[\nC=\\frac{dU}{dT}\n\\]\n\n先对 \\(x\\) 求导：\n\n\\[\n\\frac{dU}{dx}\n=-\\frac{\\hbar\\omega e^x}{(e^x-1)^2}\n\\]\n\n又有：\n\n\\[\nx=\\frac{\\hbar\\omega}{k_BT}\n\\]\n\n所以：\n\n\\[\n\\frac{dx}{dT}\n=-\\frac{\\hbar\\omega}{k_BT^2}\n=-\\frac{x}{T}\n\\]\n\n链式法则：\n\n\\[\nC=\\frac{dU}{dT}\n=\\frac{dU}{dx}\\frac{dx}{dT}\n\\]\n\n代入：\n\n\\[\nC=\n\\left(-\\frac{\\hbar\\omega e^x}{(e^x-1)^2}\\right)\n\\left(-\\frac{x}{T}\\right)\n=\n\\frac{\\hbar\\omega x}{T}\\frac{e^x}{(e^x-1)^2}\n\\]\n\n利用 \\(\\hbar\\omega/T=k_Bx\\)，得到：\n\n\\[\n\\boxed{\nC(T)=k_B\\frac{x^2 e^x}{(e^x-1)^2}\n}\n\\]\n\n等价形式：\n\n\\[\nC(T)=k_B\\frac{x^2}{4\\sinh^2(x/2)}\n\\]\n\n## 5. 高温极限\n\n高温 \\(T\\to\\infty\\) 对应 \\(x\\to0^+\\)。使用\n\n\\[\ne^x-1\\sim x,\\qquad e^x\\to1\n\\]\n\n因此：\n\n\\[\nC(T)\n\\sim k_B\\frac{x^2}{x^2}\n= k_B\n\\]\n\n所以：\n\n\\[\n\\boxed{\\lim_{T\\to\\infty}C(T)=k_B}\n\\]\n\n这正是能均分极限：一维谐振子有动能和势能两个二次自由度，各贡献 \\(k_BT/2\\)，热容为 \\(k_B\\)。\n\n---\n\n### 用到的假设\n\n1. 单个一维量子简谐振子，\\(\\omega>0\\)，能级为 \\(E_n=\\hbar\\omega(n+1/2)\\) 且非简并。\n2. 系统处于正则系综，与温度 \\(T>0\\) 的热库平衡，权重为 Boltzmann 因子。\n3. \\(x=\\hbar\\omega/(k_BT)>0\\)，因此几何级数收敛，且 \\(1-e^{-x}\\neq0\\)。\n4. 热容定义为固定 \\(\\omega\\) 下的 \\(C=dU/dT\\)；没有体积/压强功或其他外参量变化。\n5. 使用了标准正则系综关系 \\(U=-\\partial_\\beta\\ln Z\\)。\n6. 求导与级数求和/对数求导可交换；这是标准一致收敛/解析性结论。\n7. 高温极限使用 \\(x\\to0^+\\) 时 \\(e^x\\) 的 Taylor 展开。\n\n### 未做机械验证的步骤\n\n- 谐振子能谱 \\(E_n=\\hbar\\omega(n+1/2)\\) 引用标准量子力学结果，未重新解薛定谔方程。\n- 求导与级数求和的交换未做显式 \\(\\varepsilon\\)-\\(N\\) 验证，仅引用标准一致收敛结论。\n- 高温展开的余项未显式估计；此处只用于极限 \\(x\\to0\\)。\n\n```json\n{\n  \"final_expression\": \"k_B*x**2*exp(x)/(exp(x)-1)**2\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"单个一维量子简谐振子，ω>0，能级为 E_n=ℏω(n+1/2) 且非简并\",\n    \"系统处于正则系综，T>0，Boltzmann 分布适用\",\n    \"x=ℏω/(k_BT)>0，保证几何级数收敛且分母非零\",\n    \"热容定义为固定 ω 下的 C=dU/dT，无体积/压强功\",\n    \"使用标准正则系综关系 U=-∂ ln Z/∂β\",\n    \"求导与级数求和可交换，依据标准一致收敛/解析性结论\",\n    \"高温极限使用 x→0+ 时 e^x 的 Taylor 展开\"\n  ],\n  \"unverified_steps\": [\n    \"谐振子能谱引用标准量子力学结果，未重新解薛定谔方程\",\n    \"求导与级数求和交换未做显式 epsilon-N 验证\",\n    \"高温 Taylor 展开余项未显式估计\"\n  ],\n  \"reasoning_summary\": \"由正则配分函数 Z=e^{-x/2}/(1-e^{-x}) 得到平均能量 U=ℏω/2+ℏω/(e^x-1)，再对 T 求导得到 C=k_B*x^2*e^x/(e^x-1)^2；高温 x→0 时 C→k_B。\"\n}\n```",
+  "thinking_chars": 56701,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 260.3,
+  "tokens": 20282,
+  "parse_ok": true,
+  "repeat_index": 1
+}

@@ -1,0 +1,29 @@
+node_inputs:
+  prereg_artifact_id: pre_registration__Fresh_SLURM_Checkpoint_Resume
+  stage: simulation
+  experiment_focus: |
+    On the declared SLURM test partition, submit a short checkpointing job that writes
+    a sequence number and checkpoint file, is intentionally interrupted according to
+    the test protocol, then resumes from that exact checkpoint in a second job. Never
+    claim a resume if the second job starts at zero. Use dry-run first and request the
+    scheduler-specific confirmation before any real submission. Preserve both job IDs,
+    scripts, output paths, checkpoint hash, and final sequence number.
+upstream_artifacts:
+  - type: research_plan
+    name: Fresh_SLURM_Checkpoint_Resume_Plan
+    content: "Validate interruption and restart provenance with two real scheduler jobs."
+  - type: pre_registration
+    name: Fresh_SLURM_Checkpoint_Resume
+    metadata:
+      frozen: true
+      run_role: primary
+      analysis_eligible: true
+      stage: simulation
+      requires_scheduler: true
+      execution_contract:
+        version: 1
+        scientific_params: {checkpoint_at: 5, final_step: 10}
+        runtime_params: {scheduler: slurm, queue: debug, walltime_minutes: 3}
+    content: |
+      Resume evidence is valid only when the final log proves a nonzero checkpoint
+      sequence from job one was consumed by job two.

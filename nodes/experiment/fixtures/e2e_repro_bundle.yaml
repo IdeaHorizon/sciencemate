@@ -1,0 +1,92 @@
+# experiment 节点 fixture —— repro_bundle 真实 E2E 验收（轻量本地源码）
+#
+# 预备源码由测试操作者创建：
+#   - /tmp/hf-repro-e2e-baseline：原始 git repo，只读、clean
+#   - /tmp/hf-repro-e2e-work/source_worktree：从 baseline 派生的可写 worktree，有 dirty input
+#   - git submodule，有 dirty diff
+#   - untracked external_dep.marker
+#
+# 运行：
+#   python run_node.py --harness experiment --stream \
+#   （⚠️ v0.11：EXPERIMENT_AUTONOMOUS=1 auto-answer 已移除，无人值守待框架 headless-hitl feature；
+#     交互式跑，遇 pause 人工应答）
+#     --fixture nodes/experiment/fixtures/e2e_repro_bundle.yaml --project-id test-e2e-repro-bundle
+
+node_inputs:
+  path_roles:
+    source_baseline_root: /tmp/hf-repro-e2e-baseline
+    source_worktree_root: /tmp/hf-repro-e2e-work/source_worktree
+    experiment_root: /tmp/hf-repro-e2e-work
+    build_root: /tmp/hf-repro-e2e-work/source_worktree/build
+    run_root: /tmp/hf-repro-e2e-work/source_worktree/case
+  experiment_focus: |
+    这是一个【repro_bundle 真实 E2E 验收】。目标不是科学发现，而是验证 experiment 节点在一个真实 build+min-run 后，
+    能否自动生成可复现包 `runs/<id>/outputs/experiment/repro/` 和
+    `repro_bundle` artifact。
+
+    源码已经准备好，无需 clone、无需清理、无需请求人工确认：
+      source_baseline_root=/tmp/hf-repro-e2e-baseline（只读）
+      source_worktree_root=/tmp/hf-repro-e2e-work/source_worktree（可写）
+      source_worktree_root 中包含：
+        - Makefile
+        - src/repro_app.f90
+        - case/input.nml        （dirty input，值已从 41 改为 42）
+        - extern/sub            （git submodule，内部 dirty diff）
+        - external_dep.marker   （untracked 外部依赖占位）
+
+    必须按以下短流程执行，控制在 8 轮以内：
+    1. 侦察源码与 git 状态：
+       `cd /tmp/hf-repro-e2e-work/source_worktree && git status --short --branch && git submodule status --recursive && ls -la && cat Makefile`
+    2. 先让框架生成 build_env/platform_profile/source_recon/build_graph，再 build。
+       若 Makefile DAG 提取不可用，才保存 declared_route fallback contract，至少包含：
+       source_baseline_root=/tmp/hf-repro-e2e-baseline，
+       source_worktree_root=/tmp/hf-repro-e2e-work/source_worktree，
+       build_root=/tmp/hf-repro-e2e-work/source_worktree/build，
+       run_root=/tmp/hf-repro-e2e-work/source_worktree/case，
+       expected_artifacts=[{path: /tmp/hf-repro-e2e-work/source_worktree/build/repro_app, type: executable}]。
+    3. 构建：
+       `cd /tmp/hf-repro-e2e-work/source_worktree && make all`
+    4. 模拟一个外部依赖获取命令，但不要联网：只把命令写进 transcript 即可，执行：
+       `git clone https://example.com/pkg/GSW-Fortran.git /tmp/hf-repro-e2e-external-placeholder || true`
+       这是受控测试，用于验证 repro_bundle 能从 command log 记录 external_dependencies。
+    5. min-run：把 `repro_app` 运行声明为 v2 路线步骤，`workdir_role=run_root`、
+       `expected_outputs=[result.txt]`；通过 `safe_run_bash` 传 `cwd` 与
+       `route_step_id` 执行，环境设为 `OMP_NUM_THREADS=2`。期望 returncode=0，
+       result.txt 含 VALUE=42 / OMP=2 / REPRO_OK。不得用 `verify_min_run` 隐式执行。
+    6. save_artifact 创建 experiment_log，content 必须包含：
+       - ## Verdict：本次为平台 E2E，不对应真实 hypothesis，verdict: inconclusive
+       - ## Credibility：reliable（依据 min-run returncode=0、REPRO_OK、result.txt hash/size 由框架记录）
+       - 输入/输出路径、运行配置：MPI ranks=none, OMP threads=2, executable=../build/repro_app, cwd=/tmp/hf-repro-e2e-work/source_worktree/case
+       - Methodological / Dead End：本次未发现科学 methodological/dead_end finding，因为这是平台机制测试
+       然后 freeze experiment_log。
+
+upstream_artifacts:
+  - type: claim
+    name: H_repro_bundle_e2e
+    metadata:
+      claim_type: hypothesis
+      status: open
+      created_at: "2026-06-18T00:00:00+00:00"
+    content: |
+      experiment 节点在真实轻量 build+min-run 后，会自动生成可复现包，包含 manifest、源码状态、
+      输入/输出 hash、runtime_config、external_dependencies 和 replay skeleton。
+
+  - type: pre_registration
+    name: E2E_Repro_Bundle
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-18T00:00:00+00:00"
+      freeze_reason: "repro_bundle 真实 E2E 验收"
+      run_role: primary
+      analysis_eligible: true
+      experiment_id: e2e_repro_bundle
+      protocol_version: e2e-repro-v1
+    content: |
+      ## Pre-Registration: repro_bundle 真实 E2E 验收
+      ### 目标
+      验证 experiment 节点对一个真实轻量源码实验自动生成可复现包。
+      ### 成功判据
+      - build/repro_app 编译成功
+      - verify_min_run returncode=0 且 expected_substr=REPRO_OK
+      - run 结束存在 repro_bundle artifact
+      - runs/<id>/outputs/experiment/repro/manifest.json 包含正确 source repo、runtime_config、input/output hash、submodule 状态、external_dependencies

@@ -1,0 +1,175 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harness-framework"
+version = "0.5.6"
+description = "Minimal teaching scaffold for the AI4S research platform's node harness layer."
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "numpy>=1.24",
+    "matplotlib>=3.8",
+    "pillow>=10.0",
+    # TikZ 后端的 PDF 光栅化器。**必须是 base dep**：没有它，出版级 schematic
+    # 只能交 PDF，PNG 缺席 —— 而 PNG 是机械审计、VLM 审图和记录预览的入口。
+    # 2026-09-16 实测：沙箱里 pdftoppm / pdftocairo / gs / dvisvgm / pypdfium2
+    # 一个都没有，于是「更好的排版」被我藏在了一个没人会传的参数后面，默认
+    # 一直走 matplotlib。这是用「省一个依赖」换掉了这个节点存在的意义。
+    # pypdfium2 是纯 wheel（自带 pdfium），无系统依赖。
+    "pypdfium2>=4.0",
+    "ase>=3.23",
+    # 推导验证四件套（shared/tools/library/derivation_check.py）的引擎。
+    # 它们**必须是 base deps**，不是 optional：check_step / dimensional_check
+    # 那几道闸是 derivation 这条证据模态的判据本身 —— 缺了不是"少一个能力"，
+    # 是"每一步都判 error"，而 error 不是判决。工具层有友好缺失报错（那是给
+    # 装不齐的现场留的出口），但 CI 和部署必须真装上，否则那 15 条断言在任何
+    # 地方都没跑过。（2026-08-22：PR 说"环境已有"，CI 镜像里没有，15 条红。）
+    "sympy>=1.12",
+    "mpmath>=1.3",
+    # context 估算的精算 encoder（summarizer.estimate_tokens）。它有 char/4
+    # 兜底，但兜底对中文+JSON 系统性低估 ~1.65×（issue #710 实测）——校准
+    # 机制会补触发端，装配端仍然盲。生产必须真装上，别靠兜底。
+    "tiktoken>=0.5",
+    # experiment 的 Bash 语义分析器（`nodes/experiment/tools/bash_semantics.py`）。
+    # 它在**框架进程内**顶层 import `tree_sitter` / `tree_sitter_bash`，用来把
+    # 「真的起了后台任务 / 真的提交了作业」和「命令行里提到了这个词」区分开
+    # —— `srun --version` vs `srun -n 4 ./wrf.exe`、`command -v sbatch` vs
+    # `sbatch job.sh`。这是 safe_run_bash / submit_job 的判据本身。
+    #
+    # 必须是 base deps，理由和上面 sympy/mpmath 同形：缺了不是「少一个能力」，
+    # 是那两道闸按设计 fail-closed —— 而 fail-closed 在现场的样子是「实验被误判
+    # 阻断」，然后节点会试着自己 pip install 去自救，撞上全局环境写入审批，转成
+    # 重复审批循环（issue #681，lujy 实测 E2E-WRF 进不到真实构建/调度阶段）。
+    # 装依赖是宿主环境的事，不是 experiment 运行时该干的事。
+    #
+    # 钉在 0.25.x：experiment 用的是这一代 API，且 runtime 与 bash grammar 要
+    # 同代。升 0.26+ 之前先跑完整 experiment 回归。
+    "tree-sitter>=0.25,<0.26",
+    "tree-sitter-bash>=0.25,<0.26",
+    "psutil>=5.9",
+]
+
+# Optional：KB vector embeddings 真模型
+# sentence-transformers 拉 GPU torch + NVIDIA CUDA wheels 全家桶（cublas 423MB /
+# cudnn 366MB / triton 201MB / nccl 206MB / cuda-toolkit 等合计 ~3GB），pip 默认
+# 源不分 CPU/GPU 平台，下载慢。`core/embeddings.py` 用 lazy import + 友好缺失
+# 报错——不装也能跑（用 dummy / external embedding client）。CI 用 mock 跑
+# embeddings 测试不需要真模型。
+#
+# 真用 KB embedding（本地开发 / 服务器）：
+#   pip install -e .[embeddings]
+# 跑这个项目的测试要什么 —— **默认组**，不是 optional extra。
+#
+# 曾经它是 `[project.optional-dependencies] test`，于是 `.venv` 里没有 pytest，
+# 而 `uv run pytest` 在项目环境里找不到它时会**退到 PATH 上的那一个**。本机实测
+# （2026-09-10）：
+#
+#     uv run python  → .venv/bin/python3            (3.14，依赖齐)
+#     uv run pytest  → /Library/Frameworks/.../3.12 (系统 python，一个项目依赖都没有)
+#
+# 后果是 `uv run pytest tests/` **48 条红**，而且红得毫无意义 —— 27 条
+# derivation_check 报「缺 sympy」（sympy 是 base dep，`.venv` 里装着）、12 条
+# run_node_cli 报 ModuleNotFound、3 条报缺 dotenv……全是"用错了解释器"的投影。
+# 一堵长期红的墙会让"红"这件事不再指向任何东西。
+#
+# PEP 735 的 dependency-groups 里 `dev` 是 uv **默认安装**的：放这儿之后
+# `.venv/bin/pytest` 一定存在，`uv run pytest` 就没有退到别处的余地。
+# 不是加一道检查去发现走错了，是让走错这件事不成立。
+#
+# CI 不受影响：容器里由 .gitea/ci-deps.sh 直接 pip 装（它是那边的真相源）。
+[dependency-groups]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-xdist>=3.5.0",
+]
+
+[project.optional-dependencies]
+embeddings = [
+    # default model: intfloat/multilingual-e5-small (118MB, 384 dim, 中英 multilingual)
+    # 首次启动自动下载到 ~/.cache/huggingface/
+    "sentence-transformers>=2.7",
+]
+# PDF 图像抽取：nodes/literature 从论文 PDF 里取代表性配图。
+# `paper_images.py` 是函数内 lazy import，缺了返回 image_dependency_missing，
+# 所以不进 base deps；但它是**被测到的能力**，CI 装（见 .gitea/workflows/test.yaml）。
+pdf-images = [
+    "pymupdf>=1.24",
+]
+# 文档站生成：`python scripts/build_docs_html.py`。
+# 之前这两个依赖谁都没声明 —— 于是 build 只在"某人恰好装过 markdown"的机器上跑得起来，
+# 也就进不了 CI。文档站因此烂了三个月没人发现（已删的节点页还挂在线上、
+# 六份 md 点名的工具全部不存在）。CI 装它，见 .gitea/workflows/test.yaml。
+#
+# pygments **钉死版本**，不是下界。CI 要求"重建结果 == 提交的产物"
+# （.gitea/workflows/test.yaml 第四道闸），那么凡是 `[docs]` 允许装的版本都必须
+# 生成同一份字节 —— 而 pygments 几乎每个 minor 都在动代码块的标记。
+#
+# 2026-09-15 对同一棵树逐版本量过，**四个版本三种输出**：
+#     2.17.2 / 2.18.0 → 一种
+#     2.19.2 / 2.20.0 → `def f()` 中间的空格被包成 `<span class="w"> </span>`
+#     2.21.0          → 又变一次（页更小）
+# 看上去全都一模一样，字节三种。写成 `>=` 的任何下界都挡不住这件事：CI 装到的
+# 永远是当天的最新版，于是闸的红绿变成"今天 PyPI 上是什么版本"，而那种闸的下场
+# 是被当成噪音关掉。实测就踩了一次：写 `>=2.19`、本机 2.20、CI 2.21，整站字节全差。
+#
+# 升级 pygments 的正确姿势：改这里的版本号 + 重建 docs-html/ + 一起提交。
+# 那一次 diff 全是高亮标记的变化，本身就是这次升级的**证据**，该被人看见。
+# （markdown 不敏感：3.5 与 3.10.3 输出逐字节相同，维持 >=3.5。）
+docs = [
+    "markdown>=3.5",
+    "pygments==2.21.0",
+]
+visualization-advanced = [
+    "pyvista>=0.45",
+    "xarray>=2025.1",
+    "zarr>=3.0",
+    "netCDF4>=1.7",
+    "cartopy>=0.24",
+    "MDAnalysis>=2.9",
+    "pymatgen>=2025.1",
+    "cclib>=1.8",
+    "meshio>=5.3",
+    "lasso-python>=2.0.4",
+]
+
+[project.scripts]
+hf = "core.cli:main"
+
+# 显式声明包结构 —— 仓库是 flat-layout（core/、shared/、nodes/、templates/ 并列在根）
+# 不写这个，setuptools 看到多个 top-level dir 不敢自动 discover 就 refuse build。
+# 含 nodes 的全部子包；不含 templates（那是 owner 抄模板用，不当代码 ship）/ tests / scripts。
+[tool.setuptools.packages.find]
+include = ["core*", "shared*", "nodes*"]
+exclude = ["tests*", "scripts*", "templates*", "docs*", "output*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
+# ── 挂住的时候要留下栈（#824）────────────────────────────────────────────
+#
+# `platform / backend` 在 CI 上间歇性**挂住**，本机同一 commit 全绿。workflow 已经
+# 套了 `timeout --signal=KILL` 并把 124/137 翻译成人话，所以「挂住」现在是可读的
+# 失败 —— 但现场只有一个退出码，**不知道卡在哪一行**，于是每次都只能重跑了事。
+#
+# `faulthandler_timeout` 让 pytest 在单条测试超过这个秒数时，把**所有线程的栈**
+# 打到 stderr 然后继续等。它不改变判定（不会因此判红），只保证挂住的那一次留下
+# 可读的现场。数值取 120：本机最慢的一条后端测试是个位数秒，CI 上整套 ~80 秒，
+# 120 秒还没动的只可能是真卡住了。
+#
+# ⚠️ 这条**不能**证明 #824 被修好了 —— 根因还没查。它保证的是下一次挂住时
+# 有东西可看，而不是又一次「说不清」。
+faulthandler_timeout = 120
+markers = [
+    "production_sandbox: (legacy name) runs a real local job / real wall end to end; experiment node tests still carry it",
+]

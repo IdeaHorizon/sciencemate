@@ -1,0 +1,62 @@
+# experiment 节点 fixture —— 第3步真实 E2E：build gate（首次主要 build 前侦察）
+#
+#   python run_node.py --harness experiment --no-interactive \
+#     --fixture nodes/experiment/fixtures/e2e_build_gate.yaml --project-id test-e2e-gate
+#
+# 验证：首次主要 build 被 gate 事前拦 + 自动生成 build_env/platform_profile/source_recon；
+#       生成 build_graph 后放行；探查命令不被拦；伪造 scratchpad 无效。
+
+node_inputs:
+  # 路径角色是权限，只能由 fixture / 编排输入或人工批准声明；agent 存的
+  # declared_route 不再产生角色（2026-08-04）。这里显式声明，E2E 才不依赖
+  # 一次人工 pause —— 本 fixture 是 --no-interactive 跑的。
+  #
+  # 这个 case 恰好是旧实现的死锁形态：步骤 2 在源码树内 `mkdir build`，
+  # 步骤 3 的 fallback declared_route 又必须带 source_root（build_contract
+  # 要求），于是 source_root → 不可变 baseline、build_dir 嵌在其内 →
+  # 契约冲突 → 此后每条写命令都被不可授权的 invalid_path_role_contract 挡掉。
+  # 声明成 managed_source_root 后 in-source build 是合法的。
+  path_roles:
+    managed_source_root: ~/experiments/E3SM_Ocean_GPU/ParallelIO-pio2_6_7
+    build_root: ~/experiments/E3SM_Ocean_GPU/ParallelIO-pio2_6_7/build
+  experiment_focus: |
+    尝试用 CMake 构建 ParallelIO 库（源码在 ~/experiments/E3SM_Ocean_GPU/ParallelIO-pio2_6_7）。
+
+    按以下步骤：
+    1. 先用 inspect 命令看看源码（ls、cat README 等）—— 这些应当正常执行。
+    2. 尝试构建：`cd ~/experiments/E3SM_Ocean_GPU/ParallelIO-pio2_6_7 && mkdir -p build && cd build && cmake .. && make`
+       —— 如果 build 被节点的 gate 拦住，**仔细读拦截提示**，它会告诉你缺什么。
+    3. 按提示：read_artifact 看自动生成的 build_env、source_recon、platform_profile 和 build_graph。
+       如果 build_graph 仍不可得，才用 declared_route JSON/YAML build contract 作为 fallback。
+    4. 再次尝试 build —— 这次应被放行（gate 看到 framework-provisioned build_graph，或 fallback contract）。
+    5. 记录整个过程：gate 在哪一步拦、提示了什么、框架生成了哪些 artifact、最终是否放行。
+       构建是否最终成功不是重点，**重点是 gate 行为**。freeze experiment_log 即可。
+
+upstream_artifacts:
+  - type: claim
+    name: H_build_gate_enforces_recon
+    metadata:
+      claim_type: hypothesis
+      status: open
+      created_at: "2026-06-15T00:00:00+00:00"
+    content: |
+      build gate 能在首次主要 build 前事前拦截缺侦察证据的情况，自动生成 build_env、
+      platform_profile、source_recon 和 build_graph；只有 DAG 不可得时才要求 fallback declared_route。
+
+  - type: pre_registration
+    name: E2E_Build_Gate_Test
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-15T00:00:00+00:00"
+      freeze_reason: "第3步 E2E：验证 build gate 事前拦 + 自动侦察 + declared_route 放行"
+    content: |
+      ## Pre-Registration: build gate 行为测试
+      ### Hypothesis
+      首次主要 build 前，gate 事前拦截缺侦察的情况、自动生成侦察 artifact 和 build_graph。
+      ### Setup
+      - 源码：~/experiments/E3SM_Ocean_GPU/ParallelIO-pio2_6_7（纯 CMake）
+      - 不要求构建成功，重点观察 gate 行为
+      ### Expected
+      - inspect 命令正常
+      - 首次 cmake/make 被 gate 拦 + 自动生成 build_env/platform_profile/source_recon/build_graph
+      - build_graph 可用后放行；若不可用，则 fallback declared_route 后放行

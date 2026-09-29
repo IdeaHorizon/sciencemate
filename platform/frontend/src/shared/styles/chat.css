@@ -1,0 +1,661 @@
+/**
+ * Chat surface styles — sidebar + chat area.
+ *
+ * Class names match what the legacy globals.css already defines, so visual
+ * parity is automatic. Re-declared here under the shared/ namespace so we can
+ * eventually retire the legacy definitions (Phase 5).
+ */
+
+.chat-with-sidebar {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  height: 100%;
+  min-height: 0;
+}
+
+.conversation-state {
+  padding: 14px 10px;
+  color: var(--color-fg-subtle);
+  font-size: var(--font-size-meta);
+  line-height: 1.45;
+}
+.conversation-state.error, .chat-inline-error { color: var(--color-danger); }
+.chat-inline-error { display: grid; width: min(820px, 100%); margin: 0 auto 7px; gap: 3px; font-size: var(--font-size-meta); line-height: 1.45; }
+.chat-inline-error strong { color: var(--color-fg); font-weight: 570; }
+.chat-inline-error span { color: var(--color-fg-muted); }
+.chat-inline-error small { color: var(--color-danger); font-size: var(--font-size-caption); }
+.chat-empty-center .chat-inline-error { text-align: center; }
+
+.message .message-body .message-rich-text {
+  padding: 12px 14px;
+  color: var(--color-fg);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-bg-elevated);
+  font-size: var(--font-size-control);
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.message .message-body .message-rich-text > p.rich-text-paragraph {
+  margin: 0 0 10px;
+  padding: 0;
+  color: inherit;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: inherit;
+  line-height: inherit;
+  white-space: normal;
+}
+.message .message-body .message-rich-text > p.rich-text-paragraph:last-child { margin-bottom: 0; }
+.message-rich-text h1,
+.message-rich-text h2,
+.message-rich-text h3,
+.message-rich-text h4,
+.message-rich-text h5,
+.message-rich-text h6 { margin: 18px 0 7px; color: var(--color-fg); font-weight: 590; line-height: 1.3; letter-spacing: -.015em; }
+.message-rich-text h1:first-child,
+.message-rich-text h2:first-child,
+.message-rich-text h3:first-child,
+.message-rich-text h4:first-child,
+.message-rich-text h5:first-child,
+.message-rich-text h6:first-child { margin-top: 0; }
+.message-rich-text h1 { font-size: 20px; }
+.message-rich-text h2 { font-size: 18px; }
+.message-rich-text h3 { font-size: 16px; }
+.message-rich-text h4,
+.message-rich-text h5,
+.message-rich-text h6 { font-size: 14px; }
+.message-rich-text ul,
+.message-rich-text ol { margin: 7px 0 12px; padding-left: 23px; }
+.message-rich-text li { padding-left: 2px; }
+.message-rich-text li + li { margin-top: 4px; }
+.message-inline-code,
+.message-inline-math { padding: 1px 4px; color: var(--color-fg); border-radius: 4px; background: color-mix(in srgb, var(--color-fg) 7%, transparent); font: .88em/1.45 var(--font-mono); }
+.message-code-block { max-width: 100%; margin: 11px 0 14px; padding: 11px 13px; overflow: auto; color: var(--color-fg); border-left: 2px solid var(--color-border-strong); background: var(--color-bg-elevated); font: 12px/1.6 var(--font-mono); white-space: pre; }
+.message-code-block code { font: inherit; }
+.message-math-block { max-width: 100%; margin: 11px 0 14px; padding: 10px 13px; overflow-x: auto; color: var(--color-fg); border-left: 2px solid var(--color-accent); background: color-mix(in srgb, var(--color-accent-bg) 45%, transparent); }
+.message-math-block code { font: 13px/1.65 var(--font-mono); white-space: pre-wrap; }
+.message.user .message-body { display: flex; width: 100%; justify-content: flex-end; }
+/* 白字压在实色 --color-accent 上只有 2.53:1（暗色主题，也就是默认主题），
+   低于正文所需的 4.5:1 —— 而用户消息是全站出现频率最高的文字块。改用
+   accent-fill / accent-fill-fg 这一对（暗色 8.9:1、亮色 8.5:1），顺带把气泡
+   的视觉重量降下来：满饱和实色大块面积在暗色界面里过重。 */
+.message.user .message-body .message-rich-text { width: fit-content; max-width: 86%; margin-left: auto; color: var(--color-accent-fill-fg); border-color: var(--color-accent-fill); background: var(--color-accent-fill); overflow-wrap: break-word; word-break: normal; }
+.message.user .message-body .message-rich-text > p.rich-text-paragraph { white-space: pre-wrap; }
+.message.user .message-rich-text h1,
+.message.user .message-rich-text h2,
+.message.user .message-rich-text h3,
+.message.user .message-rich-text h4,
+.message.user .message-rich-text h5,
+.message.user .message-rich-text h6,
+.message.user .message-inline-code,
+.message.user .message-inline-math { color: inherit; }
+.session-document-canvas .message.assistant .message-body .message-rich-text { padding: 0; border: 0; border-radius: 0; background: transparent; font-size: var(--font-size-body); line-height: 1.72; }
+.session-document-canvas .message.user .message-body .message-rich-text > p.rich-text-paragraph { margin: 0; padding: 0; color: inherit; border: 0; border-radius: 0; background: transparent; font-size: inherit; line-height: inherit; }
+
+.message-run-accessory { margin-top: 5px; }
+.chat-transient-activity { width: min(820px, 100%); margin: 0 auto; }
+.chat-run-record {
+  margin-left: 6px;
+  padding: 2px 0 4px 12px;
+  color: var(--color-fg-subtle);
+  border-left: 1px solid var(--color-border);
+  font-size: var(--font-size-caption);
+}
+.chat-run-detail-state,
+.chat-run-direct { display: flex; align-items: center; gap: 7px; min-height: 31px; margin: 0; color: var(--color-fg-muted); font-size: var(--font-size-meta); }
+.chat-run-detail-state.failed { color: var(--color-danger); }
+.chat-run-streaming-response { margin: 0 0 13px; color: var(--color-fg); font-size: var(--font-size-body); line-height: 1.72; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-run-steps { display: grid; }
+.chat-run-step { padding: 5px 0 6px; }
+.chat-run-step + .chat-run-step { border-top: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent); }
+.chat-run-step > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 3px 0 5px; }
+.chat-run-step > header span { color: var(--color-fg-muted); font-size: var(--font-size-label); font-weight: 560; }
+.chat-run-step > header em { color: var(--color-fg-subtle); font-size: var(--font-size-caption); font-style: normal; text-transform: capitalize; }
+.chat-run-step.state-failed > header em { color: var(--color-danger); }
+.chat-run-step-summary,
+.chat-run-step-empty { margin: -1px 0 5px; color: var(--color-fg-subtle); font-size: var(--font-size-meta); line-height: 1.45; }
+.chat-run-tool { padding: 0; }
+.chat-run-tool > summary { display: grid; grid-template-columns: minmax(0, 1fr) 11px; align-items: center; gap: 7px; min-height: 29px; padding: 4px 0; list-style: none; cursor: pointer; }
+.chat-run-tool > summary::-webkit-details-marker { display: none; }
+.chat-run-tool-chevron { color: var(--color-fg-subtle); transition: transform 120ms ease; }
+.chat-run-tool[open] .chat-run-tool-chevron { transform: rotate(90deg); }
+.chat-run-tool-body { min-width: 0; padding: 1px 0 7px; }
+.chat-run-tool-heading { display: flex; align-items: baseline; min-width: 0; gap: 7px; }
+.chat-run-tool-heading strong { overflow: hidden; color: var(--color-fg-muted); font-size: var(--font-size-label); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.chat-run-tool-heading code { overflow: hidden; color: var(--color-fg-subtle); font: var(--font-size-caption)/1.3 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.chat-run-tool-heading em { flex: none; margin-left: auto; color: var(--color-fg-subtle); font-size: var(--font-size-caption); font-style: normal; }
+.chat-run-tool.state-failed .chat-run-tool-heading em { color: var(--color-danger); }
+/* 框架按设计驳回 = ReAct 循环的正常一步，不上红色（wangd 2026-08-21）。 */
+.chat-run-tool.state-declined .chat-run-tool-heading em { color: var(--color-fg-subtle); }
+.chat-run-tool.state-declined .chat-run-tool-error b,
+.chat-run-tool.state-declined .chat-run-tool-error span { color: var(--color-fg-muted) !important; }
+.chat-run-tool-body > p { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 7px; margin: 5px 0 0; font-size: var(--font-size-meta); line-height: 1.5; }
+.chat-run-tool-body > p b { color: var(--color-fg-subtle); font-size: var(--font-size-caption); font-weight: 520; }
+.chat-run-tool-body > p span,
+.chat-run-tool-body > p code { overflow-wrap: anywhere; color: var(--color-fg-muted); }
+.chat-run-tool-body > p code { font-size: var(--font-size-caption); }
+.chat-run-tool-code,
+.chat-run-tool-output { display: grid; grid-template-columns: 42px minmax(0, 1fr); gap: 7px; margin-top: 5px; font-size: var(--font-size-meta); line-height: 1.5; }
+.chat-run-tool-code > b,
+.chat-run-tool-output > b { color: var(--color-fg-subtle); font-size: var(--font-size-caption); font-weight: 520; }
+.chat-run-tool-code pre,
+.chat-run-tool-output pre { max-height: 320px; margin: 0; padding: 8px 10px; overflow: auto; color: var(--color-fg-muted); border-left: 1px solid var(--color-border); background: color-mix(in srgb, var(--color-bg-elevated) 65%, transparent); font: var(--font-size-caption)/1.55 var(--font-mono); white-space: pre; }
+.chat-run-tool-code code { font: inherit; }
+.chat-run-tool-output > span { overflow-wrap: anywhere; color: var(--color-fg-muted); }
+.chat-run-tool-error b,
+.chat-run-tool-error span { color: var(--color-danger) !important; }
+/* 错误正文现在是上游原话（可能几百字、带换行）：保留换行、长了给滚动条，
+   别把一条工具记录撑成一屏。 */
+.chat-run-tool-error span { max-height: 168px; overflow: auto; white-space: pre-wrap; }
+.chat-run-tool-error small { grid-column: 2; color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.chat-run-tool-notices { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 5px; color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.chat-run-tool-notices span { display: inline-flex; align-items: center; gap: 3px; }
+.chat-run-metrics { display: flex; flex-wrap: wrap; gap: 5px 13px; margin-top: 5px; padding-top: 7px; color: var(--color-fg-subtle); border-top: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent); font-size: var(--font-size-caption); }
+.chat-run-metrics code { overflow: hidden; max-width: 220px; color: inherit; font: inherit; text-overflow: ellipsis; white-space: nowrap; }
+.chat-run-canonical-state { display: flex; align-items: center; gap: 7px; min-height: 31px; color: var(--color-fg-subtle); font-size: var(--font-size-meta); }
+.chat-run-canonical-state.failed { color: var(--color-danger); }
+.chat-transcript-run {
+  width: 100%;
+  margin-top: 4px;
+  color: var(--color-fg-muted);
+  font-size: var(--font-size-label);
+}
+.chat-transcript-run .chat-run-detail-state { min-height: 28px; }
+.chat-transcript-status { display: flex; align-items: center; gap: 6px; min-height: 28px; color: var(--color-fg-subtle); }
+.chat-transcript-status.failed,
+.chat-transcript-status.state-failed { color: var(--color-danger); }
+.chat-transcript-status.state-attention { color: var(--color-warning); }
+.chat-transcript-status.state-interrupted { color: var(--color-fg-subtle); }
+.chat-run-tool-group { padding: 0; }
+.chat-run-tool-group > summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 11px;
+  align-items: center;
+  gap: 7px;
+  min-height: 29px;
+  padding: 4px 0;
+  color: var(--color-fg-muted);
+  list-style: none;
+  cursor: pointer;
+}
+.chat-run-tool-group > summary::-webkit-details-marker { display: none; }
+.chat-run-tool-group > summary span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-run-tool-group-heading { display: flex; align-items: baseline; gap: 7px; }
+.chat-run-tool-group-heading strong { font-weight: 500; }
+.chat-run-tool-group-heading small { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.chat-run-tool-group-body { margin-left: 12px; padding-left: 10px; border-left: 1px solid var(--color-border); }
+.chat-run-tool-group-body > p { margin: 2px 0 4px; color: var(--color-fg-subtle); font-size: var(--font-size-meta); line-height: 1.45; }
+.chat-run-tool-group[open] > summary .chat-run-tool-chevron { transform: rotate(90deg); }
+.chat-run-step-summary { display: grid; grid-template-columns: 11px minmax(0, 1fr); align-items: start; gap: 7px; padding: 5px 0; color: var(--color-fg-muted); }
+.chat-run-step-summary > span { display: grid; min-width: 0; gap: 2px; }
+.chat-run-step-summary strong { font-size: var(--font-size-label); font-weight: 520; }
+.chat-run-step-summary small { color: var(--color-fg-subtle); font-size: var(--font-size-caption); line-height: 1.4; }
+.chat-run-trace-link { display: inline-flex; margin-top: 5px; color: var(--color-fg-subtle); font-size: var(--font-size-caption); text-decoration: none; }
+.chat-run-trace-link:hover { color: var(--color-fg); text-decoration: underline; }
+.chat-run-child-step { display: flex; align-items: center; gap: 6px; min-height: 29px; color: var(--color-fg-muted); }
+.chat-run-child-step strong { overflow: hidden; font-size: var(--font-size-label); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.chat-run-child-step em { margin-left: auto; color: var(--color-fg-subtle); font-size: var(--font-size-caption); font-style: normal; text-transform: capitalize; }
+.chat-run-child-step.state-failed { color: var(--color-danger); }
+.chat-run-result { display: flex; align-items: center; gap: 7px; min-height: 34px; color: var(--color-fg-muted); text-decoration: none; }
+.chat-run-result:hover strong { text-decoration: underline; text-underline-offset: 2px; }
+.chat-run-result > span { display: grid; gap: 1px; }
+.chat-run-result strong { color: var(--color-fg); font-size: var(--font-size-label); font-weight: 540; }
+.chat-run-result small { color: var(--color-fg-subtle); font-size: var(--font-size-caption); text-transform: capitalize; }
+.chat-run-primary-error { display: grid; grid-template-columns: 14px minmax(0, 1fr); align-items: start; gap: 7px; margin: 5px 0 2px; padding: 7px 0; color: var(--color-warning); }
+.chat-run-primary-error.state-failed { color: var(--color-danger); }
+.chat-run-primary-error > svg { margin-top: 2px; }
+.chat-run-primary-error > span { display: grid; gap: 2px; }
+.chat-run-primary-error strong { color: var(--color-fg); font-size: var(--font-size-label); font-weight: 570; }
+.chat-run-primary-error small { color: var(--color-fg-muted); font-size: var(--font-size-meta); line-height: 1.45; }
+.chat-run-primary-error em { color: inherit; font-size: var(--font-size-caption); font-style: normal; line-height: 1.45; }
+.chat-run-primary-error i { color: var(--color-fg-subtle); font-size: var(--font-size-caption); font-style: normal; }
+.chat-run-failure-history { margin-top: 2px; }
+.chat-run-failure-history > summary { display: grid; grid-template-columns: minmax(0, 1fr) 11px; align-items: center; gap: 7px; min-height: 28px; color: var(--color-fg-subtle); list-style: none; cursor: pointer; }
+.chat-run-failure-history > summary::-webkit-details-marker { display: none; }
+.chat-run-failure-history > summary span { display: flex; gap: 7px; }
+.chat-run-failure-history > summary small { font-size: var(--font-size-caption); }
+.chat-run-failure-history[open] > summary .chat-run-tool-chevron { transform: rotate(90deg); }
+.chat-run-failure-history > div { margin: 1px 0 5px 12px; padding-left: 10px; border-left: 1px solid var(--color-border); }
+.chat-run-failure-history article { padding: 5px 0; }
+.chat-run-failure-history article strong { color: var(--color-fg-muted); font-size: var(--font-size-meta); font-weight: 540; }
+.chat-run-failure-history article p { margin: 2px 0; max-height: 220px; overflow: auto; color: var(--color-fg-subtle); font-size: var(--font-size-meta); overflow-wrap: anywhere; white-space: pre-wrap; }
+.chat-run-failure-history article small { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.chat-run-failure-history a { display: inline-block; margin: 5px 0; color: var(--color-fg-muted); font-size: var(--font-size-caption); text-decoration: underline; text-underline-offset: 2px; }
+.message-system-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 2px 0;
+  color: var(--color-danger);
+}
+.message-system-alert svg { flex: none; margin-top: 2px; }
+.message-system-alert p { margin: 0; font-size: var(--font-size-meta); line-height: 1.55; white-space: pre-wrap; }
+/* ── 需要人介入的面板 ───────────────────────────────────────────────
+   重排前实测（1440×900，面板宽 680px）：总高 578px，其中 context 原始 dump
+   独占 224px（39%），而唯一能操作的选项排在**顶部往下 368px** 处 —— 得划过
+   一整屏才够得着。同一条信息还重复：节点名 ×2、类别 ×2、「在等你」×3、
+   作答方式 ×2（context 尾部那句文字说明 + 下面的真按钮）。
+
+   重排原则：能操作的东西紧跟问句；次要材料折起来；同一件事只说一次。 */
+.human-input-prompt {
+  margin: 12px 0 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-left: 2px solid var(--color-accent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-fg) 2.5%, transparent);
+}
+.human-input-prompt.kind-permission { border-left-color: var(--color-warning); }
+
+.human-input-prompt > header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+.human-input-prompt > header > svg { flex: none; color: var(--color-accent); }
+.human-input-prompt.kind-permission > header > svg { color: var(--color-warning); }
+.human-input-prompt > header > strong {
+  color: var(--color-fg);
+  font-size: var(--font-size-label);
+  font-weight: 590;
+}
+/* 谁在问：压成标题右边一行 meta（原来是标题下一整句 + 「Asked by X」一行）。 */
+.human-input-from {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--color-fg-subtle);
+  font-size: var(--font-size-caption);
+}
+.human-input-from mark {
+  padding: 1px 6px;
+  color: var(--color-fg-muted);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--color-fg) 8%, transparent);
+  font-size: var(--font-size-caption);
+}
+
+.human-input-question {
+  margin: 9px 0 0;
+  color: var(--color-fg);
+  font-size: var(--font-size-control);
+  font-weight: 520;
+  line-height: 1.5;
+}
+
+/* 「为什么问你」—— 一行能扫完的判断依据。 */
+.human-input-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 7px;
+  margin: 7px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.human-input-facts li {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 1px 7px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-caption);
+}
+.human-input-facts b { color: var(--color-fg-muted); font-weight: 500; }
+.human-input-facts span { color: var(--color-fg); font-family: var(--font-mono); font-size: 11px; }
+/* 布尔为真 = 一个状态，给它警示色：它多半就是被问的原因。 */
+.human-input-facts li.is-flag {
+  border-color: color-mix(in srgb, var(--color-warning) 45%, var(--color-border));
+}
+.human-input-facts li.is-flag b { color: var(--color-warning); }
+
+/* 选项：行，不是盒。
+   上一版每项是带边框圆角的独立盒子 + 8px 内边距，五项排下来一屏都是一模一样
+   的大框，信息密度极低（wangd：「框很大但是信息非常少」）。改成发票式的行：
+   分隔线代替边框，选中态用左侧色条 —— 同样五项少占约四成高度，动作名也对齐
+   了，能扫。 */
+.human-input-options { display: grid; margin-top: 10px; border-top: 1px solid var(--color-border); }
+.human-input-options button {
+  display: grid;
+  grid-template-columns: 13px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px 6px 6px;
+  color: var(--color-fg-muted);
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid var(--color-border);
+  border-left: 2px solid transparent;
+  background: transparent;
+  cursor: pointer;
+}
+.human-input-options button:hover:not(:disabled) {
+  color: var(--color-fg);
+  background: color-mix(in srgb, var(--color-fg) 3%, transparent);
+}
+.human-input-options button:disabled { color: var(--color-fg-subtle); cursor: default; }
+.human-input-options button > i {
+  width: 11px;
+  height: 11px;
+  align-self: center;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 50%;
+}
+.human-input-options button.selected { border-left-color: var(--color-accent); background: var(--color-accent-bg); }
+.human-input-options button.selected > i { border: 4px solid var(--color-accent); }
+.human-input-prompt.kind-permission .human-input-options button.selected { border-left-color: var(--color-warning); }
+.human-input-prompt.kind-permission .human-input-options button.selected > i { border-color: var(--color-warning); }
+/* 动作名与说明并排在同一行：说明是同一件事的展开，不该另起一行占高度。
+   窄屏放不下时自然折行。 */
+.human-input-options button > span {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 9px;
+  min-width: 0;
+}
+.human-input-options strong {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 7px;
+  color: var(--color-fg);
+  font-size: var(--font-size-label);
+  font-weight: 560;
+}
+.human-input-options strong em {
+  padding: 1px 5px;
+  color: var(--color-accent);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 35%, var(--color-border));
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-caption);
+  font-style: normal;
+  font-weight: 500;
+}
+.human-input-options small { color: var(--color-fg-subtle); font-size: var(--font-size-meta); line-height: 1.45; }
+
+/* 次要材料：默认折起来，需要的人点开。 */
+.human-input-detail { margin-top: 8px; }
+.human-input-detail > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  padding: 2px 0;
+  color: var(--color-fg-subtle);
+  font-size: var(--font-size-caption);
+  list-style: none;
+  cursor: pointer;
+}
+.human-input-detail > summary::-webkit-details-marker { display: none; }
+.human-input-detail > summary::before {
+  content: "›";
+  display: inline-block;
+  transition: transform var(--duration-hover) var(--ease-out);
+}
+.human-input-detail[open] > summary::before { transform: rotate(90deg); }
+.human-input-detail > summary:hover { color: var(--color-fg-muted); }
+/* 后端拼的原始 payload 里有 200+ 字符的绝对路径 —— 必须能折行，否则一条路径
+   就要吃掉四行；再给个上限，超了自己滚。 */
+.human-input-detail > pre {
+  max-height: 210px;
+  margin: 6px 0 0;
+  padding: 9px 10px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  color: var(--color-fg-muted);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-caption);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+.human-input-detail > textarea,
+.human-input-freeform textarea {
+  width: 100%;
+  min-height: 52px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  resize: vertical;
+  color: var(--color-fg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font: inherit;
+  line-height: 1.5;
+}
+.human-input-freeform { display: block; margin-top: 10px; }
+.human-input-freeform > span { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.human-input-detail > textarea:focus,
+.human-input-freeform textarea:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 25%, transparent);
+}
+.human-input-detail > textarea:disabled,
+.human-input-freeform textarea:disabled { color: var(--color-fg-subtle); }
+
+.human-input-prompt > footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  margin-top: 11px;
+}
+.human-input-prompt > footer small {
+  margin-right: auto;
+  color: var(--color-fg-subtle);
+  font-size: var(--font-size-caption);
+  line-height: 1.4;
+}
+.human-input-prompt > footer button {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 11px;
+  color: var(--color-accent-fill-fg);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent-fill);
+  font-size: var(--font-size-meta);
+  font-weight: 540;
+}
+.human-input-prompt.kind-permission > footer button {
+  color: var(--color-fg);
+  background: color-mix(in srgb, var(--color-warning) 22%, transparent);
+}
+.human-input-prompt > footer button:disabled {
+  color: var(--color-fg-subtle);
+  background: color-mix(in srgb, var(--color-fg) 7%, transparent);
+  cursor: default;
+}
+
+@media (max-width: 760px) {
+  .chat-with-sidebar { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .conversation-sidebar { flex-direction: row; width: 100%; min-width: 0; min-height: 45px; border-right: 0; border-bottom: 1px solid var(--color-border); }
+  .conversation-sidebar-header { flex: none; gap: 8px; padding: 8px 10px; }
+  .conversation-list { flex-direction: row; min-width: 0; padding: 6px; overflow-x: auto; overflow-y: hidden; }
+  .conversation-item { flex: 0 0 145px; padding: 5px 8px; }
+  .conversation-item-summary { display: none; }
+  .conversation-state { white-space: nowrap; }
+  /* 面板本身不再靠 margin-left 缩进（旧版每块都缩 24px，窄屏要逐个清零），
+     窄屏只需要把页脚改成竖排。 */
+  .human-input-prompt > footer { align-items: stretch; flex-direction: column; }
+  .human-input-prompt > footer small { margin-right: 0; }
+  .human-input-prompt > footer button { justify-content: center; }
+}
+
+
+/* ── 内联文件改动卡（"Edited foo.py +17 -0"）──────────────────────────────── */
+.chat-run-workspace-change { padding: 4px 0; color: var(--color-fg-muted); font-size: var(--font-size-label); }
+.chat-run-workspace-change > span, .chat-run-workspace-change > summary > span { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; }
+.chat-run-workspace-change code { color: var(--color-fg); font-weight: 540; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-run-workspace-change em { font-style: normal; font-size: var(--font-size-caption); font-variant-numeric: tabular-nums; }
+.chat-run-workspace-change em.add { color: var(--color-success); }
+.chat-run-workspace-change em.del { color: var(--color-danger); }
+.chat-run-workspace-change > summary { display: grid; grid-template-columns: minmax(0, 1fr) 11px; align-items: center; gap: 7px; list-style: none; cursor: pointer; }
+.chat-run-workspace-change > summary::-webkit-details-marker { display: none; }
+.chat-run-workspace-change[open] > summary .chat-run-tool-chevron { transform: rotate(90deg); }
+.chat-run-workspace-change > .git-diff { margin: 5px 0 0; }
+.chat-run-workspace-change > ul { margin: 3px 0 0; padding: 0 0 0 14px; display: grid; gap: 2px; list-style: none; }
+.chat-run-workspace-change > ul li { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; font-size: var(--font-size-caption); }
+
+/* ── 调度器对用户说的话：就是**正常的回复文本**（2026-08-20）─────────────
+   与 .chat-run-narration（节点内部独白，小字灰色）拉开靠的是字号和颜色，
+   不是加一根竖线。
+
+   2026-08-17 给它加了 accent 竖线，为的是别被 51 句独白 + 190 张工具卡淹掉；
+   2026-08-18 已经先把"对插话的答复"摘出去了（套旁注的皮读起来不像在回答）；
+   2026-08-20 wangd 指着派发这一路说的是同一件事：「调度器还是得输出正常的
+   文本啊，然后启动就显示那个小的 xxx 进行中那个就行了…现在感觉完全不是在
+   对话啊。」一根竖线把一句话变成了一张卡片。
+   淹没问题现在由别处解决：独白是小字灰、工具卡收进抽屉、这句是正文。 */
+.chat-orchestrator-said {
+  margin: 10px 0 8px;
+  color: var(--color-fg);
+  font-size: var(--font-size-body, 15px);
+  line-height: 1.6;
+  /* ⚠️ 不再 `white-space: pre-wrap`：正文现在走 RichText，段落/标题/列表由它
+     切块。两者叠加会把块之间的空行再画一遍，段间凭空多出一倍留白。
+     代价是"靠单个换行排版"的纯文本会被并成一段 —— 而调度器写的本来就是
+     markdown（`## 研究完成` / `- 📄 [论文](path)`），以前它们是字面量。 */
+}
+
+/* 三处散文容器里的 RichText：块级排版归 RichText，字号/颜色归容器（各自
+   的分量不同：调度器说的话是正文，节点独白是小字灰）。 */
+.chat-orchestrator-said > .message-rich-text > p.rich-text-paragraph,
+.chat-run-prose > .message-rich-text > p.rich-text-paragraph,
+.chat-run-narration > div > .message-rich-text > p.rich-text-paragraph {
+  margin: 0 0 8px;
+}
+.chat-orchestrator-said > .message-rich-text > p.rich-text-paragraph:last-child,
+.chat-run-prose > .message-rich-text > p.rich-text-paragraph:last-child,
+.chat-run-narration > div > .message-rich-text > p.rich-text-paragraph:last-child {
+  margin-bottom: 0;
+}
+.chat-orchestrator-said em {
+  margin-left: 8px;
+  color: var(--color-fg-subtle);
+  font-size: var(--font-size-caption);
+  font-style: normal;
+}
+/* 插话送达回执：机械状态行，不是发言 —— 别做成气泡，别抢答复的注意力。 */
+.chat-interject-receipt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 2px;
+  color: var(--color-fg-subtle);
+  font-size: var(--font-size-caption);
+}
+.chat-interject-receipt > svg { flex: none; }
+/* 动态 thinking：三个呼吸点。只在"话已取走、模型还没开口"的窗口存在，
+   模型一开口就整个让位 —— 所以它不需要文字，动效本身就是全部信息。 */
+.chat-thinking-dots { display: inline-flex; gap: 4px; padding: 4px 0; }
+.chat-thinking-dots > i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-fg-subtle);
+  animation: chat-thinking-pulse calc(var(--motion-status-cycle) * 0.86) ease-in-out infinite;
+}
+.chat-thinking-dots > i:nth-child(2) { animation-delay: 0.2s; }
+.chat-thinking-dots > i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes chat-thinking-pulse {
+  0%, 60%, 100% { opacity: 0.25; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(calc(-2px * var(--motion-shift))); }
+}
+/* 位移已经由 --motion-shift 归零（见 tokens.css），透明度脉冲留着 —— 它就是
+   「还在想」这个状态信号本身，关掉等于把功能信息一起关了。 */
+/* 待命轮对插话的答复：这是对话消息，不是派发旁注 —— 不带 accent 竖线。 */
+.chat-interject-answer {
+  margin: 8px 0;
+  color: var(--color-fg);
+  font-size: var(--font-size-body, 15px);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.chat-interject-answer em {
+  margin-left: 8px;
+  color: var(--color-fg-subtle);
+  font-size: var(--font-size-caption);
+  font-style: normal;
+}
+
+/* 派发语**下面**那一行的节点入口 —— 它就是那个节点的按钮，不是装饰标签。
+   点它打开右栏；同时把状态和 action 数就地说清，省掉下面那张重复的卡。
+   2026-08-20 从"挂在正文句尾"改成"自己一行"：它不是那句话的一部分，是这句
+   话引出的那件正在跑的事。 */
+.chat-said-node-row { margin: 2px 0 12px; }
+.chat-said-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-fg-subtle);
+  font: inherit;
+  font-size: var(--font-size-caption);
+  cursor: pointer;
+  vertical-align: baseline;
+}
+.chat-said-node:hover {
+  border-color: var(--color-border-strong, var(--color-border));
+  background: var(--color-bg-subtle);
+  color: var(--color-fg);
+}
+.chat-said-node > small { color: var(--color-fg-subtle); }
+.chat-said-node.state-failed { border-color: var(--color-danger); }
+/* 点不动的那一份（子节点还没折进时间线）：同一个形状，别的什么都不承诺。 */
+.chat-said-node.is-static { cursor: default; border-style: dashed; }
+
+/* 节点内部独白降一级：它是给想看细节的人的，不该跟对话抢注意力。 */
+.chat-run-narration p { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.chat-run-tool-group-heading > svg { margin-right: 5px; vertical-align: -1px; }
+
+/* 对话主线上的子节点状态卡 —— 只答"谁在跑、到哪了"，细节点过去右栏看。 */
+.chat-run-node-card { display: flex; align-items: baseline; gap: 8px; width: 100%; padding: 8px 12px; border: 1px solid var(--color-border); border-radius: 8px; background: transparent; color: var(--color-fg); font: inherit; text-align: left; }
+button.chat-run-node-card { cursor: pointer; }
+button.chat-run-node-card:hover { border-color: var(--color-border-strong, var(--color-border)); background: var(--color-bg-subtle); }
+.chat-run-node-card > svg { align-self: center; flex: none; }
+.chat-run-node-card strong { font-weight: 500; }
+.chat-run-node-card small { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.chat-run-node-card .chat-run-tool-chevron { margin-left: auto; align-self: center; }
+.chat-run-node-card.state-failed { border-color: var(--color-danger); }
+
+/* 「这一轮没跑完，下一条接着跑」—— 状态不是警报，一行低调说明即可。 */
+.chat-run-continue-note { margin: 6px 2px; color: var(--color-fg-subtle); font-size: var(--font-size-meta); line-height: 1.55; }
+/* 「要你动手」不等于「出事了」。
+   `action` 收的是额度用尽、旧格式工作区这类**平台和研究都没做错**、只是需要
+   你换个后端/换个项目的局面 —— 用整行 danger 去说它，读起来像研究崩了
+   （wangd 2026-08-22：「尽量别出现红色的字…这些东西用户不应该看到的」）。
+   红色留给真正的坏事（state-failed），需要动手用琥珀色说就够。 */
+.chat-run-primary-error.state-action { color: var(--color-warning); }
+
+/* 「Ran N commands」—— 跑完的一批动作收成一行；正在跑的和落单的各自展开。 */
+.chat-run-commands > summary { display: flex; align-items: center; gap: 6px; padding: 3px 0; color: var(--color-fg-subtle); font-size: var(--font-size-meta); cursor: pointer; list-style: none; }
+.chat-run-commands > summary::-webkit-details-marker { display: none; }
+.chat-run-commands > summary:hover { color: var(--color-fg); }
+.chat-run-commands[open] > summary .chat-run-tool-chevron { transform: rotate(90deg); }
+.chat-run-commands-body { margin-left: 12px; padding-left: 10px; border-left: 1px solid var(--color-border); }
+/* 调度器自己的话：正文分量，不带轮次徽标。 */
+.chat-run-prose { margin: 8px 2px; color: var(--color-fg); font-size: var(--font-size-body); line-height: 1.7; }
+
+/* 渲染器换成 remark（GFM + KaTeX）之后新长出来的元素：表格 / 引用块 / 任务清单 / 脚注 / 公式块。 */
+.message-table-scroll { overflow-x: auto; max-width: 100%; margin: 1em 0; }
+.message-rich-text table { border-collapse: collapse; width: 100%; font-size: .94em; }
+.message-rich-text th, .message-rich-text td { padding: .5em .75em; border: 1px solid var(--color-border); vertical-align: top; }
+.message-rich-text th { font-weight: 600; background: var(--muted-surface); }
+.message-rich-text blockquote { margin: 1em 0; padding-left: 1em; border-left: 3px solid var(--color-border); }
+.message-rich-text li > p { margin: .25em 0; }
+.message-rich-text li > input + p { display: inline; margin-left: .5em; }
+.message-rich-text .katex-display { overflow-x: auto; overflow-y: hidden; padding: .25em 0; }
+.message-footnote { display: flex; gap: .5em; font-size: .9em; }

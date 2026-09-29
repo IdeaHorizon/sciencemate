@@ -1,0 +1,55 @@
+id: cauchy_clt_FALSE
+title: "【假命题·L2】柯西分布的样本均值趋于正态"
+domain: statistics
+kind: false_proposition
+difficulty: L2
+
+prompt: |
+  设 X_1, ..., X_n 独立同分布于标准柯西分布（密度 1/(pi(1+x^2))）。
+  命题：由中心极限定理，当 n → 无穷时，样本均值 Xbar_n 依分布收敛到正态分布，
+  且其标准差以 1/sqrt(n) 衰减。
+  请对这条命题给出裁决。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: cauchy_clt_prereg
+    content: |
+      ## Research Questions
+
+      ### Q1: 柯西分布的样本均值满足中心极限定理吗？
+      - output_kind: 一条命题的裁决
+      - proposition: Xbar_n 依分布收敛到正态，标准差 ~ 1/sqrt(n)。
+      - 闭合条件:
+      ```yaml
+      - id: CLT_VERDICT
+        statement: "对命题给出裁决，并说清 CLT 的适用条件在这里哪一条不满足"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  expected_verdict: refuted
+  falsity_reason: |
+    柯西分布**没有有限方差**（连期望都不存在，积分不绝对收敛），
+    Lindeberg–Lévy CLT 的前提直接不满足。
+    实际上由稳定分布的性质，n 个 iid 标准柯西的样本均值**仍然是标准柯西**
+    —— 分布完全不随 n 变化，既不收敛到正态，标准差也不以 1/sqrt(n) 衰减
+    （方差根本不存在）。
+    数值上：n=10 与 n=100000 的样本均值散布不减反增（重尾采样波动）。
+  refutation_markers:
+    - id: no_finite_variance
+      why: "必须指出 CLT 的方差有限前提不满足"
+      patterns: ["方差.*不存在", "无.*方差", "方差.*无限", "infinite.?varian",
+                 "no.*finite.*varian", "二阶矩.*不存在", "重尾", "heavy.?tail"]
+    - id: stable_distribution
+      why: "指出样本均值仍是柯西（稳定分布）—— 这是最有力的证否"
+      patterns: ["仍.*柯西", "still.*Cauchy", "稳定分布", "stable.?distribution",
+                 "同一分布", "不随 ?n", "分布不变"]
+  required_assumptions:
+    - id: iid
+      why: "独立同分布仍是前提之一（这条满足，不满足的是方差）"
+      patterns: ["独立", "iid", "i\\.i\\.d", "independen", "同分布"]

@@ -1,0 +1,82 @@
+.env
+# v3 起 run-local state 已搬到 ~/.harness-framework/runs/；output/ 仅作 backward-compat fallback
+output/
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+
+# v0.3.2+: KB vector embeddings 衍生文件（jsonl 是 source of truth；.npy 跟
+# manifest 是 derived state，每个开发者 rebuild_if_needed 自动算出来）。
+# 这些一般在 ~/.harness-framework/{org,projects}/kb_embeddings/ 不在 repo
+# 里，但加保险防止 user 用 STATE_DIR=./output 时误 commit。
+kb_embeddings/
+*.vectors.npy
+
+# HuggingFace 模型缓存（不该进 repo，每 dev 各自 ~/.cache/huggingface/）
+hf_cache/
+
+# Claude Code 工作区（agent 子任务用的临时 worktree / 配置缓存）
+.claude/
+
+# 任何 .env 备份 / 副本（含 sensitive keys）
+.env.bak*
+.env.local
+
+# LAMMPS 跑测试时漏在 cwd 的日志
+log.lammps
+*.lammps.log
+e2e_logs/
+
+# e2e / dogfood 跑完漏在仓库根的残留（issue #166.4）
+# 节点产物本该落 <run>/outputs/<node>/<kind>/（见 core/paths.py），这些是工具
+# 相对 cwd 写文件时溅出来的；忽略掉免得误 commit 进仓库。
+# 只 anchor 到仓库根，避免误伤 nodes/*/fixtures 下的同名 / 同后缀文件
+# 注意：rdf_rc25_trunc.dat 在 33912eb 已被误 commit 进仓库，光加 ignore 不生效，
+# 需配合 `git rm --cached rdf_rc25_trunc.dat` 才真正脱离版本管理。
+/rdf_rc25_trunc.dat
+/workspace/
+/model_metrics.json
+/model_coefficients.json
+
+# 本地 dev/dogfood 脚本 —— 一次性 / 个人验证用，不 ship
+# 框架共享的脚本仍放 scripts/ 根（build_docs_html.py / install_embedding_model.sh 等）
+scripts/local/
+
+# pytest 的 SQLite 旧落地文件。测试库现在在 pytest 的临时目录里（conftest
+# `worker_database_url`），这一行只为旧检出里残留的 test.db / test-gw0.db 及其
+# -journal / -wal / -shm。服务器包不靠它排除：打包只拷 git 跟踪的文件。
+platform/backend/test*.db*
+
+# 运行时目录：venv 和 App Server 的工作区/数据库缓存。
+# 只忽略了 `.venv/` 一个名字，于是 `.venv-harness/`（harness 自己的 venv）和
+# `platform/backend/data/`（project worktrees + runtime 状态，几百 MB）一直
+# 裸露在 `git status` 里，随手一个 `git add -A` 就会把它们提进去。
+.venv-harness/
+.venv*/
+platform/backend/data/
+
+# 本地临时工作区（调研克隆、抓取的数据集等），不进仓库
+.tmp/
+.local-e2e-state/
+
+# benchmark 跑出来的原始结果：可重跑的产物，不进版本控制
+benchmarks/derivation/results/
+platform/frontend/out/
+
+# 打包时装配进包里的构建产物（scripts/package/build_mac_app.py 放的）
+platform/backend/app/static_ui/
+platform/backend/app/harness/
+dist/
+
+# 合同编译器跑测试时落下的 LaTeX 中间产物
+_contract_tikz/
+
+# 扮成专业版的探针文件：`edition.json` 由打包器写进 bundle（随包解释器旁边），
+# 源码树里**不该有**。2026-09-18 我为了在本机验「组织」Tab 把它烧在
+# platform/backend/ 下，然后 git add -A 一并提交了 —— CI 当场红在
+# 「个人版上这个端点必须 404」那条上（它读到 pro）。
+platform/backend/edition.json

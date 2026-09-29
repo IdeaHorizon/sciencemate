@@ -1,0 +1,52 @@
+id: conditional_convergence_FALSE
+title: "【假命题·L2】级数重排不改变和"
+domain: mathematics
+kind: false_proposition
+difficulty: L2
+
+prompt: |
+  命题：若级数 sum a_n 收敛，则任意重排其项之后所得的级数仍收敛到同一个和。
+  以交错调和级数 1 - 1/2 + 1/3 - 1/4 + ... 为例说明你的裁决。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: conditional_convergence_prereg
+    content: |
+      ## Research Questions
+
+      ### Q1: 收敛级数的重排会改变和吗？
+      - output_kind: 一条命题的裁决
+      - proposition: 收敛级数任意重排后和不变。
+      - 闭合条件:
+      ```yaml
+      - id: REARRANGEMENT_VERDICT
+        statement: "对命题给出裁决；不成立则说清在什么条件下才成立，并以交错调和级数说明"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  expected_verdict: refuted
+  falsity_reason: |
+    命题对**绝对收敛**级数成立，对**条件收敛**级数不成立。
+    黎曼重排定理：条件收敛级数可以被重排到收敛于**任意指定实数**，
+    也可以重排到发散。
+    交错调和级数 Σ(-1)^(n+1)/n = ln2 是条件收敛的（Σ1/n 发散），
+    所以它可以被重排到任何值 —— 经典例子是重排到 (3/2)ln2。
+  refutation_markers:
+    - id: absolute_vs_conditional
+      why: "必须区分绝对收敛与条件收敛 —— 这是命题的缺口"
+      patterns: ["绝对收敛", "absolute", "条件收敛", "conditional",
+                 "Σ ?\\|a_n\\|", "sum.*\\|a"]
+    - id: riemann_theorem
+      why: "指出黎曼重排定理（或等价地说明可重排到任意值）"
+      patterns: ["黎曼", "Riemann", "重排定理", "rearrangement.?theorem",
+                 "任意.*实数", "任意值", "any.*real"]
+  required_assumptions:
+    - id: harmonic_diverges
+      why: "交错调和是条件收敛的依据：|a_n|=1/n 的和发散"
+      patterns: ["调和级数.*发散", "1/n.*发散", "harmonic.*diverg", "Σ ?1/n"]

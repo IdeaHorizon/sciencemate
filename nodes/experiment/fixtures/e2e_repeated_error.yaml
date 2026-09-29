@@ -1,0 +1,61 @@
+# experiment 节点 fixture —— 闭环1 真实 E2E：编译错误复现性 + repeated_error 判重
+#
+# 运行：
+#   python run_node.py --harness experiment --no-interactive \
+#     --fixture nodes/experiment/fixtures/e2e_repeated_error.yaml --project-id test-e2e-cl1
+#
+# 验证：safe_bash 完整日志落盘 / repeated_error 按 scoped strict_key 计数与分级 /
+#       focus 注入 / 不同 strict_key 独立 / 低置信度软提示。
+
+node_inputs:
+  experiment_focus: |
+    这是一个【编译错误复现性诊断测试】。目标是观察同一编译错误重复出现时系统的行为。
+    请严格按以下顺序用 safe_run_bash 执行命令，每条报告 returncode；
+    **不要修改任何源码文件，不要尝试创建缺失的 module，只按序执行并记录**：
+
+    1. cd /tmp/e2e_repeat && gfortran -c bad.f90
+    2. cd /tmp/e2e_repeat && gfortran -c bad.f90      （第二次，验证 bad.f90 的错误是否稳定复现）
+    3. cd /tmp/e2e_repeat && gfortran -c bad.f90      （第三次，确认复现）
+    4. cd /tmp/e2e_repeat && gfortran -c other.f90    （不同文件，不同错误）
+    5. cd /tmp/e2e_repeat && nonexistent_tool_xyz_999 （未知命令，观察未知错误）
+
+    每条命令执行后，简述 returncode 和你看到的错误类型。全部执行完后，
+    在 experiment_log 写一段总结：哪些错误重复出现、系统是否给出了换方向提示。
+    这是受控诊断测试，**不需要真正修好编译**，按序跑完即可 freeze experiment_log。
+
+upstream_artifacts:
+  - type: claim
+    name: H_repeated_error_detection_works
+    metadata:
+      claim_type: hypothesis
+      status: open
+      created_at: "2026-06-15T00:00:00+00:00"
+    content: |
+      repeated_error_detector 能识别同一编译错误的重复出现，并在累计达阈值时
+      给出换方向提示；不同错误独立计数。
+
+  - type: pre_registration
+    name: E2E_Repeated_Error_Test
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-15T00:00:00+00:00"
+      freeze_reason: "闭环1 E2E：验证 repeated_error 判重与 focus 注入"
+    content: |
+      ## Pre-Registration: 编译错误复现性诊断测试
+
+      ### Hypothesis
+      同一编译错误重复执行时，系统按 scoped strict_key 累计计数并在阈值分级提示；
+      不同错误独立计数；未知错误只软提示不硬升级。
+
+      ### Setup
+      - 预置文件：/tmp/e2e_repeat/bad.f90（use missing_mod_alpha）、other.f90（use missing_mod_beta）
+      - 工具：gfortran（系统自带）
+      - 这是诊断管线测试，不要求编译成功
+
+      ### Expected
+      - bad.f90 重复编译产生稳定的 module_missing 错误
+      - 系统识别重复并给出提示
+      - experiment_log 记录观察
+
+      ### Notes
+      - 受控测试，按 experiment_focus 的命令序列执行即可

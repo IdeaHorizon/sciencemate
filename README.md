@@ -6,8 +6,8 @@ Install it, open it, and say what you want to research — it writes the code, r
 
 Data and computation stay **on your own machine**: every project is a local git repository, and model keys are stored encrypted on that machine only. Python, git, LaTeX (tectonic), and a bash shell for running experiments ship with the app — **nothing to set up first**.
 
-- Current version: [v0.5.4](../../releases/tag/v0.5.4) · changelog in [Releases](../../releases)
-- This repository holds **release artifacts** (installers and updates), not source code
+- Current version: [v0.5.6](../../releases/tag/v0.5.6) · changelog in [Releases](../../releases)
+- This repository holds the **source code** of the Personal edition and its **releases** (installers and updates). The installers are built from this tree; see [DEVELOPMENT.md](DEVELOPMENT.md) to run it from source.
 - This is the **Personal edition**: everything runs on your own machine. The Professional edition adds a shared organization server for teams and is not distributed here.
 
 ## A look at the interface
@@ -195,4 +195,4 @@ Both platforms need a working model API key.
 
 ---
 
-*Preview release. This repository distributes installers and updates only; it contains no source code.*
+*Preview release. Licensing and third-party notices are being finalised before the public release.*

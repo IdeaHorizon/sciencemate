@@ -1,0 +1,51 @@
+# PROJECT.md —— 项目级约定（跨节点）
+
+放在 `~/.harness-framework/projects/{project_id}/PROJECT.md`。框架在该项目所有节点
+的每个 LLM call 时注入 system_prompt（含 per-node 段精准过滤）。
+
+**何时写**：项目主题 / 数据集 / 范围 / 节点专属约定。agent 通过
+`propose_profile_update(scope='project', ...)` 提议，user accept 后写入。
+
+---
+
+## 项目目标
+
+{这个项目要回答什么科学问题 / 解决什么工程问题。一段。}
+
+## 项目约束
+
+- 数据集：{例：仅用 MaterialsProject 的 chemPotPhasor 子集}
+- 计算资源：{例：M2 Max 本地跑，不用 cluster}
+- 时间窗：{例：targeting npj Comp Mat 6 月截稿}
+- 不做：{例：本项目不考虑量子精度 DFT 验证}
+
+## 学术约定
+
+- 目标 venue：{例：npj_comp_mat}
+- review rubric：{例：accept_min_overall=4.0}
+- citation 风格：{例：[claim_id] 强制内联引用}
+
+## 节点级指令
+
+agent 调起特定节点时，本段对应 `### <node_type>` 子段会精准注入到那个节点的
+system_prompt。其它节点看不到。
+
+### literature
+
+- {例：优先 2023 后的工作；忽略 pre-print 没 peer-review 的}
+- {例：每篇 paper 必须 add_memory(kind='observation', tags=['paper:<key>'])}
+
+### hypothesis
+
+- {例：每个 hypothesis 必须带结构化 falsification_criteria}
+- {例：prereg 必须 freeze_artifact 后才能进 experiment}
+
+### experiment
+
+- {例：LAMMPS 用 lmp_serial 在 /opt/homebrew/bin/}
+- {例：每次实验 wall time 上限 300 秒，超时算 timeout failure}
+
+### analysis
+
+- {例：必须做至少 1 次稳健性检验（subset / 不同阈值）}
+- {例：所有 H 都 supported 时必须标 confirmation bias 风险}

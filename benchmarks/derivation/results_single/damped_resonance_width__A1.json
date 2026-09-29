@@ -1,0 +1,114 @@
+{
+  "task_id": "damped_resonance_width",
+  "arm": "A1",
+  "final_expression": "gamma",
+  "final_expression_source": "main_result",
+  "main_result_statement": "弱阻尼近似（Q>>1）下受迫阻尼谐振子振幅共振曲线半高全宽 Δω ≈ γ = ω₀/Q；精确式 Δω = √(ω₀²−γ²/2+(γ/2)√(4ω₀²−γ²)) − √(ω₀²−γ²/2−(γ/2)√(4ω₀²−γ²))，适用 γ<ω₀√(2−√2)≈0.765ω₀",
+  "verdict": "derived",
+  "verification_evidence": [
+    {
+      "step": "S1",
+      "probe": "5aeecf0708f91ae3",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S2",
+      "probe": "e70a066a10870967",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S3",
+      "probe": "584edb080bbefc34",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S5",
+      "probe": "bc984553d62b5cc8",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S6",
+      "probe": "852a6f56d4f0b2a3",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S7",
+      "probe": "58bf0b7386001b16",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S8",
+      "probe": "e29b0d40b325bab3",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S10",
+      "probe": "4149a0510d616a82",
+      "status": "verified",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 8,
+  "step_count": 12,
+  "assumptions": [
+    "A1: γ>0, ω₀>0, F>0",
+    "A2: ω≥0",
+    "A3: 4ω₀²−γ²>0（γ<2ω₀，判别式实根）",
+    "A4: γ<ω₀√(2−√2)≈0.765ω₀（FWHM 良定义）",
+    "A5: 弱阻尼 γ≪ω₀（Q≫1）；结论依赖此近似，不 discharge",
+    "A6: 稳态线性响应、瞬态已衰减、单频驱动"
+  ],
+  "unverified_steps": [
+    "S4",
+    "S9",
+    "S11",
+    "S12"
+  ],
+  "validity_domain": [
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A6"
+  ],
+  "credibility": "high：核心代数 10 条符号 verified；弱阻尼 leading order 由 limit_check 确证（t→0 时 Δω/γ→1）；一阶修正项 γ³/(4ω₀²) 由符号 series 与数值双重确认；FWHM 定义数值核对机器精度；量纲一致。最脆处为 S11 近似截断，误差已量化 1/(4Q²)。",
+  "findings": [
+    {
+      "id": "F1",
+      "statement": "弱阻尼近似用在 S11：推导链 S1-S10 全程精确，近似仅出现在对精确 Δω 做 γ≪ω₀ Taylor 展开保留主项"
+    },
+    {
+      "id": "F2",
+      "statement": "适用范围 Q≫1，相对误差≈γ²/(4ω₀²)=1/(4Q²)；Q=20→0.06%，Q=10→0.25%，Q=5→1.0%，Q=2→8%（失效）"
+    },
+    {
+      "id": "F3",
+      "statement": "精确 Δω 表达式适用域 γ<0.765ω₀（无需弱阻尼）"
+    },
+    {
+      "id": "F4",
+      "statement": "修正项：Δω=γ+γ³/(4ω₀²)+(7/32)γ⁵/ω₀⁴+O(γ⁷/ω₀⁶)"
+    },
+    {
+      "id": "F5",
+      "statement": "共振频率偏移 ω_res²=ω₀²−γ²/2 不影响半高宽主项（一阶）"
+    },
+    {
+      "id": "F6",
+      "statement": "物理前提：稳态线性响应、单频驱动、γ>0"
+    }
+  ],
+  "frozen": true,
+  "turns": 34,
+  "tool_calls": 44,
+  "elapsed_s": 636.5,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787415479-c04ed0"
+}

@@ -1,0 +1,2506 @@
+[
+  {
+    "archive": "cas:0101",
+    "label": "哲学",
+    "categories": [
+      {
+        "domain": "010101",
+        "label": "马克思主义哲学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "010102",
+        "label": "中国哲学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "010103",
+        "label": "外国哲学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "010104",
+        "label": "逻辑学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "010105",
+        "label": "伦理学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "010106",
+        "label": "美学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "010107",
+        "label": "宗教学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "010108",
+        "label": "科学技术哲学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0201",
+    "label": "理论经济学",
+    "categories": [
+      {
+        "domain": "020101",
+        "label": "政治经济学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "020102",
+        "label": "经济思想史",
+        "kind": "leaf"
+      },
+      {
+        "domain": "020103",
+        "label": "经济史",
+        "kind": "leaf"
+      },
+      {
+        "domain": "020104",
+        "label": "西方经济学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "020105",
+        "label": "世界经济",
+        "kind": "leaf"
+      },
+      {
+        "domain": "020106",
+        "label": "人口、资源与环境经济学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0202",
+    "label": "应用经济学",
+    "categories": [
+      {
+        "domain": "020201",
+        "label": "国民经济学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "020202",
+        "label": "区域经济学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "020203",
+        "label": "财政学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "020204",
+        "label": "金融学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "020205",
+        "label": "产业经济学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "020206",
+        "label": "国际贸易学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "020207",
+        "label": "劳动经济学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "020208",
+        "label": "统计学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "020209",
+        "label": "数量经济学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "020210",
+        "label": "国防经济",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0301",
+    "label": "法学",
+    "categories": [
+      {
+        "domain": "030101",
+        "label": "法学理论",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030102",
+        "label": "法律史",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030103",
+        "label": "宪法学与行政法学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030104",
+        "label": "刑法学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030105",
+        "label": "民商法学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030106",
+        "label": "诉讼法学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030107",
+        "label": "经济法学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030108",
+        "label": "环境与资源保护法学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030109",
+        "label": "国际法学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030110",
+        "label": "军事法学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0302",
+    "label": "政治学",
+    "categories": [
+      {
+        "domain": "030201",
+        "label": "政治学理论",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030202",
+        "label": "中外政治制度",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030203",
+        "label": "科学社会主义与国际共产主义运动",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030204",
+        "label": "中共党史",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030205",
+        "label": "马克思主义理论与思想政治教育（旧目录）",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030206",
+        "label": "国际政治",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030207",
+        "label": "国际关系",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030208",
+        "label": "外交学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0303",
+    "label": "社会学",
+    "categories": [
+      {
+        "domain": "030301",
+        "label": "社会学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030302",
+        "label": "人口学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030303",
+        "label": "人类学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030304",
+        "label": "民俗学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0304",
+    "label": "民族学",
+    "categories": [
+      {
+        "domain": "030401",
+        "label": "民族学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030402",
+        "label": "马克思主义民族理论与政策",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030403",
+        "label": "中国少数民族经济",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030404",
+        "label": "中国少数民族史",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030405",
+        "label": "中国少数民族艺术",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0305",
+    "label": "马克思主义理论",
+    "categories": [
+      {
+        "domain": "030501",
+        "label": "马克思主义基本原理",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030502",
+        "label": "马克思主义发展史",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030503",
+        "label": "马克思主义中国化研究",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030504",
+        "label": "国外马克思主义研究",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030505",
+        "label": "思想政治教育",
+        "kind": "leaf"
+      },
+      {
+        "domain": "030506",
+        "label": "中国近现代史基本问题研究",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0401",
+    "label": "教育学",
+    "categories": [
+      {
+        "domain": "040101",
+        "label": "教育学原理",
+        "kind": "leaf"
+      },
+      {
+        "domain": "040102",
+        "label": "课程与教学论",
+        "kind": "leaf"
+      },
+      {
+        "domain": "040103",
+        "label": "教育史",
+        "kind": "leaf"
+      },
+      {
+        "domain": "040104",
+        "label": "比较教育学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "040105",
+        "label": "学前教育学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "040106",
+        "label": "高等教育学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "040107",
+        "label": "成人教育学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "040108",
+        "label": "职业技术教育学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "040109",
+        "label": "特殊教育学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "040110",
+        "label": "教育技术学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0402",
+    "label": "心理学（可授教育学、理学学位）",
+    "categories": [
+      {
+        "domain": "040201",
+        "label": "基础心理学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "040202",
+        "label": "发展与教育心理学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "040203",
+        "label": "应用心理学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0403",
+    "label": "体育学",
+    "categories": [
+      {
+        "domain": "040301",
+        "label": "体育人文社会学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "040302",
+        "label": "运动人体科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "040303",
+        "label": "体育教育训练学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "040304",
+        "label": "民族传统体育学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0501",
+    "label": "中国语言文学",
+    "categories": [
+      {
+        "domain": "050101",
+        "label": "文艺学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050102",
+        "label": "语言学及应用语言学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050103",
+        "label": "汉语言文字学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050104",
+        "label": "中国古典文献学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050105",
+        "label": "中国古代文学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050106",
+        "label": "中国现当代文学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050107",
+        "label": "中国少数民族语言文学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050108",
+        "label": "比较文学与世界文学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0502",
+    "label": "外国语言文学",
+    "categories": [
+      {
+        "domain": "050201",
+        "label": "英语语言文学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050202",
+        "label": "俄语语言文学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050203",
+        "label": "法语语言文学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050204",
+        "label": "德语语言文学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050205",
+        "label": "日语语言文学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050206",
+        "label": "印度语言文学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050207",
+        "label": "西班牙语语言文学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050208",
+        "label": "阿拉伯语语言文学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050209",
+        "label": "欧洲语言文学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050210",
+        "label": "亚非语言文学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050211",
+        "label": "外国语言学及应用语言学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0503",
+    "label": "新闻传播学",
+    "categories": [
+      {
+        "domain": "050301",
+        "label": "新闻学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050302",
+        "label": "传播学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0504",
+    "label": "艺术学",
+    "categories": [
+      {
+        "domain": "050401",
+        "label": "艺术学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050402",
+        "label": "音乐学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050403",
+        "label": "美术学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050404",
+        "label": "设计艺术学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050405",
+        "label": "戏剧戏曲学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050406",
+        "label": "电影学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050407",
+        "label": "广播电视艺术学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "050408",
+        "label": "舞蹈学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0601",
+    "label": "历史学",
+    "categories": [
+      {
+        "domain": "060101",
+        "label": "史学理论及史学史",
+        "kind": "leaf"
+      },
+      {
+        "domain": "060102",
+        "label": "考古学及博物馆学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "060103",
+        "label": "历史地理学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "060104",
+        "label": "历史文献学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "060105",
+        "label": "专门史",
+        "kind": "leaf"
+      },
+      {
+        "domain": "060106",
+        "label": "中国古代史",
+        "kind": "leaf"
+      },
+      {
+        "domain": "060107",
+        "label": "中国近现代史",
+        "kind": "leaf"
+      },
+      {
+        "domain": "060108",
+        "label": "世界史",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0701",
+    "label": "数学",
+    "categories": [
+      {
+        "domain": "070101",
+        "label": "基础数学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070102",
+        "label": "计算数学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070103",
+        "label": "概率论与数理统计",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070104",
+        "label": "应用数学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070105",
+        "label": "运筹学与控制论",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0702",
+    "label": "物理学",
+    "categories": [
+      {
+        "domain": "070201",
+        "label": "理论物理",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070202",
+        "label": "粒子物理与原子核物理",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070203",
+        "label": "原子与分子物理",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070204",
+        "label": "等离子体物理",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070205",
+        "label": "凝聚态物理",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070206",
+        "label": "声学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070207",
+        "label": "光学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070208",
+        "label": "无线电物理",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0703",
+    "label": "化学",
+    "categories": [
+      {
+        "domain": "070301",
+        "label": "无机化学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070302",
+        "label": "分析化学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070303",
+        "label": "有机化学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070304",
+        "label": "物理化学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070305",
+        "label": "高分子化学与物理",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0704",
+    "label": "天文学",
+    "categories": [
+      {
+        "domain": "070401",
+        "label": "天体物理",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070402",
+        "label": "天体测量与天体力学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0705",
+    "label": "地理学",
+    "categories": [
+      {
+        "domain": "070501",
+        "label": "自然地理学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070502",
+        "label": "人文地理学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070503",
+        "label": "地图学与地理信息系统",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0706",
+    "label": "大气科学",
+    "categories": [
+      {
+        "domain": "070601",
+        "label": "气象学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070602",
+        "label": "大气物理学与大气环境",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0707",
+    "label": "海洋科学",
+    "categories": [
+      {
+        "domain": "070701",
+        "label": "物理海洋学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070702",
+        "label": "海洋化学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070703",
+        "label": "海洋生物学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070704",
+        "label": "海洋地质",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0708",
+    "label": "地球物理学",
+    "categories": [
+      {
+        "domain": "070801",
+        "label": "固体地球物理学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070802",
+        "label": "空间物理学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0709",
+    "label": "地质学",
+    "categories": [
+      {
+        "domain": "070901",
+        "label": "矿物学、岩石学、矿床学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070902",
+        "label": "地球化学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070903",
+        "label": "古生物学与地层学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070904",
+        "label": "构造地质学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "070905",
+        "label": "第四纪地质学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0710",
+    "label": "生物学",
+    "categories": [
+      {
+        "domain": "071001",
+        "label": "植物学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "071002",
+        "label": "动物学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "071003",
+        "label": "生理学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "071004",
+        "label": "水生生物学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "071005",
+        "label": "微生物学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "071006",
+        "label": "神经生物学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "071007",
+        "label": "遗传学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "071008",
+        "label": "发育生物学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "071009",
+        "label": "细胞生物学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "071010",
+        "label": "生物化学与分子生物学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "071011",
+        "label": "生物物理学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "071012",
+        "label": "生态学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0711",
+    "label": "系统科学",
+    "categories": [
+      {
+        "domain": "071101",
+        "label": "系统理论",
+        "kind": "leaf"
+      },
+      {
+        "domain": "071102",
+        "label": "系统分析与集成",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0712",
+    "label": "科学技术史",
+    "categories": [
+      {
+        "domain": "071200",
+        "label": "科学技术史",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0801",
+    "label": "力学（可授工学、理学学位）",
+    "categories": [
+      {
+        "domain": "080101",
+        "label": "一般力学与力学基础",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080102",
+        "label": "固体力学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080103",
+        "label": "流体力学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080104",
+        "label": "工程力学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0802",
+    "label": "机械工程",
+    "categories": [
+      {
+        "domain": "080201",
+        "label": "机械制造及其自动化",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080202",
+        "label": "机械电子工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080203",
+        "label": "机械设计及理论",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080204",
+        "label": "车辆工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0803",
+    "label": "光学工程",
+    "categories": [
+      {
+        "domain": "080300",
+        "label": "光学工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0804",
+    "label": "仪器科学与技术",
+    "categories": [
+      {
+        "domain": "080401",
+        "label": "精密仪器及机械",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080402",
+        "label": "测试计量技术及仪器",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0805",
+    "label": "材料科学与工程",
+    "categories": [
+      {
+        "domain": "080501",
+        "label": "材料物理与化学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080502",
+        "label": "材料学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080503",
+        "label": "材料加工工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0806",
+    "label": "冶金工程",
+    "categories": [
+      {
+        "domain": "080601",
+        "label": "冶金物理化学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080602",
+        "label": "钢铁冶金",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080603",
+        "label": "有色金属冶金",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0807",
+    "label": "动力工程及工程热物理",
+    "categories": [
+      {
+        "domain": "080701",
+        "label": "工程热物理",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080702",
+        "label": "热能工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080703",
+        "label": "动力机械及工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080704",
+        "label": "流体机械及工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080705",
+        "label": "制冷及低温工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080706",
+        "label": "化工过程机械",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0808",
+    "label": "电气工程",
+    "categories": [
+      {
+        "domain": "080801",
+        "label": "电机与电器",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080802",
+        "label": "电力系统及其自动化",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080803",
+        "label": "高电压与绝缘技术",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080804",
+        "label": "电力电子与电力传动",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080805",
+        "label": "电工理论与新技术",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0809",
+    "label": "电子科学与技术",
+    "categories": [
+      {
+        "domain": "080901",
+        "label": "物理电子学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080902",
+        "label": "电路与系统",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080903",
+        "label": "微电子学与固体电子学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "080904",
+        "label": "电磁场与微波技术",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0810",
+    "label": "信息与通信工程",
+    "categories": [
+      {
+        "domain": "081001",
+        "label": "通信与信息系统",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081002",
+        "label": "信号与信息处理",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0811",
+    "label": "控制科学与工程",
+    "categories": [
+      {
+        "domain": "081101",
+        "label": "控制理论与控制工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081102",
+        "label": "检测技术与自动化装置",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081103",
+        "label": "系统工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081104",
+        "label": "模式识别与智能系统",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081105",
+        "label": "导航、制导与控制",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0812",
+    "label": "计算机科学与技术",
+    "categories": [
+      {
+        "domain": "081201",
+        "label": "计算机系统结构",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081202",
+        "label": "计算机软件与理论",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081203",
+        "label": "计算机应用技术",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0813",
+    "label": "建筑学",
+    "categories": [
+      {
+        "domain": "081301",
+        "label": "建筑历史与理论",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081302",
+        "label": "建筑设计及其理论",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081303",
+        "label": "城市规划与设计",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081304",
+        "label": "建筑技术科学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0814",
+    "label": "土木工程",
+    "categories": [
+      {
+        "domain": "081401",
+        "label": "岩土工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081402",
+        "label": "结构工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081403",
+        "label": "市政工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081404",
+        "label": "供热、供燃气、通风及空调工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081405",
+        "label": "防灾减灾工程及防护工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081406",
+        "label": "桥梁与隧道工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0815",
+    "label": "水利工程",
+    "categories": [
+      {
+        "domain": "081501",
+        "label": "水文学及水资源",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081502",
+        "label": "水力学及河流动力学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081503",
+        "label": "水工结构工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081504",
+        "label": "水利水电工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081505",
+        "label": "港口、海岸及近海工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0816",
+    "label": "测绘科学与技术",
+    "categories": [
+      {
+        "domain": "081601",
+        "label": "大地测量学与测量工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081602",
+        "label": "摄影测量与遥感",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081603",
+        "label": "地图制图学与地理信息工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0817",
+    "label": "化学工程与技术",
+    "categories": [
+      {
+        "domain": "081701",
+        "label": "化学工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081702",
+        "label": "化学工艺",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081703",
+        "label": "生物化工",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081704",
+        "label": "应用化学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081705",
+        "label": "工业催化",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0818",
+    "label": "地质资源与地质工程",
+    "categories": [
+      {
+        "domain": "081801",
+        "label": "矿产普查与勘探",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081802",
+        "label": "地球探测与信息技术",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081803",
+        "label": "地质工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0819",
+    "label": "矿业工程",
+    "categories": [
+      {
+        "domain": "081901",
+        "label": "采矿工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081902",
+        "label": "矿物加工工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "081903",
+        "label": "安全技术及工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0820",
+    "label": "石油与天然气工程",
+    "categories": [
+      {
+        "domain": "082001",
+        "label": "油气井工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082002",
+        "label": "油气田开发工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082003",
+        "label": "油气储运工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0821",
+    "label": "纺织科学与工程",
+    "categories": [
+      {
+        "domain": "082101",
+        "label": "纺织工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082102",
+        "label": "纺织材料与纺织品设计",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082103",
+        "label": "纺织化学与染整工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082104",
+        "label": "服装设计与工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0822",
+    "label": "轻工技术与工程",
+    "categories": [
+      {
+        "domain": "082201",
+        "label": "制浆造纸工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082202",
+        "label": "制糖工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082203",
+        "label": "发酵工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082204",
+        "label": "皮革化学与工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0823",
+    "label": "交通运输工程",
+    "categories": [
+      {
+        "domain": "082301",
+        "label": "道路与铁道工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082302",
+        "label": "交通信息工程及控制",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082303",
+        "label": "交通运输规划与管理",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082304",
+        "label": "载运工具运用工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0824",
+    "label": "船舶与海洋工程",
+    "categories": [
+      {
+        "domain": "082401",
+        "label": "船舶与海洋结构物设计制造",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082402",
+        "label": "轮机工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082403",
+        "label": "水声工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0825",
+    "label": "航空宇航科学与技术",
+    "categories": [
+      {
+        "domain": "082501",
+        "label": "飞行器设计",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082502",
+        "label": "航空宇航推进理论与工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082503",
+        "label": "航空宇航制造工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082504",
+        "label": "人机与环境工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0826",
+    "label": "兵器科学与技术",
+    "categories": [
+      {
+        "domain": "082601",
+        "label": "武器系统与运用工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082602",
+        "label": "兵器发射理论与技术",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082603",
+        "label": "火炮、自动武器与弹药工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082604",
+        "label": "军事化学与烟火技术",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0827",
+    "label": "核科学与技术",
+    "categories": [
+      {
+        "domain": "082701",
+        "label": "核能科学与工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082702",
+        "label": "核燃料循环与材料",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082703",
+        "label": "核技术及应用",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082704",
+        "label": "辐射防护及环境保护",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0828",
+    "label": "农业工程",
+    "categories": [
+      {
+        "domain": "082801",
+        "label": "农业机械化工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082802",
+        "label": "农业水土工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082803",
+        "label": "农业生物环境与能源工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082804",
+        "label": "农业电气化与自动化",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0829",
+    "label": "林业工程",
+    "categories": [
+      {
+        "domain": "082901",
+        "label": "森林工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082902",
+        "label": "木材科学与技术",
+        "kind": "leaf"
+      },
+      {
+        "domain": "082903",
+        "label": "林产化学加工工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0830",
+    "label": "环境科学与工程",
+    "categories": [
+      {
+        "domain": "083001",
+        "label": "环境科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "083002",
+        "label": "环境工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0831",
+    "label": "生物医学工程",
+    "categories": [
+      {
+        "domain": "083100",
+        "label": "生物医学工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0832",
+    "label": "食品科学与工程",
+    "categories": [
+      {
+        "domain": "083201",
+        "label": "食品科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "083202",
+        "label": "粮食、油脂及植物蛋白工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "083203",
+        "label": "农产品加工及贮藏工程",
+        "kind": "leaf"
+      },
+      {
+        "domain": "083204",
+        "label": "水产品加工及贮藏工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0901",
+    "label": "作物学",
+    "categories": [
+      {
+        "domain": "090101",
+        "label": "作物栽培学与耕作学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090102",
+        "label": "作物遗传育种",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0902",
+    "label": "园艺学",
+    "categories": [
+      {
+        "domain": "090201",
+        "label": "果树学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090202",
+        "label": "蔬菜学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090203",
+        "label": "茶学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0903",
+    "label": "农业资源利用",
+    "categories": [
+      {
+        "domain": "090301",
+        "label": "土壤学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090302",
+        "label": "植物营养学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0904",
+    "label": "植物保护",
+    "categories": [
+      {
+        "domain": "090401",
+        "label": "植物病理学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090402",
+        "label": "农业昆虫与害虫防治",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090403",
+        "label": "农药学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0905",
+    "label": "畜牧学",
+    "categories": [
+      {
+        "domain": "090501",
+        "label": "动物遗传育种与繁殖",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090502",
+        "label": "动物营养与饲料科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090503",
+        "label": "草业科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090504",
+        "label": "特种经济动物饲养",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0906",
+    "label": "兽医学",
+    "categories": [
+      {
+        "domain": "090601",
+        "label": "基础兽医学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090602",
+        "label": "预防兽医学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090603",
+        "label": "临床兽医学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0907",
+    "label": "林学",
+    "categories": [
+      {
+        "domain": "090701",
+        "label": "林木遗传育种",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090702",
+        "label": "森林培育",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090703",
+        "label": "森林保护学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090704",
+        "label": "森林经理学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090705",
+        "label": "野生动植物保护与利用",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090706",
+        "label": "园林植物与观赏园艺",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090707",
+        "label": "水土保持与荒漠化防治",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:0908",
+    "label": "水产",
+    "categories": [
+      {
+        "domain": "090801",
+        "label": "水产养殖",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090802",
+        "label": "捕捞学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "090803",
+        "label": "渔业资源",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1001",
+    "label": "基础医学",
+    "categories": [
+      {
+        "domain": "100101",
+        "label": "人体解剖和组织胚胎学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100102",
+        "label": "免疫学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100103",
+        "label": "病原生物学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100104",
+        "label": "病理学与病理生理学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100105",
+        "label": "法医学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100106",
+        "label": "放射医学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100107",
+        "label": "航空、航天与航海医学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1002",
+    "label": "临床医学",
+    "categories": [
+      {
+        "domain": "100201",
+        "label": "内科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100202",
+        "label": "儿科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100203",
+        "label": "老年医学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100204",
+        "label": "神经病学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100205",
+        "label": "精神病与精神卫生学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100206",
+        "label": "皮肤病与性病学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100207",
+        "label": "影像医学与核医学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100208",
+        "label": "临床检验诊断学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100209",
+        "label": "护理学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100210",
+        "label": "外科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100211",
+        "label": "妇产科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100212",
+        "label": "眼科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100213",
+        "label": "耳鼻咽喉科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100214",
+        "label": "肿瘤学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100215",
+        "label": "康复医学与理疗学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100216",
+        "label": "运动医学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100217",
+        "label": "麻醉学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100218",
+        "label": "急诊医学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1003",
+    "label": "口腔医学",
+    "categories": [
+      {
+        "domain": "100301",
+        "label": "口腔基础医学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100302",
+        "label": "口腔临床医学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1004",
+    "label": "公共卫生与预防医学",
+    "categories": [
+      {
+        "domain": "100401",
+        "label": "流行病与卫生统计学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100402",
+        "label": "劳动卫生与环境卫生学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100403",
+        "label": "营养与食品卫生学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100404",
+        "label": "儿少卫生与妇幼保健学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100405",
+        "label": "卫生毒理学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100406",
+        "label": "军事预防医学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1005",
+    "label": "中医学",
+    "categories": [
+      {
+        "domain": "100501",
+        "label": "中医基础理论",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100502",
+        "label": "中医临床基础",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100503",
+        "label": "中医医史文献",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100504",
+        "label": "方剂学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100505",
+        "label": "中医诊断学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100506",
+        "label": "中医内科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100507",
+        "label": "中医外科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100508",
+        "label": "中医骨伤科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100509",
+        "label": "中医妇科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100510",
+        "label": "中医儿科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100511",
+        "label": "中医五官科学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100512",
+        "label": "针灸推拿学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100513",
+        "label": "民族医学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1006",
+    "label": "中西医结合",
+    "categories": [
+      {
+        "domain": "100601",
+        "label": "中西医结合基础",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100602",
+        "label": "中西医结合临床",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1007",
+    "label": "药学",
+    "categories": [
+      {
+        "domain": "100701",
+        "label": "药物化学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100702",
+        "label": "药剂学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100703",
+        "label": "生药学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100704",
+        "label": "药物分析学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100705",
+        "label": "微生物与生化药学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "100706",
+        "label": "药理学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1008",
+    "label": "中药学",
+    "categories": [
+      {
+        "domain": "100800",
+        "label": "中药学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1101",
+    "label": "军事思想及军事历史",
+    "categories": [
+      {
+        "domain": "110101",
+        "label": "军事思想",
+        "kind": "leaf"
+      },
+      {
+        "domain": "110102",
+        "label": "军事历史",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1102",
+    "label": "战略学",
+    "categories": [
+      {
+        "domain": "110201",
+        "label": "军事战略学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "110202",
+        "label": "战争动员学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1103",
+    "label": "战役学",
+    "categories": [
+      {
+        "domain": "110301",
+        "label": "联合战役学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "110302",
+        "label": "军种战役学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1104",
+    "label": "战术学",
+    "categories": [
+      {
+        "domain": "110401",
+        "label": "合同战术学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "110402",
+        "label": "兵种战术学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1105",
+    "label": "军队指挥学",
+    "categories": [
+      {
+        "domain": "110501",
+        "label": "作战指挥学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "110502",
+        "label": "军事运筹学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "110503",
+        "label": "军事通信学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "110504",
+        "label": "军事情报学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "110505",
+        "label": "密码学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "110506",
+        "label": "军事教育训练学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1106",
+    "label": "军制学",
+    "categories": [
+      {
+        "domain": "110601",
+        "label": "军事组织编制学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "110602",
+        "label": "军队管理学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1107",
+    "label": "军队政治工作学",
+    "categories": [
+      {
+        "domain": "110700",
+        "label": "军队政治工作学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1108",
+    "label": "军事后勤学与军事装备学",
+    "categories": [
+      {
+        "domain": "110801",
+        "label": "军事后勤学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "110802",
+        "label": "后方专业勤务",
+        "kind": "leaf"
+      },
+      {
+        "domain": "110803",
+        "label": "军事装备学",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1201",
+    "label": "管理科学与工程",
+    "categories": [
+      {
+        "domain": "120100",
+        "label": "管理科学与工程",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1202",
+    "label": "工商管理",
+    "categories": [
+      {
+        "domain": "120201",
+        "label": "会计学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "120202",
+        "label": "企业管理",
+        "kind": "leaf"
+      },
+      {
+        "domain": "120203",
+        "label": "旅游管理",
+        "kind": "leaf"
+      },
+      {
+        "domain": "120204",
+        "label": "技术经济及管理",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1203",
+    "label": "农林经济管理",
+    "categories": [
+      {
+        "domain": "120301",
+        "label": "农业经济管理",
+        "kind": "leaf"
+      },
+      {
+        "domain": "120302",
+        "label": "林业经济管理",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1204",
+    "label": "公共管理",
+    "categories": [
+      {
+        "domain": "120401",
+        "label": "行政管理",
+        "kind": "leaf"
+      },
+      {
+        "domain": "120402",
+        "label": "社会医学与卫生事业管理",
+        "kind": "leaf"
+      },
+      {
+        "domain": "120403",
+        "label": "教育经济与管理",
+        "kind": "leaf"
+      },
+      {
+        "domain": "120404",
+        "label": "社会保障",
+        "kind": "leaf"
+      },
+      {
+        "domain": "120405",
+        "label": "土地资源管理",
+        "kind": "leaf"
+      }
+    ]
+  },
+  {
+    "archive": "cas:1205",
+    "label": "图书馆、情报与档案管理",
+    "categories": [
+      {
+        "domain": "120501",
+        "label": "图书馆学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "120502",
+        "label": "情报学",
+        "kind": "leaf"
+      },
+      {
+        "domain": "120503",
+        "label": "档案学",
+        "kind": "leaf"
+      }
+    ]
+  }
+]

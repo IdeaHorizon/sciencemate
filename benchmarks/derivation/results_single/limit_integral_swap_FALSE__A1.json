@@ -1,0 +1,93 @@
+{
+  "task_id": "limit_integral_swap_FALSE",
+  "arm": "A1",
+  "final_expression": "+∞），故 DCT/MCT/一致收敛/一致有界的前提全部缺失",
+  "final_expression_source": "guessed_from_last_step",
+  "main_result_statement": "命题『[0,1] 上可积函数列逐点收敛即可交换极限与积分』不成立（refuted）。反例 f_n(x)=n*1_{(0,1/n)}(x)：每个 f_n 可积、处处点收敛于 f≡0，但 ∫_0^1 f_n dx ≡ 1 而 ∫_0^1 f dx = 0。充分条件（任一即可）：一致收敛；控制收敛 DCT（|f_n|≤g∈L1）；单调收敛 MCT（0≤f_n↑f）；一致有界+点收敛（Arzelà）。",
+  "verdict": "refuted",
+  "verification_evidence": [
+    {
+      "step": "S4",
+      "probe": "d504b6b46720ab70",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S5",
+      "probe": "c161171fd0f44304",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S6",
+      "probe": "ac25a14206ec21b7",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S7",
+      "probe": "219fd54001ef0760",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S8",
+      "probe": "7e9cf3dd95f786eb",
+      "status": "verified",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 5,
+  "step_count": 9,
+  "assumptions": [
+    "A1: n ∈ ℕ⁺ 正整数，积分区间 (0,1/n) 良定、宽度 1/n→0",
+    "A2: x ∈ [0,1]（命题取值域）",
+    "A3: 积分取 Lebesgue 或 Riemann 意义，[0,1] 带标准测度/长度；反例两种意义下均否证命题",
+    "A4: ε>0 截断参数（诊断 ∫_0^1 dx/x 发散用）",
+    "A5: S4/S5 check_step 符号化简隐含 n>0，已由 A1 显式覆盖，无额外隐藏假设"
+  ],
+  "unverified_steps": [
+    "S1",
+    "S2",
+    "S3",
+    "S9"
+  ],
+  "validity_domain": [
+    "A1",
+    "A2",
+    "A3",
+    "A5"
+  ],
+  "credibility": {
+    "level": "high",
+    "basis": "承重步骤 S4-S7 全部符号 verified（check_step）；反例为解析构造，数值演示一致。S3 逐点收敛 case 论证为 prose（全称-存在论证超出 CAS 能力），S8 广义积分发散为 verified 原函数步 + 数值复核（该步仅诊断用），均非承重、已如实标注。",
+    "weakest_point": "S3 分情形论证未过机械验证器"
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "statement": "否证干净：极限 f≡0 本身可积（两种意义），否证源于质量向 x=0 邻域集中（高度 n、宽度 1/n、面积恒 1）的逃逸，而非极限函数不可积（区别于 Dirichlet 型病态）"
+    },
+    {
+      "id": "F2",
+      "statement": "反例恰在 S9 四组充分条件前提全部缺失的边界上：无 L1 控制（sup~1/x 不可积）、非单调、sup||f_n||_oo=∞ 无一致有界/一致收敛"
+    },
+    {
+      "id": "F3",
+      "statement": "处处点收敛 + 双方 L1 也不保证 L1 收敛：∫|f_n-f|=1 不趋于 0。命题要求比点收敛强得多的结论"
+    },
+    {
+      "id": "F4",
+      "statement": "工具备注：limit_check 对 -log(eps)→oo 的 matches_expected=false 为工具比对层怪癖（计算值=oo=期望）；check_step 对广义积分 =oo 返回 inconclusive（CAS 能力边界）。均以原函数步 verified + 数值复核兜底，承重结论不受影响"
+    },
+    {
+      "id": "F5",
+      "statement": "S3 逐点收敛为 prose 论证，已如实标注不冒充 verified；数值演示一致"
+    }
+  ],
+  "frozen": true,
+  "turns": 14,
+  "tool_calls": 22,
+  "elapsed_s": 241.4,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787423911-a26ab4"
+}

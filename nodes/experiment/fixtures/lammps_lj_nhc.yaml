@@ -1,0 +1,67 @@
+# experiment 节点的 fixture —— 注入一个 frozen pre_registration，让 experiment
+# 节点严格按 prereg 跑（实际跑或写好可跑的 input.lammps，看 owner harness 配置）。
+#
+# 运行：
+#   python run_node.py --harness experiment --sandbox --fixture nodes/experiment/fixtures/minimal.yaml
+#
+# 预期产出：
+#   - frozen raw_results、clean_results、experiment_log 三件套
+#   - 若有可长期复用的执行知识，可选 create_experiment 或 KB claim；不影响执行验收
+# 注意：实际跑 LAMMPS 需要本地装好；fixture 默认只测"节点能否按 prereg 写 input 文件"。
+
+node_inputs:
+  experiment_focus: |
+    跑 prereg 里指定的 LJ NVT MD，对比 NHC chain length=3 vs single NH 的温度收敛时间。
+
+upstream_artifacts:
+  - type: pre_registration
+    name: LJ_NHC_vs_NH_convergence
+    metadata:
+      frozen: true
+      frozen_at: "2026-05-15T10:00:00+00:00"
+      freeze_reason: "ready for execution"
+      # 正式主运行：让"欠正式裁决"那条链真的生效（执行证据闭环、结论证据
+      # 可解析、repro bundle）。不声明时框架按 secondary 记录，那几道门会空过。
+      run_role: primary
+      analysis_eligible: true
+      experiment_id: lj_nhc_vs_nh
+      protocol_version: lj-nhc-v1
+    content: |
+      ## Pre-Registration: NHC vs single Nosé-Hoover convergence speed
+
+      ### Hypothesis (H1)
+      在 ρ=0.85, T*=1.5, N=2048 atoms 的 LJ NVT MD 中，NHC chain length=3 的温度
+      到 |T - T_target| / T_target < 0.5% 所需 wall time **比 single NH 快 ≥ 20%**。
+
+      ### Falsification criteria（机械可判）
+      - metric:  convergence_wall_time_ratio = t_NH / t_NHC
+      - op:      <
+      - threshold: 1.20
+        （即 NHC 不快于 20% → hypothesis refuted）
+
+      ### Predicted outcome
+      t_NHC ≈ 6-8 ps，t_NH ≈ 9-12 ps（基于 Martyna et al. 1992 估计）。
+
+      ### Setup
+      - LAMMPS（version 23Jun2022 或更新）
+      - N = 2048 atoms in 一个 cubic box，ρ = 0.85 σ⁻³
+      - T_target = 1.5 ε/kB
+      - timestep = 0.005 τ
+      - simulation length = 30 ps（足够 NH 也收敛）
+      - thermostat 1：single Nosé-Hoover，Q = 100
+      - thermostat 2：NHC chain length=3，Q1=100, Q2=Q3=10
+      - seed：每组各跑 3 个独立 seed（42, 43, 44），取均值
+      - 输出：T(t) 每 0.05 ps 一次，到 dump file
+
+      ### Pre-analysis statistical plan
+      - 每个 thermostat 算 3 个 seed 的 mean convergence time
+      - 双侧 t-test， α=0.05
+      - 如果 NHC 收敛时间均值 > NH 均值 × 1/1.20 → hypothesis refuted
+
+memory_entries:
+  - kind: directive
+    text: "实验跑完原始 log 必须 freeze_artifact 冻结，用它返回的 chunk_id 才能进 KB 当 evidence。"
+    tags: [experiment, freeze]
+  - kind: decision
+    text: "选 LAMMPS 而非 GROMACS — 这边已经验证过 LAMMPS NHC 实现，可控变量少。"
+    tags: [tooling]

@@ -1,0 +1,29 @@
+{
+  "task_id": "rc_transient",
+  "arm": "A0",
+  "model": "deepseek-v4-flash",
+  "final_expression": "V0*(1 - exp(-t/(R*C)))",
+  "verdict": "derived",
+  "assumptions": [
+    "理想集总参数电路；R、C 是线性时不变常数元件。",
+    "R>0 且 C>0，因此 RC 非零且 τ=RC 有定义；除以 RC/τ 合法。",
+    "直流电压源 V0 为理想恒压源，内阻为 0，t=0 瞬时接入，接入后 V0 不随时间变化。",
+    "导线电阻、电感和寄生电容忽略；KVL 成立。",
+    "电容初始电压 v_C(0^-)=0；开关过程不产生使电容电压突跳的无穷大电流脉冲，所以 v_C(0^+)=0。",
+    "取串联电流 i 与电容电压关联方向，i=C dv_C/dt，v_R=Ri。",
+    "微分方程在 t>0 成立，t=0 作为初始条件使用；v_C(t) 在 t>0 可微。",
+    "指数函数不展开成级数；若展开成 e^{-t/(RC)}，其幂级数对所有实数 t/(RC) 绝对收敛。",
+    "初始条件与外加电压 V0 相互独立，由初值唯一确定积分常数。",
+    "量纲均匀：指数 t/(RC) 无量纲，由量纲分析保证。"
+  ],
+  "unverified_steps": [],
+  "reasoning_summary": "列 KVL 得 RC dv_C/dt + v_C = V0，用积分因子 e^{t/(RC)} 解初值问题，得 v_C(t)=V0(1-e^{-t/(RC)})；时间常数为 τ=RC，量纲 [R][C]=s，所以确实是时间量纲。",
+  "raw_text": "设 \\(v_C(t)\\) 为电容电压，\\(i(t)\\) 为串联电流。取回路方向：\\(t>0\\) 时电源正极经 \\(R,C\\) 回到负极。\n\n## 推导\n\n1. **列 KVL**  \n   闭合后有\n   \\[\n   V_0=v_R+v_C=Ri+v_C.\n   \\]\n   理由是串联回路电压降之和等于电源电压。\n\n2. **用电容元件方程**  \n   理想电容满足\n   \\[\n   i=C\\frac{dv_C}{dt}.\n   \\]\n   代入 KVL：\n   \\[\n   RC\\frac{dv_C}{dt}+v_C=V_0,\\qquad v_C(0)=0.\n   \\]\n\n3. **化成标准一阶线性 ODE**  \n   因为 \\(R>0,C>0\\)，令 \\(\\tau=RC\\)，两边除以 \\(RC\\)：\n   \\[\n   \\frac{dv_C}{dt}+\\frac{1}{\\tau}v_C=\\frac{V_0}{\\tau}.\n   \\]\n\n4. **积分因子法**  \n   取积分因子\n   \\[\n   \\mu(t)=e^{\\int_0^t \\frac{1}{\\tau}\\,ds}=e^{t/\\tau}.\n   \\]\n   两边乘 \\(\\mu(t)\\)：\n   \\[\n   e^{t/\\tau}\\frac{dv_C}{dt}+\\frac{1}{\\tau}e^{t/\\tau}v_C\n   =\\frac{V_0}{\\tau}e^{t/\\tau}.\n   \\]\n   左边正好是\n   \\[\n   \\frac{d}{dt}\\left(v_C e^{t/\\tau}\\right).\n   \\]\n\n5. **两边从 0 到 t 积分**  \n   \\[\n   v_C(t)e^{t/\\tau}-v_C(0)\n   =\\int_0^t \\frac{V_0}{\\tau}e^{s/\\tau}\\,ds\n   =V_0(e^{t/\\tau}-1).\n   \\]\n   又 \\(v_C(0)=0\\)，所以\n   \\[\n   v_C(t)=V_0\\left(1-e^{-t/\\tau}\\right)\n   =V_0\\left(1-e^{-t/(RC)}\\right).\n   \\]\n   对 \\(t\\ge 0\\) 成立。\n\n6. **时间常数**  \n   \\[\n   \\tau=RC.\n   \\]\n\n7. **量纲验证**  \n   \\[\n   [R]=\\frac{[V]}{[A]},\\qquad [C]=\\frac{[A][s]}{[V]},\n   \\]\n   因此\n   \\[\n   [RC]=\\frac{[V]}{[A]}\\cdot \\frac{[A][s]}{[V]}=[s].\n   \\]\n   所以 \\(\\tau=RC\\) 的量纲确实是时间。\n\n8. **代入验证**  \n   \\[\n   v_C(0)=V_0(1-1)=0,\n   \\]\n   \\[\n   \\frac{dv_C}{dt}=\\frac{V_0}{RC}e^{-t/(RC)},\n   \\]\n   \\[\n   RC\\frac{dv_C}{dt}+v_C\n   =V_0e^{-t/(RC)}+V_0(1-e^{-t/(RC)})=V_0.\n   \\]\n   满足原方程和初值。\n\n命题没有错，不需要证伪。\n\n```json\n{\n  \"final_expression\": \"V0*(1 - exp(-t/(R*C)))\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"理想集总参数电路；R、C 是线性时不变常数元件。\",\n    \"R>0 且 C>0，因此 RC 非零且 τ=RC 有定义；除以 RC/τ 合法。\",\n    \"直流电压源 V0 为理想恒压源，内阻为 0，t=0 瞬时接入，接入后 V0 不随时间变化。\",\n    \"导线电阻、电感和寄生电容忽略；KVL 成立。\",\n    \"电容初始电压 v_C(0^-)=0；开关过程不产生使电容电压突跳的无穷大电流脉冲，所以 v_C(0^+)=0。\",\n    \"取串联电流 i 与电容电压关联方向，i=C dv_C/dt，v_R=Ri。\",\n    \"微分方程在 t>0 成立，t=0 作为初始条件使用；v_C(t) 在 t>0 可微。\",\n    \"指数函数不展开成级数；若展开成 e^{-t/(RC)}，其幂级数对所有实数 t/(RC) 绝对收敛。\",\n    \"初始条件与外加电压 V0 相互独立，由初值唯一确定积分常数。\",\n    \"量纲均匀：指数 t/(RC) 无量纲，由量纲分析保证。\"\n  ],\n  \"unverified_steps\": [],\n  \"reasoning_summary\": \"列 KVL 得 RC dv_C/dt + v_C = V0，用积分因子 e^{t/(RC)} 解初值问题，得 v_C(t)=V0(1-e^{-t/(RC)})；时间常数为 τ=RC，量纲 [R][C]=s，所以确实是时间量纲。\"\n}\n```",
+  "thinking_chars": 46551,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 133.2,
+  "tokens": 17463,
+  "parse_ok": true
+}

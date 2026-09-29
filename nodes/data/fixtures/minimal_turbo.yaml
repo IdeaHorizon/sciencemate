@@ -1,0 +1,29 @@
+# data 节点 fixture：入口节点，无上游 artifact，给一个 AI4S 前处理 spec。
+#
+# 运行：
+#   python run_node.py --harness data --sandbox --fixture nodes/data/fixtures/minimal.yaml
+#
+# 预期产出：
+#   - dataset artifact
+#   - state.root/data_preprocessing/<case>/manifest.json
+#   - OpenFOAM 输入文件、网格、Tecplot dat、数据驱动模型训练资产
+
+node_inputs:
+  spec: |
+    为涡轮叶片流动准备一个 OpenFOAM CFD 前处理包。
+    目标是高雷诺数可压 RANS 算例，其他参数你可以自己决定
+    需要输出可复现的 manifest、0/U、0/p、system 文件、OpenFOAM 网格、Tecplot dat 网格文件。
+#    并预留一个根据历史 CSV 数据训练升阻力代理模型的脚本。
+
+   # 该翼型是非 NACA 翼型，几何文件路径为：
+   # /Users/cuibing/Desktop/profile_A-airfoil.dat
+  reproducibility:
+    seed: 17
+    notes: "默认单位使用 SI；缺失参数必须写入 manifest 的 assumptions 或 quality_gates。"
+
+upstream_artifacts: []
+
+memory_entries:
+  - kind: directive
+    text: "data 节点必须优先生成可复现前处理包，再保存 dataset artifact。"
+    tags: [AI4S, preprocessing, reproducibility]

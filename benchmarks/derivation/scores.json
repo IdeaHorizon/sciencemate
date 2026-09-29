@@ -1,0 +1,733 @@
+[
+  {
+    "task_id": "adiabatic_relation",
+    "kind": "normal",
+    "arm": "A0",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "ideal_gas",
+      "adiabatic",
+      "quasistatic",
+      "constant_cv"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 0.0,
+    "verifiability_note": "无结构化验证证据（声称仅为自述）",
+    "turns": 1,
+    "tool_calls": 0,
+    "needs_review": [
+      "提交里提到了可复现的验证方式但没有结构化证据 —— 人判是否算部分可核验"
+    ],
+    "error": ""
+  },
+  {
+    "task_id": "adiabatic_relation",
+    "kind": "normal",
+    "arm": "A1",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "ideal_gas",
+      "adiabatic",
+      "quasistatic",
+      "constant_cv"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 1.0,
+    "verifiability_note": "7/7 条声称有账本证据",
+    "turns": 24,
+    "tool_calls": 40,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "damped_resonance_width",
+    "kind": "normal",
+    "arm": "A0",
+    "correctness": false,
+    "correctness_note": "数值反例 {'gamma': '13'}",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "weak_damping",
+      "steady_state"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 0.0,
+    "verifiability_note": "无结构化验证证据（声称仅为自述）",
+    "turns": 1,
+    "tool_calls": 0,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "damped_resonance_width",
+    "kind": "normal",
+    "arm": "A1",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "weak_damping",
+      "steady_state"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 1.0,
+    "verifiability_note": "8/8 条声称有账本证据",
+    "turns": 34,
+    "tool_calls": 44,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "exponential_mle_fisher",
+    "kind": "normal",
+    "arm": "A0",
+    "correctness": null,
+    "correctness_note": "判不了：SyntaxError: invalid syntax (<string>, line 1)",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "iid",
+      "support",
+      "second_order"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 0.0,
+    "verifiability_note": "无结构化验证证据（声称仅为自述）",
+    "turns": 1,
+    "tool_calls": 0,
+    "needs_review": [
+      "表达式比对失败（判不了：SyntaxError: invalid syntax (<string>, line 1)）—— 人判是否等价",
+      "unverified_steps 为空：是全验过了还是没披露？A1 查账本，A0 需人判"
+    ],
+    "error": ""
+  },
+  {
+    "task_id": "exponential_mle_fisher",
+    "kind": "normal",
+    "arm": "A1",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "iid",
+      "support",
+      "second_order"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 1.0,
+    "verifiability_note": "9/9 条声称有账本证据",
+    "turns": 27,
+    "tool_calls": 43,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "geometric_expectation",
+    "kind": "normal",
+    "arm": "A0",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "convergence",
+      "term_operations"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 0.0,
+    "verifiability_note": "无结构化验证证据（声称仅为自述）",
+    "turns": 1,
+    "tool_calls": 0,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "geometric_expectation",
+    "kind": "normal",
+    "arm": "A1",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "convergence",
+      "term_operations"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 1.0,
+    "verifiability_note": "8/8 条声称有账本证据",
+    "turns": 50,
+    "tool_calls": 72,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "kepler_third_law",
+    "kind": "normal",
+    "arm": "A0",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "two_body",
+      "circular_or_ellipse"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 0.0,
+    "verifiability_note": "无结构化验证证据（声称仅为自述）",
+    "turns": 1,
+    "tool_calls": 0,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "kepler_third_law",
+    "kind": "normal",
+    "arm": "A1",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "two_body",
+      "circular_or_ellipse"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 1.0,
+    "verifiability_note": "3/3 条声称有账本证据",
+    "turns": 23,
+    "tool_calls": 37,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "maxent_boltzmann",
+    "kind": "normal",
+    "arm": "A0",
+    "correctness": null,
+    "correctness_note": "判不了：SyntaxError: invalid syntax (<string>, line 1)",
+    "false_detection": true,
+    "assumption_recall": 0.6666666666666666,
+    "assumptions_hit": [
+      "normalization",
+      "energy_constraint"
+    ],
+    "assumptions_missed": [
+      "concavity"
+    ],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 0.0,
+    "verifiability_note": "无结构化验证证据（声称仅为自述）",
+    "turns": 1,
+    "tool_calls": 0,
+    "needs_review": [
+      "表达式比对失败（判不了：SyntaxError: invalid syntax (<string>, line 1)）—— 人判是否等价"
+    ],
+    "error": ""
+  },
+  {
+    "task_id": "maxent_boltzmann",
+    "kind": "normal",
+    "arm": "A1",
+    "correctness": null,
+    "correctness_note": "",
+    "false_detection": null,
+    "assumption_recall": null,
+    "assumptions_hit": [],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": null,
+    "verifiability": null,
+    "verifiability_note": "",
+    "turns": null,
+    "tool_calls": null,
+    "needs_review": [],
+    "error": "run 没有产出 derivation_log"
+  },
+  {
+    "task_id": "ols_variance",
+    "kind": "normal",
+    "arm": "A0",
+    "correctness": null,
+    "correctness_note": "判不了：AttributeError: 'Symbol' object has no attribute 'T'",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "full_rank",
+      "homoscedastic",
+      "uncorrelated_errors",
+      "nonrandom_X"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 0.0,
+    "verifiability_note": "无结构化验证证据（声称仅为自述）",
+    "turns": 1,
+    "tool_calls": 0,
+    "needs_review": [
+      "表达式比对失败（判不了：AttributeError: 'Symbol' object has no attribute 'T'）—— 人判是否等价",
+      "unverified_steps 为空：是全验过了还是没披露？A1 查账本，A0 需人判"
+    ],
+    "error": ""
+  },
+  {
+    "task_id": "ols_variance",
+    "kind": "normal",
+    "arm": "A1",
+    "correctness": null,
+    "correctness_note": "判不了：AttributeError: 'Symbol' object has no attribute 'T'",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "full_rank",
+      "homoscedastic",
+      "uncorrelated_errors",
+      "nonrandom_X"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": null,
+    "verifiability": 1.0,
+    "verifiability_note": "5/5 条声称有账本证据",
+    "turns": 17,
+    "tool_calls": 24,
+    "needs_review": [
+      "表达式比对失败（判不了：AttributeError: 'Symbol' object has no attribute 'T'）—— 人判是否等价"
+    ],
+    "error": ""
+  },
+  {
+    "task_id": "rc_transient",
+    "kind": "normal",
+    "arm": "A0",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "initial_condition",
+      "ideal_components"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 0.0,
+    "verifiability_note": "无结构化验证证据（声称仅为自述）",
+    "turns": 1,
+    "tool_calls": 0,
+    "needs_review": [
+      "unverified_steps 为空：是全验过了还是没披露？A1 查账本，A0 需人判"
+    ],
+    "error": ""
+  },
+  {
+    "task_id": "rc_transient",
+    "kind": "normal",
+    "arm": "A1",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "initial_condition",
+      "ideal_components"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 1.1428571428571428,
+    "verifiability_note": "8/7 条声称有账本证据",
+    "turns": 37,
+    "tool_calls": 48,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "reduced_mass",
+    "kind": "normal",
+    "arm": "A0",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "central_force",
+      "no_external"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 0.0,
+    "verifiability_note": "无结构化验证证据（声称仅为自述）",
+    "turns": 1,
+    "tool_calls": 0,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "reduced_mass",
+    "kind": "normal",
+    "arm": "A1",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "central_force",
+      "no_external"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 1.0,
+    "verifiability_note": "6/6 条声称有账本证据",
+    "turns": 18,
+    "tool_calls": 26,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "relativistic_ke_correction",
+    "kind": "normal",
+    "arm": "A0",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "low_velocity",
+      "truncation"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 0.0,
+    "verifiability_note": "无结构化验证证据（声称仅为自述）",
+    "turns": 1,
+    "tool_calls": 0,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "relativistic_ke_correction",
+    "kind": "normal",
+    "arm": "A1",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "low_velocity",
+      "truncation"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 1.0,
+    "verifiability_note": "7/7 条声称有账本证据",
+    "turns": 16,
+    "tool_calls": 27,
+    "needs_review": [
+      "unverified_steps 为空：是全验过了还是没披露？A1 查账本，A0 需人判"
+    ],
+    "error": ""
+  },
+  {
+    "task_id": "sample_sd_unbiased_FALSE",
+    "kind": "false_proposition",
+    "arm": "A0",
+    "correctness": null,
+    "correctness_note": "",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "nondegenerate"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": 1.0,
+    "disclosure": true,
+    "verifiability": 0.0,
+    "verifiability_note": "无结构化验证证据（声称仅为自述）",
+    "turns": 1,
+    "tool_calls": 0,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "sample_sd_unbiased_FALSE",
+    "kind": "false_proposition",
+    "arm": "A1",
+    "correctness": null,
+    "correctness_note": "",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "nondegenerate"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": 1.0,
+    "disclosure": true,
+    "verifiability": 0.7777777777777778,
+    "verifiability_note": "7/9 条声称有账本证据",
+    "turns": 19,
+    "tool_calls": 29,
+    "needs_review": [
+      "unverified_steps 为空：是全验过了还是没披露？A1 查账本，A0 需人判"
+    ],
+    "error": ""
+  },
+  {
+    "task_id": "sample_variance_unbiased",
+    "kind": "normal",
+    "arm": "A0",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "independence",
+      "identical_distribution",
+      "finite_variance"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 0.0,
+    "verifiability_note": "无结构化验证证据（声称仅为自述）",
+    "turns": 1,
+    "tool_calls": 0,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "sample_variance_unbiased",
+    "kind": "normal",
+    "arm": "A1",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "independence",
+      "identical_distribution",
+      "finite_variance"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 1.0,
+    "verifiability_note": "7/7 条声称有账本证据",
+    "turns": 15,
+    "tool_calls": 36,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "sho_correction_sign_FALSE",
+    "kind": "false_proposition",
+    "arm": "A0",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "high_T"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": 0.5,
+    "disclosure": true,
+    "verifiability": 0.0,
+    "verifiability_note": "无结构化验证证据（声称仅为自述）",
+    "turns": 1,
+    "tool_calls": 0,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "sho_correction_sign_FALSE",
+    "kind": "false_proposition",
+    "arm": "A1",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "high_T"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": 0.5,
+    "disclosure": true,
+    "verifiability": 1.0,
+    "verifiability_note": "9/9 条声称有账本证据",
+    "turns": 21,
+    "tool_calls": 33,
+    "needs_review": [
+      "unverified_steps 为空：是全验过了还是没披露？A1 查账本，A0 需人判"
+    ],
+    "error": ""
+  },
+  {
+    "task_id": "sho_heat_capacity",
+    "kind": "normal",
+    "arm": "A0",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "quantized_levels",
+      "canonical_ensemble",
+      "convergence"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 0.0,
+    "verifiability_note": "无结构化验证证据（声称仅为自述）",
+    "turns": 1,
+    "tool_calls": 0,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "sho_heat_capacity",
+    "kind": "normal",
+    "arm": "A1",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "quantized_levels",
+      "canonical_ensemble",
+      "convergence"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": null,
+    "disclosure": true,
+    "verifiability": 1.0,
+    "verifiability_note": "11/11 条声称有账本证据",
+    "turns": 33,
+    "tool_calls": 60,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "sqrt_subadditive_FALSE",
+    "kind": "false_proposition",
+    "arm": "A0",
+    "correctness": null,
+    "correctness_note": "",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "real_domain"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": 1.0,
+    "disclosure": true,
+    "verifiability": 0.0,
+    "verifiability_note": "无结构化验证证据（声称仅为自述）",
+    "turns": 1,
+    "tool_calls": 0,
+    "needs_review": [
+      "unverified_steps 为空：是全验过了还是没披露？A1 查账本，A0 需人判"
+    ],
+    "error": ""
+  },
+  {
+    "task_id": "sqrt_subadditive_FALSE",
+    "kind": "false_proposition",
+    "arm": "A1",
+    "correctness": null,
+    "correctness_note": "",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "real_domain"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": 1.0,
+    "disclosure": true,
+    "verifiability": 1.0,
+    "verifiability_note": "5/5 条声称有账本证据",
+    "turns": 20,
+    "tool_calls": 30,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "variance_additive_FALSE",
+    "kind": "false_proposition",
+    "arm": "A0",
+    "correctness": true,
+    "correctness_note": "符号化简差为 0",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "finite_variance"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": 1.0,
+    "disclosure": true,
+    "verifiability": 0.0,
+    "verifiability_note": "无结构化验证证据（声称仅为自述）",
+    "turns": 1,
+    "tool_calls": 0,
+    "needs_review": [],
+    "error": ""
+  },
+  {
+    "task_id": "variance_additive_FALSE",
+    "kind": "false_proposition",
+    "arm": "A1",
+    "correctness": true,
+    "correctness_note": "12 点数值一致（符号未化开）",
+    "false_detection": true,
+    "assumption_recall": 1.0,
+    "assumptions_hit": [
+      "finite_variance"
+    ],
+    "assumptions_missed": [],
+    "refutation_markers": 1.0,
+    "disclosure": true,
+    "verifiability": 1.0,
+    "verifiability_note": "3/3 条声称有账本证据",
+    "turns": 19,
+    "tool_calls": 24,
+    "needs_review": [],
+    "error": ""
+  }
+]

@@ -1,0 +1,132 @@
+{
+  "conventionVersion": 1,
+  "schemaVersion": 1,
+  "scope": "Only the Phase-0 vertical-slice kinds listed in payloadShapes are frozen. Other kind payloads remain Record<string, unknown> until runtime evidence supports a shape.",
+  "layout": {
+    "canonical": "direct_fields",
+    "description": "Listed fields are direct children of ExecutionEvent.payload, exactly as shown by the fixtures.",
+    "forbiddenWrapperFields": ["data", "eventPayload", "payload"]
+  },
+  "valueConventions": {
+    "Progress": {
+      "elapsed_only": ["mode", "elapsedMs"],
+      "derived_or_reported": ["mode", "completed", "total", "unit", "exact", "sourceEventIds"],
+      "modes": ["elapsed_only", "derived", "reported"]
+    },
+    "SummarySource": {
+      "mechanical": ["type", "eventIds"],
+      "run_summary": ["type", "runId", "field"],
+      "artifact": ["type", "artifactId", "version", "field"]
+    },
+    "Failure": {
+      "required": ["errorCode", "errorMessage"],
+      "optional": ["retryable"],
+      "nonCanonicalAliases": ["errorType", "message"]
+    },
+    "UsageCoverage": ["complete", "partial"]
+  },
+  "stepIdentity": {
+    "rule": "Every tool.* payload carries the stable stepId of its owner; clients never infer Tool-to-Step ownership from order or timestamps.",
+    "rawSubagentStep": "Derive stepId from subagent_call_start source identity and reuse it through the matching terminal event.",
+    "rootRunStep": "If a Run has Tool events without a subagent step, emit a deterministic adapter_derived root step.started before them."
+  },
+  "toolIdentity": {
+    "harnessObservation": "Current Harness transcript tool_call/tool_result records omit the provider call id and are recorded sequentially within a Run.",
+    "rawToolCall": "Each raw tool_call is a distinct invocation; derive a new toolCallId from its source identity.",
+    "rawToolResult": "Pair with the nearest preceding unmatched tool_call in the same run and turn; reuse toolCallId and stepId.",
+    "rawToolLongRunning": "Pair with the currently unmatched tool_call in the same run; reuse toolCallId and stepId.",
+    "sameInvocationRetry": "Only an explicit retry observation may emit tool.retrying; reuse toolCallId and increment attempt.",
+    "newRawToolCallAfterFailure": "A later raw tool_call gets a new toolCallId. Set retryOfToolCallId only when an explicit source relationship proves it.",
+    "forbiddenInferenceInputs": ["toolName equality", "arguments equality", "wall-clock proximity"]
+  },
+  "decisionChoiceSets": {
+    "normalPostNode": ["proceed", "revise", "redirect_upstream", "abort", "edit"],
+    "note": "Mirrors Harness _NORMAL_ACTIONS. The review_failed retry_reviewer variant is not frozen in this vertical slice."
+  },
+  "payloadShapes": {
+    "session.message": {
+      "required": ["messageId", "role", "content"],
+      "optional": ["inReplyToMessageId"],
+      "values": {"role": ["user", "assistant", "system"]},
+      "note": "content is sanitized user-visible text, never chain-of-thought."
+    },
+    "session.completed": {
+      "required": ["status"],
+      "optional": ["finalRunId", "resultArtifactIds"],
+      "values": {"status": ["completed"]}
+    },
+    "step.started": {
+      "required": ["stepId", "title"],
+      "optional": ["parentStepId", "redirectedFromStepId"]
+    },
+    "step.progress": {
+      "required": ["stepId", "progress"],
+      "valueShapes": {"progress": "Progress"}
+    },
+    "step.completed": {
+      "required": ["stepId", "status"],
+      "optional": ["summaryRef", "summarySource"],
+      "values": {"status": ["completed", "completed_with_warning"]},
+      "valueShapes": {"summarySource": "SummarySource"}
+    },
+    "step.failed": {
+      "required": ["stepId", "errorCode", "errorMessage"],
+      "optional": ["retryable"],
+      "valueShapes": {"errorCode,errorMessage,retryable": "Failure"}
+    },
+    "tool.started": {
+      "required": ["stepId", "toolCallId", "toolName", "arguments"],
+      "optional": ["retryOfToolCallId"]
+    },
+    "tool.progress": {
+      "required": ["stepId", "toolCallId", "toolName", "progress"],
+      "valueShapes": {"progress": "Progress"}
+    },
+    "tool.retrying": {
+      "required": ["stepId", "toolCallId", "toolName", "attempt", "reason"],
+      "optional": ["maxAttempts"]
+    },
+    "tool.long_running": {
+      "required": ["stepId", "toolCallId", "toolName", "elapsedSeconds"]
+    },
+    "tool.completed": {
+      "required": ["stepId", "toolCallId", "toolName", "resultSummary"],
+      "optional": ["resultCount", "summarySource"],
+      "valueShapes": {"summarySource": "SummarySource"}
+    },
+    "tool.failed": {
+      "required": ["stepId", "toolCallId", "toolName", "errorCode", "errorMessage"],
+      "optional": ["retryable"],
+      "valueShapes": {"errorCode,errorMessage,retryable": "Failure"}
+    },
+    "artifact.created": {
+      "required": ["artifactId", "artifactType", "name", "version", "frozen"]
+    },
+    "artifact.versioned": {
+      "required": ["artifactId", "version", "previousVersion"]
+    },
+    "artifact.frozen": {
+      "required": ["artifactId", "version"]
+    },
+    "decision.required": {
+      "required": ["decisionId", "subtype", "prompt", "choices", "requiredApprovalCount"],
+      "optional": ["recommendedChoiceId"],
+      "choiceRequired": ["choiceId", "label"],
+      "note": "This event is a notification; the durable Decision API is authoritative for authority and current status."
+    },
+    "decision.resolved": {
+      "required": ["decisionId", "selectedChoiceId", "terminal", "acceptedResponseCount", "requiredApprovalCount"],
+      "optional": ["authorizedTarget"]
+    },
+    "usage.updated": {
+      "required": ["promptTokens", "completionTokens", "totalTokens", "coverage"],
+      "optional": ["cost", "currency"],
+      "values": {"coverage": ["complete", "partial"]}
+    },
+    "context.updated": {
+      "required": ["turn", "effectiveTokens", "window", "breakdown"],
+      "optional": ["promptTokens", "estimatedTokens", "configuredWindow", "compressAt", "emergencyAt", "messageCount", "lastCompaction"],
+      "note": "How full the orchestrator context was on the latest model request. Percentages and the auto-compaction line are on the effectiveTokens ruler (the one the harness compresses by); promptTokens is the provider-counted input for the same request."
+    }
+  }
+}

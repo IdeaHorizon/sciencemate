@@ -1,0 +1,95 @@
+node_inputs:
+  path_roles:
+    source_baseline_root: /mnt/beegfs/lujy/ai4s-platform/vasp-spr-cu04-smoke-work/source_baseline/vasp.6.5.1
+    source_worktree_root: /mnt/beegfs/lujy/ai4s-platform/vasp-spr-cu04-smoke-work/source_worktree/vasp.6.5.1
+    experiment_root: /mnt/beegfs/lujy/ai4s-platform/vasp-spr-cu04-smoke-work
+    build_root: /mnt/beegfs/lujy/ai4s-platform/vasp-spr-cu04-smoke-work/build
+    run_root: /mnt/beegfs/lujy/ai4s-platform/vasp-spr-cu04-smoke-work/run
+  experiment_focus: |
+    这是 VASP 在 spr-cu01 提交、通过 SLURM 定向到 spr-cu04 的共享盘冒烟实验。
+    本实验只验证 VASP 源码/输入/编译/调度/最小运行链路，不产生 hypothesis verdict 的最终科学证据。
+
+    目标：
+    1. 读取 frozen pre_registration / research plan 路径，并确认共享盘上存在三份输入包：
+       `aimd_simulations__temperature_300.zip`、`vasp.6.5.1.tgz`、`vasp-upstream-artifacts.zip`。
+    2. 在共享文件系统上创建本 run 专用 workdir，解压源码、predecessor 输入和上游 artifacts。
+    3. 只使用 predecessor 阶段输入；不直接运行 AIMD 根目录，因为根目录 POSCAR 尚未由 predecessor/CONTCAR 生成。
+    4. 编译默认在提交端 spr-cu01 的共享 workdir 中执行；如果预计全量编译较久、登录节点策略不允许、
+       或必须保证 compute node 环境一致性，才通过 `submit_job` 提交编译作业并说明原因。
+       VASP 真实计算运行必须通过 `submit_job` 生成 SLURM 脚本提交，不要在登录节点直接长时间运行 VASP。
+    5. SLURM 目标：scheduler=slurm，queue=debug，nodelist=spr-cu04。dry_run 脚本必须包含
+       `#SBATCH --partition=debug` 和 `#SBATCH --nodelist=spr-cu04`。
+    6. 真实提交前必须 `request_human_input`，说明 scheduler、partition、nodelist、mpi_ranks、walltime、
+       workdir、script_path、是否会编译 VASP，并得到明确确认。
+    7. 编译前必须检查 toolchain coherence（MPI wrapper、Fortran compiler、BLAS/LAPACK/ScaLAPACK/FFTW）。
+       如果已有可执行 VASP，可优先复用；否则在 source_worktree_root 中编译。
+    8. 运行输入必须复制到 workdir 后再修改；把 INCAR 中 NSW 调小为 1 或 3，做最短 predecessor smoke run。
+    9. 如果能运行 VASP，要求产生 stdout/stderr、OUTCAR/OSZICAR/CONTCAR 中的至少一个，并归档摘要。
+    10. 如果缺少编译/运行环境、队列权限或 spr-cu04 不可用，应明确记录为 environment/scheduler/toolchain blocker，
+        不要伪造运行成功。
+    11. 冻结 experiment_log，说明本次只是 SLURM smoke test；verdict 必须写成 `verdict: inconclusive`，
+        scope/label 可写 smoke，不得声称支持或反驳科学假设。
+
+    路径：
+    - 提交端仓库: /mnt/beegfs/lujy/ai4s-platform/test_20260625/harness-framework
+    - 输入包目录: /mnt/beegfs/lujy/ai4s-platform/test1_vasp
+    - VASP 源码包: /mnt/beegfs/lujy/ai4s-platform/test1_vasp/vasp.6.5.1.tgz
+    - 上游 artifacts 包: /mnt/beegfs/lujy/ai4s-platform/test1_vasp/vasp-upstream-artifacts.zip
+    - AIMD/predecessor 输入包: /mnt/beegfs/lujy/ai4s-platform/test1_vasp/aimd_simulations__temperature_300.zip
+    - experiment_root: /mnt/beegfs/lujy/ai4s-platform/vasp-spr-cu04-smoke-work
+    - source_baseline_root: /mnt/beegfs/lujy/ai4s-platform/vasp-spr-cu04-smoke-work/source_baseline/vasp.6.5.1
+    - source_worktree_root: /mnt/beegfs/lujy/ai4s-platform/vasp-spr-cu04-smoke-work/source_worktree/vasp.6.5.1
+    - build_root 建议路径: /mnt/beegfs/lujy/ai4s-platform/vasp-spr-cu04-smoke-work/build
+    - run_root: /mnt/beegfs/lujy/ai4s-platform/vasp-spr-cu04-smoke-work/run
+    # 日志属于 run_root 角色；experiment_root 只是逻辑容器，直接写会被 scope_guard 拦。
+    - logs 建议路径: /mnt/beegfs/lujy/ai4s-platform/vasp-spr-cu04-smoke-work/run/logs
+
+    写入约束：
+    - 不要向 /mnt/beegfs/lujy/ai4s-platform/test1_vasp 写入任何文件。
+    - 不要在原始输入包目录或 source_baseline_root 创建 makefile.include。
+    - source_baseline_root 只保留一份；如需改源码或源码内构建，派生并复用受版本控制的 source_worktree_root，只在 worktree 中写 makefile.include，变更保存 patch/diff。
+    - 原始输入包和 POTCAR 只能读取；运行输入必须复制到共享 workdir 的 run/predecessor 后再修改。
+    - 不要修改 VASP `.F` / `.F90` / `.c` / `.py` 等上游源码，也不要修改 src/makefile；若出现源码兼容性问题，只能记录 blocker/dead_end，
+      或先请求人工授权后再考虑对 workdir 副本做最小补丁。
+    - source_worktree_root、build_root、run_root 可按角色写入；source_baseline_root 和输入包只读。
+
+    推荐 SLURM 资源（可根据 discover_resources 结果调整，但必须保守说明原因）：
+    - scheduler: slurm
+    - queue: debug
+    - nodelist: spr-cu04
+    - mpi_ranks: 4
+    - cpus_per_rank: 1
+    - gpus: 0
+    - memory_gb: 32
+    - walltime_minutes: 120
+    # 作业 cwd 会承接 SLURM 的 stdout/stderr，必须落在可写的 run_root 下。
+    - workdir: /mnt/beegfs/lujy/ai4s-platform/vasp-spr-cu04-smoke-work/run
+
+upstream_artifacts:
+  - type: claim
+    name: H24_thermal_nodal_surface_robustness
+    metadata:
+      claim_type: hypothesis
+      status: open
+      created_at: "2026-06-16T03:33:56+00:00"
+    content: |
+      tC40 中 Γ 点四重简并节点面在 300 K 热扰动下更脆弱，AIMD snapshots 的后续能带分析应检验 Γ/K 节点面的开隙差异。
+      本 SLURM smoke run 只验证 VASP/input/framework/scheduler 链路，不对该 claim 下最终 verdict。
+
+  - type: pre_registration
+    name: tC40_nodal_surface_SIB_anode_prereg
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-16T03:33:56+00:00"
+      freeze_reason: "Imported upstream hypothesis pre-registration for local VASP smoke validation"
+    content: |
+      上游 prereg artifact 文件：
+      /mnt/beegfs/lujy/ai4s-platform/test1_vasp/vasp-upstream-artifacts.zip
+      解压后应定位 `pre_registration__tC40_nodal_surface_SIB_anode_prereg.json`。
+
+      本次运行范围收缩为 VASP predecessor SLURM smoke test：
+      - 不运行完整 300 K AIMD。
+      - 不抽取 snapshots。
+      - 不做 band/gap analysis。
+      - 不产生 validated/refuted 科学 verdict。
+      - 只验证 spr-cu01 -> SLURM spr-cu04 提交、VASP 工具链、输入复制、最小运行和日志归档。

@@ -1,0 +1,700 @@
+openapi: 3.1.0
+info:
+  title: Agent Research Platform Read API
+  version: 1.0.0
+  description: |
+    Minimal read-only Research App Server contract for Run projections, canonical
+    execution events, and durable Decision state. Harness remains the scientific
+    execution source of truth; this API exposes a sanitized, database-backed projection.
+
+    All responses are tenant-scoped by server-side authorization. Tenant identity is
+    retained in durable resource records but is intentionally absent from canonical
+    ExecutionEvent v1, which follows the client protocol frozen in UI Spec section 27.4.
+servers:
+  - url: /api/v1
+paths:
+  /runs:
+    get:
+      operationId: listRuns
+      summary: List visible Runs
+      parameters:
+        - $ref: "#/components/parameters/ProjectId"
+        - $ref: "#/components/parameters/SessionId"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/RunStatus"
+        - name: cursor
+          in: query
+          description: Opaque cursor returned by the previous page.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        "200":
+          description: Runs ordered by createdAt descending, then id descending.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /runs/{runId}:
+    get:
+      operationId: getRun
+      summary: Get one Run and its Attempts
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Durable Run projection and attempts ordered by attemptNo ascending.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunDetailResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Error"
+  /sessions/{sessionId}/events:
+    get:
+      operationId: listSessionEvents
+      summary: Pull canonical Session events after a known sequence
+      description: |
+        Returns events whose sequence is strictly greater than afterSequence, ordered by
+        sequence ascending. Sequence is allocated transactionally by the App Server and is
+        monotonic within a Session, including events from parallel Runs.
+
+        At-least-once transports may replay an event, so clients also de-duplicate by event
+        id. If no item is returned, nextAfterSequence equals the requested afterSequence.
+        Otherwise it equals the greatest sequence returned. When hasMore is true, clients
+        continue from nextAfterSequence; they must not infer missing events from timestamps.
+      parameters:
+        - $ref: "#/components/parameters/SessionIdPath"
+        - name: afterSequence
+          in: query
+          required: false
+          description: Exclusive Session sequence cursor. Omitted is equivalent to 0.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 200
+      responses:
+        "200":
+          description: Gap-preserving slice of the durable Session event stream.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventPage"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Error"
+  /projects/{projectId}/sessions/{sessionId}/recover:
+    post:
+      operationId: recoverStaleSession
+      summary: Start one safe continuation after a Harness runtime was lost
+      description: |
+        Creates a new Session linked to the stale source Session. This operation never
+        claims to resume an in-memory process or in-flight tool call. It copies the frozen
+        base revision, policy, research-settings snapshot, model backend, and knowledge
+        watermark, then opens a fresh ChangeSet from that same base revision.
+
+        The operation is idempotent: the first request returns 201 with status=created;
+        later requests for the same source return 200 with status=existing and the same
+        continuation Session.
+      parameters:
+        - $ref: "#/components/parameters/ProjectIdPath"
+        - $ref: "#/components/parameters/SessionIdPath"
+      responses:
+        "200":
+          description: The previously created safe continuation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionRecovery"
+        "201":
+          description: A new safe continuation was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionRecovery"
+        "409":
+          description: The source is not a recoverable stale formal-Harness Session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        default:
+          $ref: "#/components/responses/Error"
+  /sessions/{sessionId}/decisions/current:
+    get:
+      operationId: listCurrentSessionDecisions
+      summary: List currently unresolved Decisions for a Session
+      description: |
+        Returns durable Decisions in pending or partially_approved state. An empty items
+        array means that the Session has no currently actionable Decision. Authority is a
+        snapshot fixed when the Decision was created; possession of decision.respond alone,
+        or being the first responder, never grants authority.
+      parameters:
+        - $ref: "#/components/parameters/SessionIdPath"
+      responses:
+        "200":
+          description: Decisions ordered by createdAt ascending, then id ascending.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DecisionListResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Error"
+  /decisions/{decisionId}:
+    get:
+      operationId: getDecision
+      summary: Get the current durable state of one Decision
+      parameters:
+        - $ref: "#/components/parameters/DecisionId"
+      responses:
+        "200":
+          description: Current Decision state, including its frozen authority snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Decision"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    ProjectId:
+      name: projectId
+      in: query
+      schema:
+        type: string
+        minLength: 1
+    ProjectIdPath:
+      name: projectId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    SessionId:
+      name: sessionId
+      in: query
+      schema:
+        type: string
+        minLength: 1
+    SessionIdPath:
+      name: sessionId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    RunId:
+      name: runId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    DecisionId:
+      name: decisionId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+  responses:
+    Error:
+      description: Request failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource not found in the caller's authorized scope.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    ExecutionEvent:
+      $ref: "./execution-event.schema.json"
+    IdentityContext:
+      type: object
+      additionalProperties: false
+      required: [tenantId, workspaceId, projectId, sessionId]
+      properties:
+        tenantId:
+          type: string
+          minLength: 1
+        workspaceId:
+          type: string
+          minLength: 1
+        projectId:
+          type: string
+          minLength: 1
+        sessionId:
+          type: string
+          minLength: 1
+    RecoveredSession:
+      type: object
+      additionalProperties: true
+      required:
+        - id
+        - projectId
+        - recoveredFromSessionId
+        - recoverySourceRunId
+        - baseRevisionId
+        - modelBackendId
+      properties:
+        id:
+          type: string
+        projectId:
+          type: string
+        recoveredFromSessionId:
+          type: string
+        recoverySourceRunId:
+          type: string
+        baseRevisionId:
+          type: string
+        modelBackendId:
+          type: [string, "null"]
+    SessionRecovery:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - action
+        - reason
+        - sourceSessionId
+        - sourceRunId
+        - suggestedMessage
+        - session
+      properties:
+        status:
+          type: string
+          enum: [created, existing]
+        action:
+          type: string
+          const: start_new_session
+        reason:
+          type: string
+          const: lost_runtime_state
+        sourceSessionId:
+          type: string
+        sourceRunId:
+          type: string
+        suggestedMessage:
+          type: string
+        session:
+          $ref: "#/components/schemas/RecoveredSession"
+    RunStatus:
+      type: string
+      enum:
+        - queued
+        - dispatching
+        - running
+        - waiting_permission
+        - waiting_human
+        - waiting_compute
+        - retrying
+        - completed
+        - completed_with_warning
+        - incomplete
+        - failed
+        - cancelled
+        - stale_unknown
+    AttemptStatus:
+      type: string
+      enum:
+        - created
+        - leased
+        - running
+        - released
+        - completed
+        - failed
+        - cancelled
+        - stale_unknown
+    Run:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/IdentityContext"
+        - type: object
+          required:
+            - id
+            - status
+            - currentAttemptNo
+            - usage
+            - retryCount
+            - createdAt
+            - updatedAt
+          properties:
+            id:
+              type: string
+              minLength: 1
+            parentRunId:
+              type: [string, "null"]
+            nodeType:
+              type: [string, "null"]
+              description: Harness capability/node label retained as metadata, never Graph execution truth.
+            status:
+              $ref: "#/components/schemas/RunStatus"
+            currentAttemptNo:
+              type: integer
+              minimum: 0
+            usage:
+              $ref: "#/components/schemas/RunUsage"
+            retryCount:
+              type: integer
+              minimum: 0
+              description: Count of known retries for this Run; interpret with usage.coverage.
+            createdAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
+            startedAt:
+              type: [string, "null"]
+              format: date-time
+            endedAt:
+              type: [string, "null"]
+              format: date-time
+            summary:
+              type: [object, "null"]
+              additionalProperties: true
+    RunUsage:
+      type: object
+      additionalProperties: false
+      required:
+        - promptTokens
+        - completionTokens
+        - totalTokens
+        - cost
+        - coverage
+      properties:
+        promptTokens:
+          type: integer
+          minimum: 0
+        completionTokens:
+          type: integer
+          minimum: 0
+        totalTokens:
+          type: integer
+          minimum: 0
+        cost:
+          type: [number, "null"]
+          minimum: 0
+          description: Known monetary cost, or null when provider data/versioned pricing is unavailable.
+        currency:
+          type: [string, "null"]
+          description: ISO 4217 code when cost is known; otherwise null or omitted.
+        coverage:
+          type: string
+          enum: [complete, partial]
+          description: Whether token, cost, and retry observations cover every request in this Run.
+    RunAttempt:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/IdentityContext"
+        - type: object
+          required:
+            - id
+            - runId
+            - attemptNo
+            - status
+            - createdAt
+          properties:
+            id:
+              type: string
+              minLength: 1
+            runId:
+              type: string
+              minLength: 1
+            attemptNo:
+              type: integer
+              minimum: 1
+            status:
+              $ref: "#/components/schemas/AttemptStatus"
+            workerId:
+              type: [string, "null"]
+            leaseUntil:
+              type: [string, "null"]
+              format: date-time
+            heartbeatAt:
+              type: [string, "null"]
+              format: date-time
+            checkpointRef:
+              type: [string, "null"]
+              description: Opaque checkpoint reference; never a client-visible local path.
+            exitReason:
+              type: [string, "null"]
+            createdAt:
+              type: string
+              format: date-time
+            startedAt:
+              type: [string, "null"]
+              format: date-time
+            endedAt:
+              type: [string, "null"]
+              format: date-time
+    RunListResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Run"
+        nextCursor:
+          type: [string, "null"]
+    RunDetailResponse:
+      type: object
+      additionalProperties: false
+      required: [run, attempts]
+      properties:
+        run:
+          $ref: "#/components/schemas/Run"
+        attempts:
+          type: array
+          items:
+            $ref: "#/components/schemas/RunAttempt"
+    EventPage:
+      type: object
+      additionalProperties: false
+      required: [items, afterSequence, nextAfterSequence, hasMore]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExecutionEvent"
+        afterSequence:
+          type: integer
+          minimum: 0
+          description: Exclusive cursor supplied by the caller, after applying its default.
+        nextAfterSequence:
+          type: integer
+          minimum: 0
+        hasMore:
+          type: boolean
+    DecisionStatus:
+      type: string
+      enum:
+        - pending
+        - partially_approved
+        - resolved
+        - expired
+        - cancelled
+    DecisionAuthority:
+      type: object
+      additionalProperties: false
+      required:
+        - authorityType
+        - authoritySubjects
+        - requiredApprovalCount
+        - actionSetVersion
+        - policySnapshotId
+      properties:
+        authorityType:
+          type: string
+          enum:
+            - initiating_user
+            - named_users
+            - project_role
+            - approval_group
+        authoritySubjects:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+        requiredApprovalCount:
+          type: integer
+          minimum: 1
+        actionSetVersion:
+          type: string
+          minLength: 1
+        policySnapshotId:
+          type: string
+          minLength: 1
+        expiresAt:
+          type: [string, "null"]
+          format: date-time
+    DecisionChoice:
+      type: object
+      additionalProperties: false
+      required: [choiceId, label]
+      properties:
+        choiceId:
+          type: string
+          minLength: 1
+          description: Stable choice identifier submitted by a responder; display order is not authoritative.
+        label:
+          type: string
+          minLength: 1
+        description:
+          type: [string, "null"]
+        consequence:
+          type: [string, "null"]
+        reversible:
+          type: [boolean, "null"]
+    Decision:
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/IdentityContext"
+        - type: object
+          required:
+            - id
+            - runId
+            - status
+            - subtype
+            - prompt
+            - choices
+            - authority
+            - acceptedResponseCount
+            - createdAt
+            - updatedAt
+          properties:
+            id:
+              type: string
+              minLength: 1
+            runId:
+              type: string
+              minLength: 1
+            attemptNo:
+              type: [integer, "null"]
+              minimum: 1
+            status:
+              $ref: "#/components/schemas/DecisionStatus"
+            subtype:
+              type: string
+              minLength: 1
+            prompt:
+              type: string
+              minLength: 1
+            context:
+              type: object
+              additionalProperties: true
+            choices:
+              type: array
+              minItems: 1
+              items:
+                $ref: "#/components/schemas/DecisionChoice"
+            recommendedChoiceId:
+              type: [string, "null"]
+            selectedChoiceId:
+              type: [string, "null"]
+            authority:
+              $ref: "#/components/schemas/DecisionAuthority"
+            acceptedResponseCount:
+              type: integer
+              minimum: 0
+            createdAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
+            resolvedAt:
+              type: [string, "null"]
+              format: date-time
+    DecisionListResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Decision"
+    CommandStatus:
+      type: string
+      enum: [accepted, queued, running, succeeded, failed, rejected, cancelled]
+    Command:
+      description: Reserved durable shape for later write APIs. Every write is idempotent in its authorized scope.
+      unevaluatedProperties: false
+      allOf:
+        - $ref: "#/components/schemas/IdentityContext"
+        - type: object
+          required:
+            - id
+            - kind
+            - status
+            - idempotencyKey
+            - actorUserId
+            - createdAt
+            - updatedAt
+          properties:
+            id:
+              type: string
+              minLength: 1
+            runId:
+              type: [string, "null"]
+            kind:
+              type: string
+              enum:
+                - run.start
+                - run.pause
+                - run.resume
+                - run.inject
+                - run.cancel
+                - decision.respond
+                - permission.respond
+            status:
+              $ref: "#/components/schemas/CommandStatus"
+            idempotencyKey:
+              type: string
+              minLength: 1
+            actorUserId:
+              type: string
+              minLength: 1
+            payload:
+              type: object
+              additionalProperties: true
+            result:
+              type: [object, "null"]
+              additionalProperties: true
+            error:
+              type: [object, "null"]
+              additionalProperties: true
+            createdAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          minLength: 1
+        message:
+          type: string
+          minLength: 1
+        requestId:
+          type: [string, "null"]
+        details:
+          type: [object, "null"]
+          additionalProperties: true

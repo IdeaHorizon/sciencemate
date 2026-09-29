@@ -1,0 +1,29 @@
+node_inputs:
+  prereg_artifact_id: pre_registration__Fresh_MPI_Integral_Scaling
+  stage: simulation
+  experiment_focus: |
+    Create a small MPI program in run_root that estimates pi by deterministic
+    numerical integration. Compile it using the locally discovered MPI compiler and
+    execute it with 1, 2, and 4 ranks. Do not silently replace MPI with serial Python.
+    Save stdout, rank counts, runtime, and numerical estimates. Parse all three
+    measurements into raw_results/clean_results and compare each estimate with pi
+    within the preregistered tolerance.
+upstream_artifacts:
+  - type: research_plan
+    name: Fresh_MPI_Integral_Scaling_Plan
+    content: "Use a deterministic integral so numerical agreement, not speed alone, is testable."
+  - type: pre_registration
+    name: Fresh_MPI_Integral_Scaling
+    metadata:
+      frozen: true
+      run_role: primary
+      analysis_eligible: true
+      stage: simulation
+      execution_contract:
+        version: 1
+        scientific_params: {ranks: [1, 2, 4], intervals: 1000000, abs_error_max: 0.00001}
+        runtime_params: {launcher: mpirun}
+    content: |
+      ## Research question Q1
+      Do 1, 2, and 4 MPI ranks produce a reproducible integral estimate within 1e-5
+      of pi while preserving the declared rank count?

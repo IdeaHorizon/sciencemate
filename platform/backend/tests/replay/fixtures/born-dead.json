@@ -1,0 +1,367 @@
+{
+ "rootRunId": "run_9aaa6b79073947c8a6fff2b09f649424",
+ "runs": [
+  {
+   "id": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "parentRunId": null,
+   "nodeType": "project_chat",
+   "status": "running",
+   "summary": {
+    "staleReason": "app_server_restart",
+    "staleFromStatus": "running"
+   }
+  },
+  {
+   "id": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->hypothesis@d1",
+   "parentRunId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "nodeType": "hypothesis",
+   "status": "completed",
+   "summary": {}
+  },
+  {
+   "id": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->_reviewer@d1",
+   "parentRunId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "nodeType": "_reviewer",
+   "status": "running",
+   "summary": {}
+  },
+  {
+   "id": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->observation@d1",
+   "parentRunId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "nodeType": "observation",
+   "status": "completed",
+   "summary": {}
+  }
+ ],
+ "lifecycle": [
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "sequence": 1,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "project_chat",
+    "attemptNo": 1,
+    "owningRun": true,
+    "modelBackendName": "DeepSeek V4 Flash · 积算"
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->hypothesis@d1",
+   "sequence": 3,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "hypothesis",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->hypothesis@d1",
+   "sequence": 484,
+   "kind": "run.completed",
+   "payload": {
+    "status": "completed",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->_reviewer@d1",
+   "sequence": 486,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "_reviewer",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->_reviewer@d1",
+   "sequence": 576,
+   "kind": "run.completed",
+   "payload": {
+    "status": "completed",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "sequence": 580,
+   "kind": "run.paused",
+   "payload": {
+    "prompt": "Post-node decision for hypothesis",
+    "reason": "waiting_human"
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "sequence": 582,
+   "kind": "run.resumed",
+   "payload": {
+    "attemptNo": 1
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->observation@d1",
+   "sequence": 600,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "observation",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->observation@d1",
+   "sequence": 798,
+   "kind": "run.completed",
+   "payload": {
+    "status": "completed",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->_reviewer@d1",
+   "sequence": 800,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "_reviewer",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->_reviewer@d1",
+   "sequence": 903,
+   "kind": "run.completed",
+   "payload": {
+    "status": "completed",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "sequence": 907,
+   "kind": "run.paused",
+   "payload": {
+    "prompt": "Post-node decision for observation",
+    "reason": "waiting_human"
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "sequence": 909,
+   "kind": "run.resumed",
+   "payload": {
+    "attemptNo": 1
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "sequence": 925,
+   "kind": "run.paused",
+   "payload": {
+    "prompt": "Post-node decision for observation",
+    "reason": "waiting_human"
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "sequence": 926,
+   "kind": "run.resumed",
+   "payload": {
+    "attemptNo": 1
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->observation@d1",
+   "sequence": 927,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "observation",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->observation@d1",
+   "sequence": 1174,
+   "kind": "run.completed",
+   "payload": {
+    "status": "completed",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->_reviewer@d1",
+   "sequence": 1176,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "_reviewer",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->_reviewer@d1",
+   "sequence": 1267,
+   "kind": "run.completed",
+   "payload": {
+    "status": "completed",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "sequence": 1271,
+   "kind": "run.paused",
+   "payload": {
+    "prompt": "Post-node decision for observation",
+    "reason": "waiting_human"
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "sequence": 1273,
+   "kind": "run.resumed",
+   "payload": {
+    "attemptNo": 1
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "sequence": 1289,
+   "kind": "run.paused",
+   "payload": {
+    "prompt": "Post-node decision for observation",
+    "reason": "waiting_human"
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "sequence": 1290,
+   "kind": "run.resumed",
+   "payload": {
+    "attemptNo": 1
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->hypothesis@d1",
+   "sequence": 1291,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "hypothesis",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->hypothesis@d1",
+   "sequence": 1430,
+   "kind": "run.completed",
+   "payload": {
+    "status": "completed",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->_reviewer@d1",
+   "sequence": 1432,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "_reviewer",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->_reviewer@d1",
+   "sequence": 1542,
+   "kind": "run.completed",
+   "payload": {
+    "status": "completed",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "sequence": 1546,
+   "kind": "run.paused",
+   "payload": {
+    "prompt": "Post-node decision for hypothesis",
+    "reason": "waiting_human"
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "sequence": 1548,
+   "kind": "run.resumed",
+   "payload": {
+    "attemptNo": 1
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "sequence": 1565,
+   "kind": "run.paused",
+   "payload": {
+    "prompt": "Post-node decision for hypothesis",
+    "reason": "waiting_human"
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424",
+   "sequence": 1566,
+   "kind": "run.resumed",
+   "payload": {
+    "attemptNo": 1
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->observation@d1",
+   "sequence": 1567,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "observation",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->observation@d1",
+   "sequence": 1676,
+   "kind": "run.completed",
+   "payload": {
+    "status": "completed",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_9aaa6b79073947c8a6fff2b09f649424::_orchestrator->_reviewer@d1",
+   "sequence": 1678,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "_reviewer",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  }
+ ]
+}

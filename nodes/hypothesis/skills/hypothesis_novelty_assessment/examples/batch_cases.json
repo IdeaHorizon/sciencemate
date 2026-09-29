@@ -1,0 +1,47 @@
+[
+  {
+    "name": "H1_NHC_vs_NH_incremental",
+    "G": 5,
+    "D": 2,
+    "M": 2,
+    "P": 3,
+    "R": 2,
+    "_comment": "Direct gap but standard comparison, partial KB overlap"
+  },
+  {
+    "name": "H2_scaling_law_transformative",
+    "G": 4,
+    "D": 4,
+    "M": 4,
+    "P": 4,
+    "R": 0,
+    "_comment": "Novel mechanism + sharp prediction, no redundancy"
+  },
+  {
+    "name": "H3_known_benchmark_rehash",
+    "G": 1,
+    "D": 1,
+    "M": 1,
+    "P": 1,
+    "R": 5,
+    "_comment": "Retreads validated claim — should cap low"
+  },
+  {
+    "name": "H4_cross_domain_bridge",
+    "G": 3,
+    "D": 5,
+    "M": 5,
+    "P": 4,
+    "R": 0,
+    "_comment": "Cross-domain synthesis, high innovation"
+  },
+  {
+    "name": "H5_moderate_extension",
+    "G": 3,
+    "D": 3,
+    "M": 3,
+    "P": 3,
+    "R": 1,
+    "_comment": "Balanced moderate novelty"
+  }
+]

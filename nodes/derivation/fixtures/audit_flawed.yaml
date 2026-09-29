@@ -1,0 +1,39 @@
+# audit 模式的最小 fixture：审一份**埋了错**的外来证明。
+#
+# 样本设计：前 3 步是对的（(x-1)²≥0 展开），第 4 步"两边同除以 x"没说 x>0 ——
+# x=-1 时 x+1/x = -2 < 2，推论是假的。
+#
+# 考的正是**分不分得清哪几步对、哪一步错**：全盘否定和全盘放行都算失败。
+
+node_inputs:
+  mode: audit
+  audit_target:
+    source: "外部提供的不等式证明（benchmark 埋错样本）"
+    path: nodes/derivation/fixtures/audit_samples/flawed_proof.md
+    content_hash: "d1c1b9d2ed48b84295f012ee5c4b5aa87aeb588e841f11ce43cdb0666d2cff38"
+
+upstream_artifacts:
+  - type: pre_registration
+    name: audit_flawed_proof_prereg
+    content: |
+      ## Research Questions
+
+      ### Q1: 这份证明站得住吗？
+      - output_kind: 一条命题的裁决
+      - proposition: 待审推导（含命题与推论）的每一步都成立。
+      - 闭合条件:
+      ```yaml
+      - id: AUDIT_VERDICT
+        statement: "对这份推导给出 audit_verdict（sound/flawed/unverifiable）；判 flawed 必须点名步骤并挂证据"
+      - id: STEP_LEVEL_REPORT
+        statement: "逐步报告：哪些机械确证、哪些只有数值支持、哪些需人审"
+      ```
+    metadata:
+      frozen: true
+
+memory_entries:
+  - kind: directive
+    text: >
+      审计纪律：指控要挂证据。判某步有缺陷，要么该步 check_step 结论是 failed，
+      要么在 findings 里点名说清矛盾。验不了就用 unverifiable —— 那是诚实不是失败。
+    tags: [methodology]

@@ -1,0 +1,60 @@
+id: sqrt_subadditive_FALSE
+title: 【假命题】根号次可加性对一切实数成立
+domain: mathematics
+kind: false_proposition
+
+prompt: |
+  命题：对一切实数 a、b，都有 sqrt(a+b) <= sqrt(a) + sqrt(b)。
+  请对这条命题给出裁决 —— 成立就证明，不成立就证伪并给出它成立所需的正确条件。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: sqrt_subadditive_FALSE_prereg
+    content: |
+      ## Research Questions
+      
+      ### Q1: 根号的次可加性对一切实数成立吗？
+      - output_kind: 一条命题的裁决
+      - proposition: 对一切实数 a、b，sqrt(a+b) <= sqrt(a) + sqrt(b)。
+      - 闭合条件:
+      ```yaml
+      - id: SUBADDITIVITY_VERDICT
+        statement: "对命题给出裁决，并给出它成立所需的正确条件"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  expected_verdict: refuted
+  # ⚠️ 2026-08-23 观察（未改判据）：真跑里模型给的裁决比这个标签**更精确** ——
+  # 「字面『∀ 实数』版本为 ill-posed（**非假命题**）：a<0 或 b<0 时相应根号
+  # 无实值；裁决对象为良定义域上的精确引理」。
+  #
+  # 它是对的：命题在负数处**没有真值**，那叫"没定义"，不叫"假"。
+  # expected_verdict 保持 refuted，因为真正的判据是下面的 refutation_markers
+  # （"必须指出缺的是非负条件"），模型逐条命中；而 refuted 在"该命题不成立"的
+  # 宽泛意义上也不算错判。
+  #
+  # 记在这里是因为「判据比被判的东西更不可靠」这条已经栽过一次
+  # （damped_resonance_width 的 ground truth 错误，方向恰好有利于 harness）。
+  # 这次不是错，是**粒度不够** —— 但下次设计假命题题目时，
+  # ill-posed / false / underspecified 三者该分开。
+  falsity_reason: |
+    命题漏了非负条件。a、b 取负数时 sqrt 在实数域无定义（或落到复数），
+    不等号本身失去意义。正确表述需要 a >= 0 且 b >= 0 —— 在此条件下
+    两边平方比较可得 a+b <= a+b+2*sqrt(a*b)，成立。
+  refutation_markers:
+    - id: nonneg_condition
+      why: "必须指出缺的是非负条件"
+      patterns: ["非负", "a *>= *0", "a *≥ *0", "nonnegat", "non.?negative", "大于等于零", "正实数"]
+    - id: counterexample
+      why: "给出具体反例或说明负数下无定义"
+      patterns: ["反例", "counterexample", "无定义", "undefined", "复数", "complex", "a *= *-", "负数"]
+  required_assumptions:
+    - id: real_domain
+      why: "讨论限定在实数域（这正是命题失效的地方）"
+      patterns: ["实数", "real", "定义域", "domain", "复数", "complex"]

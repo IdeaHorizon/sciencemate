@@ -1,0 +1,114 @@
+# Review spec for {你的节点} 节点产物（`{artifact_type}`）
+
+> 当 _reviewer 节点审 {你的节点} 产的 `{artifact_type}` artifact 时，按本 spec
+> 走多维度审稿。复制本模板到 `nodes/{你的节点}/review_spec.md`，把所有
+> `{占位符}` 替换成你节点实际内容，删掉你不需要的维度，加你领域特定的维度。
+>
+> reviewer 启动时 `read_file('nodes/{你的节点}/review_spec.md')` 拉本文件当
+> 权威 rubric。如果本文件不存在，reviewer 走 fallback baseline rubric（诚实
+> / 内部一致 / 数据可追溯三条）—— 你节点要严格审就**必须**填本文件。
+
+## 审稿前必做
+
+reviewer 拿到 `artifact_id + source_node_type + producer_run_id` 后：
+
+1. `read_artifact(artifact_id)` 拿 `{artifact_type}` 全文
+2. `read_external_artifact(...)` 拉 lineage —— 列出 reviewer 必须拉的上游：
+   - `{上游 artifact_type 1}` —— 比对 {本节点 artifact} 跟它的关系
+   - `{上游 artifact_type 2}`（如有）
+3. `list_artifacts(producer_run_id=...)` 看节点本 run 产了哪些副产物
+4. （可选）`list_skills(for_node='{你的节点}')` —— 看 owner 有没写
+   `review_*` skill 提供更细 procedure
+
+## 审稿维度（每项 1-5 整数；**不允许** 2.5 / 3.5）
+
+> 建议保留 4-6 个维度。维度太少 = rubber-stamp；太多 = LLM 评分噪声大。
+
+### 1. {维度 1 中文名} ({dimension_1_snake_case})
+
+{这个维度审什么？1-2 句话说清楚}
+
+- 怎么查：{具体动作 / 工具调用}
+- 红线：{什么情况算 critical / major / minor concern}
+- 5 分意味着：{什么标准算"零问题"}
+- 1 分意味着：{什么标准算"严重失败"}
+
+### 2. {维度 2 中文名} ({dimension_2_snake_case})
+
+{...}
+
+### 3. {维度 3 中文名} ({dimension_3_snake_case})
+
+{...}
+
+### 4. 诚实 (honesty)  ← **建议每个节点都保留这条**
+
+artifact 是否实事求是地报告失败 / 限制 / 不确定性？还是只报喜不报忧？
+
+- 看是否有 limitations / 失败模式 / 偏差讨论
+- 看 confidence 是否 calibrated（不要 "this proves X" 这种 overclaim）
+- 看 deviation_from_plan 是否明确披露
+
+### 5. 数据完整性 (data_provenance)  ← **建议每个节点都保留这条**
+
+artifact 引用的数 / claim / chunk 是否都能追溯？
+
+- 抽查 3-5 个数字 → read 源 artifact 验
+- 抽查 3-5 个 `claim_<8hex>` / `concept_<8hex>` 引用 → `get_kb_record` 验
+- phantom 引用（KB 不存在的）= critical 红线（citation_integrity_check
+  hook v0.9 已自动机械扫，本维度审 KB 引用的**方向 / 含义**是否被反着引）
+
+## 评分规则
+
+- 每维度 1-5 整数
+- `overall_score` = 各维平均，**整数取整**（不允许半档）
+- `verdict` 由 overall_score 推：
+  - ≥ 4: `approve`
+  - = 3: `approve_with_revisions`
+  - = 2: `major_concerns`
+  - ≤ 1: `block`
+
+## 强制 metadata 字段（reviewer 存 review_critique 时必填）
+
+```json
+{
+  "verdict": "approve | approve_with_revisions | major_concerns | block",
+  "overall_score": <1-5 int>,
+  "per_dimension_scores": {
+    "{dimension_1_snake_case}": <int>,
+    "{dimension_2_snake_case}": <int>,
+    ...
+  },
+  "n_concerns": <int>,
+  "n_critical_concerns": <int>,
+  "recommended_action": "proceed | revise | redirect_upstream | abort | escalate_to_human"
+}
+```
+
+## Recommended action 怎么填
+
+| verdict | 常见 recommended_action | 何时不一样 |
+|---|---|---|
+| approve | `proceed` | 几乎总是 |
+| approve_with_revisions | `proceed` 或 `revise` | minor concern → proceed；影响 downstream → revise |
+| major_concerns | `revise` | target_node='{你的节点}'，feedback_to_next_run 给具体改法 |
+| block | `escalate_to_human` 或 `redirect_upstream` | 要重做整个上游 → redirect_upstream（指向具体上游节点）；reviewer 拿不准 → escalate |
+
+## 跟邻居的边界
+
+- _reviewer **不重做 {本节点工作}** —— 那是 {本节点} 节点的活
+- _reviewer **不直接改 {artifact_type}** —— {本节点} 根据 critique 改
+- _reviewer **不冻结 {artifact_type}** —— orchestrator 在 user accept 后做
+- _reviewer **可写 review_critique artifact + 可写 memory（observation）+ 可
+  propose_to_curator**（建议 curator 后续整合的 synthesis 候选）
+
+## 跟 quality_check 的区别
+
+- **`completion_criteria.quality_checks`** in `harness.yaml`：mechanical /
+  LLM-as-judge against state_summary，**节点 owner 写**，节点 loop 完即跑。
+  弱（看 metadata keys，不看 values）。
+- **本 review_spec.md**：独立 fresh agent loop，可调任意 read 工具（read_artifact
+  / search_kb / get_kb_record 等），**可看 artifact content + 跨产物对账**。
+  强（深审）。
+
+两层都有 = 防护到位。quality_check 是"形式合规"，review_spec 是"内容合理"。

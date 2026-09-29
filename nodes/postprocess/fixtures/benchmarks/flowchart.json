@@ -1,0 +1,185 @@
+{
+ "assertions": [
+  {
+   "derived_from": "流程含入库、质量筛查、打回重采、预处理、特征提取、基线训练、交叉验证、报告归档共 8 个环节",
+   "equals": 8,
+   "id": "node_count",
+   "kind": "node_count"
+  },
+  {
+   "derived_from": "9 条连线：入库→筛查、筛查→打回、筛查→预处理、预处理→特征、预处理→基线、特征→验证、基线→验证、验证→预处理、验证→报告",
+   "equals": 9,
+   "id": "edge_count",
+   "kind": "edge_count"
+  },
+  {
+   "derived_from": "特征提取与基线模型训练两路结果汇合做交叉验证",
+   "equals": 2,
+   "id": "cv_merge",
+   "kind": "neighbors",
+   "node": "cv",
+   "within": {
+    "role": "处理"
+   }
+  },
+  {
+   "derived_from": "预处理后并行做特征提取和基线模型训练",
+   "equals": 2,
+   "id": "preprocess_fanout",
+   "kind": "neighbors",
+   "node": "preprocess",
+   "within": {
+    "role": "处理"
+   }
+  },
+  {
+   "derived_from": "标出每个判定点（质量筛查、交叉验证）的判据和两条分支",
+   "equals": 2,
+   "id": "two_decision_points",
+   "kind": "node_count",
+   "selector": {
+    "role": "判定点"
+   }
+  },
+  {
+   "derived_from": "不合格打回重采：打回重采只由质量筛查触发",
+   "equals": 1,
+   "id": "resample_trigger",
+   "kind": "neighbors",
+   "node": "resample",
+   "within": {
+    "role": "判定点"
+   }
+  }
+ ],
+ "blocks": [
+  {
+   "bands": [
+    [
+     "node:raw"
+    ],
+    [
+     "node:qc"
+    ],
+    [
+     "node:preprocess"
+    ],
+    [
+     "node:feat",
+     "node:baseline"
+    ],
+    [
+     "node:cv"
+    ],
+    [
+     "node:report"
+    ]
+   ],
+   "edges": [
+    {
+     "from": "raw",
+     "role": "数据流",
+     "to": "qc"
+    },
+    {
+     "from": "qc",
+     "label": "不合格",
+     "role": "回退",
+     "to": "resample"
+    },
+    {
+     "from": "qc",
+     "label": "合格",
+     "role": "数据流",
+     "to": "preprocess"
+    },
+    {
+     "from": "preprocess",
+     "role": "数据流",
+     "to": "feat"
+    },
+    {
+     "from": "preprocess",
+     "role": "数据流",
+     "to": "baseline"
+    },
+    {
+     "from": "feat",
+     "role": "数据流",
+     "to": "cv"
+    },
+    {
+     "from": "baseline",
+     "role": "数据流",
+     "to": "cv"
+    },
+    {
+     "from": "cv",
+     "label": "R² < 0.8 · 调参重来",
+     "role": "回退",
+     "to": "preprocess"
+    },
+    {
+     "from": "cv",
+     "label": "R² ≥ 0.8 · 达标",
+     "role": "数据流",
+     "to": "report"
+    }
+   ],
+   "groups": [],
+   "kind": "diagram",
+   "nodes": [
+    {
+     "id": "raw",
+     "label": "原始观测数据入库",
+     "role": "数据"
+    },
+    {
+     "id": "qc",
+     "label": "质量筛查",
+     "role": "判定点",
+     "sublabel": "判据：完整性 / 异常值"
+    },
+    {
+     "id": "resample",
+     "label": "打回重采",
+     "role": "重采",
+     "side": "left"
+    },
+    {
+     "id": "preprocess",
+     "label": "预处理",
+     "role": "预处理",
+     "sublabel": "去噪 · 归一化"
+    },
+    {
+     "id": "feat",
+     "label": "特征提取",
+     "role": "处理"
+    },
+    {
+     "id": "baseline",
+     "label": "基线模型训练",
+     "role": "处理"
+    },
+    {
+     "id": "cv",
+     "label": "交叉验证",
+     "role": "判定点",
+     "sublabel": "判据：R² ≥ 0.8"
+    },
+    {
+     "id": "report",
+     "label": "产出报告并归档",
+     "role": "输出"
+    }
+   ],
+   "title": "① 数据处理流水线"
+  },
+  {
+   "kind": "note",
+   "text": "两个判定点：① 质量筛查（不合格打回重采）；② 交叉验证（R² < 0.8 回退预处理调参，达标则产出报告并归档）。特征提取与基线模型训练并行，两路结果汇合后进入交叉验证。"
+  }
+ ],
+ "title": "科研数据处理流程"
+}

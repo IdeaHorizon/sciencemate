@@ -1,0 +1,11 @@
+{
+  "answer": {
+    "kind": "text",
+    "text": "跑的怎么样了？"
+  },
+  "history": [
+    { "role": "user", "content": "开始研究" },
+    { "role": "assistant", "content": "已开始。" }
+  ],
+  "conversation_id": "de4632cc-8a94-4c02-abb3-6a51ca48c155"
+}

@@ -1,0 +1,28 @@
+{
+  "task_id": "pairwise_independence_FALSE",
+  "arm": "A0",
+  "model": "deepseek-v4-flash",
+  "final_expression": "Rational(1,4) != Rational(1,2)**3",
+  "verdict": "refuted",
+  "assumptions": [
+    "X 与 Y 独立，且 P(X=1)=P(X=-1)=P(Y=1)=P(Y=-1)=1/2",
+    "Z=XY，乘法在实数值上有明确定义",
+    "由 X,Y 独立得到 (X,Y) 的四个原子结果概率均为 1/4",
+    "概率值分母 2 和 4 均非零",
+    "Z 的边缘分布为 P(Z=1)=P(Z=-1)=1/2",
+    "对取值于 {-1,1} 的有限离散变量，只需检查全部原子事件的概率等于边缘乘积即可推出独立性",
+    "相互独立要求三元联合分布等于边缘分布之积；一个三元事件不满足即可证伪"
+  ],
+  "unverified_steps": [
+    "有限离散变量中“原子事件概率分解足以推出独立性”作为标准测度论事实引用，未对任意 Borel 集逐项展开验证"
+  ],
+  "reasoning_summary": "构造 X,Y 独立均匀取 ±1，令 Z=XY。逐项验证 X,Y、X,Z、Y,Z 两两独立；但 P(X=1,Y=1,Z=1)=1/4，而 P(X=1)P(Y=1)P(Z=1)=1/8，所以三元联合分布不等于边缘乘积，命题被证伪。",
+  "raw_text": "命题不成立。反例如下。\n\n设 \\(X,Y\\) 独立，且都在 \\(\\{-1,1\\}\\) 上等概率取值：\n\n\\[\nP(X=1)=P(X=-1)=P(Y=1)=P(Y=-1)=\\frac12.\n\\]\n\n令\n\n\\[\nZ=XY.\n\\]\n\n因为 \\(X,Y\\) 独立，所以\n\n\\[\nP(X=x,Y=y)=\\frac12\\cdot\\frac12=\\frac14,\\qquad x,y\\in\\{-1,1\\}.\n\\]\n\n于是 \\((X,Y,Z)\\) 的联合分布为：\n\n\\[\n\\begin{array}{c|c|c|c}\nX & Y & Z & P(X,Y,Z)\\\\\n\\hline\n1 & 1 & 1 & 1/4\\\\\n1 & -1 & -1 & 1/4\\\\\n-1 & 1 & -1 & 1/4\\\\\n-1 & -1 & 1 & 1/4\n\\end{array}\n\\]\n\n因此\n\n\\[\nP(Z=1)=\\frac12,\\qquad P(Z=-1)=\\frac12.\n\\]\n\n---\n\n### 1. 验证两两独立\n\n先看 \\(X,Z\\)：\n\n\\[\n\\begin{aligned}\nP(X=1,Z=1)&=\\frac14=P(X=1)P(Z=1),\\\\\nP(X=1,Z=-1)&=\\frac14=P(X=1)P(Z=-1),\\\\\nP(X=-1,Z=1)&=\\frac14=P(X=-1)P(Z=1),\\\\\nP(X=-1,Z=-1)&=\\frac14=P(X=-1)P(Z=-1).\n\\end{aligned}\n\\]\n\n所以 \\(X\\) 与 \\(Z\\) 独立。\n\n同理，\\(Y,Z\\) 也独立，因为\n\n\\[\n\\begin{aligned}\nP(Y=1,Z=1)&=\\frac14=P(Y=1)P(Z=1),\\\\\nP(Y=1,Z=-1)&=\\frac14=P(Y=1)P(Z=-1),\\\\\nP(Y=-1,Z=1)&=\\frac14=P(Y=-1)P(Z=1),\\\\\nP(Y=-1,Z=-1)&=\\frac14=P(Y=-1)P(Z=-1).\n\\end{aligned}\n\\]\n\n而 \\(X,Y\\) 由构造独立。所以 \\(X,Y,Z\\) 两两独立。\n\n---\n\n### 2. 验证三元不独立\n\n考虑事件\n\n\\[\nX=1,\\quad Y=1,\\quad Z=1.\n\\]\n\n由表可知：\n\n\\[\nP(X=1,Y=1,Z=1)=\\frac14.\n\\]\n\n但边缘乘积为\n\n\\[\nP(X=1)P(Y=1)P(Z=1)\n=\\frac12\\cdot\\frac12\\cdot\\frac12\n=\\frac18.\n\\]\n\n二者不相等：\n\n\\[\n\\frac14\\ne\\frac18.\n\\]\n\n所以三元联合分布不等于边缘分布之积，\\(X,Y,Z\\) 不相互独立。\n\n---\n\n因此原命题被证伪。\n\n正确结论是：**两两独立是相互独立的必要条件，但不是充分条件**。三变量要相互独立，还必须有\n\n\\[\nP(X\\in A,Y\\in B,Z\\in C)\n=\nP(X\\in A)P(Y\\in B)P(Z\\in C)\n\\]\n\n对任意事件 \\(A,B,C\\) 成立。\n\n```json\n{\n  \"final_expression\": \"Rational(1,4) != Rational(1,2)**3\",\n  \"verdict\": \"refuted\",\n  \"assumptions\": [\n    \"X 与 Y 独立，且 P(X=1)=P(X=-1)=P(Y=1)=P(Y=-1)=1/2\",\n    \"Z=XY，乘法在实数值上有明确定义\",\n    \"由 X,Y 独立得到 (X,Y) 的四个原子结果概率均为 1/4\",\n    \"概率值分母 2 和 4 均非零\",\n    \"Z 的边缘分布为 P(Z=1)=P(Z=-1)=1/2\",\n    \"对取值于 {-1,1} 的有限离散变量，只需检查全部原子事件的概率等于边缘乘积即可推出独立性\",\n    \"相互独立要求三元联合分布等于边缘分布之积；一个三元事件不满足即可证伪\"\n  ],\n  \"unverified_steps\": [\n    \"有限离散变量中“原子事件概率分解足以推出独立性”作为标准测度论事实引用，未对任意 Borel 集逐项展开验证\"\n  ],\n  \"reasoning_summary\": \"构造 X,Y 独立均匀取 ±1，令 Z=XY。逐项验证 X,Y、X,Z、Y,Z 两两独立；但 P(X=1,Y=1,Z=1)=1/4，而 P(X=1)P(Y=1)P(Z=1)=1/8，所以三元联合分布不等于边缘乘积，命题被证伪。\"\n}\n```",
+  "thinking_chars": 40930,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 139.1,
+  "tokens": 15792,
+  "parse_ok": true
+}

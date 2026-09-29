@@ -1,0 +1,82 @@
+{
+  "task_id": "kepler_third_law",
+  "arm": "A1",
+  "final_expression": "4*pi**2*a**3/(G*M)",
+  "final_expression_source": "main_result",
+  "main_result_statement": "圆轨道（双体 M>>m、仅引力）T^2 = 4*pi^2*a^3/(G*M)；椭圆推广 a=半长轴、严格双体形式 T^2 = 4*pi^2*a^3/(G*(M+m))，m<<M 时退化（误差 ~ m/(2M)）",
+  "verdict": "derived",
+  "verification_evidence": [
+    {
+      "step": "S4",
+      "probe": "dca7a84652e96ce2",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S7",
+      "probe": "42de6b16c3802450",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "E3",
+      "probe": "cecaf5b1f1b4d63b",
+      "status": "verified",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 3,
+  "step_count": 14,
+  "assumptions": [
+    "A1: 双体系统，m 绕 M 运动，M>>m（中心体近似静止）",
+    "A2: 圆轨道、匀速运动",
+    "A3: 引力是唯一作用力（无摄动）",
+    "A4: m!=0, r>0, T>0（除法定义域；物理恒正）",
+    "A5: G>0, M>0（物理恒真）"
+  ],
+  "unverified_steps": [
+    "S1",
+    "S2",
+    "S3",
+    "S5",
+    "S6",
+    "S8",
+    "S9",
+    "E1",
+    "E2",
+    "E4",
+    "E5"
+  ],
+  "validity_domain": [
+    "A1",
+    "A2",
+    "A3"
+  ],
+  "credibility": {
+    "verification_level": "代数核心 3 步符号确证；数值核对 3 项 verified；极限 2/3 干净（第 3 项工具歧义）；反例搜索 3 项无果",
+    "weakest_links": [
+      "S3/E2 物理断言",
+      "S9 椭圆解为引用"
+    ],
+    "assumptions_carried": [
+      "A1 M>>m",
+      "A2 圆轨道",
+      "A3 仅引力"
+    ],
+    "assessment": "链完整、代数全机械确证、数值定量一致；适用域内 derived 可信度高"
+  },
+  "findings": [
+    "F1: 适用域=圆轨道+M>>m+仅引力（A1-A3）；代数核心 S4/S7/E3 全部符号确证",
+    "F2: 数值验证（星历表 GM_sun）：地球单体误差 1.47e-6 ≈ m/(2M)=1.50e-6，双体 3.6e-8；木星（m/M=9.5e-4 判别性）单体 6.4e-4 -> 双体 1.6e-4（残差=土星摄动）",
+    "F3: v^2=GM/r 核对：1AU 处 29.7847 km/s vs 文献 29.78（差 4.7 m/s）",
+    "F4: 椭圆推广 a=半长轴、与偏心率无关（cited）；M->(M+m) 条件 m/M<<1，精度 epsilon 需 m/M <= 2*epsilon",
+    "F5: 教训：必须用星历表 GM_sun，名义 G*M_sun 差 1e-5 会误导",
+    "F6: 量纲 time^2 一致；r->0、M->oo 极限通过；r->oo 工具符号怪癖（物理无歧义）",
+    "F7: 最脆：S3/E2 物理断言与 S9 引用（L1 可接受）"
+  ],
+  "frozen": true,
+  "turns": 23,
+  "tool_calls": 37,
+  "elapsed_s": 491.2,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787419190-009e79"
+}

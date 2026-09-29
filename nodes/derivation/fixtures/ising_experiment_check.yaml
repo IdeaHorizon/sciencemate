@@ -1,0 +1,95 @@
+# T 线第二步：experiment 用蒙特卡洛检验 derivation 冻结的理论预测。
+#
+# ⚠️ 阈值由第一步的 derivation_log 填入（已填：2.269185314213022，冻结于 18:20:23Z）——
+# **这正是这条线要证明的东西**：预注册的判据来自一份**先于本次实验被冻结**
+# 的理论推导，而不是实验做完之后倒推出来的。
+#
+# 为什么不用 E2E v26（2026-08-13）的现成 Ising 数据：那批实验**早于**今天的
+# 推导，拿它对账会让时间戳链是反的。演示"预测先于实验"就必须真跑一次新的。
+# 小规模 Wolff 实测三个尺寸 0.3s，完全跑得动 —— 精度低不影响闭环成立，
+# 把容差放宽即可（论文级精度是另一件事）。
+#
+# v26 留下的教训写进了闭合条件：**加权 vs 不加权把判决从 refuted(2.8σ)
+# 翻成 supported(1.17σ)**。所以 prereg 不能只冻阈值，还要冻**分析方法**。
+
+node_inputs:
+  stage: simulation
+  run_role: primary
+  experiment_spec: |
+    二维方格 Ising 模型（零外场、最近邻、周期边界）的临界温度测定。
+
+    方法（预注册，不得事后更改）：
+      · Wolff 单团簇算法（避免临界慢化）
+      · 尺寸 L ∈ {8, 12, 16, 24}
+      · 温度扫描 T ∈ [2.20, 2.34]，步长 0.01（15 点）
+      · 每点：热化 500 次团簇翻转，测量 4000 次
+      · 观测量：Binder 累积量 U_L = 1 - <m⁴>/(3<m²>²)
+      · T_c 估计：相邻尺寸对的 U_L(T) 曲线交叉点，**对所有尺寸对取无权平均**
+        （加权方案必须预先声明 —— 见闭合条件 FIT_SCHEME）
+      · 误差：交叉点集合的标准误
+
+    实现用 execute_python（numpy 即可，不需要外部依赖）。
+  execution_params:
+    lattice_sizes: [8, 12, 16, 24]
+    temperature_range: [2.20, 2.34]
+    temperature_step: 0.01
+    thermalization_clusters: 500
+    measurement_clusters: 4000
+    algorithm: wolff
+    observable: binder_cumulant
+
+upstream_artifacts:
+  # ★ 时间戳链的起点：这份推导在本次实验开跑**之前**就已冻结。
+  #   experiment 读得到它，但改不了它 —— 对照值不是实验做完倒推的。
+  - type: derivation_log
+    name: Ising_Tc_closed_form_via_KW_duality
+    content: |
+      理论预测（先于本次实验冻结）：
+        k_B T_c / J = 2/log(1+sqrt(2)) = 2.269185314213022
+      来源：Kramers–Wannier 自对偶条件 sinh(2K_c)=1
+      冻结时间：2026-08-22T18:20:23.881942+00:00
+      验证账本：15 verified / 19 numerically_supported，20 步链、8 条活假设
+    metadata:
+      frozen: true
+      frozen_at: "2026-08-22T18:20:23.881942+00:00"
+      main_result:
+        expression: "2/log(1+sqrt(2))"
+        statement: "二维方格 Ising 临界温度闭式"
+
+  - type: pre_registration
+    name: Ising_Tc_Experiment_Prereg
+    content: |
+      ## Research Questions
+
+      ### Q1: 蒙特卡洛测得的临界温度与理论预测一致吗？
+      - output_kind: 一条命题的裁决
+      - proposition: 有限尺寸标度外推得到的 T_c 与 derivation 冻结的理论值
+        在给定容差内一致。
+      - 闭合条件:
+      ```yaml
+      - id: TC_MEASURED
+        metric: "|T_c^MC - T_c^theory|"
+        comparison: "<"
+        threshold: 0.02
+      - id: FIT_SCHEME
+        statement: "交叉点的平均方案（加权/无权）在开跑前已声明并如实执行 —— E2E v26 实测：加权与否把同一批数据的判决从 refuted(2.8σ) 翻成 supported(1.17σ)"
+      - id: THEORY_PROVENANCE
+        statement: "对照的理论值来自本项目先前冻结的 derivation_log，记录其 artifact id 与冻结时间，证明预测先于本次实验"
+      ```
+      - 理论对照值（来自冻结的 derivation_log）:
+        kT_c/J = 2.269185314213022    # = 2/log(1+sqrt(2))（冻结于 2026-08-22T18:20:23.881942+00:00）
+    metadata:
+      frozen: true
+
+memory_entries:
+  - kind: directive
+    text: >
+      本次实验检验的是一份**先于实验被冻结**的理论预测。对照值不是你算的，
+      也不许改 —— 它来自 upstream 的 derivation_log。测出来不一致就如实报
+      不一致，那是有价值的结果（要么理论错、要么实现错、要么尺寸不够）。
+    tags: [methodology]
+  - kind: directive
+    text: >
+      拟合方案必须按预注册执行。E2E v26 的教训：同一批数据，加权拟合给出
+      refuted(2.8σ)、无权拟合给出 supported(1.17σ) —— 事后选方案等于事后选结论。
+    tags: [methodology]

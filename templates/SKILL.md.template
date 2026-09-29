@@ -1,0 +1,94 @@
+# 完整规范见 `docs/skill-spec.md`。可工作 dummy 例子在
+# `nodes/experiment/skills/.example_skill/SKILL.md`（folder 以 . 开头，自动不注册）。
+---
+name: {your_skill_name}                # 跟所在文件夹名一致：shared/skills/{your_skill_name}/SKILL.md 或 nodes/{node}/skills/{your_skill_name}/SKILL.md
+
+# ── description 模板（LLM 决策第一眼看到的）─────────────────────────────────
+# 推荐结构（详见 docs/skill-spec.md § 7.2）：
+#   <这是关于什么主题的指引>。
+#   当 <某情况> 时按本指引做：<动作概括>。
+#   不要用在 <反例场景> —— 那时应该 <别的做法>。
+description: |
+  {这是关于 X 的指引}。当 {某情况} 时按本指引做：{动作概括}。
+  不要用在 {反例场景} —— 那时应该 {另一种做法 / 别的 skill / 别的 tool}。
+
+applies_when:
+  # 在什么情况下 LLM 应该用这个 skill。框架把这些 cue 渲进 system_prompt。
+  - {例：项目刚开始进入一个新研究方向}
+  - {例：上游 artifact 是 experiment_log 类型}
+  - {例：user 在对话里说"以后..."/"始终..."/"我偏好..."}
+tools_used:
+  # skill 工作流里要用的工具名。LLM 看到这个会知道这些工具适合一起用。
+  # 如果本 skill 是纯推理框架/心智模型（不调任何工具），留空 [] 即可。
+  - {tool_name_1}
+  - {tool_name_2}
+node_type: {optional}                   # 可选。填了就是节点 local skill；不填是 shared（任意节点能用）
+status: validated                       # validated | proposed | deprecated
+relevant_concepts: []                   # 可选：相关 KB concept_id（让 KB curator 能 cross-link）
+---
+
+## 用 / 不用 本 skill
+
+**用 when**：
+- {具体场景 1 —— LLM 看到时能确认"是的，现在就该用"}
+- {具体场景 2}
+
+**不用 when**：
+- {反例 1} → 改用 {其它 skill / tool}
+- {反例 2} → 应该走 {别的流程}
+
+## 工作流（按步骤写，每步是一个具体动作）
+
+1. **{步骤名}**：{动作描述}。例如 "调 `search_kb(entity_type='claims', query='X')` 看 KB 里有没有 X 相关 claim"。
+2. **{步骤名}**：...
+3. **{步骤名}**：...
+4. ...
+
+> 注：如果本 skill 是**纯推理框架 / 心智模型**（不涉及 tool 调用，如 Karpathy 那种），
+> 把这一节改成 "## 思考框架" + "## 关键判断维度"。详见 docs/skill-spec.md § 2 的 7 种 skill 类型。
+
+## 输入 / 前置条件
+
+- 节点必须已经有 `{artifact_type}` artifact 在上游
+- 或者 node_inputs.{key} 必须传
+
+## 输出
+
+- 期望产出：`save_artifact(artifact_type="{type}", ...)`
+- 期望副作用：`add_memory(kind="observation", text="...", tags=[...])`
+
+## 关键判断点（可选 —— LLM 容易选错的 if-then 分支）
+
+- 看到 {场景 X} → 走 step Y 而不是 step Z
+- 如果 {条件}，{怎么做}；否则 {另一种做法}
+
+## Pitfalls / 反模式（必读 —— 写下别人踩过的坑）
+
+- ❌ {不要做什么} → 后果是 {什么}
+- ❌ {不要做什么}
+- ✅ {如果不确定就这样做}
+
+## 完整例子（可选但强烈推荐）
+
+```
+# user 说："以后回复都用中文"
+# 你应该这么做：
+add_memory(kind='directive', text='总是用中文回复 user', tags=['language'])
+propose_profile_update(
+  scope='user',
+  section='## 交互偏好',
+  new_content='- 默认用中文回复（user 2026-05-13 说）',
+  reasoning='user 在 chat 中说：以后回复都用中文，别用英文'
+)
+```
+
+<!--
+提交前 self-check（详见 docs/skill-spec.md § 7.6）：
+- [ ] frontmatter description 含 "当 X 时用 / 不要用在 Y" 双向语义
+- [ ] body 有 "用 / 不用" 段
+- [ ] body 有 Pitfalls 段（至少 3 条）
+- [ ] 至少 1 个可跑的 example
+- [ ] 引用的 tool 名都真存在（grep shared/tools/）
+- [ ] 实测：fixture 跑后 LLM 行为符合预期
+-->
+

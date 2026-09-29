@@ -1,0 +1,13 @@
+# hypothesis 节点本地 ignore（规则仅作用于本目录及子目录）
+
+# sandbox / run_node 运行产物
+output/
+
+# 本地测试 fixture 变体、参考论文 PDF 等大文件（minimal.yaml 除外，CI 需要）
+fixtures/*
+!fixtures/minimal.yaml
+ref/
+
+# agent scratch / 临时文件
+*.tmp
+.scratch/

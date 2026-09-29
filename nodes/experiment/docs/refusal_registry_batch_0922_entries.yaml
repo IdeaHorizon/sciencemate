@@ -1,0 +1,282 @@
+# 冻结批（5ae74712 → 本 PR 头）的 root-owner 交接件：refusal 登记（2026-09-22）。
+#
+# 本文件的 baseline_tightening + entries **取代** refusal_registry_044_p0a_prereg_assignment_entries.yaml
+# 里的同名两节（那份是 P0a 一稿写的；这份覆盖整批：P0a v2–v5、048 v3–v5、035a）。
+# 044 文件里的 root_test_handoff / additional_root_test_handoffs（10 条 root 测试的夹具改法）
+# 仍以 044 文件为准，未变。
+#
+# 根文件 docs/verdict_demolition/refusal_registry.yaml、refusal_baseline.json 与 tests/**
+# 对 Experiment owner 只读；以下内容供 framework owner 合入。审方已在本 PR 头的副本上
+# 把这两节合进根文件重放 tests/test_refusal_sites_are_classified.py：**通过，六个文件
+# 余量均为 0**（不多登、不少登）。
+#
+# 2026-09-22 批次（P0a v2–v5 + 048 v1–v5 + 035a + 046/047）的 root-owner 交接件。
+# 取代 nodes/experiment/docs/refusal_registry_044_p0a_prereg_assignment_entries.yaml
+# 的 baseline_tightening / entries 两节（该文件其余 root_test_handoff 等节不在此处重复）。
+#
+# 目标 worktree HEAD: 950073cf0127bdeba1d91c5dd43dc0fd3d0358d5（agent-wt/integ-0920）
+# 对比基点: 5ae74712c0bc53a386a3b9ccff77e754d17eea0c（044 交接件的基点，本批次之前）
+# 根文件 docs/verdict_demolition/refusal_registry.yaml、refusal_baseline.json 与 tests/**
+# 对 Experiment owner 只读；以下内容供 framework owner 合入，不能用抬高 baseline 代替登记。
+#
+# 计数对账（scripts/scan_refusal_sites.py 同一套 AST 谓词，按 函数+error_code 逐点比对
+# 5ae74712 与 HEAD；闸的放行额度 = baseline + 根 registry 里该文件已有条目数）：
+#
+#   文件                         baseline  根已登记  base点数  现点数  新增  删除  净欠额  本件条目
+#   contract_audit.py               55        0        55       57     2     0      2        2
+#   execution_action_census.py       0        0         0       16    16     0     16       16
+#   execution_route.py              67        4        71       72     8     7      1        1
+#   operation_completion.py         26        9        35       38     3     0      3        3
+#   run_contract.py                  2        0         2        4     2     0      2        2
+#   safe_bash.py                    29→27     0        29       32     5     2      3→5      5
+#                                                                                  合计     29
+#
+# · execution_route.py 的 8 增 / 7 删：7 删全部是 048 v3–v5 把 _declare_execution_route 内联
+#   的拒绝搬进只读预检 helper（_canonical_route_integrity_problem、_route_recovery_basis_refusal、
+#   _route_scope_effect_refusal、_route_envelope_refs_refusal、_route_envelope_enforce_refusal、
+#   _route_amendment_preflight ×2），error_code 与文案逐字不变，declare 与草稿预检共用。
+#   它们不是新墙，也没有腾出槽位（文件计数不变），所以既不登记也不收紧；真正新增只有
+#   enforce_execution_route 一处。
+# · safe_bash.py 沿用 044 交接件的 29→27 收紧：两处直接 return 的「启动 shell 失败」信封
+#   已改为经 _terminalize(...) / _census_block(...) 返回（scanner 看不见的 Call 形态），
+#   先收紧再逐条登记 5 处新位点，额度恰好等于实测，不留余量。
+#
+# 条目标记：
+#   [carried]  从 044 交接件逐字复制（位点仍在，代码语义未变）—— 25 条
+#   [revised]  位点仍在，但 P0a v2 改变了该位点的分支，044 的 collector 理由已不成立，
+#              本件改写为 B —— 1 条（execution_action_census.pending_operation_action_block）
+#   [new]      本批次新增位点 —— 3 条（contract_audit ×1、operation_completion ×1、safe_bash ×1）
+
+baseline_tightening:
+  - file: nodes/experiment/tools/safe_bash.py
+    from: 29
+    to: 27
+    why: >-
+      P0a 把 _exec_and_log 中两个直接返回的 shell 启动失败信封收进统一的
+      census terminalization 路径；旧的两个 scanner-visible return 已删除。
+      先收紧再登记四个新位点，等价于 root gate 当前看到的净 +2，但不会留下
+      两个可被未来拒绝点静默复用的 baseline 槽位。
+      （0922 补注：本批次 safe_bash 又新增 _safe_write_file 一处，因此收紧后需登记 5 条，
+      27 + 5 = 32 = 现值。）
+
+entries:
+  # ── nodes/experiment/tools/contract_audit.py（+2）────────────────────────────
+  # [carried] _dispatch_data_request → execution_action_census_guard_unavailable
+  - file: nodes/experiment/tools/contract_audit.py
+    class: B
+    why: >-
+      _dispatch_data_request 在 Data child 尚未启动前无法加载或执行 pending-assignment
+      action-census guard 时拒绝派发。此时缺的是可核验的动作授权/记账边界；继续会让
+      一个外部 child 脱离 P0a 的完整动作账本。没有副作用，可在修复 guard 后安全重试。
+  # [new · P0a v4 (e39debac)] _dispatch_data_request → dispatch_committed_but_receipt_event_not_durable
+  - file: nodes/experiment/tools/contract_audit.py
+    class: B
+    why: >-
+      _dispatch_data_request 在 Data child 已跑完、input delivery ledger 已提交之后，
+      census 收据事件 data_request_dispatched 追加失败时返回
+      dispatch_committed_but_receipt_event_not_durable，带 side_effect_committed=true、
+      payload_must_not_rerun=true。副作用已经发生：返回普通 success 会让模型再派一个子
+      run，吞掉则 census 看不见这次派发、build 收尾能绿。唯一出口是
+      reconcile_data_dispatch(spec_id) 补记缺失的收据事件，不重跑派发。
+
+  # ── nodes/experiment/tools/execution_action_census.py（+16）─────────────────
+  # [carried] _error 助手本体
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      _error 是本模块拒绝信封的单一构造器；scanner 会同时计这个返回点和各调用点。
+      本体只渲染已由下列调用点判定的协议错误，不新增策略或结果充分性判断；各 caller
+      仍逐点登记，不能把这个 helper 条目当作未来通用造墙额度。
+  # [carried] begin_execution_action → execution_action_census_input_invalid（非 object）
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      begin_execution_action 收到非 object 的 action 或 decision 时无法构造动作协议记录，
+      在任何 payload 启动前返回 execution_action_census_input_invalid。
+  # [carried] begin_execution_action → execution_action_census_tool_unsupported
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      begin_execution_action 只接受声明进入三阶段 census 的执行工具；unsupported tool
+      无对应 spawn/terminal owner，故在副作用前按协议拒绝。
+  # [carried] begin_execution_action → execution_action_census_input_invalid（tools disagree）
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      action.tool 与 resolver decision.tool 不一致时无法把 admission 绑定到同一动作身份；
+      拒绝写入避免产生两个互相矛盾的事实来源。
+  # [carried] begin_execution_action → execution_action_route_binding_invalid（normalize）
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      route-backed admission 缺少、误带或错配 exact route attempt binding 时拒绝；否则
+      action census 会把物理动作记到错误 step/attempt。
+  # [carried] begin_execution_action → execution_action_route_binding_invalid（not persisted）
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      exact route binding 未在 route owner 中唯一持久化时拒绝 admission；调用方内存里的
+      binding 不能代替 durable route_step_bound 事实。
+  # [carried] begin_execution_action → execution_action_census_state_invalid
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      state 缺少 run identity 时拒绝创建 action_id；无 run_id 的事件无法在恢复时证明
+      归属，不能进入持久账本。
+  # [carried] begin_execution_action → execution_action_census_history_invalid
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      route-backed admission 发现 transcript 损坏或读取告警时拒绝追加；在不完整历史上
+      继续写会把重复 admission 或冲突身份伪装成唯一事实。
+  # [carried] begin_execution_action → execution_action_route_attempt_already_admitted
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      同一 persisted route attempt 已存在不等价 admission 时拒绝覆盖；旧动作事实不可被
+      后来的重调改写，需先由账本 owner 对账。
+  # [carried] begin_execution_action → execution_action_census_persistence_failed
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      admission append 未能证明 durable 时禁止 payload 启动；否则副作用可能发生却没有
+      可恢复的 action identity。append 已成功但响应丢失时 exact reread 仍可幂等收敛。
+  # [carried] _append_followup → execution_action_{phase}_conflict
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      _append_followup 对同 action/phase 的非等价重调返回 conflict，不覆盖已有 spawn 或
+      terminal 事实；这是不可变事件完整性，不是实验结果判决。
+  # [carried] _append_followup → execution_action_census_persistence_failed
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      spawn/terminal follow-up 无法证明 durable 时返回 persistence_failed，并携带只补该
+      phase 的恢复胶囊和 payload_must_not_rerun，防止用重跑物理载荷补账。
+  # [carried] observe_execution_action_spawn → execution_action_spawn_observation_invalid
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      observe_execution_action_spawn 只接受 bool/null 的 spawn/submission 事实及稳定
+      proof_source；形状不合法就没有可写入三阶段协议的物理观察。
+  # [carried] defer_execution_action_terminal → execution_action_terminal_input_invalid
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      defer_execution_action_terminal 同时收到 result 与 error 时终态协议自相矛盾；该纯函数
+      不写事件，调用方修正为二选一即可。
+  # [carried] finish_execution_action → execution_action_terminal_input_invalid
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      finish_execution_action 同时收到 result 与 error 时无法形成唯一 terminal projection；
+      在写账前拒绝，修正调用参数后可重试，不涉及结果充分性。
+  # [revised · P0a v2] pending_operation_action_block → prereg_pending_operation_action_ineligible
+  #   044 交接件把它记为 collector（待拆分标记），理由是 route_exempt_effectful_action_not_compatible
+  #   同时挡住 fetch_resource / safe_write_file / dispatch_data_request 且让 egress 回归转红。
+  #   P0a v2（裁决 (a)）已删掉这一分支：三个 support tool 在此放行并以 receipted 入账，
+  #   路线层放行的低风险写入记 incidental。剩余分支按 044 自己的判断「属于 B」登记。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      pending_operation_action_block 是临时 pending-assignment 兼容 lane 的副作用前守门，
+      单一 return 携带 reason 之一：prereg_assignment_authority_unavailable（run acceptance
+      收据读不到或不是 v2）、prior_scientific_signal_requires_redispatch、
+      pending_assignment_requires_explicit_operational_scope、
+      scientific_execution_requires_exact_prereg_assignment、unknown_execution_tool、
+      route_exempt_effectful_action_not_compatible（无路线且非 read-only / dry-run /
+      authoritative mechanical 的执行工具）。它们共守一条不变量：run 的 prereg assignment
+      authority 未定或不可读时，不产生任何无法归属的执行事实；缺失事实不能推断为许可。
+      只读诊断始终放行；support tool 放行并入账为 receipted（P0a v2）。无副作用，
+      retryable_in_current_run=false，出口是派发方以 typed bound/none 重派或 framework
+      修复收据，随 release_marker 一起下线。备注：explicit_operational_scope 分支目前
+      没有直接测试。
+
+  # ── nodes/experiment/tools/execution_route.py（+1，另 7 处为搬家不登记）───────
+  # [carried] enforce_execution_route → execution_action_census_guard_unavailable
+  - file: nodes/experiment/tools/execution_route.py
+    class: B
+    why: >-
+      enforce_execution_route 在动作本来可能到达副作用、但 pending-operation census guard
+      无法加载或判定时 fail closed。缺失 guard 不能被解释成许可；无副作用，修复节点 guard
+      后可重试，并保留明确 owner/blocker。
+
+  # ── nodes/experiment/tools/operation_completion.py（+3）──────────────────────
+  # [new · P0a v2→v4] _record_operation_completion → operation_build_artifact_not_produced_by_satisfying_attempt
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      新 closure 的 build 成功声明里，任一 artifact_paths / executable_paths / json_paths
+      不在满足真实执行义务的那次 attempt 收尾时冻结的产物身份收据（lexical 路径、kind、
+      inode、sha256）里，或此刻身份已与收据不同，返回
+      operation_build_artifact_not_produced_by_satisfying_attempt。它只判产物归属、不判
+      产物质量：路线之外由 shell / Python / safe_write_file 写出或事后 ln / mv 顶替的文件
+      不能被铸成构建结果。无副作用，retryable_in_current_run=true、payload_must_not_rerun=
+      false——把产物写进产出步骤的 expected_outputs 并真实执行后，用相同输入重试。
+  # [carried] _record_operation_completion → operation_task_kind_mismatch
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      operation closure 的调用方 task_kind 与 immutable operation category 不兼容时返回
+      operation_task_kind_mismatch；它机械阻止用 generic 等标签降低既有 build 执行义务，
+      不评判结果质量。物理 payload 不重跑，只以兼容 task_kind 重试 completion。
+  # [carried] _record_operation_completion → operation_real_execution_required
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      成功 toolchain_build 没有完整、权威且非 dry-run 的 action-census 执行事实时返回
+      operation_real_execution_required。退出码、只读探测或文字声明不能替代真实 build；
+      可实际执行并核验后重试，无法执行则以诚实 blocked closure 收尾。
+
+  # ── nodes/experiment/tools/run_contract.py（+2）─────────────────────────────
+  # [carried] _pending_scientific_block_payload → prereg_assignment_required
+  - file: nodes/experiment/tools/run_contract.py
+    class: B
+    why: >-
+      prereg_assignment 为 pending 且当前动作出现科学信号时返回 prereg_assignment_required；
+      项目 catalog 只是观察，不能替派发方选择治理本 run 的 exact prereg。错误体要求新 run
+      携带 typed bound/none，保留候选 witness，不在 child 内猜测或覆写 authority。
+  # [carried] prereg_assignment_scientific_block → prereg_assignment_authority_unavailable
+  - file: nodes/experiment/tools/run_contract.py
+    class: B
+    why: >-
+      科学动作发生前无法读取唯一 run-acceptance/prereg-assignment authority 时返回
+      prereg_assignment_authority_unavailable；缺失或损坏的权威记录不能当作 none。
+      这是身份/记录完整性门，需由 framework/dispatch owner 修复或重派。
+
+  # ── nodes/experiment/tools/safe_bash.py（+5，配 29→27 收紧）──────────────────
+  # [carried] _exec_and_log → execution_action_census_input_invalid
+  - file: nodes/experiment/tools/safe_bash.py
+    class: C
+    why: >-
+      _exec_and_log 只接受 execution_action 与 execution_decision 同时提供或同时省略；半组
+      参数无法建立同一 admission，故在 spawn 前返回 execution_action_census_input_invalid。
+  # [carried] _begin_execution_action_census → tuple (None, {status: error, phase: admission})
+  - file: nodes/experiment/tools/safe_bash.py
+    class: B
+    why: >-
+      _begin_execution_action_census 把 action-census admission 的异常或非成功响应规范化为
+      pre-spawn 错误；没有 durable admission 就不启动 payload，避免无身份副作用。
+  # [carried] _settle_execution_action_census → {status: error, execution_action_phase, ...}
+  - file: nodes/experiment/tools/safe_bash.py
+    class: B
+    why: >-
+      _settle_execution_action_census 在物理 outcome 已存在但 spawn/terminal phase 未完整持久化
+      时返回不可重跑错误，附 phase facts 与恢复胶囊；这保护账本完整性并明确禁止重复副作用。
+  # [carried] _exec_and_log._census_block → {**census_error, status: error, execution_outcome}
+  - file: nodes/experiment/tools/safe_bash.py
+    class: B
+    why: >-
+      _census_block 将已发生的物理 execution_outcome 与 census 持久化失败合成一个模型可见
+      信封；它不改写物理结果、不新判充分性，并统一携带 payload_must_not_rerun。
+  # [new · P0a v2 B2 / v3 / v4] _safe_write_file → write_committed_but_census_settlement_uncertain
+  - file: nodes/experiment/tools/safe_bash.py
+    class: B
+    why: >-
+      _safe_write_file 在文件已经写入、但三阶段 census 的 settle 未能证明 passed（含 settle
+      自身抛错）时返回 write_committed_but_census_settlement_uncertain，带
+      side_effect_committed=true、written_path、census_action_id、payload_must_not_rerun=true。
+      写入已发生：返回普通 success 会让 ROC(build) 对照不到这次写入（P0a v2 B2 实测可铸
+      假成功），盲重跑会重复写。next_action 原样透传 census 的 runtime-owned 结算出口
+      （retry_missing_census_phase_only，model_callable=false），模型侧按 model_next_action
+      报 blocker 结束本 run。

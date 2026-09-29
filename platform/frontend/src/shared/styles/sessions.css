@@ -1,0 +1,816 @@
+.session-index-page {
+  width: min(920px, calc(100% - 56px));
+  margin: 0 auto;
+  padding: clamp(44px, 8vh, 82px) 0 80px;
+}
+.session-index-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 28px; margin-bottom: 34px; }
+.session-index-header > div { min-width: 0; }
+.session-index-header > div > span,
+.session-index-empty > span,
+.session-workspace-error > span { color: var(--color-fg-subtle); font-size: var(--font-size-caption); font-weight: 650; letter-spacing: .09em; text-transform: uppercase; }
+.session-index-header h1,
+.session-workspace-error h1 { margin: 6px 0 7px; color: var(--color-fg); font-size: 25px; font-weight: 560; letter-spacing: -.025em; }
+.session-index-header p,
+.session-index-empty p,
+.session-workspace-error p { max-width: 650px; margin: 0; color: var(--color-fg-muted); font-size: var(--font-size-control); line-height: 1.55; }
+.session-index-header button,
+.session-index-empty button { display: inline-flex; flex: none; align-items: center; gap: 6px; min-height: 34px; padding: 0 10px; color: var(--color-fg); border: 1px solid var(--color-border); border-radius: 6px; background: transparent; font-size: var(--font-size-label); }
+.session-index-header button:hover,
+.session-index-empty button:hover { border-color: var(--color-border-strong); }
+.session-fixture-provenance { margin: -20px 0 25px; color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.session-index-loading { display: grid; gap: 5px; }
+.session-groups { display: grid; gap: 34px; }
+.session-index-group-heading { display: flex; align-items: baseline; gap: 7px; padding-bottom: 7px; border-bottom: 1px solid var(--color-border); }
+.session-index-group-heading h2 { margin: 0; color: var(--color-fg); font-size: var(--font-size-control); font-weight: 580; }
+.session-index-group-heading span,
+.session-archived-group > summary span { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.session-index-list { display: grid; }
+.session-index-row {
+  display: grid;
+  grid-template-columns: 7px minmax(190px, 1.6fr) minmax(130px, .75fr) minmax(155px, .9fr) 15px;
+  align-items: center;
+  gap: 13px;
+  min-height: 69px;
+  padding: 8px 6px;
+  color: var(--color-fg-muted);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 80%, transparent);
+  text-decoration: none;
+  transition: background 100ms ease, color 100ms ease;
+}
+.session-index-row:hover { color: var(--color-fg); background: var(--color-bg-elevated); }
+/* 收起按钮压在行上：平时藏起来，hover / 聚焦时出现，别把列表变成按钮墙 */
+.session-index-row-wrap { position: relative; }
+.session-index-row-wrap .session-index-row { padding-right: 34px; }
+.session-index-archive {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--color-fg-subtle);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 100ms ease, color 100ms ease, border-color 100ms ease;
+}
+.session-index-row-wrap:hover .session-index-archive,
+.session-index-archive:focus-visible { opacity: 1; }
+.session-index-archive:hover {
+  color: var(--color-fg);
+  border-color: var(--color-border);
+  background: var(--color-bg);
+}
+.session-index-archive:disabled { cursor: default; opacity: 1; }
+.session-state-dot,
+.session-state i { width: 6px; height: 6px; border-radius: 50%; background: var(--color-fg-subtle); }
+.session-state-dot.state-running, .session-state-dot.state-queued, .session-state-dot.state-retrying, .session-state-dot.state-waiting_compute,
+.session-state.state-running i, .session-state.state-queued i, .session-state.state-retrying i, .session-state.state-waiting_compute i { background: var(--color-accent); }
+.session-state-dot.state-waiting_human, .session-state-dot.state-waiting_permission, .session-state-dot.state-completed_with_warning,
+.session-state.state-waiting_human i, .session-state.state-waiting_permission i, .session-state.state-completed_with_warning i { background: var(--color-warning); }
+.session-state-dot.state-failed, .session-state-dot.state-stale_unknown,
+.session-state.state-failed i, .session-state.state-stale_unknown i { background: var(--color-danger); }
+.session-state-dot.state-completed, .session-state.state-completed i { background: var(--color-success); }
+.session-index-main,
+.session-index-context { display: grid; min-width: 0; gap: 4px; }
+.session-index-row strong,
+.session-index-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-index-main strong { color: var(--color-fg); font-size: var(--font-size-control); font-weight: 560; }
+.session-index-main small { color: var(--color-fg-muted); font-size: var(--font-size-meta); }
+.session-index-context strong { color: var(--color-fg-muted); font-size: var(--font-size-meta); font-weight: 540; }
+.session-index-context small { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.session-index-usage { text-align: right; }
+.session-archived-group > summary { display: flex; align-items: center; gap: 7px; padding: 7px 0; color: var(--color-fg-muted); border-bottom: 1px solid var(--color-border); font-size: var(--font-size-label); list-style: none; cursor: pointer; }
+.session-archived-group > summary::-webkit-details-marker { display: none; }
+.session-index-empty { max-width: 530px; margin: 16vh auto 0; }
+.session-index-empty h2 { margin: 6px 0 8px; color: var(--color-fg); font-size: 20px; font-weight: 550; letter-spacing: -.02em; }
+.session-index-empty button { margin-top: 20px; }
+.session-index-message { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: start; gap: 10px; padding: 13px 0; color: var(--color-danger); border-top: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); }
+.session-index-message span { display: grid; gap: 3px; }
+.session-index-message strong { color: var(--color-fg); font-size: var(--font-size-label); font-weight: 560; }
+.session-index-message small { color: var(--color-fg-muted); font-size: var(--font-size-meta); }
+.session-index-message button { padding: 3px 5px; color: var(--color-fg-muted); border: 0; background: transparent; font-size: var(--font-size-meta); }
+
+.session-workspace { position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr); grid-template-columns: minmax(0, 1fr); height: 100%; min-height: 0; background: var(--color-bg); }
+.session-workspace-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 52px; padding: 8px 20px; border-bottom: 1px solid var(--color-border); }
+.session-header-primary { display: flex; flex: 1; align-items: center; min-width: 0; gap: 10px; }
+.session-header-primary > a { display: grid; flex: none; place-items: center; width: 25px; height: 25px; color: var(--color-fg-subtle); border-radius: 5px; }
+.session-header-primary > a:hover { color: var(--color-fg); background: var(--color-bg-elevated); }
+.session-header-primary > div { min-width: 0; }
+.session-title-display { display: flex; align-items: center; flex: 0 1 auto; min-width: 0; gap: 6px; }
+.session-title-display h1 { overflow: hidden; margin: 0; color: var(--color-fg); font-size: var(--font-size-title); font-weight: 570; letter-spacing: -.01em; text-overflow: ellipsis; white-space: nowrap; }
+.session-title-display button { display: grid; place-items: center; padding: 4px; color: var(--color-fg-subtle); border: 0; border-radius: 4px; background: transparent; opacity: 0; }
+.session-title-display:hover button, .session-title-display button:focus-visible { opacity: 1; }
+.session-title-edit { display: flex; align-items: center; gap: 4px; }
+.session-title-edit input { width: min(430px, 45vw); padding: 3px 5px; color: var(--color-fg); border: 1px solid var(--color-border-strong); border-radius: 4px; background: var(--color-bg-input); font-size: var(--font-size-control); }
+.session-title-edit button { display: grid; place-items: center; padding: 4px; color: var(--color-fg); border: 0; background: transparent; }
+.session-header-primary > .session-meta-state { flex: none; color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.session-instruction-audit-trigger { display: inline-flex; align-items: center; max-width: min(590px, 52vw); gap: 5px; margin-top: 7px; padding: 0; color: var(--color-fg-subtle); border: 0; border-bottom: 1px solid transparent; background: transparent; font-size: var(--font-size-caption); text-align: left; }
+.session-instruction-audit-trigger:hover { color: var(--color-fg-muted); border-bottom-color: var(--color-border-strong); }
+.session-instruction-audit-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-instruction-audit-layer { position: fixed; z-index: 110; inset: 0; display: flex; justify-content: flex-end; background: rgba(0, 0, 0, .18); }
+/* 行高按内容走，不留一个会拉伸的 1fr 行。
+   原来是 `grid-template-rows: auto minmax(0, 1fr)`：抽屉里的元素数量本来就
+   不固定（loading / error / 快照各是一个 grid item），第二个元素恰好落进那个
+   1fr 行就会被拉满，后面的内容被推下去一大段空白。整个抽屉本来就 overflow-y
+   自己滚，不需要靠 1fr 去撑高度。 */
+.session-instruction-audit { display: grid; grid-auto-rows: max-content; overflow-y: auto; width: min(440px, calc(100% - 30px)); height: 100%; padding: 20px; border-left: 1px solid var(--color-border); background: var(--color-bg); box-shadow: -18px 0 50px rgba(0, 0, 0, .12); }
+.session-instruction-audit > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding-bottom: 17px; border-bottom: 1px solid var(--color-border); }
+.session-instruction-audit > header > span { display: grid; gap: 3px; }
+.session-instruction-audit > header strong { color: var(--color-fg); font-size: 16px; font-weight: 580; }
+.session-instruction-audit > header small { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.session-instruction-audit > header button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; color: var(--color-fg-muted); border: 0; border-radius: 5px; background: transparent; }
+.session-instruction-audit > header button:hover { color: var(--color-fg); background: var(--color-bg-elevated); }
+.session-instruction-audit .instruction-service-state { align-self: start; margin-top: 18px; }
+.instruction-audit-loading { padding: 18px 3px; color: var(--color-fg-subtle); font-size: var(--font-size-meta); }
+.instruction-snapshot-meta { display: grid; gap: 0; margin: 18px 0 8px; }
+.instruction-snapshot-meta > div { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 12px; padding: 8px 3px; border-bottom: 1px solid var(--color-border); }
+.instruction-snapshot-meta dt { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.instruction-snapshot-meta dd { overflow: hidden; margin: 0; color: var(--color-fg-muted); font-size: var(--font-size-caption); text-overflow: ellipsis; white-space: nowrap; }
+.instruction-snapshot-meta code { font: 11px var(--font-mono); }
+.instruction-audit-sources { border-top: 1px solid var(--color-border); }
+.instruction-audit-sources > details { border-bottom: 1px solid var(--color-border); }
+.instruction-audit-sources summary { display: grid; grid-template-columns: minmax(0, 1fr) 86px; gap: 10px; padding: 12px 3px; list-style: none; cursor: pointer; }
+.instruction-audit-sources summary::-webkit-details-marker { display: none; }
+.instruction-audit-sources summary > span { display: grid; min-width: 0; gap: 3px; }
+.instruction-audit-sources strong { color: var(--color-fg); font-size: var(--font-size-meta); font-weight: 560; }
+.instruction-audit-sources small,
+.instruction-audit-sources summary > code { overflow: hidden; color: var(--color-fg-subtle); font-size: var(--font-size-caption); text-overflow: ellipsis; white-space: nowrap; }
+.instruction-audit-sources summary > code { text-align: right; }
+.instruction-audit-sources pre { overflow: auto; max-height: 280px; margin: 0; padding: 3px 3px 14px; color: var(--color-fg-muted); font: 12px/1.65 var(--font-mono); white-space: pre-wrap; word-break: break-word; }
+.instruction-audit-sources > p { color: var(--color-fg-subtle); font-size: var(--font-size-meta); }
+.session-state { display: inline-flex; align-items: center; gap: 5px; color: var(--color-fg-muted); }
+.session-header-actions { display: flex; align-items: center; flex: none; gap: 5px; }
+.session-header-actions > button,
+.session-header-actions > .session-action-conflict { display: inline-flex; align-items: center; gap: 5px; min-height: 34px; padding: 0 10px; color: var(--color-fg-muted); border: 1px solid var(--color-border); border-radius: 5px; background: transparent; font-size: var(--font-size-meta); text-decoration: none; }
+.session-header-actions > button:hover,
+.session-header-actions > .session-action-conflict:hover { color: var(--color-fg); border-color: var(--color-border-strong); }
+.session-header-actions > .session-action-conflict { color: var(--color-warning); }
+.session-review-updates { padding: 5px 3px; color: var(--color-fg-muted); font-size: var(--font-size-meta); text-decoration: none; }
+.session-review-updates:hover { color: var(--color-fg); }
+.session-header-actions details { position: relative; }
+.session-header-actions details > summary { display: grid; place-items: center; width: 29px; height: 29px; color: var(--color-fg-muted); border-radius: 5px; list-style: none; cursor: pointer; }
+.session-header-actions details > summary::-webkit-details-marker { display: none; }
+/* 右上角的「更多」菜单：同理，从触发按钮的右上角长出来。 */
+.session-header-actions details[open] > div {
+  transform-origin: top right;
+  opacity: 1;
+  transform: scale(1);
+  transition:
+    opacity var(--duration-popover) var(--ease-out),
+    transform var(--duration-popover) var(--ease-out);
+
+  @starting-style {
+    opacity: 0;
+    transform: scale(calc(1 - 0.04 * var(--motion-shift)));
+  }
+}
+.session-header-actions details > summary:hover { color: var(--color-fg); background: var(--color-bg-elevated); }
+.session-header-actions details > div { position: absolute; z-index: var(--z-dropdown); top: 34px; right: 0; display: grid; width: 185px; padding: 5px; border: 1px solid var(--color-border); border-radius: 7px; background: var(--color-bg-overlay); box-shadow: var(--shadow-md); }
+.session-header-actions details a,
+.session-header-actions details button { display: flex; align-items: center; gap: 7px; min-height: 34px; padding: 0 8px; color: var(--color-fg-muted); border: 0; border-radius: 4px; background: transparent; font-size: var(--font-size-meta); text-align: left; text-decoration: none; }
+.session-header-actions details a:hover,
+.session-header-actions details button:hover { color: var(--color-fg); background: var(--color-bg-elevated); }
+.session-header-actions details .session-release-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px 8px; margin: 3px 2px 1px; padding: 7px 5px; border-top: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); }
+.session-header-actions details .session-release-control > span { color: var(--color-fg); font-size: var(--font-size-meta); font-weight: 560; }
+.session-header-actions details .session-release-control > div { display: flex; justify-content: flex-end; gap: 2px; }
+.session-header-actions details .session-release-control button { min-height: 24px; padding: 0 5px; }
+.session-header-actions details .session-release-control > div button:first-child { color: var(--color-danger); }
+.session-header-actions details .session-release-control button:disabled { cursor: wait; opacity: .5; }
+.session-header-actions details .session-release-control > small { grid-column: 1 / -1; color: var(--color-danger); font-size: var(--font-size-caption); line-height: 1.4; }
+.session-mobile-action { display: none !important; }
+.session-workspace > .session-fixture-provenance { position: absolute; z-index: 1; top: 79px; right: 20px; margin: 0; }
+.session-document-canvas { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.session-changes-panel { z-index: 1; flex: none; border-bottom: 1px solid var(--color-border); background: var(--color-bg); }
+.session-changes-panel.has-conflicts { border-bottom-color: color-mix(in srgb, var(--color-warning) 38%, var(--color-border)); }
+.session-changes-inner { width: min(760px, calc(100% - 40px)); margin: 0 auto; }
+.session-changes-summary { display: flex; align-items: center; gap: 12px; min-height: 48px; }
+.session-changes-toggle { display: flex; flex: 1; align-items: center; min-width: 0; gap: 9px; padding: 7px 0; color: var(--color-fg-muted); border: 0; background: transparent; text-align: left; }
+.session-changes-panel.has-conflicts .session-changes-toggle > svg:first-child { color: var(--color-warning); }
+.session-changes-toggle > span { display: grid; min-width: 0; gap: 2px; }
+.session-changes-toggle strong,
+.session-changes-toggle small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-changes-toggle strong { color: var(--color-fg); font-size: var(--font-size-label); font-weight: 570; }
+.session-changes-toggle small { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.session-changes-toggle > svg:last-child { flex: none; margin-left: auto; transition: transform 120ms ease; }
+.session-changes-toggle > svg.is-expanded { transform: rotate(180deg); }
+.session-publish-action { display: inline-flex; flex: none; align-items: center; gap: 5px; min-height: 28px; padding: 0 8px; color: var(--color-fg); border: 1px solid var(--color-border); border-radius: 5px; background: transparent; font-size: var(--font-size-meta); }
+.session-publish-action:hover { border-color: var(--color-border-strong); }
+.session-publish-action:disabled { cursor: wait; opacity: .5; }
+.session-changes-error { margin: -1px 0 9px 22px; color: var(--color-danger); font-size: var(--font-size-meta); line-height: 1.45; }
+.session-changes-detail { overflow: auto; max-height: min(42vh, 440px); padding: 2px 0 13px 22px; }
+.session-git-summary { display: flex; align-items: center; min-width: 0; gap: 8px 14px; padding: 8px 0 11px; color: var(--color-fg-subtle); border-top: 1px solid var(--color-border); font-size: var(--font-size-caption); white-space: nowrap; }
+.session-git-summary > span { display: inline-flex; align-items: center; min-width: 0; gap: 5px; }
+.session-git-summary code { overflow: hidden; max-width: 190px; color: var(--color-fg-muted); font-family: var(--font-mono); text-overflow: ellipsis; }
+.session-git-summary .session-git-stats { margin-left: auto; }
+.session-git-stats b { color: #248636; font-weight: 600; }
+.session-git-stats i { color: #cf3d43; font-style: normal; font-weight: 600; }
+.session-conflict-explanation { margin: 2px 0 12px; color: var(--color-fg-muted); font-size: var(--font-size-meta); line-height: 1.55; }
+.session-change-item { border-top: 1px solid color-mix(in srgb, var(--color-border) 72%, transparent); }
+.session-change-item > summary { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto 14px; align-items: center; gap: 8px; min-height: 39px; color: var(--color-fg-muted); list-style: none; cursor: pointer; }
+.session-change-item > summary::-webkit-details-marker { display: none; }
+.session-change-item > summary > span,
+.session-change-item > summary > small { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.session-change-item > summary > strong { overflow: hidden; color: var(--color-fg); font-family: var(--font-mono); font-size: var(--font-size-meta); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.session-change-item > summary > svg { transition: transform 120ms ease; }
+.session-change-item[open] > summary > svg { transform: rotate(180deg); }
+.session-change-preview { min-width: 0; padding: 2px 0 10px; }
+.session-change-preview pre,
+.session-change-preview p { overflow: auto; max-height: 150px; margin: 0; padding: 7px 0; color: var(--color-fg-muted); border: 0; background: transparent; font-family: var(--font-mono); font-size: var(--font-size-caption); line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.session-change-preview small { color: var(--color-warning); font-size: var(--font-size-caption); }
+.session-conflict-item { padding: 11px 0 15px; border-top: 1px solid color-mix(in srgb, var(--color-warning) 38%, var(--color-border)); }
+.session-conflict-item > header { display: flex; align-items: baseline; min-width: 0; gap: 8px; }
+.session-conflict-item > header span { flex: none; color: var(--color-warning); font-size: var(--font-size-caption); }
+.session-conflict-item > header strong { overflow: hidden; color: var(--color-fg); font-family: var(--font-mono); font-size: var(--font-size-meta); font-weight: 520; text-overflow: ellipsis; white-space: nowrap; }
+.session-conflict-base { margin: 8px 0 2px; }
+.session-conflict-base > summary { width: fit-content; color: var(--color-fg-subtle); font-size: var(--font-size-caption); list-style: none; cursor: pointer; }
+.session-conflict-base > summary::-webkit-details-marker { display: none; }
+.session-conflict-base > summary::before { content: "+"; display: inline-block; width: 12px; }
+.session-conflict-base[open] > summary::before { content: "−"; }
+.session-conflict-comparison { display: grid; grid-template-columns: 1fr 1fr; margin-top: 9px; border-top: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); }
+.session-conflict-comparison > section { min-width: 0; padding: 10px 12px 10px 0; }
+.session-conflict-comparison > section + section { padding-right: 0; padding-left: 12px; border-left: 1px solid var(--color-border); }
+.session-conflict-comparison > section > span { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.session-conflict-comparison .session-change-preview { min-height: 54px; padding: 2px 0 4px; }
+.session-conflict-comparison button { min-height: 26px; padding: 0; color: var(--color-fg-muted); border: 0; border-bottom: 1px solid var(--color-border-strong); background: transparent; font-size: var(--font-size-caption); }
+.session-conflict-comparison button:hover { color: var(--color-fg); border-bottom-color: var(--color-fg-muted); }
+.session-conflict-comparison button:disabled { cursor: wait; opacity: .5; }
+.session-conflict-permission { display: block; margin-top: 8px; color: var(--color-warning); font-size: var(--font-size-caption); }
+.session-changes-loading,
+.session-kb-boundary { margin: 9px 0 0; color: var(--color-fg-subtle); font-size: var(--font-size-caption); line-height: 1.5; }
+.session-kb-boundary { padding-top: 10px; border-top: 1px solid color-mix(in srgb, var(--color-border) 65%, transparent); }
+.session-run-verification-error { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: min(820px, calc(100% - 48px)); margin: 10px auto 0; padding: 10px 0; color: var(--color-fg-muted); border-top: 1px solid color-mix(in srgb, var(--color-danger) 38%, var(--color-border)); border-bottom: 1px solid color-mix(in srgb, var(--color-danger) 38%, var(--color-border)); }
+.session-run-verification-error > span { display: grid; gap: 2px; }
+.session-run-verification-error strong { color: var(--color-fg); font-size: var(--font-size-meta); font-weight: 570; }
+.session-run-verification-error small { color: var(--color-fg-subtle); font-size: var(--font-size-caption); line-height: 1.45; }
+.session-run-verification-error button { flex: none; min-height: 28px; padding: 0 8px; color: var(--color-fg-muted); border: 1px solid var(--color-border); border-radius: 5px; background: transparent; font-size: var(--font-size-meta); }
+.session-run-verification-error button:hover:not(:disabled) { color: var(--color-fg); border-color: var(--color-border-strong); }
+.session-run-verification-error button:disabled { cursor: wait; opacity: .55; }
+.session-document-canvas .chat-area .messages { gap: 26px; padding: 42px max(24px, calc((100% - 820px) / 2)); }
+.session-document-canvas .message { width: 100%; max-width: 820px; margin-inline: auto; }
+.session-document-canvas .message.assistant > span { margin-bottom: 9px; color: var(--color-fg-subtle); font-size: var(--font-size-caption); font-weight: 560; letter-spacing: 0; text-transform: none; }
+.session-document-canvas .message.assistant .message-body p { padding: 0; color: var(--color-fg); border: 0; border-radius: 0; background: transparent; font-size: var(--font-size-body); line-height: 1.72; }
+.session-document-canvas .message.user > span { display: none; }
+.session-document-canvas .message.user .message-body { display: flex; justify-content: flex-end; }
+.session-document-canvas .message.user .message-body p { width: auto; max-width: none; padding: 11px 15px; color: var(--color-fg); border: 0; border-radius: 12px; background: var(--color-bg-elevated); font-size: 15px; line-height: 1.55; white-space: pre-wrap; }
+.session-document-canvas .chat-session-empty-copy { display: grid; place-content: center; flex: 1; min-height: 38vh; text-align: center; }
+.session-document-canvas .chat-session-empty-copy h2 { margin: 0 0 6px; color: var(--color-fg); font-size: 22px; font-weight: 540; letter-spacing: -.02em; }
+.session-document-canvas .chat-session-empty-copy p { margin: 0; color: var(--color-fg-subtle); font-size: var(--font-size-label); }
+.session-document-canvas .thinking-indicator { padding: 9px 0; border: 0; background: transparent; }
+.session-document-canvas .composer-wrapper { padding: 8px max(24px, calc((100% - 820px) / 2)) 18px; background: linear-gradient(to bottom, transparent, var(--color-bg) 18%); }
+.session-document-canvas .composer { grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; max-width: 820px; padding: 6px 10px 8px; border-color: var(--color-border); border-radius: 16px; background: var(--color-bg-elevated); box-shadow: 0 3px 15px rgba(0, 0, 0, .06); }
+/* 无分隔线：一个框里一根线就够了（外框那根）。控制条靠间距和字号区分。 */
+.session-document-canvas .composer-context { display: flex; flex-wrap: wrap; align-items: center; min-width: 0; gap: 6px; padding: 0; border-bottom: 0; }
+.session-document-canvas .composer-model-status { overflow: hidden; max-width: 300px; color: var(--color-fg-muted); font-size: var(--font-size-caption); text-overflow: ellipsis; white-space: nowrap; }
+.session-document-canvas .composer-model-link { cursor: pointer; text-decoration: none; }
+.session-document-canvas .composer-model-link:hover { color: var(--color-fg); text-decoration: underline; text-underline-offset: 2px; }
+.session-document-canvas .composer-access-state { overflow: hidden; margin-left: auto; color: var(--color-fg-subtle); font-size: var(--font-size-caption); text-overflow: ellipsis; white-space: nowrap; }
+.session-document-canvas .composer-context > small { margin-left: auto; color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.session-document-canvas .composer textarea { min-height: 42px; padding: 8px 4px 2px; color: var(--color-fg); font-size: var(--font-size-control); }
+/* 只针对发送按钮：这条以前写成 `.composer button`，把控制条里的每个 chip
+   都变成了 34px 黑圆点（实测截图）。选择器写宽 = 以后每加一个按钮都中招。 */
+.session-document-canvas .composer > button { width: 30px; height: 30px; color: var(--color-bg); border-radius: 50%; background: var(--color-fg); }
+/* 节点 chip 上的静态状态点 —— 一段里只留一个会动的指示（那条实时状态行）。 */
+.chat-said-node-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); }
+.session-changes-panel.is-empty .session-changes-empty { display: inline-flex; align-items: center; gap: 8px; padding: 9px 2px; color: var(--color-fg-muted); }
+.session-changes-panel.is-empty .session-changes-empty strong { display: block; color: var(--color-fg); font-size: var(--font-size-label); font-weight: 550; }
+.session-changes-panel.is-empty .session-changes-empty small { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.session-workspace-loading { display: grid; width: min(820px, calc(100% - 48px)); margin: 0 auto; padding-top: 24px; gap: 60px; }
+.session-workspace-loading > div { display: grid; gap: 16px; }
+.session-workspace-error { max-width: 580px; margin: 18vh auto 0; padding: 0 24px; }
+.session-workspace-error a,
+.session-workspace-error button { display: inline-flex; align-items: center; gap: 5px; margin-top: 18px; padding: 6px 0; color: var(--color-fg-muted); border: 0; background: transparent; font-size: var(--font-size-label); text-decoration: none; }
+.session-redirect-loading { display: grid; align-content: center; gap: 10px; width: min(680px, calc(100% - 48px)); min-height: 70vh; margin: 0 auto; color: var(--color-fg-subtle); font-size: var(--font-size-meta); }
+.session-execution-inspector { min-height: 100%; }
+.session-execution-inspector > a { position: relative; z-index: 2; display: inline-flex; align-items: center; gap: 5px; margin: 12px 20px 0; color: var(--color-fg-muted); font-size: var(--font-size-meta); text-decoration: none; }
+
+@media (max-width: 900px) {
+  .session-index-row { grid-template-columns: 7px minmax(180px, 1.5fr) minmax(125px, .8fr) 15px; }
+  .session-index-usage { display: none; }
+  .session-workspace-header { align-items: flex-start; padding: 11px 13px; }
+  .session-meta-changes { display: none; }
+}
+@media (max-width: 620px) {
+  .session-index-page { width: calc(100% - 28px); padding-top: 34px; }
+  .session-index-header { align-items: flex-start; margin-bottom: 28px; }
+  .session-index-header p { display: none; }
+  .session-index-row { grid-template-columns: 7px minmax(0, 1fr) 15px; min-height: 61px; gap: 10px; }
+  .session-index-context { display: none; }
+  .session-index-main small { white-space: normal; }
+  .session-workspace-header { min-height: 66px; }
+  .session-meta-head,
+  .session-meta-advanced,
+  .session-meta-driver,
+  .session-meta-changes { display: none; }
+  .session-header-meta { margin-top: 4px; }
+  .session-instruction-audit-trigger { max-width: 62vw; margin-top: 4px; }
+  .session-header-actions > button,
+  .session-header-actions > .session-action-conflict,
+  .session-review-updates { display: none; }
+  .session-mobile-action { display: flex !important; }
+  .session-document-canvas .chat-area .messages { padding: 28px 15px; }
+  .session-changes-inner { width: calc(100% - 30px); }
+  .session-changes-detail { max-height: 47vh; padding-left: 20px; }
+  .session-git-summary { flex-wrap: wrap; }
+  .session-git-summary .session-git-stats { margin-left: 0; }
+  .session-changes-toggle small { display: none; }
+  .session-run-verification-error { width: calc(100% - 30px); align-items: flex-start; }
+  .session-change-item > summary { grid-template-columns: 49px minmax(0, 1fr) 13px; }
+  .session-change-item > summary > small { display: none; }
+  .session-conflict-comparison { grid-template-columns: 1fr; }
+  .session-conflict-comparison > section { padding: 10px 0; }
+  .session-conflict-comparison > section + section { padding-left: 0; border-top: 1px solid var(--color-border); border-left: 0; }
+  .session-document-canvas .composer-wrapper { padding: 6px 10px 10px; }
+  .session-document-canvas .composer-model-status { max-width: 132px; }
+  .session-document-canvas .composer-access-state { max-width: 170px; }
+  .session-document-canvas .composer-context > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-workspace > .session-fixture-provenance { display: none; }
+}
+.project-files-panel {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-elevated);
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+
+.project-files-panel > button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  text-align: left;
+}
+
+.project-files-panel > button span { display: grid; gap: 2px; }
+.project-files-panel > button small { color: var(--color-fg-subtle); }
+.project-files-panel .is-expanded { transform: rotate(180deg); }
+
+.project-files-tree {
+  border-top: 1px solid var(--color-border);
+  max-height: 360px;
+  overflow: auto;
+  padding: 8px 12px 12px;
+}
+
+.project-files-tree details summary {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.project-files-tree ul { list-style: none; margin: 0; padding: 0 0 4px 12px; }
+.project-files-tree li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 0;
+}
+.project-files-tree li code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-files-tree li small { color: var(--color-fg-subtle); }
+.project-files-tree li.is-modified code,
+.project-files-tree li.is-untracked code { color: var(--color-accent); }
+
+/* 目录行：整行让给里面的 <details>，不然它会被文件行那套三列网格切开。
+   summary 自己再摆成同样的三列，于是展开与不展开的行左右对齐。 */
+.project-files-tree li:has(> details) { display: block; padding: 0; }
+.project-files-tree li > details > summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 0;
+  font-weight: 500;
+  justify-content: unset;
+}
+.project-files-tree li > details > summary small { color: var(--color-fg-subtle); }
+
+/* 「这一层还有多少没列出来」。这条**不是**装饰：静默截断正是 2026-09-09 那个
+   bug 的本体 —— 少给了而不说，界面就把"我只拿到这么多"显示成了"一共就这么多"。 */
+.project-files-truncated {
+  margin: 4px 0 0;
+  padding: 4px 8px;
+  border-left: 2px solid var(--color-accent);
+  color: var(--color-fg-subtle);
+  font-size: 12px;
+}
+
+/* ── 输入框控制条 ─────────────────────────────────────────────────────────
+   改造前这一行是三段截断文字（模型名 / 访问状态 / 一句长句），没有一样能点。
+   现在每一项要么是控件要么是一眼能读的状态；长解释收进 title 与 popover。 */
+.session-document-canvas .composer-bar {
+  grid-column: 1 / -1;
+  display: flex; align-items: center; flex-wrap: wrap;
+  min-width: 0; gap: 6px; padding: 0 3px 7px;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 65%, transparent);
+}
+.composer-chip-wrap { position: relative; display: inline-flex; }
+.session-document-canvas .composer-chip {
+  /* flex: none —— 不许被挤压。默认 flex-shrink:1 会把"DeepSeek · GPUStack"
+     压成 "D."（实测截图）。宁可换行，也不要把信息压没。 */
+  display: inline-flex; align-items: center; flex: none; gap: 5px;
+  max-width: 210px; height: 26px; padding: 0 9px;
+  color: var(--color-fg-muted); border: 1px solid var(--color-border);
+  border-radius: 999px; background: transparent;
+  font-size: var(--font-size-caption); line-height: 1; white-space: nowrap;
+  cursor: pointer; transition: background .12s, color .12s, border-color .12s;
+}
+.session-document-canvas .composer-chip:hover:not(:disabled) {
+  color: var(--color-fg);
+  border-color: color-mix(in srgb, var(--color-fg) 30%, transparent);
+  background: color-mix(in srgb, var(--color-fg) 5%, transparent);
+}
+.session-document-canvas .composer-chip:disabled { cursor: default; opacity: .55; }
+.composer-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-chip-badge {
+  padding: 0 5px; color: var(--color-bg); border-radius: 999px;
+  background: var(--color-fg); font-size: 10px; font-style: normal; line-height: 15px;
+}
+.session-document-canvas .composer-chip--mode.is-on {
+  color: var(--color-fg);
+  border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 11%, transparent);
+}
+/* 状态永远靠右，且不参与前面几个 chip 的换行挤压 */
+.session-document-canvas .composer-chip--state {
+  margin-left: auto; border-color: transparent; cursor: default;
+}
+.composer-chip--state i {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--color-fg-subtle);
+}
+.composer-chip--state.is-running i { background: #16a34a; animation: composer-pulse calc(var(--motion-status-cycle) * 1.15) ease-in-out infinite; }
+.composer-chip--state.is-waiting_human i { background: #d97706; }
+.composer-chip--state.is-unavailable i { background: #dc2626; }
+@keyframes composer-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+.composer-popover {
+  position: absolute; bottom: calc(100% + 7px); left: 0; z-index: 40;
+  width: 274px; padding: 9px; border: 1px solid var(--color-border);
+  border-radius: 11px; background: var(--color-bg);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 13%);
+  /* 锚在触发器上的浮层要从触发点长出来 —— 居中放大解释不了「它从哪来」。
+     这个是从输入框上方的 chip 弹出的，所以原点在左下角。
+     不从 scale(0) 起：现实里没有东西从虚无里出现。 */
+  transform-origin: bottom left;
+  opacity: 1;
+  transform: scale(1);
+  transition:
+    opacity var(--duration-popover) var(--ease-out),
+    transform var(--duration-popover) var(--ease-out);
+
+  @starting-style {
+    opacity: 0;
+    transform: scale(calc(1 - 0.04 * var(--motion-shift)));
+  }
+}
+.composer-popover-title {
+  margin: 2px 4px 7px; color: var(--color-fg);
+  font-size: var(--font-size-caption); font-weight: 600;
+}
+.composer-popover-item {
+  display: flex; align-items: center; justify-content: space-between;
+  width: 100%; padding: 7px 8px; border: 0; border-radius: 7px;
+  background: transparent; text-align: left; cursor: pointer;
+}
+.composer-popover-item:hover { background: color-mix(in srgb, var(--color-fg) 6%, transparent); }
+.composer-popover-item span { display: grid; gap: 2px; }
+.composer-popover-item strong { color: var(--color-fg); font-size: var(--font-size-caption); font-weight: 600; }
+.composer-popover-item small { color: var(--color-fg-subtle); font-size: 11px; }
+.composer-popover-foot {
+  margin: 7px 4px 2px; color: var(--color-fg-subtle);
+  font-size: 11px; line-height: 1.5;
+}
+.composer-popover-link {
+  display: block; margin: 6px 4px 2px; color: var(--color-fg-muted);
+  font-size: 11px; text-decoration: none;
+}
+.composer-popover-link:hover { color: var(--color-fg); text-decoration: underline; }
+
+/* ── 上下文窗口 chip（输入框上方）───────────────────────────────────────
+   chip 上是小量表 + 百分比；弹层里是数字、分段条、压缩线、上次压缩。
+   色调按离压缩线多远：near = 已过自动压缩线，over = 已过紧急线。 */
+.composer-chip-meter {
+  position: relative; display: inline-block; width: 30px; height: 5px;
+  border-radius: 999px; overflow: hidden;
+  background: color-mix(in srgb, var(--color-fg) 12%, transparent);
+}
+.composer-chip-meter b {
+  position: absolute; inset: 0 auto 0 0; border-radius: 999px;
+  background: var(--color-accent); transition: width .25s;
+}
+.composer-chip-meter em {
+  position: absolute; top: 0; bottom: 0; width: 1px;
+  background: color-mix(in srgb, var(--color-fg) 55%, transparent);
+}
+.session-document-canvas .composer-chip--context.is-near {
+  color: var(--color-fg);
+  border-color: color-mix(in srgb, var(--color-warning) 60%, transparent);
+  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+}
+.session-document-canvas .composer-chip--context.is-near .composer-chip-meter b { background: var(--color-warning); }
+.session-document-canvas .composer-chip--context.is-over {
+  color: var(--color-fg);
+  border-color: color-mix(in srgb, var(--color-danger) 60%, transparent);
+  background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+}
+.session-document-canvas .composer-chip--context.is-over .composer-chip-meter b { background: var(--color-danger); }
+
+.context-window-panel { display: grid; gap: 8px; }
+.context-window-headline {
+  display: flex; align-items: baseline; gap: 4px; margin: 0 4px;
+  color: var(--color-fg-muted); font-size: var(--font-size-caption);
+}
+.context-window-headline strong { color: var(--color-fg); font-size: 15px; font-weight: 600; }
+.context-window-headline em {
+  margin-left: auto; font-style: normal; font-weight: 600; color: var(--color-fg);
+}
+.context-window-panel.is-near .context-window-headline em { color: var(--color-warning); }
+.context-window-panel.is-over .context-window-headline em { color: var(--color-danger); }
+.context-window-bar {
+  position: relative; display: flex; height: 8px; margin: 0 4px;
+  border-radius: 999px; overflow: hidden;
+  background: color-mix(in srgb, var(--color-fg) 10%, transparent);
+}
+.context-window-bar > span { display: block; height: 100%; }
+.context-window-bar > span + span { box-shadow: inset 1px 0 0 var(--color-bg); }
+.context-window-mark {
+  position: absolute; top: 0; bottom: 0; width: 1px;
+  background: var(--color-fg); opacity: .7;
+}
+.seg-system { background: color-mix(in srgb, var(--color-fg) 78%, transparent); }
+.seg-tools { background: color-mix(in srgb, var(--color-fg) 48%, transparent); }
+.seg-toolResults { background: var(--color-accent); }
+.seg-summary { background: color-mix(in srgb, var(--color-accent) 55%, var(--color-fg) 25%); }
+.seg-framework { background: color-mix(in srgb, var(--color-fg) 28%, transparent); }
+.seg-conversation { background: color-mix(in srgb, var(--color-accent) 62%, transparent); }
+.seg-free { background: transparent; }
+.context-window-legend {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 3px 10px;
+  margin: 0 4px; padding: 0; list-style: none;
+}
+.context-window-legend li {
+  display: flex; align-items: center; gap: 5px; min-width: 0;
+  color: var(--color-fg-muted); font-size: 11px;
+}
+.context-window-legend li i { flex: none; width: 8px; height: 8px; border-radius: 2px; }
+.context-window-legend li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.context-window-legend li b { margin-left: auto; color: var(--color-fg); font-weight: 500; }
+.context-window-facts { display: grid; gap: 4px; margin: 2px 4px 0; }
+.context-window-facts > div { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
+.context-window-facts dt { color: var(--color-fg-subtle); }
+.context-window-facts dd { margin: 0; color: var(--color-fg); text-align: right; }
+
+/* ── composer 停止键 ───────────────────────────────────────────────────
+   它和发送键**共用右下角那一格**（composerPrimaryAction 决定此刻是哪个），
+   所以不再需要给它单独腾一列。 */
+.session-document-canvas .composer > button.composer-stop {
+  width: 30px; height: 30px; border-radius: 50%;
+  color: var(--color-fg); background: transparent;
+  border: 1px solid var(--color-border);
+}
+.session-document-canvas .composer > button.composer-stop:hover { color: var(--color-danger); border-color: var(--color-danger); }
+
+/* ── 研究进程检查器（右栏）─────────────────────────────────────────────
+   上半：研究地图（只画走过的，Analysis⇄experiment 回路 + 卫星）；
+   下半：节点 run 明细按发生顺序排列，默认折叠。取代足迹线。 */
+.session-canvas-split { display: flex; min-height: 0; }
+/* 主列的 flex 规则搬去了 file-preview.css 的 `.workspace-split-main` —— 现在
+   这个分栏容器不只服务会话页，主列也不一定是聊天画布。 */
+/* 只有卡片列表滚动 —— header / 地图 / Tab 条固定不动。
+   之前靠 sticky 去"盖住"滚过去的内容：容器有 padding-top、header 又在
+   流里，内容照样从缝里透出来（wangd 2026-08-18 连着两次指出「上面还是
+   漏出来文字」）。让它们根本不在滚动区里，就没有盖不盖得住的问题。 */
+/* 宽度由 JS 的 flex-basis 给（用户拖出来的那个数），但"对话列不许被挤没"
+   这条不变量归 CSS：`max-width: calc(100% - 420px)`。
+
+   一开始这条边界只由 JS 在 resize 事件里夹取。实测（2026-08-18）窗口缩窄
+   之后右栏纹丝不动、对话列被压成 **0 宽**——因为那一刻没有任何事件送到。
+   布局的硬边界不该依赖某个事件有没有如约到达：CSS 每一帧都在算它。
+
+   容器窄到 320+420 都放不下时，min-width 按 CSS 规则压过 max-width，
+   右栏保住 320、挤对话列 —— 与 clampInspectorWidth 的取舍一致。 */
+.session-inspector { flex-grow: 0; flex-shrink: 0; min-width: 320px; max-width: calc(100% - 420px); display: flex; flex-direction: column; min-height: 0; overflow: hidden; padding: 14px 18px 0; border-left: 1px solid var(--color-border); background: var(--color-bg); }
+.session-inspector-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.session-inspector-header > span { display: inline-flex; align-items: center; gap: 6px; color: var(--color-fg-subtle); font-size: var(--font-size-caption); font-weight: 560; letter-spacing: .06em; }
+.session-inspector-header > button { display: inline-flex; padding: 3px; border: 0; border-radius: 5px; background: transparent; color: var(--color-fg-subtle); cursor: pointer; }
+.session-inspector-header > button:hover { background: var(--color-bg-subtle); color: var(--color-fg); }
+.session-inspector-runs { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding: 10px 0 22px; }
+.session-inspector-empty, .research-map-empty { margin: 14px 2px; color: var(--color-fg-subtle); font-size: var(--font-size-meta); }
+.session-inspector-toggle { display: inline-flex; align-items: center; gap: 6px; }
+.session-inspector-toggle.is-active { color: var(--color-accent); border-color: var(--color-border-strong, var(--color-border)); }
+
+/* 高度由组件按内容现算、并用内联 max-height 封在 1:1（见 ResearchMap.tsx
+   文件头）：这里只给宽度，height 保持 auto —— 面板拖宽时被 max-height 截住，
+   图不再跟着等比长高；窄面板下 auto 仍让它整体缩，不会横向溢出。 */
+.research-map { display: block; width: 100%; height: auto; flex: 0 0 auto; }
+.research-map-label { fill: var(--color-fg); font-size: 13px; font-weight: 560; }
+.research-map-caption { fill: var(--color-fg-subtle); font-size: 11px; }
+/* 服务用量行：安静的灰字；正在跑的那个服务用紫色呼吸 —— 紫 = 服务，还是
+   那三种颜色（墨/teal/紫），只是从"挂出去的卫星"收敛成了车站的一行属性。 */
+.research-map-service { fill: var(--color-fg-subtle); font-size: 10px; }
+.research-map-service-running { fill: #7F77DD; animation: research-map-service-pulse calc(var(--motion-status-cycle) * 0.64) ease-in-out infinite; }
+@keyframes research-map-service-pulse { 50% { opacity: 0.4; } }
+.research-map-flow { stroke-dasharray: 5 7; animation: research-map-flow calc(var(--motion-status-cycle) * 0.64) linear infinite; }
+@keyframes research-map-flow { to { stroke-dashoffset: -12; } }
+/* 纯装饰性的常量运动（走 stroke-dashoffset，不是 transform，--motion-shift
+   管不到），减少动效时直接停掉。两个来源都要响应。 */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-reduce-motion="false"]) .research-map-flow,
+  :root:not([data-reduce-motion="false"]) .research-map-service-running { animation: none; }
+}
+:root[data-reduce-motion="true"] .research-map-flow,
+:root[data-reduce-motion="true"] .research-map-service-running { animation: none; }
+
+/* 右栏节点卡：语境行（派发时说的那句话）+ 可展开的运行细节。 */
+.session-inspector-card { padding: 9px 12px; border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-bg); }
+/* 展开一张节点卡不该把整个右栏顶成几屏（wangd 2026-08-21：「它会把整个 block
+   弄得特别长，然后就不得不往下滑特别多」）。一次 run 有 139 个 action 是常态。
+   ——「这次 run 是干嘛的」（summary 行）留在滚动区**外面**，永远看得见；
+   ——底下的过程给一个固定高度的滚动区，翻它不影响外层位置。
+   高度取 clamp：小窗口不至于只剩一条缝，大屏也不会又长回去。 */
+.session-inspector-card .chat-run-tool-group-body { max-height: clamp(220px, 46vh, 520px); overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
+/* 被左栏箭头定位到的那一张：高亮一下，否则滚过去了人也不知道是哪张。 */
+.session-inspector-card.is-focused { border-color: var(--color-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 22%, transparent); }
+.session-inspector-card-note { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin: 0 0 6px; color: var(--color-fg-subtle); font-size: var(--font-size-meta); line-height: 1.5; }
+.session-inspector-narration { margin: 2px 2px 6px; color: var(--color-fg); font-size: var(--font-size-meta); line-height: 1.6; }
+.session-inspector-narration .chat-run-narration-turn { margin-right: 6px; }
+
+/* 流程图 + Tab 常驻：翻细节时"整体走到哪了"这个问题一直都在。 */
+.session-inspector-pinned { flex: 0 0 auto; border-bottom: 1px solid var(--color-border); padding-bottom: 4px; }
+/* 流程图折叠开关：图回答"整体走到哪了"，翻细节时那个问题暂时不重要，
+   而它占掉小半个面板。收起状态记在 localStorage（持续的意图）。 */
+.session-inspector-map-toggle {
+  display: flex; align-items: center; gap: 5px; width: 100%;
+  padding: 5px 10px; border: 0; background: transparent;
+  color: var(--color-fg-subtle); font: inherit;
+  font-size: var(--font-size-caption); cursor: pointer; text-align: left;
+}
+.session-inspector-map-toggle:hover { color: var(--color-fg); }
+.session-inspector-map-toggle > svg { transition: transform 120ms ease; }
+.session-inspector-map-toggle > svg.is-collapsed { transform: rotate(-90deg); }
+@media (prefers-reduced-motion: reduce) {
+  .session-inspector-map-toggle > svg { transition: none; }
+}
+.session-inspector-tabs { display: flex; gap: 4px; margin-top: 6px; }
+.session-inspector-tabs button { padding: 5px 10px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--color-fg-subtle); font-size: var(--font-size-meta); cursor: pointer; }
+.session-inspector-tabs button:hover { color: var(--color-fg); }
+.session-inspector-tabs button.is-active { color: var(--color-fg); border-bottom-color: var(--color-fg); }
+
+/* 拖拽把手 —— 两栏之间的那条边。
+   命中区（10px）比看得见的那条线宽：贴着 1px 的边去够鼠标是件很烦的事。
+   `touch-action: none` 必须有，否则触屏上浏览器会把这个手势当成页面滚动，
+   pointermove 直接不发给我们。 */
+.session-inspector-resizer { flex: 0 0 10px; margin: 0 -5px; z-index: 1; cursor: col-resize; touch-action: none; background: transparent; }
+.session-inspector-resizer::after { content: ""; display: block; width: 2px; height: 100%; margin: 0 auto; background: transparent; transition: background .12s ease; }
+.session-inspector-resizer:hover::after,
+.session-inspector-resizer:focus-visible::after,
+.session-inspector-resizer.is-dragging::after { background: var(--color-border-strong); }
+.session-inspector-resizer:focus-visible { outline: none; }
+/* 拖动时全局禁选：不禁的话拖过对话区会把正文一路选蓝。 */
+body:has(.session-inspector-resizer.is-dragging) { cursor: col-resize; user-select: none; }
+
+/* 会话信息抽屉里的事实行（版本 / 基线 / 驾驶者）—— 从顶栏搬进来的那三行。 */
+.session-about-facts { display: grid; gap: 7px; margin: 16px 0 0; }
+.session-about-facts > div { display: grid; grid-template-columns: 66px minmax(0, 1fr); align-items: baseline; gap: 10px; }
+.session-about-facts dt { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.session-about-facts dd { margin: 0; color: var(--color-fg); font-size: var(--font-size-meta); }
+.session-about-instruction-label { display: flex; align-items: center; gap: 5px; margin: 16px 0 0; padding-top: 14px; border-top: 1px solid var(--color-border); color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+
+/* ⋯ 上的小点：项目往前走了要有人知道，但它不值一个常驻按钮。 */
+.session-header-actions details > summary.has-badge { position: relative; }
+.session-header-actions details > summary.has-badge::after { content: ""; position: absolute; top: 4px; right: 4px; width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent, var(--color-fg)); }
+.session-header-actions details .session-review-updates > i { width: 6px; height: 6px; margin-left: auto; border-radius: 50%; background: var(--color-accent, var(--color-fg)); }
+/* 菜单分组：不可逆的操作和随便点的操作之间要有一条线。 */
+.session-header-actions details .session-menu-sectioned { margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--color-border); border-radius: 0; }
+
+
+/* 右键菜单 —— 列表项上不常驻的操作（删除/归档）。 */
+.context-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 190px;
+  padding: 5px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
+}
+.context-menu > button {
+  display: block; width: 100%;
+  padding: 7px 10px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--color-fg);
+  font: inherit; font-size: var(--font-size-body, 14px);
+  text-align: left; cursor: pointer;
+}
+.context-menu > button:hover:not(:disabled) { background: var(--color-bg-subtle); }
+.context-menu > button.is-danger { color: var(--color-danger); }
+.context-menu > button:disabled { color: var(--color-fg-subtle); cursor: not-allowed; }
+
+/* ── 交付物：这个项目冻结了什么，一点就在右栏打开 ─────────────────────────
+   放在输入框正上方 —— 读完汇报正要说下一句时，"论文在这儿"就在手边。
+   放进对话流会被几百条活动记录冲走；放进 ⋯ 菜单等于还是要翻。 */
+.session-deliverables {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-elevated);
+}
+.session-deliverables h2 {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 0 6px;
+  color: var(--color-fg-subtle);
+  font-size: var(--font-size-caption);
+  font-weight: 590;
+}
+.session-deliverables ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.session-deliverable {
+  padding: 3px 9px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font: inherit;
+  font-size: var(--font-size-caption);
+  cursor: pointer;
+}
+.session-deliverable:hover { border-color: var(--color-accent, currentColor); }
+/* 打不开的照列，只是点不动 —— 少列一条，用户会以为那份产物不存在。 */
+.session-deliverable.is-static {
+  color: var(--color-fg-subtle);
+  cursor: default;
+  border-style: dashed;
+}
+
+/* 刚附加的文件 → 一键晋升成项目材料（issue #689）。挨着输入框的一行小字，
+ * 点掉或存入后消失 —— 它是顺手动作的入口，不是附件管理面板。 */
+
+/* ── 研究产出 ─────────────────────────────────────────────────────────────
+   单位是**对象**不是文件：一篇论文一行，它编出来的 PDF 就挂在那一行上。
+   让用户去目录树里翻、还得知道文件叫什么，正是 2026-09-09 要修的毛病。 */
+.project-outputs { display: grid; gap: 10px; padding: 8px 12px 16px; }
+
+.project-outputs-tier > summary {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 0; cursor: pointer; font-weight: 600;
+}
+.project-outputs-tier > summary small {
+  color: var(--color-fg-subtle); font-weight: 400;
+}
+.project-outputs-hint {
+  margin: 0 0 6px; color: var(--color-fg-subtle); font-size: 12px;
+}
+
+.project-outputs-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.project-outputs-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center; gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+.project-outputs-identity { display: grid; gap: 1px; min-width: 0; }
+.project-outputs-identity strong {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.project-outputs-identity small { color: var(--color-fg-subtle); }
+.project-outputs-frozen { color: var(--color-accent); }
+
+.project-outputs-files { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+.project-outputs-files button {
+  /* 可点的东西要长得像可点的东西 —— 这一条靠 CSS 保证。 */
+  max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 2px 8px; font-size: 12px;
+  border: 1px solid var(--color-border); border-radius: 999px;
+  background: var(--color-bg-subtle); color: var(--color-fg); cursor: pointer;
+}
+.project-outputs-files button:hover { border-color: var(--color-accent); }
+/* 记录（那份 JSON 信封）永远排在最后、也最不显眼：用户要的是论文。 */
+.project-outputs-files button.is-record { color: var(--color-fg-subtle); }
+
+/* 交付物是这一页的主角，给它一点重量。 */
+.project-outputs-tier.is-deliverable .project-outputs-row {
+  border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-border));
+}

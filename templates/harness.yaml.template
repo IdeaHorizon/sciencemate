@@ -1,0 +1,114 @@
+# harness.yaml.template —— 复制到 nodes/{your_node}/harness.yaml，然后开始设计。
+#
+# 必填：node_type。其它字段若缺失会回退到 NodeHarness 默认值，但一个"有用"的
+# harness 至少需要 system_prompt + tools + required_output_artifact_types。
+#
+# 见 nodes/literature/harness.yaml + nodes/analysis/harness.yaml 两个参考设计。
+
+node_type: {your_node}              # 必须与目录名 nodes/{your_node}/ 一致
+version: "0.1"
+risk_level: low                     # low | medium | high
+
+# ── agent 的指令。markdown 也行。把工作流写具体。 ─────────────────────────────
+system_prompt: |
+  你是 {your role}。你的任务是 {一句话目标}。
+
+  ## 工作流
+  1. {步骤}
+  2. {步骤}
+  3. ...
+
+  ## 输出
+  用 `save_artifact(artifact_type="{type}", ...)` 保存结果。
+
+# ── 硬约束。NEVER / ALWAYS / EVERY 风格。保持精简。 ─────────────────────────
+rules:
+  - "绝不要 ..."
+  - "始终 ..."
+
+# ── 推荐做法。不强制。 ──────────────────────────────────────────────────────
+guidelines:
+  - "优先 ..."
+
+# ── 要注入 system prompt 的命名 skill。见 shared/skills/examples.py。 ──────
+skills: []
+
+# ── 本节点允许使用的工具。必须已在 tool registry 注册（shared/tools/*  ──────
+#    或 nodes/{your_node}/tools/*）。
+tools:
+  - save_artifact
+  - read_artifact
+  - list_artifacts
+  - save_memory
+  - search_memory
+  # 在这里追加领域工具，例如 semantic_scholar_search
+
+# ── 检索 + token 预算 ───────────────────────────────────────────────────────
+context_config:
+  memory_query: ""                  # 用来检索相关 memory 的子串
+  kb_query: ""                      # 用来检索相关 KB 内容的子串（非空时注入 KB context）
+  max_context_tokens: 60000
+  max_output_tokens: 4096
+  temperature: 0.5
+
+# ── 完成判定 ─────────────────────────────────────────────────────────────────
+required_output_artifact_types:     # 本节点必须产出的 artifact 类型
+  - {artifact_type}                 # 例如 survey_report
+
+required_input_artifact_types: []   # 本节点必须看到的上游 artifact 类型（子调用时校验）
+
+completion_criteria:
+  quality_checks:
+    - name: {check_name}
+      description: "这个检查验证什么、怎么样算通过。"
+      threshold: 1                   # 含义取决于这个检查本身
+
+# ── I/O 契约。帮助设计文档 + LLM 理解自己的任务。 ──────────────────────────
+expected_inputs:
+  {field}: "输入是什么。"
+
+expected_outputs:
+  {field}: "输出长什么样。"
+
+# ── 输出如何传给下游 ────────────────────────────────────────────────────────
+handoff_policy:
+  strategy: summary                  # full | summary | selective | none
+  max_tokens: 3000
+  required_fields: []
+
+# ── 循环控制 ────────────────────────────────────────────────────────────────
+max_turns: 12
+
+# ── （可选）启用 hook ─────────────────────────────────────────────────────────
+# memory_delta + kb_delta 默认启用，不需要写在这里。
+# loop_hooks:
+#   - scratchpad
+#   - reflection
+
+# ── （可选）context 压缩 ─────────────────────────────────────────────────────
+# 大致逻辑：messages token 估算超过 trigger.threshold * max_context_tokens 时，
+# 把中间老消息压成一段叙述，保留 system 消息和最近 N 轮。
+#
+# summarizer:
+#   trigger:
+#     type: token_threshold          # token_threshold | turn_count | never
+#     threshold: 0.7                  # 占 max_context_tokens 比例
+#   keep_verbatim:
+#     system: true
+#     last_n_turns: 3
+#     tool_calls:                     # 这些工具的 call+result 永远不压缩
+#       - save_artifact
+#       - freeze_artifact
+#       - request_human_input
+#   compress:
+#     strategy: llm                   # llm | truncate | drop_tool_results
+#     target_tokens: 2000
+#     instruction: |
+#       你在为 {your_node} 节点压缩历史 messages。
+#       必须保留：<这个节点的关键事实>
+#       可以丢：<这个节点的冗余>
+
+# ── （可选）subagent 调度 ────────────────────────────────────────────────────
+# 允许本节点通过 run_node 工具调用的下游节点白名单（仅在 tools 里加入 run_node 后生效）。
+# 空 / 未设 → 默认禁止递归调用。["*"] → 任意节点。
+# callable_nodes: []

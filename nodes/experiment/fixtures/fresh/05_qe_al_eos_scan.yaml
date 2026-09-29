@@ -1,0 +1,29 @@
+node_inputs:
+  prereg_artifact_id: pre_registration__Fresh_QE_Al_EOS
+  stage: simulation
+  experiment_focus: |
+    If Quantum ESPRESSO pw.x and an aluminium pseudopotential are locally available,
+    run a real five-point fcc-Al SCF equation-of-state scan at the preregistered
+    lattice constants. Retain input/output for every point, parse total energies, and
+    fit a declared quadratic local minimum without silently dropping failed points.
+    If the executable or pseudopotential is unavailable, record feasibility probes and
+    stop honestly; do not download a substitute or invent energy values.
+upstream_artifacts:
+  - type: research_plan
+    name: Fresh_QE_Al_EOS_Plan
+    content: "Evaluate the frozen five-volume energy protocol and retain all points."
+  - type: pre_registration
+    name: Fresh_QE_Al_EOS
+    metadata:
+      frozen: true
+      run_role: primary
+      analysis_eligible: true
+      stage: simulation
+      execution_contract:
+        version: 1
+        scientific_params: {alat_angstrom: [3.95, 4.00, 4.05, 4.10, 4.15], ecutwfc_ry: 25}
+        runtime_params: {mpi_ranks: 1}
+    content: |
+      ## Research question Q1
+      Does the five-point SCF scan yield a finite local energy minimum inside the
+      declared lattice-constant interval?

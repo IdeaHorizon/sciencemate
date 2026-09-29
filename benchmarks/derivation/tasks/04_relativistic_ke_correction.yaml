@@ -1,0 +1,50 @@
+id: relativistic_ke_correction
+title: 相对论动能的首阶修正
+domain: relativity
+kind: normal
+
+prompt: |
+  相对论动能 K = m c^2 / sqrt(1 - v^2/c^2) - m c^2。
+  在 v << c 时展开，给出经典项 m v^2 / 2 之后的**首阶修正项**，并说明展开的适用范围。
+  main_result.expression 只填**那一项修正**（不含经典项）。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: relativistic_ke_correction_prereg
+    content: |
+      ## Research Questions
+      
+      ### Q1: 相对论动能相对经典动能的首阶修正是什么？
+      - output_kind: 一条命题的裁决
+      - proposition: K = m v^2/2 + (3/8) m v^4/c^2 + O(v^6/c^4)。
+      - 闭合条件:
+      ```yaml
+      - id: FIRST_CORRECTION
+        metric: "首阶修正系数（以 m v^4/c^2 为单位）"
+        comparison: "=="
+        threshold: 0.375
+      - id: VALIDITY
+        statement: "说明展开在什么范围内可用，以及被丢弃项的量级"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  final_expression: "3*m*v**4/(8*c**2)"
+  accepted_alternatives:
+    # 首轮实测两臂都给了完整动能 —— 题目原来只说"给出首阶修正项"，
+    # 没说 main_result 里填哪个。**这是题目的歧义，不是模型的错**。
+    # prompt 已补明确要求；同时接受完整式，别用一次表述不清去扣分。
+    - "m*v**2/2 + 3*m*v**4/(8*c**2)"
+  expected_verdict: derived
+  required_assumptions:
+    - id: low_velocity
+      why: "v<<c 是展开成立的前提，适用域必须交代"
+      patterns: ["v *<< *c", "低速", "non.?relativis", "beta *<< *1", "v/c *<< *1", "小速度"]
+    - id: truncation
+      why: "丢弃的是 O(v^6/c^4)，量级要说清"
+      patterns: ["O\\(v\\^?6", "v\\*\\*6", "高阶", "higher.?order", "六次", "截断"]

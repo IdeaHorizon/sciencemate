@@ -1,0 +1,33 @@
+# PROFILE.md —— user 全局偏好（跨项目）
+
+放在 `~/.harness-framework/user/PROFILE.md`。框架在每个 LLM call 时把它注入
+system_prompt。
+
+**何时写**：user 明确说"以后/始终/我偏好"类持久偏好时，agent 通过
+`propose_profile_update(scope='user', ...)` 提议，user 用 `resolve_proposal accept`
+后才会真的写入这里。
+
+**绝不**让 agent 直接写这个文件 —— 必须走 user 确认 gate。
+
+---
+
+## 交互偏好
+
+- {例：默认用中文回复}
+- {例：回复保持简短，避免冗长解释}
+
+## 写作偏好
+
+- {例：术语用 IUPAC nomenclature}
+- {例：论文引用走 BibTeX / [author year] 风格}
+
+## 工具偏好
+
+- {例：Python 包优先 PyTorch / numpy / scipy；不要用 TensorFlow}
+- {例：MD 软件优先 LAMMPS over GROMACS}
+- {例：可视化用 matplotlib over plotly}
+
+## 数据保密 / 不要做的事
+
+- {例：不要在 prompt 里粘贴真实 patient ID}
+- {例：不调用任何会产生公网请求的工具，除非显式说明}

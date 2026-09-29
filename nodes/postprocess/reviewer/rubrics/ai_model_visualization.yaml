@@ -1,0 +1,9 @@
+rubric_id: ai_model_visualization
+extends: base
+checks:
+  - model block ordering and repeated-block notation are visually unambiguous
+  - tensor shapes and dimensions are attached to the correct modules or edges
+  - residual skip branch merge and conditioning paths have unambiguous arrow direction
+  - attention query and key axes are visibly labeled in the declared orientation
+  - attention layer head model and normalization context are visible where the figure contract requires them
+  - attention color scale matches the declared probability or score semantics

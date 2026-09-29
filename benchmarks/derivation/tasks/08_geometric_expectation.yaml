@@ -1,0 +1,44 @@
+id: geometric_expectation
+title: 几何分布的期望
+domain: probability
+kind: normal
+
+prompt: |
+  X ~ Geometric(p)，取值 1,2,3,...，P(X=k) = (1-p)^(k-1) * p。
+  推导 E[X]，并说明推导中用到的级数收敛条件。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: geometric_expectation_prereg
+    content: |
+      ## Research Questions
+
+      ### Q1: 几何分布的期望是多少？
+      - output_kind: 一条命题的裁决
+      - proposition: E[X] = 1/p。
+      - 闭合条件:
+      ```yaml
+      - id: EXPECTATION
+        metric: "E[X] 乘以 p"
+        comparison: "=="
+        threshold: 1
+      - id: CONVERGENCE
+        statement: "说明级数收敛条件（0<p<=1，即 |1-p|<1），以及逐项求导/错位相减的合法性"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  final_expression: "1/p"
+  expected_verdict: derived
+  required_assumptions:
+    - id: convergence
+      why: "级数收敛要求 |1-p|<1；p 取 0 时发散 —— 这是最该入账的条件"
+      patterns: ["收敛", "converg", "0 *< *p", "p *<= *1", "p *≤ *1", "\\|1 *- *p\\| *< *1", "p *> *0"]
+    - id: term_operations
+      why: "逐项求导或错位相减需要绝对收敛才合法"
+      patterns: ["逐项", "term.?by.?term", "绝对收敛", "absolut", "错位相减", "重排", "rearrang", "一致收敛"]

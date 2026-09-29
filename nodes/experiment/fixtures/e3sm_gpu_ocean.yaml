@@ -1,0 +1,104 @@
+# experiment 节点 fixture —— E3SM MPAS-Ocean GPU 加速编译测试
+#
+# 目标：验证 experiment 节点能否利用 E3SM 官方构建系统（CIME），
+# 在无人工干预的情况下成功编译 MPAS-Ocean 组件（nvfortran + OpenACC GPU 加速）。
+#
+# 运行：
+#   cd ~/2026-ai4s-platform-project/node4-experiment/harness-framework
+#   python run_node.py --harness experiment --sandbox --no-interactive \
+#     --fixture nodes/experiment/fixtures/e3sm_gpu_ocean.yaml
+
+node_inputs:
+  experiment_focus: |
+    目标：使用 E3SM 官方构建系统将 MPAS-Ocean 组件编译为 GPU 加速版本
+    （nvfortran + OpenACC），在本机 RTX 5070 Laptop（sm_120）上验证编译成功。
+
+    **本机客观环境（已验证，agent 无需重复探测）**：
+    - E3SM 源码：/home/lujy/E3SM_src
+    - GPU：NVIDIA RTX 5070 Laptop，Compute Capability 12.0（sm_120，Blackwell）
+    - nvfortran 26.3：/opt/nvidia/hpc_sdk/Linux_x86_64/26.3/compilers/bin/nvfortran
+    - HPCX MPI（与 nvfortran 同源）：/opt/nvidia/hpc_sdk/Linux_x86_64/26.3/comm_libs/13.1/hpcx/hpcx-2.25.1/ompi
+    - NetCDF-Fortran（nvfortran 编译版）：/home/lujy/experiments/e3sm_gpu_test/netcdf-nv
+
+    **任务范围**：
+    - 最小目标：MPAS-Ocean 组件通过 E3SM 官方构建系统编译成功（无 nvfortran FATAL 报错）
+    - 拉伸目标：运行一个最小 ocean-only case（1天模拟，无 rsl.error FATAL）
+    - 不要求大气/陆面组件
+
+upstream_artifacts:
+  - type: claim
+    name: H_E3SM_GPU_Ocean_builds
+    metadata:
+      claim_type: hypothesis
+      status: open
+      created_at: "2026-06-10T00:00:00+00:00"
+    content: |
+      E3SM MPAS-Ocean 组件能在本机使用 nvfortran + OpenACC（GPU 加速）通过
+      E3SM 官方构建系统（CIME）成功编译，产出 ocean 可执行文件，
+      且 nvidia-smi 在运行期间显示 GPU 利用率 > 0%。
+
+  - type: pre_registration
+    name: E3SM_GPU_Ocean_Build_Test
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-10T00:00:00+00:00"
+      freeze_reason: "验证 experiment 节点能否自主完成 E3SM GPU ocean 编译"
+    content: |
+      ## Pre-Registration: E3SM MPAS-Ocean GPU Compilation Test
+
+      ### Hypothesis
+      experiment 节点能够利用 E3SM 官方 CIME 构建系统，在不依赖手工编译脚本的情况下，
+      将 MPAS-Ocean 组件编译为 nvfortran + OpenACC GPU 加速版本，
+      在 RTX 5070 Laptop (sm_120) 上成功运行。
+
+      ### Setup
+      - **E3SM 源码**: /home/lujy/E3SM_src
+      - **目标组件**: MPAS-Ocean（mpaso）
+      - **目标加速**: nvfortran + OpenACC，GPU 架构 sm_120 (Blackwell)
+      - **构建方式**: E3SM 官方 CIME（create_newcase → case.setup → case.build）
+      - **案例目录**: ~/e3sm_runs/cases/agent_gpu_ocean_test
+      - **编译器工具链**: nvfortran 26.3 + HPCX MPI（均来自 NVIDIA HPC SDK 26.3）
+
+      ### Success Criteria
+      - case.build 无 nvfortran FATAL 错误（returncode == 0）
+      - ocean 可执行文件存在于 case bld 目录
+      - 可选拉伸目标：1天 ocean-only 模拟完成，无 rsl.error FATAL
+
+      ### Falsification Criteria
+      - metric: returncode from case.build
+      - op: ==
+      - threshold: 0
+      - 若 case.build 失败 OR 可执行文件不存在 → hypothesis refuted
+
+      ### Notes
+      - E3SM CIME 机器定义可能需要新增本机 nvhpc compiler 条目，
+        agent 应通过官方文档自行确定，不得使用手工 shell 脚本替代 CIME
+      - NetCDF for nvfortran 已在 /home/lujy/experiments/e3sm_gpu_test/netcdf-nv
+      - NVIDIA HPC SDK 26.3 已安装，nvfortran 可用
+
+memory_entries:
+  - kind: directive
+    text: |
+      E3SM 本机客观环境（2026-06-10 验证）：
+      - E3SM 源码：/home/lujy/E3SM_src（完整组件树 + cime_config/machines/）
+      - nvfortran 26.3：/opt/nvidia/hpc_sdk/Linux_x86_64/26.3/compilers/bin/nvfortran
+      - HPCX MPI：/opt/nvidia/hpc_sdk/Linux_x86_64/26.3/comm_libs/13.1/hpcx/hpcx-2.25.1/ompi
+      - NetCDF-Fortran（nvfortran 版）：/home/lujy/experiments/e3sm_gpu_test/netcdf-nv
+      - GPU：RTX 5070 Laptop，sm_120，显存 ~8GB
+      - CIME 机器配置文件：/home/lujy/E3SM_src/cime_config/machines/（含 config_machines.xml / config_compilers.xml）
+      - 本机尚无 nvhpc compiler 条目，需要 agent 通过官方文档添加
+    tags: [e3sm, environment, verified]
+
+  # - kind: directive
+  #   text: |
+  #     已知死路（简要，详细 reason 已写入 KB dead_end claims，后续 run 可通过 search_kb 查到）：
+  #     1. 手写 shell 脚本逐文件编译（build_ocean.sh 模式）：Fortran .mod 依赖顺序问题 + 跨编译器 .mod ABI 不兼容 → 不可行
+  #     2. 复用 gfortran 编译的 .mod 文件给 nvfortran：格式不兼容 → 不可行
+  #     必须走 E3SM 官方 CIME 构建（维护了正确的 Makefile 依赖图）
+  #   tags: [e3sm, dead-end, must-avoid]
+
+  - kind: decision
+    text: |
+      统一使用 /home/lujy/E3SM_src 作为主源码树（另有副本 /home/lujy/experiments/e3sm_gpu_ocean/e3sm_repo，
+      避免两套源码并行带来混淆）。
+    tags: [e3sm, build, consistency]

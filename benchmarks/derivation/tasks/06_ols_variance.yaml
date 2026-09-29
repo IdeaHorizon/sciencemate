@@ -1,0 +1,53 @@
+id: ols_variance
+title: OLS 估计量的方差
+domain: statistics
+kind: normal
+
+prompt: |
+  线性模型 y = X*beta + eps，X 为满秩设计矩阵（非随机），
+  eps 的均值为 0、协方差矩阵为 sigma^2 * I。
+  推导 OLS 估计量 beta_hat = (X'X)^(-1) X'y 的协方差矩阵。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: ols_variance_prereg
+    content: |
+      ## Research Questions
+
+      ### Q1: OLS 估计量的协方差矩阵是什么？
+      - output_kind: 一条命题的裁决
+      - proposition: Var(beta_hat) = sigma^2 (X'X)^(-1)。
+      - 闭合条件:
+      ```yaml
+      - id: OLS_VARIANCE
+        statement: "给出 Var(beta_hat) 的推导，每步经机械验证或如实标注未验"
+      - id: ASSUMPTION_LEDGER
+        statement: "列全用到的假设：X 满秩、X 非随机、同方差、误差不相关"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  final_expression: "sigma2*(X_t_X)**(-1)"
+  expression_note: "判分时把 (X'X)^-1 记作符号 X_t_X 的逆；等价写法均可"
+  accepted_aliases:
+    X_t_X: ["X.T*X", "XtX", "Inverse"]
+    sigma2: ["sigma**2"]
+  expected_verdict: derived
+  required_assumptions:
+    - id: full_rank
+      why: "X'X 可逆是 beta_hat 存在的前提"
+      patterns: ["满秩", "full.?rank", "可逆", "invertib", "非奇异", "nonsingular", "rank"]
+    - id: homoscedastic
+      why: "同方差 —— Var(eps)=sigma^2 I 的对角同值部分"
+      patterns: ["同方差", "homosced", "sigma\\^?2 *I", "sigma2 *I", "等方差", "constant.?varian"]
+    - id: uncorrelated_errors
+      why: "误差不相关 —— 协方差矩阵的非对角为 0"
+      patterns: ["不相关", "uncorrelat", "独立", "independen", "对角", "diagonal", "Cov.*= *0"]
+    - id: nonrandom_X
+      why: "X 非随机（或条件于 X），否则不能提到期望外面"
+      patterns: ["非随机", "固定", "fixed", "non.?random", "条件于", "conditional on", "确定性", "deterministic"]

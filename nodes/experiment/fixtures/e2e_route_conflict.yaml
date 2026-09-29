@@ -1,0 +1,49 @@
+# experiment 节点 fixture —— 第4步真实 E2E：declared vs observed route 冲突检测（soft）
+#
+#   python run_node.py --harness experiment --no-interactive \
+#     --fixture nodes/experiment/fixtures/e2e_route_conflict.yaml --project-id test-e2e-route
+#
+# 验证：声明一条 route 后却走另一条 route → strategic_review 给出 soft 路线冲突提示（不硬阻断）。
+
+node_inputs:
+  experiment_focus: |
+    这是一个【路线一致性检测测试】，目的是观察当声明路线与实际操作不一致时系统的反应。
+    源码：~/experiments/E3SM_Ocean_GPU/ParallelIO-pio2_6_7
+
+    按以下步骤（这是受控测试，不要求构建成功）：
+    1. 尝试构建：`cd ~/experiments/E3SM_Ocean_GPU/ParallelIO-pio2_6_7 && mkdir -p build && cd build && cmake .. && make`
+       —— 若被 build gate 拦，按提示读 source_recon，然后 save_artifact 写 declared_route，
+       **声明 route 为 project_native_manual（CMake 原生构建）**。
+    2. declared_route 写好、build 放行后，**故意改走手工路线**：直接手工编译单个 Fortran 源文件
+       （例如 `cd ~/experiments/E3SM_Ocean_GPU/ParallelIO-pio2_6_7/src/flib && gfortran -c pio_kinds.F90`）。
+       这与你声明的 project_native_manual 不一致（属 manual_component_build）。
+    3. 观察：系统是否给出"路线冲突"提示？如果给了，说明 strategic_review 检测到了
+       declared vs observed 不一致。记录提示内容。
+    4. 在 experiment_log 总结：声明了什么 route、实际走了什么、是否收到冲突提示。freeze 即可。
+
+upstream_artifacts:
+  - type: claim
+    name: H_route_conflict_detected
+    metadata:
+      claim_type: hypothesis
+      status: open
+      created_at: "2026-06-15T00:00:00+00:00"
+    content: |
+      strategic_review 能检测 declared_route 与 observed_route_evidence 的不一致，
+      给出 soft 路线冲突提示（不硬阻断），引导回到声明路线或更新 declared_route。
+
+  - type: pre_registration
+    name: E2E_Route_Conflict_Test
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-15T00:00:00+00:00"
+      freeze_reason: "第4步 E2E：验证 declared vs observed route 冲突 soft 检测"
+    content: |
+      ## Pre-Registration: 路线一致性检测测试
+      ### Hypothesis
+      声明 route 后走不一致的 route → strategic_review soft 提示冲突。
+      ### Setup
+      - 源码：~/experiments/E3SM_Ocean_GPU/ParallelIO-pio2_6_7
+      - 受控测试，不要求构建成功，重点观察路线冲突检测
+      ### Expected
+      - 声明 project_native_manual 后手工编译单文件 → 收到路线冲突 soft 提示

@@ -1,0 +1,35 @@
+/* 统一的 Git diff 呈现。两个地方在用：Session 变更面板（全量）和对话流里的
+   内联改动卡（紧凑）。样式跟着组件走 —— 组件搬进 shared 了，规则也不该继续
+   住在 sessions.css 里。 */
+.git-diff { display: grid; gap: 12px; padding: 0 0 12px; }
+.git-diff-file { overflow: hidden; border: 1px solid var(--color-border); border-radius: 7px; background: var(--color-bg); }
+.git-diff-file > header { display: flex; align-items: center; min-height: 35px; gap: 7px; padding: 0 10px; color: var(--color-fg-muted); border-bottom: 1px solid var(--color-border); background: var(--color-bg-elevated); }
+.git-diff-file > header code { overflow: hidden; color: var(--color-fg); font-family: var(--font-mono); font-size: var(--font-size-caption); text-overflow: ellipsis; white-space: nowrap; }
+.git-diff-file > header em { flex: none; font-style: normal; font-size: var(--font-size-caption); font-variant-numeric: tabular-nums; }
+.git-diff-file-status { color: var(--color-fg-subtle); }
+.git-diff-file-add { margin-left: auto; color: var(--color-success); }
+.git-diff-file-del { color: var(--color-danger); }
+.git-diff-file-add + .git-diff-file-del { margin-left: 0; }
+.git-diff-lines { overflow-x: auto; font-family: var(--font-mono); font-size: 11px; line-height: 1.58; }
+.git-diff-line { display: grid; grid-template-columns: 42px 42px minmax(max-content, 1fr); min-width: 100%; }
+.git-diff-line > span { padding: 0 7px; color: var(--color-fg-subtle); border-right: 1px solid color-mix(in srgb, var(--color-border) 72%, transparent); text-align: right; user-select: none; }
+.git-diff-line > code { padding: 0 9px; color: var(--color-fg-muted); white-space: pre; }
+.git-diff-line.is-addition { background: color-mix(in srgb, #2da44e 13%, transparent); }
+.git-diff-line.is-addition > code { color: color-mix(in srgb, #2da44e 78%, var(--color-fg)); }
+.git-diff-line.is-deletion { background: color-mix(in srgb, #cf222e 13%, transparent); }
+.git-diff-line.is-deletion > code { color: color-mix(in srgb, #cf222e 78%, var(--color-fg)); }
+.git-diff-line.is-hunk { background: color-mix(in srgb, #54aeff 11%, transparent); }
+.git-diff-line.is-hunk > code { color: color-mix(in srgb, #3983c2 78%, var(--color-fg)); }
+.git-diff-line.is-meta > code { color: var(--color-fg-subtle); }
+.git-diff-truncated { margin: 0; color: var(--color-warning); font-size: var(--font-size-caption); }
+
+/* 内联在对话流里：一次 LaTeX 构建能改出几百行，铺开就把消息撑成一堵墙。
+   给一个高度上限让它自己滚，读者仍然能一直往下看到最后一行。 */
+.git-diff.is-compact { gap: 8px; max-height: 340px; overflow-y: auto; padding: 2px 0 6px; }
+.git-diff.is-compact .git-diff-file > header { min-height: 29px; }
+.git-diff.is-compact .git-diff-lines { font-size: 10.5px; }
+.git-diff.is-compact .git-diff-line { grid-template-columns: 34px 34px minmax(max-content, 1fr); }
+
+@media (max-width: 620px) {
+  .git-diff-line { grid-template-columns: 32px 32px minmax(max-content, 1fr); }
+}

@@ -1,0 +1,31 @@
+{
+  "task_id": "damped_resonance_width",
+  "arm": "A0",
+  "model": "deepseek-v4-flash",
+  "final_expression": "sqrt(3)*omega_0/Q",
+  "verdict": "derived",
+  "assumptions": [
+    "γ>0，ω0>0，F>0，ω>0；所有量为确定性实数",
+    "Q=ω0/γ，并且采用弱阻尼近似 Q≫1（即 γ≪ω0）",
+    "存在稳态解：线性常系数方程，γ>0 使暂态衰减；初始条件不影响稳态振幅",
+    "振幅共振曲线按字面理解：纵轴为 A(ω)，半高为 A=A_max/2",
+    "分母非零：γ>0 时受迫响应分母 (ω0^2-ω^2)^2+γ^2ω^2>0",
+    "存在振幅共振峰：需 D_min>0 且 u_max>0；弱阻尼 γ^2<2ω0^2 自动满足",
+    "两个半高交点存在：弱阻尼 Q≫1 保证 u_- >0",
+    "二项式/泰勒展开收敛：r=γ/ω0=1/Q≪1，余项按 O(Q^{-5}) 估计",
+    "不涉及随机性/独立性假设；不使用统计独立性"
+  ],
+  "unverified_steps": [
+    "稳态解的存在性使用了线性 ODE 的标准结果，未从初值问题重新推导暂态衰减",
+    "泰勒展开的高阶余项只按标准展开写作 O(Q^{-5})，未用符号软件逐项机械验证"
+  ],
+  "reasoning_summary": "把振幅分母 D(u) 配方，得到峰值振幅；令 D=4D_min 得到振幅半高交点；在 Q≫1 下展开根号，得到 Δω≈√3ω0/Q。若把共振曲线定义为 A^2(ω)，则半高条件应为 D=2D_min，结果是 Δω≈ω0/Q。",
+  "raw_text": "我按字面把“振幅共振曲线”理解为：横轴是驱动频率 \\(\\omega\\)，纵轴是稳态振幅 \\(A(\\omega)\\)，所以“半高”是\n\n\\[\nA=\\frac{A_{\\max}}{2}.\n\\]\n\n如果题目想要的是 \\(A^2(\\omega)\\)（功率/能量）共振曲线的半高，则结果不同，见末尾备注。\n\n---\n\n## 1. 稳态振幅\n\n对方程\n\n\\[\nx''+\\gamma x'+\\omega_0^2 x=F\\cos(\\omega t)\n\\]\n\n设稳态解为\n\n\\[\nx(t)=\\Re\\left[X e^{i\\omega t}\\right],\n\\]\n\n代入得\n\n\\[\n(-\\omega^2+i\\gamma\\omega+\\omega_0^2)X=F,\n\\]\n\n所以\n\n\\[\nX=\\frac{F}{\\omega_0^2-\\omega^2+i\\gamma\\omega}.\n\\]\n\n振幅为\n\n\\[\nA(\\omega)=|X|\n=\\frac{F}{\\sqrt{(\\omega_0^2-\\omega^2)^2+\\gamma^2\\omega^2}}.\n\\]\n\n这里默认 \\(\\gamma>0\\)，否则暂态不衰减，稳态解不一定存在。\n\n---\n\n## 2. 求振幅最大值位置\n\n令\n\n\\[\nu=\\omega^2,\\qquad a=\\omega_0^2.\n\\]\n\n则振幅平方的分母为\n\n\\[\nD(u)=(a-u)^2+\\gamma^2 u.\n\\]\n\n配方：\n\n\\[\nD(u)\n=\\left(u-a+\\frac{\\gamma^2}{2}\\right)^2\n+\\gamma^2a-\\frac{\\gamma^4}{4}.\n\\]\n\n所以\n\n\\[\nD_{\\min}=\\gamma^2\\omega_0^2-\\frac{\\gamma^4}{4}\n=\\gamma^2\\left(\\omega_0^2-\\frac{\\gamma^2}{4}\\right),\n\\]\n\n对应的\n\n\\[\nu_{\\max}=\\omega_0^2-\\frac{\\gamma^2}{2}.\n\\]\n\n因此峰值振幅为\n\n\\[\nA_{\\max}=\\frac{F}{\\sqrt{D_{\\min}}}.\n\\]\n\n---\n\n## 3. 半高条件\n\n要求振幅降到峰值的一半：\n\n\\[\nA(\\omega)=\\frac12 A_{\\max}.\n\\]\n\n因为\n\n\\[\nA(\\omega)=\\frac{F}{\\sqrt{D(\\omega)}},\n\\]\n\n所以\n\n\\[\nD(\\omega)=4D_{\\min}.\n\\]\n\n代入配方形式：\n\n\\[\n\\left(u-u_{\\max}\\right)^2+D_{\\min}=4D_{\\min},\n\\]\n\n即\n\n\\[\n\\left(u-u_{\\max}\\right)^2=3D_{\\min}.\n\\]\n\n于是两个半高交点满足\n\n\\[\nu_{\\pm}\n=\n\\omega_0^2-\\frac{\\gamma^2}{2}\n\\pm\n\\sqrt{3\\gamma^2\\left(\\omega_0^2-\\frac{\\gamma^2}{4}\\right)}.\n\\]\n\n对应的频率为\n\n\\[\n\\omega_{\\pm}=\\sqrt{u_{\\pm}}.\n\\]\n\n所以振幅共振曲线的“严格”全宽为\n\n\\[\n\\Delta\\omega_{\\rm exact}\n=\n\\omega_+-\\omega_-\n=\n\\sqrt{u_+}-\\sqrt{u_-}.\n\\]\n\n---\n\n## 4. 弱阻尼近似，并用 \\(Q=\\omega_0/\\gamma\\) 表示\n\n现在用弱阻尼近似：\n\n\\[\n\\gamma\\ll\\omega_0.\n\\]\n\n等价地：\n\n\\[\nQ=\\frac{\\omega_0}{\\gamma}\\gg 1.\n\\]\n\n令\n\n\\[\nr=\\frac{\\gamma}{\\omega_0}=\\frac{1}{Q},\\qquad r\\ll1.\n\\]\n\n则\n\n\\[\n\\omega_{\\pm}\n=\n\\omega_0\n\\sqrt{\n1-\\frac{r^2}{2}\n\\pm\n\\frac{\\sqrt{3}}{Q}\\sqrt{1-\\frac{1}{4Q^2}}\n}.\n\\]\n\n对根号做泰勒展开，保留领头阶：\n\n\\[\n\\Delta\\omega\n=\n\\omega_+-\\omega_-\n\\simeq\n\\sqrt{3}\\,\\gamma.\n\\]\n\n用品质因数表示：\n\n\\[\n\\boxed{\n\\Delta\\omega\n\\simeq\n\\sqrt{3}\\,\\gamma\n=\n\\sqrt{3}\\,\\frac{\\omega_0}{Q}\n}.\n\\]\n\n若想保留下一阶修正，可写成\n\n\\[\n\\Delta\\omega\n=\n\\sqrt{3}\\,\\frac{\\omega_0}{Q}\n\\left(\n1+\\frac{1}{2Q^2}\n+O(Q^{-4})\n\\right).\n\\]\n\n弱阻尼近似是在“把 \\(\\omega_\\pm\\) 的根号做 \\(1/Q\\) 展开”这一步使用的。  \n适用条件就是：\n\n\\[\nQ\\gg1\n\\quad\\Longleftrightarrow\\quad\n\\gamma\\ll\\omega_0.\n\\]\n\n如果不满足弱阻尼，则必须用上面的严格公式；并且大阻尼时可能不存在两个正的半高交点。\n\n---\n\n## 备注：如果你说的是 \\(A^2(\\omega)\\) 曲线\n\n如果“共振曲线”的纵轴是 \\(A^2(\\omega)\\)，那么半高条件是\n\n\\[\nA^2=\\frac12 A_{\\max}^2,\n\\]\n\n即\n\n\\[\nD=2D_{\\min}.\n\\]\n\n同样的做法会得到\n\n\\[\n\\Delta\\omega\\simeq \\gamma=\\frac{\\omega_0}{Q}.\n\\]\n\n所以：\n\n- 字面意义的振幅曲线 \\(A(\\omega)\\)：  \n  \\[\n  \\Delta\\omega\\simeq \\sqrt{3}\\,\\frac{\\omega_0}{Q}.\n  \\]\n\n- 功率/能量曲线 \\(A^2(\\omega)\\)：  \n  \\[\n  \\Delta\\omega\\simeq \\frac{\\omega_0}{Q}.\n  \\]\n\n---\n\n```json\n{\n  \"final_expression\": \"sqrt(3)*omega_0/Q\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"γ>0，ω0>0，F>0，ω>0；所有量为确定性实数\",\n    \"Q=ω0/γ，并且采用弱阻尼近似 Q≫1（即 γ≪ω0）\",\n    \"存在稳态解：线性常系数方程，γ>0 使暂态衰减；初始条件不影响稳态振幅\",\n    \"振幅共振曲线按字面理解：纵轴为 A(ω)，半高为 A=A_max/2\",\n    \"分母非零：γ>0 时受迫响应分母 (ω0^2-ω^2)^2+γ^2ω^2>0\",\n    \"存在振幅共振峰：需 D_min>0 且 u_max>0；弱阻尼 γ^2<2ω0^2 自动满足\",\n    \"两个半高交点存在：弱阻尼 Q≫1 保证 u_- >0\",\n    \"二项式/泰勒展开收敛：r=γ/ω0=1/Q≪1，余项按 O(Q^{-5}) 估计\",\n    \"不涉及随机性/独立性假设；不使用统计独立性\"\n  ],\n  \"unverified_steps\": [\n    \"稳态解的存在性使用了线性 ODE 的标准结果，未从初值问题重新推导暂态衰减\",\n    \"泰勒展开的高阶余项只按标准展开写作 O(Q^{-5})，未用符号软件逐项机械验证\"\n  ],\n  \"reasoning_summary\": \"把振幅分母 D(u) 配方，得到峰值振幅；令 D=4D_min 得到振幅半高交点；在 Q≫1 下展开根号，得到 Δω≈√3ω0/Q。若把共振曲线定义为 A^2(ω)，则半高条件应为 D=2D_min，结果是 Δω≈ω0/Q。\"\n}\n```",
+  "thinking_chars": 75852,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 260.6,
+  "tokens": 29706,
+  "parse_ok": true
+}

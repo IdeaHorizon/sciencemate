@@ -1,0 +1,67 @@
+# 第6步正式 benchmark fixture —— MOM6 轻数据模拟（MPI+OpenMP，真实编译源码）。
+#
+#   EXPERIMENT_BENCH_GROUP=A python run_node.py --harness experiment --no-interactive \
+#     --fixture nodes/experiment/fixtures/bench_mom6.yaml --project-id bench-mom6-A
+#   （B、C 同理；每组前由 driver 把 pristine 源码副本 cp 到 ~/experiments/MOM6-bench-run）
+#
+# 源码（操作方已 clone，commit 锁定）：
+#   MOM6-examples d29f977 / MOM6 759c03a / FMS2 0721d59(2022.02) / mkmf c87e743
+# 任务给目标，不给具体 mkmf 命令（公平：让 recon/FermiLink/源码分析去解）。
+
+node_inputs:
+  experiment_focus: |
+    目标：从源码【真实编译】MOM6 海洋模式（ocean_only / solo 可执行），用 **MPI + OpenMP**
+    方式构建与运行，然后跑一个【轻数据】算例 double_gyre 做最小验证。
+
+    源码已就绪（无需 clone，build/ 干净，**无需请求人工确认**，直接开始）。
+    源码树事实（仅陈述布局，构建怎么做由你判断）：
+      ~/experiments/MOM6-bench-run
+        - src/MOM6   （模型源码；ocean_only solo driver 在 src/MOM6/config_src/drivers/solo_driver）
+        - src/FMS2   （MOM6 依赖的 FMS 框架库；顶层 Makefile 默认 FMS_CODEBASE=src/FMS2）
+        - src/mkmf   （GFDL 构建工具 list_paths/mkmf；templates/ 下有多种编译器模板）
+        - ocean_only/double_gyre （轻算例：MOM_input/diag_table/input.nml，解析初始化无大数据）
+        - 顶层 Makefile （构建/运行约定）
+
+    环境（已实测可用）：mpif90/mpicc（conda gcc 14.3）、netcdf-fortran（nf-config，has-nc4）、
+    OpenMP（gfortran -fopenmp）。
+
+    要求：
+    1. 这是【陌生构建】，自行用节点能力 + 源码分析判断构建路线（如被 build gate 拦，按提示读
+       source_recon / platform_profile，再 save_artifact 写 declared_route，并在正文写一行
+       `target_path: ~/experiments/MOM6-bench-run/<你的可执行产物实际路径>`）。
+    2. 编译必须 **MPI（mpif90/mpicc）+ OpenMP（-fopenmp）**。不要退化成串行/无 MPI。
+    3. 构建成功后跑 double_gyre 最小验证（短步数即可）：在 ocean_only/double_gyre 下用
+       `OMP_NUM_THREADS=2 mpirun -np 2 <可执行> 2>&1`，确认 returncode=0 且产生 ocean.stats /
+       输出含有限值（非 NaN）。可用 safe_execute_python 调
+       `from nodes.experiment.hooks import verify_min_run` 让框架核验运行命令。
+    4. 在 experiment_log 总结：路线、构建结果、是否 MPI+OpenMP、min-run 结果、遇到的失败与解决。
+       freeze 即可。构建/运行未完全成功也要如实记录（不要伪造）。
+
+upstream_artifacts:
+  - type: claim
+    name: H_mom6_build_minrun
+    metadata:
+      claim_type: hypothesis
+      status: open
+      created_at: "2026-06-16T00:00:00+00:00"
+    content: |
+      弱模型能在预算内从源码真实编译 MOM6 ocean_only（MPI+OpenMP）并跑通 double_gyre
+      轻算例的最小运行；框架脚手架（recon/gate/route/milestone）是否改变其行为由 A/B/C 对照测量。
+
+  - type: pre_registration
+    name: Bench_MOM6
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-16T00:00:00+00:00"
+      freeze_reason: "第6步正式 benchmark：MOM6 轻数据 MPI+OpenMP × A/B/C"
+    content: |
+      ## Pre-Registration: MOM6 benchmark
+      ### Hypothesis
+      A/B/C 对照下，框架脚手架对弱模型陌生 HPC 构建（MOM6 mkmf, MPI+OpenMP）的影响。
+      ### Setup
+      - 源码 commit 锁定；每组 pristine 副本 + 独立 project-id；预算 max_turns=40 / 墙钟≤30min。
+      - 高危拦截三组全开（共同安全基线）。
+      ### Expected / Metrics
+      - 主：预算内 build+min-run 成功；无效/重复失败命令数；request_human_input/人工纠偏数。
+      - 辅：首次路线正确性、路线切换、首/末里程碑轮次、safe_run_bash 数、token/费用/墙钟、
+        重复同根因、误判/误阻断、clean rebuild 复现。

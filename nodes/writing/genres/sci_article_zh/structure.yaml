@@ -1,0 +1,97 @@
+id: sci_article_zh
+display_name: 中文 SCI 风格研究论文
+language:
+  body: zh
+  figures: en           # 图内文字英文（用户可在简报里改）
+  title: zh
+renderer: zh_article
+budget:
+  total_chars: [6000, 12000]     # 正文汉字数（不含参考文献）
+  abstract_chars: [250, 450]
+  keywords: [4, 8]
+  figures_max: 16
+  tables_max: 8
+
+# 骨架变体：提纲阶段按贡献类型与作者偏好选一个
+variants:
+  imrad:
+    description: 标准 IMRaD，方法在结果前
+    parts: [abstract, introduction, methods, results, discussion, conclusion]
+  results_first:
+    description: 结果在前、方法在后（Nature 系习惯）
+    parts: [abstract, introduction, results, discussion, methods, conclusion]
+  author_chapters:
+    description: 保留作者草稿的章节骨架，只在其内部做 IMRaD 规范化
+    parts: [abstract, introduction, background, methods, results, discussion, conclusion]
+
+# 每个部件的论证动作。起草时逐条完成，审读时逐条核。
+parts:
+  abstract:
+    heading: null                   # 由渲染器放在 abstract 环境里
+    moves:
+      - 背景一句：问题为什么重要
+      - 缺口一句：现有工作缺什么
+      - 本文做了什么：对象、方法、规模（几种拓扑、几种策略、多少配置）
+      - 关键结果：两到四个带数字的发现
+      - 意义与边界：一句话
+    chars: [250, 450]
+    forbid: [引用文献, 图表引用, 缩写未展开]
+  introduction:
+    heading: 引言
+    moves:
+      - 领地：领域现状与为什么重要（两到三段，引文献）
+      - 缺口：现有工作在哪个具体问题上没有统一口径或证据
+      - 占领：本文的研究问题（可编号）、方法概要、贡献列表（具体到可验证）
+      - 文章组织（可选，一句）
+    chars: [1200, 2200]
+    forbid: [提前报告详细结果数字, 使用第一人称复数以外的自称]
+  background:
+    heading: 背景
+    moves:
+      - 只放理解方法与结果必需的背景；能并入引言的并入引言
+    chars: [0, 1500]
+  methods:
+    heading: 方法
+    moves:
+      - 研究对象与配置（表格化）
+      - 设置与参数（能复现的程度）
+      - 指标定义与统计口径
+      - 精度或校准证据（若有）
+    chars: [1500, 3000]
+    forbid: [写没有来源的参数, 在方法里下结论]
+  results:
+    heading: 结果
+    moves:
+      - 总览图先行，一段一个信息
+      - 按研究问题逐一回答，每个回答落到具体图表与数字
+      - 交互效应或反例单独说
+      - 不解释机理（留给讨论），不复述图里所有数
+    chars: [1800, 3500]
+    forbid: [无图表支撑的定量断言, 在结果里加限定语堆叠]
+  discussion:
+    heading: 讨论
+    moves:
+      - 主要发现的解释与机理
+      - 与已有工作的对照（一致或不一致，为什么）
+      - 对实践的启示
+      - 局限性（单独小节，一次说清，逐条具体）
+    chars: [1000, 2000]
+    forbid: [重复结果数字, 在每段末尾重复免责声明]
+  conclusion:
+    heading: 结论
+    moves:
+      - 回答引言提出的问题，三到五条，可被他人转述
+      - 未来工作一句到两句
+    chars: [300, 700]
+    forbid: [新数据, 新引用]
+
+required_parts: [abstract, introduction, methods, results, discussion, conclusion]
+front_matter: [title, authors_optional, keywords]
+back_matter: [references]
+
+# 参考文献
+references:
+  min_count: 20
+  style: gb7714-2015
+  must_be_cited: true
+  must_resolve: true       # DOI/arXiv 可解析

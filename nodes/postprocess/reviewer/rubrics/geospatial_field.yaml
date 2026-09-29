@@ -1,0 +1,10 @@
+rubric_id: geospatial_field
+extends: base
+checks:
+  - map projection and spatial extent are visually coherent with the coordinate grid
+  - gridded cells do not show unexplained seams, transpose errors, longitude wrapping, or polar distortion artifacts
+  - the colorbar is legible and visibly corresponds to the field colormap
+  - coast, grid, and annotation context remains subordinate to the scientific field
+  - missing values are visually distinct from valid extrema and do not look like measured zeros
+  - dense rasterized fields remain sharp enough at final publication size
+  - time, level, ensemble member, units, and variable identity are not clipped or ambiguous

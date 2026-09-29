@@ -1,0 +1,10 @@
+rubric_id: particle_trajectory
+extends: base
+checks:
+  - selected atoms remain individually or collectively resolvable at the final size without opaque saturation
+  - orthographic depth ordering and view direction do not create a misleading false contact pattern
+  - periodic-cell context, when shown, is visible but does not obscure particles
+  - the color legend corresponds visibly to rendered molecular categories
+  - projected coordinate labels, units, frame annotation, and selection text are legible
+  - deterministic display sampling does not produce visible stripes or category disappearance
+  - no atom markers, legends, titles, or axes are clipped

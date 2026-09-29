@@ -1,0 +1,109 @@
+{
+  "task_id": "adiabatic_relation",
+  "arm": "A1",
+  "final_expression": "T*V**(gamma-1)",
+  "final_expression_source": "main_result",
+  "main_result_statement": "理想气体准静态绝热过程的 T-V 关系：T*V^(γ−1) = 常数，γ = C_p/C_V（适用域：理想气体、准静态、绝热、C_V 恒定、T>0、V>0）",
+  "verdict": "derived",
+  "verification_evidence": [
+    {
+      "step": "S6",
+      "probe": "e5682276d629ac99",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S8a",
+      "probe": "bcc1f3d767012e59",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S8b",
+      "probe": "0231a3d479265444",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S9",
+      "probe": "4bd551f686c90284",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S10",
+      "probe": "039daf98cf917346",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S11",
+      "probe": "db7c15460eebc9fc",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S12",
+      "probe": "406bbdce66c1e23f",
+      "status": "verified",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 7,
+  "step_count": 13,
+  "assumptions": [
+    "A1: 准静态 δW = p dV",
+    "A2: 绝热 δQ = 0",
+    "A3: 理想气体 U=U(T)，dU=C_V dT",
+    "A4: pV = nRT",
+    "A5: T>0 且 V>0",
+    "A6: C_V ≠ 0（物理上 C_V>0）",
+    "A7: 迈耶关系 C_p−C_V = nR",
+    "A8: γ := C_p/C_V（定义）",
+    "A9: C_V 过程内恒定"
+  ],
+  "unverified_steps": [
+    "S1",
+    "S2",
+    "S3",
+    "S4",
+    "S5",
+    "S7"
+  ],
+  "validity_domain": [
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A6",
+    "A7",
+    "A8",
+    "A9"
+  ],
+  "credibility": {
+    "deductive_steps_verified": "7/7 代数步骤 symbolically verified（check_step）",
+    "level": "derived",
+    "numerical_support": "log-RK4 守恒 6.8e-06（截断误差量级）；解析残差 5.5e-10；单原子特例 γ=5/3：T2=75 K 与教科书一致",
+    "physical_inputs": "第一定律、理想气体内能与状态方程、迈耶关系 —— 教科书标准事实（cited_theorem 带锚点）",
+    "scope": "理想气体、准静态、绝热、C_V 恒定、T>0、V>0",
+    "weakest_links": [
+      "S6 ODE 积分（分离变量+唯一性）——回代验证 verified + Picard–Lindelöf 支撑",
+      "迈耶关系 C_p−C_V=nR 为理想气体非平凡事实（物理），其代数推论已单独 verified"
+    ]
+  },
+  "findings": [
+    "主结果 T V^(γ−1)=const（γ=C_p/C_V）在理想气体+准静态+绝热+C_V 恒定+T,V>0 下成立：7 条代数步骤全部 check_step 符号 verified；ODE 解由回代验证+Picard–Lindelöf 唯一性确立。",
+    "交叉路线 p V^γ=const' 与教科书标准形式对账一致（S11 verified）。",
+    "两条数值独立路径支持：log-RK4 守恒偏差 6.8e-06（截断误差量级）；解析解残差 5.5e-10。numerically_supported 级佐证，不替代演绎。",
+    "limit_check 工具异常：V^(-2/3)@V→0 返回 limit=oo、expected=oo 却判 mismatch（同值不匹配），判定为工具比较逻辑缺陷；物理结论由 V→∞→0 旁证（matches=true）支持。另：limit_check 中 gamma 与 sympy Γ 函数名冲突。",
+    "数值方法教训：固定步长 RK4 在 V→0 奇异区（dT/dV∝1/V）方法性发散（初版偏差 5.8e5）；改 log-V 空间（线性 ODE）后守恒成立。",
+    "教科书简写 ln T（带量纲）严格形式为 ln(T/T0)，差常数，最终式不变（S12 verified）。",
+    "γ>1 对理想气体成立（C_p=C_V+nR>C_V），是 T 随 V 单调递减的关键；推导未显式使用 γ>1，结论形式对任意实 γ 成立，物理语境 γ>1。"
+  ],
+  "frozen": true,
+  "turns": 24,
+  "tool_calls": 40,
+  "elapsed_s": 437.5,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787416116-daef15"
+}

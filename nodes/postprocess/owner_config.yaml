@@ -1,0 +1,29 @@
+# owner_config.yaml —— postprocess 节点 owner 的控制面板
+#
+# 默认全部注释掉 = 走 framework 默认。要 override 某项解开对应行即可。
+# 加载顺序：core defaults < env vars < harness.yaml < 本文件（最高优先级）
+#
+# 详见 docs/owner-guide.md § 5.7、templates/owner_config.yaml.template
+
+# ── LLM call 行为 ─────────────────────────────────────────────────────────
+llm:
+  # timeout_s: 600                    # 单 LLM call 超时秒（默认 300，env LLM_TIMEOUT）
+  # temperature_override: 0.3         # override harness.yaml context_config.temperature
+
+# ── 节点资源上限 ──────────────────────────────────────────────────────────
+budget:
+  # max_turns: 50                     # 0 = 无限制（开发模式）；生产推荐 ≥ 20
+  # max_context_tokens: 200000        # 默认 120000（LLM_CONTEXT_WINDOW env）
+  # max_output_tokens: 32768          # 默认 16384（writing 类节点可 24576+）
+
+# ── Context 压缩触发参数 ──────────────────────────────────────────────────
+summarizer:
+  # trigger_threshold: 0.6            # 在 max_context * threshold 触发压缩（默认 0.7）
+  # keep_last_n_turns: 5              # 压缩时保留的最近 N 轮（默认 3）
+  # target_tokens: 3000               # 压缩后叙述目标长度（默认 2000）
+
+# ── Subagent 调度参数 ─────────────────────────────────────────────────────
+subagent:
+  # max_depth: 6                      # 子节点递归深度（默认 4）
+  # max_parallel: 8                   # 并发子节点上限（默认 5）
+  # child_timeout_s: 180              # 子 LLM call timeout 秒（None = 跟随 llm.timeout_s）

@@ -1,0 +1,68 @@
+# owner_config.yaml —— 节点 owner 的"控制面板"
+#
+# 这一个文件集中放 owner 可调的所有运行时参数。改 LLM 等待时间、节点 turn
+# budget、context 压缩阈值、subagent 并发数等，都在这里 —— 不用 override
+# agent_loop / llm.py，不用翻 yaml / env var。
+#
+# 加载顺序（后面的 override 前面的）：
+#   1. core defaults                  （NodeHarness 默认）
+#   2. env vars                       （LLM_TIMEOUT / LLM_CONTEXT_WINDOW / HARNESS_FRAMEWORK_MAX_*）
+#   3. nodes/<n>/harness.yaml         （owner 传统配置）
+#   4. nodes/<n>/owner_config.yaml    ← **本文件，优先级最高**
+#
+# 全部字段都是 OPT-IN：留空 / 注释 = 走上层默认。**不要**把字段都填上以为是
+# "声明默认值"—— 那会锁死本节点跟随框架升级的能力。只显式设你确实想 override
+# 的字段。
+#
+# 详见 docs/owner-guide.md § 5.7「owner_config.yaml」。
+
+# ── llm: LLM call 行为 ────────────────────────────────────────────────────
+llm:
+  # 单次 LLM call 超时（秒）。reasoning model（GLM-5.x / o1 / R1）chain-of-thought
+  # 在长 context 下经常 >90s。默认走 LLM_TIMEOUT env (默认 300)。设这个 = 本
+  # 节点专属（如 writing 节点要长 manuscript 可设 600）。
+  # timeout_s: 600
+
+  # override harness.yaml `context_config.temperature`。一般直接改 yaml 即可；
+  # 这里给"我想全局调温但不想动 yaml 历史"的用法。
+  # temperature_override: 0.3
+
+# ── budget: 节点资源上限 ──────────────────────────────────────────────────
+budget:
+  # 节点最多跑多少 turn（agent_loop 循环）。0 = 无限制（开发模式）。
+  # 生产环境推荐 ≥ 20 给 reasoning model 留余地。
+  # max_turns: 50
+
+  # 单次 LLM call 的 context window（**不是** API hard limit，是 summarizer
+  # 触发阈值的基线）。默认 120000，由 LLM_CONTEXT_WINDOW env 控。
+  # max_context_tokens: 200000
+
+  # 单次 LLM call 的输出 token 上限。GLM/o1/R1 reasoning_tokens 占大头，
+  # 默认 16384；writing 之类 manuscript 节点可调到 24576+。
+  # max_output_tokens: 32768
+
+# ── summarizer: context 压缩触发参数 ──────────────────────────────────────
+summarizer:
+  # 在 max_context_tokens × threshold 时触发压缩。默认 0.7。
+  # 设 0.5 = 提早压缩（防尾巴撞 limit）；0.85 = 尽量晚压（保历史细节）。
+  # trigger_threshold: 0.6
+
+  # 压缩时最近 N 轮原样保留。默认 3。值大 = 当前任务上下文细但老 turn 全压；
+  # 值小 = 多 turn 都被压，可能丢方法细节。
+  # keep_last_n_turns: 5
+
+  # 压缩后中间叙述目标 token 数。默认 2000。
+  # target_tokens: 3000
+
+# ── subagent: 子节点调度参数 ──────────────────────────────────────────────
+subagent:
+  # 子 agent 递归最深几层。默认 4（env HARNESS_FRAMEWORK_MAX_SUBAGENT_DEPTH）。
+  # max_depth: 6
+
+  # 同时跑多少个子 agent。默认 5（env HARNESS_FRAMEWORK_MAX_PARALLEL）。
+  # 太高 = LLM 配额 + 速率限制 + IDE 难看；太低 = 慢。
+  # max_parallel: 8
+
+  # 子 agent LLM call timeout（秒）。None = 跟随 llm.timeout_s。
+  # 设独立值适用于"父节点慢推理，子节点要快"场景（不常见）。
+  # child_timeout_s: 180

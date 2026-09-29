@@ -1,0 +1,25 @@
+{
+  "task_id": "pairwise_independence_FALSE",
+  "arm": "B0",
+  "model": "deepseek-v4-pro",
+  "final_expression": "1/4 if x*y == z else 0",
+  "verdict": "refuted",
+  "assumptions": [
+    "X,Y are iid uniform on {-1,1}, so P(X=x,Y=y)=1/4 for all x,y in {-1,1}.",
+    "Z is defined deterministically as Z=XY.",
+    "Independence for discrete variables is checked by joint pmf equals product of marginal pmfs for all relevant values.",
+    "All sums are finite over the 2x2x2 outcome space; no convergence or series conditions used.",
+    "No conditional probabilities are used; if written conditionally, denominators P(X=x), P(Y=y), P(Z=z) are 1/2 > 0."
+  ],
+  "unverified_steps": [],
+  "reasoning_summary": "构造 X,Y 独立且均匀分布于 {±1}，令 Z=XY；验证可得 X,Y,Z 两两独立，但 (1,1,1) 处联合概率 1/4 不等于边缘乘积 1/8，因此命题被证伪。",
+  "raw_text": "命题为假：两两独立不蕴含相互独立。下面给出经典反例。\n\n## 1. 构造反例\n\n令 \\(X,Y\\) 独立同分布，取值于 \\(\\{-1,1\\}\\)，且每个值概率 \\(1/2\\)：\n\n\\[\nP(X=x,Y=y)=\\frac14,\\qquad \\forall x,y\\in\\{-1,1\\}.\n\\]\n\n定义\n\n\\[\nZ=XY.\n\\]\n\n也就是说，\\(Z\\) 由 \\(X,Y\\) 完全确定。\n\n## 2. 列出用到的假设\n\n- \\(X,Y\\) 是独立同分布的 Rademacher 随机变量，即  \n  \\[\n  P(X=x,Y=y)=\\frac14,\\qquad x,y\\in\\{-1,1\\}.\n  \\]\n- \\(Z=XY\\) 是确定性函数。\n- 所有随机变量都是离散有限样本空间上的随机变量，因此无需处理级数收敛、积分收敛、展开适用域等问题。\n- 独立性判定使用离散情形定义：联合分布等于边缘分布乘积。\n- 本例未显式使用条件概率；若要使用条件形式，需要分母非零，这里  \n  \\[\n  P(X=x)=P(Y=y)=P(Z=z)=\\frac12>0.\n  \\]\n\n## 3. 写出联合分布\n\n因为 \\(X,Y\\) 四个组合 \\((-1,-1),(-1,1),(1,-1),(1,1)\\) 各概率 \\(1/4\\)，且 \\(Z=XY\\) 唯一确定，所以\n\n\\[\np_{X,Y,Z}(x,y,z)=\n\\begin{cases}\n\\frac14,& z=xy,\\\\\n0,& z\\neq xy,\n\\end{cases}\n\\qquad x,y,z\\in\\{-1,1\\}.\n\\]\n\n## 4. 计算边缘分布\n\n由联合分布求和：\n\n\\[\nP(X=x)=\\sum_{y,z}p_{X,Y,Z}(x,y,z)=\\frac12,\n\\]\n\n因为固定 \\(x\\) 后，有两个 \\(y\\) 取值，各自对应唯一 \\(z=xy\\)，每个概率 \\(1/4\\)，合计 \\(1/2\\)。\n\n同理：\n\n\\[\nP(Y=y)=\\frac12.\n\\]\n\n对 \\(Z\\)：\n\n- \\(Z=1\\) 对应 \\((X,Y)=(1,1)\\) 或 \\((-1,-1)\\)，两个概率 \\(1/4+1/4=1/2\\)；\n- \\(Z=-1\\) 对应 \\((X,Y)=(1,-1)\\) 或 \\((-1,1)\\)，概率也是 \\(1/2\\)。\n\n所以：\n\n\\[\nP(Z=z)=\\frac12.\n\\]\n\n## 5. 验证两两独立\n\n### \\(X\\) 与 \\(Y\\) 独立\n\n由构造：\n\n\\[\nP(X=x,Y=y)=\\frac14\n\\]\n\n而\n\n\\[\nP(X=x)P(Y=y)=\\frac12\\cdot\\frac12=\\frac14.\n\\]\n\n所以 \\(X,Y\\) 独立。\n\n### \\(X\\) 与 \\(Z\\) 独立\n\n对任意 \\(x,z\\in\\{-1,1\\}\\)：\n\n\\[\nP(X=x,Z=z)=\\sum_y p_{X,Y,Z}(x,y,z).\n\\]\n\n由于 \\(z=xy\\)，给定 \\(x,z\\) 后 \\(y=xz\\) 是唯一的。因此只有一个 \\(y\\) 项贡献：\n\n\\[\nP(X=x,Z=z)=\\frac14.\n\\]\n\n同时：\n\n\\[\nP(X=x)P(Z=z)=\\frac12\\cdot\\frac12=\\frac14.\n\\]\n\n所以 \\(X,Z\\) 独立。\n\n### \\(Y\\) 与 \\(Z\\) 独立\n\n同理，对任意 \\(y,z\\in\\{-1,1\\}\\)，给定 \\(y,z\\) 后 \\(x=yz\\) 唯一，因此\n\n\\[\nP(Y=y,Z=z)=\\frac14\n\\]\n\n且\n\n\\[\nP(Y=y)P(Z=z)=\\frac12\\cdot\\frac12=\\frac14.\n\\]\n\n所以 \\(Y,Z\\) 独立。\n\n因此三者两两独立。\n\n## 6. 检查是否相互独立\n\n相互独立要求对所有 \\(x,y,z\\) 有\n\n\\[\nP(X=x,Y=y,Z=z)=P(X=x)P(Y=y)P(Z=z).\n\\]\n\n取 \\(x=1,y=1,z=1\\)：\n\n\\[\nP(X=1,Y=1,Z=1)=P(X=1,Y=1)=\\frac14.\n\\]\n\n但边缘乘积为\n\n\\[\nP(X=1)P(Y=1)P(Z=1)=\\frac12\\cdot\\frac12\\cdot\\frac12=\\frac18.\n\\]\n\n显然\n\n\\[\n\\frac14\\neq \\frac18.\n\\]\n\n因此三者不相互独立。\n\n## 7. 结论\n\n该命题被证伪：随机变量两两独立不蕴含相互独立。反例为\n\n\\[\nX,Y\\text{ 独立同分布且均匀取值于 }\\{-1,1\\},\\qquad Z=XY.\n\\]\n\n在这个反例中，\\(X,Y,Z\\) 两两独立，但联合分布不等于边缘分布乘积。\n\n```json\n{\n  \"final_expression\": \"1/4 if x*y == z else 0\",\n  \"verdict\": \"refuted\",\n  \"assumptions\": [\n    \"X,Y are iid uniform on {-1,1}, so P(X=x,Y=y)=1/4 for all x,y in {-1,1}.\",\n    \"Z is defined deterministically as Z=XY.\",\n    \"Independence for discrete variables is checked by joint pmf equals product of marginal pmfs for all relevant values.\",\n    \"All sums are finite over the 2x2x2 outcome space; no convergence or series conditions used.\",\n    \"No conditional probabilities are used; if written conditionally, denominators P(X=x), P(Y=y), P(Z=z) are 1/2 > 0.\"\n  ],\n  \"unverified_steps\": [],\n  \"reasoning_summary\": \"构造 X,Y 独立且均匀分布于 {±1}，令 Z=XY；验证可得 X,Y,Z 两两独立，但 (1,1,1) 处联合概率 1/4 不等于边缘乘积 1/8，因此命题被证伪。\"\n}\n```",
+  "thinking_chars": 24497,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 103.3,
+  "tokens": 9491,
+  "parse_ok": true,
+  "repeat_index": 1
+}

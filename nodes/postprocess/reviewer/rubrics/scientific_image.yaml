@@ -1,0 +1,8 @@
+rubric_id: scientific_image
+extends: base
+checks:
+  - visible saturation or crushed contrast
+  - scale-bar visibility
+  - channel and lookup-table legend visibility
+  - comparison-window consistency across panels
+  - annotation occlusion of evidence

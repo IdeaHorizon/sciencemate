@@ -24,8 +24,8 @@ set -eu
 
 # 下面两行由打包器整行替换（占位符只能出现在这里，别处不许提它 —— 第一版把占位符
 # 也写进了 case 的模式里，替换后要么语法错、要么把正确的地址当成"没填"拒掉）。
-DEFAULT_URL="https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.4"
-DEFAULT_DMG="ScienceMate-0.5.4-arm64.dmg"
+DEFAULT_URL="https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.6"
+DEFAULT_DMG="ScienceMate-0.5.6-arm64.dmg"
 BASE="${AFS_RELEASE_URL:-$DEFAULT_URL}"
 DMG="$DEFAULT_DMG"
 APP="ScienceMate.app"

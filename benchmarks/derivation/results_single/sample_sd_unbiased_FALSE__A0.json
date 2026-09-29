@@ -1,0 +1,30 @@
+{
+  "task_id": "sample_sd_unbiased_FALSE",
+  "arm": "A0",
+  "model": "deepseek-v4-flash",
+  "final_expression": "sigma*sqrt(2/(n-1))*gamma(n/2)/gamma((n-1)/2)",
+  "verdict": "refuted",
+  "assumptions": [
+    "n>=2；n=1 时 S^2 的分母 n-1 为 0，不定义",
+    "X_i 独立同分布，且方差 sigma^2 < infinity；因此均值 mu=E[X_i] 存在",
+    "sigma^2>0 时讨论非退化情形；若 sigma^2=0，则 E[S]=sigma=0 平凡成立",
+    "sqrt(t) 在 [0, infinity) 上严格凹，Jensen 不等式适用",
+    "Jensen 取等条件：严格凹函数下，仅当 S^2 几乎处处常数时取等；sigma^2>0 时 S^2 不几乎处处常数",
+    "正态精确公式额外假设 X_i~N(mu,sigma^2)",
+    "(n-1)S^2/sigma^2 ~ chi^2_{n-1} 是正态样本方差的标准分布结论",
+    "Y~chi^2_k 的 Gamma 期望公式 E[Y^{1/2}]=sqrt(2)*Gamma((k+1)/2)/Gamma(k/2)"
+  ],
+  "unverified_steps": [
+    "正态样本方差服从 chi^2 分布这一结论作为标准定理引用，未重新推导",
+    "Gamma 积分计算使用了标准 Gamma 函数公式，未另做数值/符号验证"
+  ],
+  "reasoning_summary": "因为平方根是严格凹函数，Jensen 不等式给出 E[S]<=sqrt(E[S^2])=sigma；非退化时等号不成立，所以原命题被证伪。正态分布下可精确算得 E[S]=sigma*sqrt(2/(n-1))*gamma(n/2)/gamma((n-1)/2)。",
+  "raw_text": "命题不成立。\n\n关键原因是：平方根是严格凹函数，所以“样本方差的无偏性”不能传递给“样本标准差”。更准确地说，对 \\(n\\ge2\\)、\\(\\sigma^2>0\\)，有\n\n\\[\nE[S]<\\sigma.\n\\]\n\n只有 \\(\\sigma^2=0\\) 的退化情形才有 \\(E[S]=\\sigma=0\\)。\n\n下面逐步推导。\n\n---\n\n### 1. 先算 \\(E[S^2]\\)\n\n设 \\(\\mu=E[X_i]\\)，\\(\\bar X=\\frac1n\\sum_i X_i\\)。恒等式：\n\n\\[\n\\sum_{i=1}^n (X_i-\\bar X)^2\n=\n\\sum_{i=1}^n X_i^2-n\\bar X^2.\n\\]\n\n取期望：\n\n\\[\nE[X_i^2]=\\sigma^2+\\mu^2,\n\\]\n\n且\n\n\\[\nE[\\bar X^2]\n=\\operatorname{Var}(\\bar X)+\\mu^2\n=\\frac{\\sigma^2}{n}+\\mu^2.\n\\]\n\n所以\n\n\\[\nE\\left[\\sum_{i=1}^n(X_i-\\bar X)^2\\right]\n=\nn(\\sigma^2+\\mu^2)-n\\left(\\frac{\\sigma^2}{n}+\\mu^2\\right)\n=(n-1)\\sigma^2.\n\\]\n\n因此\n\n\\[\nE[S^2]\n=\n\\frac{1}{n-1}E\\left[\\sum_{i=1}^n(X_i-\\bar X)^2\\right]\n=\n\\sigma^2.\n\\]\n\n也就是说，\\(S^2\\) 是 \\(\\sigma^2\\) 的无偏估计。\n\n---\n\n### 2. 用 Jensen 不等式\n\n因为 \\(f(t)=\\sqrt t\\) 在 \\([0,\\infty)\\) 上是严格凹函数，所以\n\n\\[\nE[S]\n=\nE[\\sqrt{S^2}]\n\\le\n\\sqrt{E[S^2]}\n=\n\\sigma.\n\\]\n\n在 \\(\\sigma^2>0\\) 且 \\(n\\ge2\\) 时，\\(S^2\\) 不会几乎处处为常数，因此 Jensen 不等式取不到等号：\n\n\\[\nE[S]<\\sigma.\n\\]\n\n所以原命题\n\n\\[\nE[S]=\\sigma\n\\]\n\n是错的。\n\n---\n\n### 3. 正态分布下的精确结果\n\n如果额外假设 \\(X_i\\sim N(\\mu,\\sigma^2)\\)，则\n\n\\[\n\\frac{(n-1)S^2}{\\sigma^2}\\sim \\chi^2_{n-1}.\n\\]\n\n令 \\(k=n-1\\)，\\(Y\\sim\\chi^2_k\\)，则\n\n\\[\nE[S]\n=\n\\frac{\\sigma}{\\sqrt{k}}E[Y^{1/2}].\n\\]\n\n而\n\n\\[\nE[Y^{1/2}]\n=\n\\frac{\\sqrt2\\,\\Gamma((k+1)/2)}{\\Gamma(k/2)}.\n\\]\n\n所以正态情形下：\n\n\\[\nE[S]\n=\n\\sigma\\sqrt{\\frac{2}{n-1}}\\,\n\\frac{\\Gamma(n/2)}{\\Gamma((n-1)/2)}.\n\\]\n\n这个因子小于 \\(1\\)，例如 \\(n=2\\) 时是\n\n\\[\n\\sqrt{\\frac{2}{\\pi}}\\approx 0.798.\n\\]\n\n因此正态分布本身就是反例。\n\n如果不假设正态，则一般没有只依赖于 \\(\\sigma\\) 和 \\(n\\) 的精确等式；原题条件下最普遍的结论是：\n\n\\[\nE[S]<\\sigma.\n\\]\n\n```json\n{\n  \"final_expression\": \"sigma*sqrt(2/(n-1))*gamma(n/2)/gamma((n-1)/2)\",\n  \"verdict\": \"refuted\",\n  \"assumptions\": [\n    \"n>=2；n=1 时 S^2 的分母 n-1 为 0，不定义\",\n    \"X_i 独立同分布，且方差 sigma^2 < infinity；因此均值 mu=E[X_i] 存在\",\n    \"sigma^2>0 时讨论非退化情形；若 sigma^2=0，则 E[S]=sigma=0 平凡成立\",\n    \"sqrt(t) 在 [0, infinity) 上严格凹，Jensen 不等式适用\",\n    \"Jensen 取等条件：严格凹函数下，仅当 S^2 几乎处处常数时取等；sigma^2>0 时 S^2 不几乎处处常数\",\n    \"正态精确公式额外假设 X_i~N(mu,sigma^2)\",\n    \"(n-1)S^2/sigma^2 ~ chi^2_{n-1} 是正态样本方差的标准分布结论\",\n    \"Y~chi^2_k 的 Gamma 期望公式 E[Y^{1/2}]=sqrt(2)*Gamma((k+1)/2)/Gamma(k/2)\"\n  ],\n  \"unverified_steps\": [\n    \"正态样本方差服从 chi^2 分布这一结论作为标准定理引用，未重新推导\",\n    \"Gamma 积分计算使用了标准 Gamma 函数公式，未另做数值/符号验证\"\n  ],\n  \"reasoning_summary\": \"因为平方根是严格凹函数，Jensen 不等式给出 E[S]<=sqrt(E[S^2])=sigma；非退化时等号不成立，所以原命题被证伪。正态分布下可精确算得 E[S]=sigma*sqrt(2/(n-1))*gamma(n/2)/gamma((n-1)/2)。\"\n}\n```",
+  "thinking_chars": 82135,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 253.1,
+  "tokens": 27954,
+  "parse_ok": true
+}

@@ -1,0 +1,60 @@
+# derivation 节点的最小 fixture。
+# 运行:  python run_node.py --harness derivation --fixture fixtures/minimal.yaml
+#
+# 取的是一个**有精确解可对照**的形状：一维简谐振子在正则系综下的热容。
+# 选它的理由和 E2E v26 选 Ising 一样 —— 结论是已知的，所以"推导做对没有"
+# 这件事本身不含糊，能把注意力全放在**纪律**上：
+#
+#   · 每一步有没有验证章（还是模型自己写了句 verified）
+#   · 高温展开丢掉的高阶项有没有说清量级与适用范围
+#   · 结论的适用域是不是悄悄比前提允许的更宽（经典极限 vs 全温区）
+#   · ħω/kT → 0 的极限对不对得上能均分定理
+#
+# 闭合条件刻意做成"数值条 + 陈述条"混合：推导两类都兑现得了，
+# 这也是 derivation 不进 _MODALITY_BY_NODE 的原因（见 shared/tools/run_node.py）。
+
+node_inputs:
+  mode: confirmatory
+  propositions:
+    - "一维量子简谐振子的正则配分函数与热容有闭式解"
+    - "该热容在高温极限下退化为经典能均分结果 k_B"
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: SHO_Heat_Capacity_Prereg
+    content: |
+      ## Research Questions
+
+      ### Q1: 一维量子简谐振子的热容如何随温度变化，经典极限在什么条件下成立？
+      - output_kind: 一条命题的裁决
+      - proposition: 量子简谐振子热容 C(T) 有闭式解，且在 k_B*T >> ħω 时
+        退化为经典能均分值 k_B；偏离在 ħω/(k_B*T) 的二阶出现。
+      - 闭合条件:
+      ```yaml
+      - id: CLOSED_FORM_C
+        statement: "给出 C(T) 的闭式表达式，且每一步代数变换经机械验证（未验步骤须逐一列出并说明为何未验）"
+      - id: CLASSICAL_LIMIT
+        metric: "lim_{x->0} C/k_B"
+        comparison: "=="
+        threshold: 1
+      - id: LEADING_CORRECTION
+        statement: "给出经典极限的首阶修正项及其量级，并说明高温展开在什么范围内可用"
+      - id: DIMENSIONAL_SANITY
+        statement: "配分函数无量纲、热容量纲为能量/温度，两者均经 dimensional_check 核对"
+      ```
+    metadata:
+      frozen: true
+
+memory_entries:
+  - kind: directive
+    text: >
+      演绎纪律：每一步要么调 check_step 拿验证章，要么标 cited_theorem/prose/definition
+      并说明理由。自己写的 verified 冻结门不认。近似必须交代丢了什么量级、
+      在什么范围内可忽略 —— 不带误差控制的近似等于把一个未知大小的窟窿留在结论里。
+    tags: [methodology]
+  - kind: directive
+    text: >
+      数值证据关不掉演绎命题：数值抽查在 N 个点上成立是 numerically_supported，
+      不是 verified。主结果只有数值支持时 credibility 必须如实交代。
+    tags: [methodology]

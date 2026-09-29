@@ -1,0 +1,22 @@
+# 这台执行主机提供什么算力软件 —— 部署时声明一次，所有会话共享。
+#
+# 用法：把这份文件复制成实际的登记表，然后
+#   export HARNESS_HOST_CAPABILITIES=/path/to/host_capabilities.yaml
+#
+# 为什么是声明而不是自动探测：科研软件的调用方式常常不只是一个二进制
+# （module load、conda env、license server、MPI 启动器），这些只有部署的人
+# 知道。将来商业软件作为注册工具接进来，本来也是登记制。
+#
+# 但登记表会**自证**：加载时逐条核对可执行文件真的存在，核不上的照样交给
+# 模型，但带 `⚠️ 登记的路径当前不存在`。一份说"LAMMPS 在 X"而 X 不存在的
+# 登记表，比没有登记表更糟。
+
+software:
+  - name: LAMMPS
+    invoke: /opt/homebrew/bin/lmp_serial
+    version: "stable_2Aug2023"
+    notes: "串行构建；生产模拟走 submit_job(scheduler=local)，别用 safe_run_bash（回合内会超时）"
+
+  # - name: VASP
+  #   invoke: "module load vasp/6.4 && vasp_std"
+  #   notes: "需要 license；invoke 是组合命令，框架无法预先核对可用性"

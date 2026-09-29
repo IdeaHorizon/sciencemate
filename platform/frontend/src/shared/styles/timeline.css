@@ -1,0 +1,118 @@
+/* Transcript timeline */
+
+.timeline {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.timeline-item {
+  position: relative;
+  display: flex;
+  gap: var(--space-3);
+  padding-left: 4px;
+}
+
+/* Vertical thread between dots */
+.timeline-item:not(.last)::before {
+  content: "";
+  position: absolute;
+  left: 16px;
+  top: 28px;
+  bottom: -8px;
+  width: 1px;
+  background: var(--color-border);
+}
+
+.timeline-dot {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-pill);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  color: var(--color-fg-muted);
+  margin-top: 2px;
+}
+
+.timeline-content {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+}
+
+.timeline-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  color: var(--color-fg);
+}
+
+/* 这里原有一条同名规则，其每一条属性都被 app/globals.css 里的同选择器规则
+   覆盖（globals 的 @import 在文件头，自身规则在后，等特异性下 globals 胜）。
+   删掉的是死代码：留着只会让人以为改这里有效。globals 那份仍在，渲染不变。 */
+/* 这里原有一条同名规则，其每一条属性都被 app/globals.css 里的同选择器规则
+   覆盖（globals 的 @import 在文件头，自身规则在后，等特异性下 globals 胜）。
+   删掉的是死代码：留着只会让人以为改这里有效。globals 那份仍在，渲染不变。 */
+.timeline-summary {
+  font-size: 12px;
+  color: var(--color-fg-muted);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 这里原有一条同名规则，其每一条属性都被 app/globals.css 里的同选择器规则
+   覆盖（globals 的 @import 在文件头，自身规则在后，等特异性下 globals 胜）。
+   删掉的是死代码：留着只会让人以为改这里有效。globals 那份仍在，渲染不变。 */
+/* 这里原有一条同名规则，其每一条属性都被 app/globals.css 里的同选择器规则
+   覆盖（globals 的 @import 在文件头，自身规则在后，等特异性下 globals 胜）。
+   删掉的是死代码：留着只会让人以为改这里有效。globals 那份仍在，渲染不变。 */
+
+.timeline-detail {
+  padding: var(--space-3);
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg);
+}
+
+.event-readable {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.event-readable p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-fg-muted);
+}
+.event-readable strong {
+  color: var(--color-fg);
+}
+.event-meta-line {
+  font-family: var(--font-mono);
+  font-size: 11px !important;
+  color: var(--color-fg-subtle) !important;
+}
+.event-content-preview {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}

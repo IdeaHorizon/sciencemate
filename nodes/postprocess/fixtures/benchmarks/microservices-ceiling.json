@@ -1,0 +1,711 @@
+{
+ "assertions": [
+  {
+   "derived_from": "接入层：CDN、WAF、API 网关、gRPC 网关",
+   "equals": 4,
+   "id": "access_count",
+   "kind": "node_count",
+   "selector": {
+    "role": "接入层"
+   }
+  },
+  {
+   "derived_from": "业务层十个服务",
+   "equals": 10,
+   "id": "biz_count",
+   "kind": "node_count",
+   "selector": {
+    "role": "业务服务"
+   }
+  },
+  {
+   "derived_from": "数据层：MySQL 主从、Redis 集群、Kafka、Elasticsearch、对象存储",
+   "equals": 5,
+   "id": "data_count",
+   "kind": "node_count",
+   "selector": {
+    "role": "数据存储"
+   }
+  },
+  {
+   "derived_from": "Prometheus、Grafana、Jaeger",
+   "equals": 3,
+   "id": "obs_count",
+   "kind": "node_count",
+   "selector": {
+    "role": "可观测"
+   }
+  },
+  {
+   "derived_from": "订单调用支付、库存、风控、优惠券",
+   "equals": 4,
+   "id": "order_calls",
+   "kind": "edge_count",
+   "source": {
+    "ids": [
+     "order"
+    ]
+   },
+   "target": {
+    "ids": [
+     "pay",
+     "stock",
+     "risk",
+     "coupon"
+    ]
+   }
+  },
+  {
+   "derived_from": "支付调用风控",
+   "equals": 1,
+   "id": "pay_calls",
+   "kind": "edge_count",
+   "source": {
+    "ids": [
+     "pay"
+    ]
+   },
+   "target": {
+    "ids": [
+     "risk"
+    ]
+   }
+  },
+  {
+   "derived_from": "搜索读库存与订单",
+   "equals": 2,
+   "id": "search_reads",
+   "kind": "edge_count",
+   "source": {
+    "ids": [
+     "search"
+    ]
+   },
+   "target": {
+    "ids": [
+     "stock",
+     "order"
+    ]
+   }
+  },
+  {
+   "derived_from": "全部业务服务都写 Kafka",
+   "equals": 10,
+   "id": "kafka_writers",
+   "kind": "edge_count",
+   "source": {
+    "role": "业务服务"
+   },
+   "target": {
+    "ids": [
+     "kafka"
+    ]
+   }
+  },
+  {
+   "derived_from": "用户/鉴权/订单/支付/库存/物流用 MySQL",
+   "equals": 6,
+   "id": "mysql_users",
+   "kind": "edge_count",
+   "source": {
+    "role": "业务服务"
+   },
+   "target": {
+    "ids": [
+     "mysql"
+    ]
+   }
+  },
+  {
+   "derived_from": "用户/鉴权/订单/库存/优惠券用 Redis",
+   "equals": 5,
+   "id": "redis_users",
+   "kind": "edge_count",
+   "source": {
+    "role": "业务服务"
+   },
+   "target": {
+    "ids": [
+     "redis"
+    ]
+   }
+  },
+  {
+   "derived_from": "搜索用 Elasticsearch",
+   "equals": 1,
+   "id": "es_users",
+   "kind": "edge_count",
+   "source": {
+    "role": "业务服务"
+   },
+   "target": {
+    "ids": [
+     "es"
+    ]
+   }
+  },
+  {
+   "derived_from": "物流与消息用对象存储",
+   "equals": 2,
+   "id": "oss_users",
+   "kind": "edge_count",
+   "source": {
+    "role": "业务服务"
+   },
+   "target": {
+    "ids": [
+     "oss"
+    ]
+   }
+  },
+  {
+   "derived_from": "被全部业务服务上报",
+   "equals": 10,
+   "id": "prometheus_reporters",
+   "kind": "edge_count",
+   "source": {
+    "role": "业务服务"
+   },
+   "target": {
+    "ids": [
+     "prometheus"
+    ]
+   }
+  },
+  {
+   "derived_from": "被全部业务服务上报",
+   "equals": 10,
+   "id": "grafana_reporters",
+   "kind": "edge_count",
+   "source": {
+    "role": "业务服务"
+   },
+   "target": {
+    "ids": [
+     "grafana"
+    ]
+   }
+  },
+  {
+   "derived_from": "被全部业务服务上报",
+   "equals": 10,
+   "id": "jaeger_reporters",
+   "kind": "edge_count",
+   "source": {
+    "role": "业务服务"
+   },
+   "target": {
+    "ids": [
+     "jaeger"
+    ]
+   }
+  }
+ ],
+ "bands": [
+  [
+   "group:access"
+  ],
+  [
+   "group:biz"
+  ],
+  [
+   "group:data"
+  ]
+ ],
+ "edges": [
+  {
+   "from": "cdn",
+   "kind": "dashed",
+   "role": "请求路由",
+   "to": "user"
+  },
+  {
+   "from": "waf",
+   "kind": "dashed",
+   "role": "请求路由",
+   "to": "user"
+  },
+  {
+   "from": "api_gw",
+   "kind": "dashed",
+   "role": "请求路由",
+   "to": "user"
+  },
+  {
+   "from": "grpc_gw",
+   "kind": "dashed",
+   "role": "请求路由",
+   "to": "user"
+  },
+  {
+   "from": "order",
+   "role": "服务调用",
+   "to": "pay"
+  },
+  {
+   "from": "order",
+   "role": "服务调用",
+   "to": "stock"
+  },
+  {
+   "from": "order",
+   "role": "服务调用",
+   "to": "risk"
+  },
+  {
+   "from": "order",
+   "role": "服务调用",
+   "to": "coupon"
+  },
+  {
+   "from": "pay",
+   "role": "服务调用",
+   "to": "risk"
+  },
+  {
+   "from": "search",
+   "role": "服务调用",
+   "to": "stock"
+  },
+  {
+   "from": "search",
+   "role": "服务调用",
+   "to": "order"
+  },
+  {
+   "from": "user",
+   "role": "数据读写",
+   "to": "kafka"
+  },
+  {
+   "from": "auth",
+   "role": "数据读写",
+   "to": "kafka"
+  },
+  {
+   "from": "order",
+   "role": "数据读写",
+   "to": "kafka"
+  },
+  {
+   "from": "pay",
+   "role": "数据读写",
+   "to": "kafka"
+  },
+  {
+   "from": "stock",
+   "role": "数据读写",
+   "to": "kafka"
+  },
+  {
+   "from": "logistics",
+   "role": "数据读写",
+   "to": "kafka"
+  },
+  {
+   "from": "risk",
+   "role": "数据读写",
+   "to": "kafka"
+  },
+  {
+   "from": "coupon",
+   "role": "数据读写",
+   "to": "kafka"
+  },
+  {
+   "from": "msg",
+   "role": "数据读写",
+   "to": "kafka"
+  },
+  {
+   "from": "search",
+   "role": "数据读写",
+   "to": "kafka"
+  },
+  {
+   "from": "user",
+   "role": "数据读写",
+   "to": "mysql"
+  },
+  {
+   "from": "auth",
+   "role": "数据读写",
+   "to": "mysql"
+  },
+  {
+   "from": "order",
+   "role": "数据读写",
+   "to": "mysql"
+  },
+  {
+   "from": "pay",
+   "role": "数据读写",
+   "to": "mysql"
+  },
+  {
+   "from": "stock",
+   "role": "数据读写",
+   "to": "mysql"
+  },
+  {
+   "from": "logistics",
+   "role": "数据读写",
+   "to": "mysql"
+  },
+  {
+   "from": "user",
+   "role": "数据读写",
+   "to": "redis"
+  },
+  {
+   "from": "auth",
+   "role": "数据读写",
+   "to": "redis"
+  },
+  {
+   "from": "order",
+   "role": "数据读写",
+   "to": "redis"
+  },
+  {
+   "from": "stock",
+   "role": "数据读写",
+   "to": "redis"
+  },
+  {
+   "from": "coupon",
+   "role": "数据读写",
+   "to": "redis"
+  },
+  {
+   "from": "search",
+   "role": "数据读写",
+   "to": "es"
+  },
+  {
+   "from": "logistics",
+   "role": "数据读写",
+   "to": "oss"
+  },
+  {
+   "from": "msg",
+   "role": "数据读写",
+   "to": "oss"
+  },
+  {
+   "from": "user",
+   "role": "指标上报",
+   "to": "prometheus"
+  },
+  {
+   "from": "auth",
+   "role": "指标上报",
+   "to": "prometheus"
+  },
+  {
+   "from": "order",
+   "role": "指标上报",
+   "to": "prometheus"
+  },
+  {
+   "from": "pay",
+   "role": "指标上报",
+   "to": "prometheus"
+  },
+  {
+   "from": "stock",
+   "role": "指标上报",
+   "to": "prometheus"
+  },
+  {
+   "from": "logistics",
+   "role": "指标上报",
+   "to": "prometheus"
+  },
+  {
+   "from": "risk",
+   "role": "指标上报",
+   "to": "prometheus"
+  },
+  {
+   "from": "coupon",
+   "role": "指标上报",
+   "to": "prometheus"
+  },
+  {
+   "from": "msg",
+   "role": "指标上报",
+   "to": "prometheus"
+  },
+  {
+   "from": "search",
+   "role": "指标上报",
+   "to": "prometheus"
+  },
+  {
+   "from": "user",
+   "role": "指标上报",
+   "to": "grafana"
+  },
+  {
+   "from": "auth",
+   "role": "指标上报",
+   "to": "grafana"
+  },
+  {
+   "from": "order",
+   "role": "指标上报",
+   "to": "grafana"
+  },
+  {
+   "from": "pay",
+   "role": "指标上报",
+   "to": "grafana"
+  },
+  {
+   "from": "stock",
+   "role": "指标上报",
+   "to": "grafana"
+  },
+  {
+   "from": "logistics",
+   "role": "指标上报",
+   "to": "grafana"
+  },
+  {
+   "from": "risk",
+   "role": "指标上报",
+   "to": "grafana"
+  },
+  {
+   "from": "coupon",
+   "role": "指标上报",
+   "to": "grafana"
+  },
+  {
+   "from": "msg",
+   "role": "指标上报",
+   "to": "grafana"
+  },
+  {
+   "from": "search",
+   "role": "指标上报",
+   "to": "grafana"
+  },
+  {
+   "from": "user",
+   "role": "指标上报",
+   "to": "jaeger"
+  },
+  {
+   "from": "auth",
+   "role": "指标上报",
+   "to": "jaeger"
+  },
+  {
+   "from": "order",
+   "role": "指标上报",
+   "to": "jaeger"
+  },
+  {
+   "from": "pay",
+   "role": "指标上报",
+   "to": "jaeger"
+  },
+  {
+   "from": "stock",
+   "role": "指标上报",
+   "to": "jaeger"
+  },
+  {
+   "from": "logistics",
+   "role": "指标上报",
+   "to": "jaeger"
+  },
+  {
+   "from": "risk",
+   "role": "指标上报",
+   "to": "jaeger"
+  },
+  {
+   "from": "coupon",
+   "role": "指标上报",
+   "to": "jaeger"
+  },
+  {
+   "from": "msg",
+   "role": "指标上报",
+   "to": "jaeger"
+  },
+  {
+   "from": "search",
+   "role": "指标上报",
+   "to": "jaeger"
+  }
+ ],
+ "groups": [
+  {
+   "id": "access",
+   "label": "接入层",
+   "ranks": [
+    [
+     "cdn",
+     "waf",
+     "api_gw",
+     "grpc_gw"
+    ]
+   ]
+  },
+  {
+   "id": "biz",
+   "label": "业务层",
+   "ranks": [
+    [
+     "user",
+     "auth",
+     "order",
+     "pay",
+     "stock",
+     "logistics",
+     "risk",
+     "coupon",
+     "msg",
+     "search"
+    ]
+   ]
+  },
+  {
+   "id": "data",
+   "label": "数据层",
+   "ranks": [
+    [
+     "mysql",
+     "redis",
+     "kafka",
+     "es",
+     "oss"
+    ]
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "id": "cdn",
+   "label": "CDN",
+   "role": "接入层"
+  },
+  {
+   "id": "waf",
+   "label": "WAF",
+   "role": "接入层"
+  },
+  {
+   "id": "api_gw",
+   "label": "API 网关",
+   "role": "接入层"
+  },
+  {
+   "id": "grpc_gw",
+   "label": "gRPC 网关",
+   "role": "接入层"
+  },
+  {
+   "id": "user",
+   "label": "用户",
+   "role": "业务服务"
+  },
+  {
+   "id": "auth",
+   "label": "鉴权",
+   "role": "业务服务"
+  },
+  {
+   "id": "order",
+   "label": "订单",
+   "role": "业务服务"
+  },
+  {
+   "id": "pay",
+   "label": "支付",
+   "role": "业务服务"
+  },
+  {
+   "id": "stock",
+   "label": "库存",
+   "role": "业务服务"
+  },
+  {
+   "id": "logistics",
+   "label": "物流",
+   "role": "业务服务"
+  },
+  {
+   "id": "risk",
+   "label": "风控",
+   "role": "业务服务"
+  },
+  {
+   "id": "coupon",
+   "label": "优惠券",
+   "role": "业务服务"
+  },
+  {
+   "id": "msg",
+   "label": "消息",
+   "role": "业务服务"
+  },
+  {
+   "id": "search",
+   "label": "搜索",
+   "role": "业务服务"
+  },
+  {
+   "id": "mysql",
+   "label": "MySQL 主从",
+   "role": "数据存储"
+  },
+  {
+   "id": "redis",
+   "label": "Redis 集群",
+   "role": "数据存储"
+  },
+  {
+   "id": "kafka",
+   "label": "Kafka",
+   "role": "数据存储"
+  },
+  {
+   "id": "es",
+   "label": "Elasticsearch",
+   "role": "数据存储"
+  },
+  {
+   "id": "oss",
+   "label": "对象存储",
+   "role": "数据存储"
+  },
+  {
+   "id": "prometheus",
+   "label": "Prometheus",
+   "role": "可观测",
+   "side": "right"
+  },
+  {
+   "id": "grafana",
+   "label": "Grafana",
+   "role": "可观测",
+   "side": "right"
+  },
+  {
+   "id": "jaeger",
+   "label": "Jaeger",
+   "role": "可观测",
+   "side": "right"
+  }
+ ],
+ "notes": [
+  "接入层组件（CDN/WAF/API 网关/gRPC 网关）将请求路由到业务层（图中以用户服务为代表入口，具体路由映射需求未给出）。",
+  "业务层 → 数据层为读写方向；业务层 → 可观测性为指标/追踪上报方向。"
+ ],
+ "title": "微服务全景架构图"
+}

@@ -1,0 +1,106 @@
+{
+  "task_id": "geometric_expectation",
+  "arm": "A1",
+  "final_expression": "1/p",
+  "final_expression_source": "main_result",
+  "main_result_statement": "几何分布 X~Geometric(p)（P(X=k)=(1-p)^(k-1)*p, k=1,2,...）的期望 E[X] = 1/p，适用域 0 < p <= 1",
+  "verdict": "derived",
+  "verification_evidence": [
+    {
+      "step": "S3",
+      "probe": "5741fbb582a5d8fb",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S4",
+      "probe": "49d43ab56bb7feb7",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S5",
+      "probe": "1920cd23099f27e7",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S9",
+      "probe": "59e56c989320cbea",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S10",
+      "probe": "7ec68a0619addc68",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S11",
+      "probe": "2702fe2bbf2b6a71",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S12",
+      "probe": "6e1e103c216a9d0e",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S13",
+      "probe": "a150aa212ba0b9d2",
+      "status": "verified",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 8,
+  "step_count": 14,
+  "assumptions": [
+    "A5: 有限和可逐项求导（有限项线性，无条件合法）",
+    "A1: p ∈ (0,1]：概率参数定义域（P(X=k)=(1-p)^{k-1}p 为合法 PMF 要求 p>0 且 p<=1；p=0 时 PMF 和为 0，非概率分布，X 无定义）",
+    "A2: q := 1-p ∈ [0,1)（A1 推论）",
+    "A3: |q| < 1（级数收敛条件；A1 下 |1-p|<1 恒成立，即 0<p<=1 ⊆ (0,2)）",
+    "A4: 1-q != 0 且 p != 0（除法良定义；A1 保证）",
+    "A6: 幂级数 Σ q^{k-1} 在 |q|<1（收敛半径内任意闭区间）一致收敛，可逐项求导"
+  ],
+  "unverified_steps": [
+    "S1",
+    "S2",
+    "S6",
+    "S7",
+    "S8",
+    "S14"
+  ],
+  "validity_domain": [
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A6"
+  ],
+  "credibility": {
+    "level": "derived",
+    "scope": "0 < p <= 1（A1）。p=0 不在适用域（X 无定义，级数发散）；p=1 退化包含在适用域内",
+    "verification_stats": {
+      "inconclusive": 1,
+      "numerically_supported": 3,
+      "verified": 9
+    },
+    "weakest_step": "S6：N·q^N→0 未在符号层面机械化（sympy 对符号 q 依赖 sign(log q)），靠标准论证+具体值核对"
+  },
+  "findings": [
+    "收敛条件的角色定位：错位相减（S3）对有限部分和是无条件代数恒等式，与收敛性无关；|q|<1 只在取极限（S6，尾巴 N·q^N→0）处起作用。这是『收敛条件在哪一步、为什么需要』的精确答案。",
+    "|1-p|<1 ⟺ 0<p<2；概率参数域 0<p<=1 ⊆ (0,2)，故收敛条件在定义域内恒成立，不是额外限制。p=0 是收敛边界（比值判别极限 1、通项 k 不趋于 0），恰为 X 无定义的退化点；p=1 退化 X≡1，E[X]=1=1/p 一致。",
+    "两条独立路线（错位相减 / 逐项求导）都得到 Σ k q^{k-1} = 1/(1-q)^2，互相印证主结果。",
+    "极限回归：p→1 时 limit(1/p,p,1)=1 与退化 X≡1 一致；p→0⁺ 时 limit(1/p,p,0,dir='+')=oo，期望发散是边界行为正确表现（check_step 符号 verified）。早期 limit_check 对 p→0⁺ 的 matches=false 是工具对 oo 的机械比较缺陷（sympy 直接比较 lim==oo 为 True），数学无矛盾。",
+    "数值复核（机械对照，非证据）：6 个 p 值（0.05/0.1/0.3/0.5/0.8/0.99）N=2000 的部分和与 1/p 全部精确吻合（尾项 < 1e-42 可忽略）。",
+    "最脆步骤：S6（N·q^N → 0），sympy 符号层不能直接判定（依赖 sign(log q)），依赖标准分析论证 + 具体值核对 —— 在 L1 rigor 下可接受，已在 credibility 中如实标注。"
+  ],
+  "frozen": true,
+  "turns": 50,
+  "tool_calls": 72,
+  "elapsed_s": 847.8,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787417751-0358de"
+}

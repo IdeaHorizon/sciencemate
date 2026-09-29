@@ -1,0 +1,122 @@
+[project]
+name = "research-platform"
+version = "0.1.0"
+description = "Agent-based Scientific Research Platform"
+requires-python = ">=3.12"
+dependencies = [
+    # Web framework
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "python-multipart>=0.0.9",
+    # Database —— 个人档只要 SQLite（aiosqlite）。Postgres 驱动在 [org] extra 里。
+    "sqlalchemy[asyncio]>=2.0.30",
+    "aiosqlite>=0.20.0",
+    "alembic>=1.13.0",
+    # Validation & serialization
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+    # Task queue
+    # LLM providers
+    "anthropic>=0.39.0",
+    "openai>=1.50.0",
+    # Object storage
+    # PDF parsing
+    "PyMuPDF>=1.24.0",
+    # Text matching
+    "pyahocorasick>=2.0.0",
+    # Utilities
+    "httpx>=0.27.0",
+    # JWT 与口令散列。`cryptography` / `bcrypt` 从前只是
+    # `python-jose[cryptography]` 与 `passlib[bcrypt]` 的传递依赖，可
+    # `app.services.model_backends`（Fernet）、`app.services.self_update`
+    # （Ed25519）、`app.auth`（bcrypt）都是**直接 import** 它们 —— 拆掉那两个
+    # 门面就必须把它们显式写出来，否则下一次解析有权把它们删掉，而报错会出现在
+    # 一个跟这次改动毫无关系的地方。passlib 本身全仓零 import（口令散列一直是
+    # 直接调 bcrypt），跟着一起走。
+    "pyjwt>=2.9.0",
+    "cryptography>=42.0.0",
+    "bcrypt>=4.1.0",
+    "tenacity>=8.3.0",
+    "PyYAML>=6.0.2",
+    "psutil>=5.9",
+    "asyncssh>=2.24.0",
+]
+
+[project.optional-dependencies]
+# 组织档（一台常驻服务器 + Postgres）才需要的东西。个人档装不上也跑得起来 ——
+# 这正是 `uv sync` 之后 `import asyncpg` 应该失败的意思。
+org = [
+    "asyncpg>=0.29.0",
+    # pgvector 不是任何模型的列类型（全仓零使用），但 alembic 的 007 迁移在模块
+    # 顶层 import 它 —— `ScriptDirectory.get_heads()` 会执行每个迁移模块，所以
+    # 凡是要跑 alembic 的地方就要有它。个人档不跑 alembic（schema 从模型直接建），
+    # 所以它不在基础依赖里。
+    "pgvector>=0.3.0",
+]
+dev = [
+    # 测试要覆盖组织档那条路，所以 dev 带上整个 org extra 的东西：
+    #   pgvector —— "库落后就拒绝启动"要读 alembic head，那会执行每个迁移模块；
+    #   asyncpg  —— test_failure_criteria_are_not_dead 扫"文案点名的异常类型是否
+    #               真的存在"，其中 UniqueViolationError 来自 asyncpg。看不见它，
+    #               这道闸就会把组织档真有的类型误报成幽灵。
+    # 个人档装的是基础依赖，这两个都没有 —— 那才是这次改动的意思。
+    "pgvector>=0.3.0",
+    "asyncpg>=0.29.0",
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-xdist>=3.6.0",
+    "pytest-cov>=5.0.0",
+    "httpx>=0.27.0",
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+]
+
+[project.scripts]
+# 一条命令。名字随品牌定（产品名还没拍板），入口不变。
+research-platform = "app.launcher:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+# 装机时随包分发的两样东西：界面的静态导出、harness 的源码树。它们由
+# `scripts/package/build_mac_app.py` 在打包前放进来，不进版本库（构建产物），
+# 而 hatchling 默认**跳过被 VCS 忽略的文件** —— 不在这里点名，打出来的 wheel
+# 就是空的一半：能起服务、没有界面、发消息永远不回复。
+artifacts = ["app/static_ui/**", "app/harness/**"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# A small set of backend integration tests exercises the real Harness-owned
+# literature catalog.  Keep that test-only seam importable when pytest is run
+# from platform/backend, as CI does; production code still loads Harness
+# through the configured repository boundary.
+pythonpath = ["../.."]
+# ── 挂住的时候要留下栈（#824）────────────────────────────────────────────
+#
+# `platform / backend` 在 CI 上间歇性**挂住**，本机同一 commit 全绿。workflow 已经
+# 套了 `timeout --signal=KILL` 并把 124/137 翻译成人话，所以「挂住」现在是可读的
+# 失败 —— 但现场只有一个退出码，**不知道卡在哪一行**，于是每次都只能重跑了事。
+#
+# `faulthandler_timeout` 让 pytest 在单条测试超过这个秒数时，把**所有线程的栈**
+# 打到 stderr 然后继续等。它不改变判定（不会因此判红），只保证挂住的那一次留下
+# 可读的现场。数值取 120：本机最慢的一条后端测试是个位数秒，CI 上整套 ~80 秒，
+# 120 秒还没动的只可能是真卡住了。
+#
+# ⚠️ 这条**不能**证明 #824 被修好了 —— 根因还没查。它保证的是下一次挂住时
+# 有东西可看，而不是又一次「说不清」。
+faulthandler_timeout = 120
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

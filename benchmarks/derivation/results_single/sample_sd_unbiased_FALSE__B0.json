@@ -1,0 +1,33 @@
+{
+  "task_id": "sample_sd_unbiased_FALSE",
+  "arm": "B0",
+  "model": "deepseek-v4-pro",
+  "final_expression": "sigma*sqrt(2/(n-1))*gamma(n/2)/gamma((n-1)/2)",
+  "verdict": "refuted",
+  "assumptions": [
+    "n >= 2, so the sample variance denominator n-1 is nonzero",
+    "X_1,...,X_n are iid",
+    "Var(X_i)=sigma^2 is finite, so first and second moments exist",
+    "S^2 is the sample variance with n-1 denominator",
+    "sqrt is concave on [0, infinity), so Jensen applies to S^2 >= 0",
+    "For the explicit counterexample, X_i ~ Normal(mu, sigma^2) with sigma > 0",
+    "Under normality, (n-1)S^2/sigma^2 follows a chi-square distribution with n-1 degrees of freedom",
+    "The chi-square variable is nondegenerate, giving strict Jensen inequality c_n < 1",
+    "The gamma integral converges for degrees of freedom n-1 > 0"
+  ],
+  "unverified_steps": [
+    "The Fisher-Cochran theorem for normal samples is invoked rather than derived",
+    "Jensen's inequality and its strict-equality condition are used as standard results",
+    "The gamma integral evaluation uses the standard Gamma-function integral, not re-proved here"
+  ],
+  "reasoning_summary": "样本方差 S^2 是无偏的，但平方根是严格凹函数，所以 E[S] <= sigma；正态反例给出 E[S]=sigma*c_n < sigma，其中 c_n 是小于 1 的校正因子。因此原命题 E[S]=sigma 被证伪。",
+  "raw_text": "裁决：命题 **不成立**（refuted）。样本标准差通常不是总体标准差 \\(\\sigma\\) 的无偏估计。\n\n---\n\n## 1. 先看 \\(S^2\\) 的无偏性\n\n设\n\n\\[\n\\bar X=\\frac1n\\sum_{i=1}^n X_i,\\qquad \nS^2=\\frac1{n-1}\\sum_{i=1}^n(X_i-\\bar X)^2.\n\\]\n\n这里需要假设 \\(n\\ge 2\\)，否则 \\(n-1=0\\) 不能作分母。\n\n记 \\(\\mu=E[X_i]\\)，\\(Var(X_i)=\\sigma^2\\)。利用\n\n\\[\n\\sum_{i=1}^n(X_i-\\bar X)^2\n=\n\\sum_{i=1}^n[(X_i-\\mu)-(\\bar X-\\mu)]^2\n=\n\\sum_{i=1}^n(X_i-\\mu)^2-n(\\bar X-\\mu)^2,\n\\]\n\n两边取期望：\n\n\\[\nE\\left[\\sum_{i=1}^n(X_i-\\bar X)^2\\right]\n=\nn\\sigma^2-nE[(\\bar X-\\mu)^2]\n=\nn\\sigma^2-n\\frac{\\sigma^2}{n}\n=\n(n-1)\\sigma^2.\n\\]\n\n这里用了独立性得到 \\(Var(\\bar X)=\\sigma^2/n\\)。因此\n\n\\[\nE[S^2]=\\sigma^2.\n\\]\n\n这一步只说明 **样本方差** \\(S^2\\) 对 \\(\\sigma^2\\) 无偏。\n\n---\n\n## 2. 用 Jensen 不等式看 \\(E[S]\\)\n\n\\(\\varphi(t)=\\sqrt t\\) 在 \\(t\\ge 0\\) 上是凹函数。于是\n\n\\[\nE[S]\n=\nE[\\varphi(S^2)]\n\\le\n\\varphi(E[S^2])\n=\n\\sqrt{\\sigma^2}\n=\n\\sigma.\n\\]\n\n所以从一般理论只能得到\n\n\\[\nE[S]\\le \\sigma,\n\\]\n\n而不是 \\(E[S]=\\sigma\\)。平方根不是线性变换，\\(S^2\\) 无偏不代表 \\(S=\\sqrt{S^2}\\) 无偏。\n\n---\n\n## 3. 正态反例：明确证伪\n\n取 \\(X_i\\sim N(\\mu,\\sigma^2)\\)，\\(\\sigma>0\\)。这是原假设下的一个特殊情形。\n\n由 Fisher-Cochran 定理：\n\n\\[\nY=\\frac{(n-1)S^2}{\\sigma^2}\\sim \\chi^2_{n-1}.\n\\]\n\n所以\n\n\\[\nS=\\sigma \\sqrt{\\frac{Y}{n-1}}.\n\\]\n\n令 \\(\\nu=n-1\\)。\\(\\chi^2_\\nu\\) 的密度为\n\n\\[\nf_Y(y)=\\frac{1}{2^{\\nu/2}\\Gamma(\\nu/2)}\ny^{\\nu/2-1}e^{-y/2},\\qquad y>0.\n\\]\n\n于是\n\n\\[\nE[\\sqrt{Y}]\n=\n\\int_0^\\infty y^{1/2}f_Y(y)\\,dy\n=\n\\frac{1}{2^{\\nu/2}\\Gamma(\\nu/2)}\n\\int_0^\\infty y^{(\\nu+1)/2-1}e^{-y/2}\\,dy.\n\\]\n\n利用 Gamma 积分\n\n\\[\n\\int_0^\\infty y^{\\alpha-1}e^{-y/2}\\,dy\n=\n2^\\alpha\\Gamma(\\alpha),\n\\]\n\n取 \\(\\alpha=(\\nu+1)/2\\)，得到\n\n\\[\nE[\\sqrt{Y}]\n=\n\\sqrt{2}\\,\n\\frac{\\Gamma((\\nu+1)/2)}{\\Gamma(\\nu/2)}.\n\\]\n\n代回 \\(\\nu=n-1\\)：\n\n\\[\nE[S]\n=\n\\sigma\n\\sqrt{\\frac{2}{n-1}}\n\\frac{\\Gamma\\left(\\frac n2\\right)}\n{\\Gamma\\left(\\frac{n-1}{2}\\right)}.\n\\]\n\n记\n\n\\[\nc_n=\n\\sqrt{\\frac{2}{n-1}}\n\\frac{\\Gamma\\left(\\frac n2\\right)}\n{\\Gamma\\left(\\frac{n-1}{2}\\right)}.\n\\]\n\n因为 \\(Y/(n-1)\\) 不是常数，且 \\(\\sqrt{\\cdot}\\) 严格凹，所以\n\n\\[\nc_n\n=\nE\\left[\\sqrt{\\frac{Y}{n-1}}\\right]\n<\n\\sqrt{E\\left[\\frac{Y}{n-1}\\right]}\n=\n1.\n\\]\n\n因此\n\n\\[\nE[S]=\\sigma c_n<\\sigma.\n\\]\n\n例如 \\(n=2\\) 时，\n\n\\[\nc_2=\\sqrt{\\frac{2}{1}}\n\\frac{\\Gamma(1)}{\\Gamma(1/2)}\n=\n\\sqrt{\\frac2\\pi}\n<1.\n\\]\n\n所以原命题 \\(E[S]=\\sigma\\) 不成立。\n\n---\n\n## 4. 结论\n\n正确结论是：\n\n- 一般 iid 情形下，只有 \\(E[S^2]=\\sigma^2\\)。\n- 对样本标准差 \\(S\\)，一般有 \\(E[S]\\le\\sigma\\)。\n- 在正态模型中，\n\n\\[\nE[S]\n=\n\\sigma\n\\sqrt{\\frac{2}{n-1}}\n\\frac{\\Gamma\\left(\\frac n2\\right)}\n{\\Gamma\\left(\\frac{n-1}{2}\\right)}\n<\\sigma.\n\\]\n\n样本标准差通常向下偏，不是 \\(\\sigma\\) 的无偏估计。\n\n```json\n{\n  \"final_expression\": \"sigma*sqrt(2/(n-1))*gamma(n/2)/gamma((n-1)/2)\",\n  \"verdict\": \"refuted\",\n  \"assumptions\": [\n    \"n >= 2, so the sample variance denominator n-1 is nonzero\",\n    \"X_1,...,X_n are iid\",\n    \"Var(X_i)=sigma^2 is finite, so first and second moments exist\",\n    \"S^2 is the sample variance with n-1 denominator\",\n    \"sqrt is concave on [0, infinity), so Jensen applies to S^2 >= 0\",\n    \"For the explicit counterexample, X_i ~ Normal(mu, sigma^2) with sigma > 0\",\n    \"Under normality, (n-1)S^2/sigma^2 follows a chi-square distribution with n-1 degrees of freedom\",\n    \"The chi-square variable is nondegenerate, giving strict Jensen inequality c_n < 1\",\n    \"The gamma integral converges for degrees of freedom n-1 > 0\"\n  ],\n  \"unverified_steps\": [\n    \"The Fisher-Cochran theorem for normal samples is invoked rather than derived\",\n    \"Jensen's inequality and its strict-equality condition are used as standard results\",\n    \"The gamma integral evaluation uses the standard Gamma-function integral, not re-proved here\"\n  ],\n  \"reasoning_summary\": \"样本方差 S^2 是无偏的，但平方根是严格凹函数，所以 E[S] <= sigma；正态反例给出 E[S]=sigma*c_n < sigma，其中 c_n 是小于 1 的校正因子。因此原命题 E[S]=sigma 被证伪。\"\n}\n```",
+  "thinking_chars": 72495,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 273.3,
+  "tokens": 23368,
+  "parse_ok": true,
+  "repeat_index": 1
+}

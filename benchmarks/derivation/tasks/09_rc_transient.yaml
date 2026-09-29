@@ -1,0 +1,44 @@
+id: rc_transient
+title: RC 电路充电暂态
+domain: engineering
+kind: normal
+
+prompt: |
+  RC 串联电路，t=0 接入直流电压 V_0（电容初始电压为 0）。
+  推导电容电压 V_C(t)，给出时间常数，并用量纲分析验证时间常数确实是时间量纲。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: rc_transient_prereg
+    content: |
+      ## Research Questions
+      
+      ### Q1: RC 电路的充电暂态响应是什么？
+      - output_kind: 一条命题的裁决
+      - proposition: V_C(t) = V_0 (1 - exp(-t/(R C)))，时间常数 tau = R C。
+      - 闭合条件:
+      ```yaml
+      - id: RESPONSE
+        statement: "给出 V_C(t) 的完整推导"
+      - id: DIMENSIONAL_SANITY
+        statement: "用 dimensional_check 验证 R*C 的量纲是时间"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  final_expression: "V_0*(1 - exp(-t/(R*C)))"
+  accepted_aliases:
+    V_0: [V0]
+  expected_verdict: derived
+  required_assumptions:
+    - id: initial_condition
+      why: "V_C(0)=0 是定积分常数的来源"
+      patterns: ["初始", "initial", "V_?C\\(0\\)", "t *= *0", "零初值", "未充电"]
+    - id: ideal_components
+      why: "理想电阻电容、无漏电"
+      patterns: ["理想", "ideal", "线性", "linear", "无漏", "常数.*R", "恒定"]

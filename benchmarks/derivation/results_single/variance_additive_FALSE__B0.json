@@ -1,0 +1,29 @@
+{
+  "task_id": "variance_additive_FALSE",
+  "arm": "B0",
+  "model": "deepseek-v4-pro",
+  "final_expression": "Var(X) + Var(Y) + 2*Cov(X, Y)",
+  "verdict": "refuted",
+  "assumptions": [
+    "X, Y 是同一概率空间上的实值随机变量",
+    "X, Y 具有有限二阶矩，即 E[X^2]<∞、E[Y^2]<∞，否则方差无定义",
+    "由有限二阶矩和 Cauchy-Schwarz 保证 E[XY] 有限",
+    "可使用期望的有限和线性性 E[aA+bB]=aE[A]+bE[B]",
+    "协方差使用定义 Cov(X,Y)=E[XY]-E[X]E[Y]",
+    "反例中取 Y=X 且 X~Bernoulli(1/2)，无分母、无级数收敛问题"
+  ],
+  "unverified_steps": [
+    "Cauchy-Schwarz 不等式用于保证 E|XY| 有限，仅引用标准结论，未重新机械证明",
+    "期望线性性的有限和情形作为标准定理引用，未从测度积分定义重新机械展开证明"
+  ],
+  "reasoning_summary": "按方差定义展开 Var(X+Y) 得到 Var(X)+Var(Y)+2Cov(X,Y)，所以原命题只在 Cov(X,Y)=0 时成立，对任意随机变量不成立。取 Y=X 的非退化 Bernoulli 反例得到 Var(X+Y)=1 而 Var(X)+Var(Y)=1/2，证伪原命题。",
+  "raw_text": "裁决：**命题不成立**。正确的一般公式是\n\n\\[\n\\operatorname{Var}(X+Y)\n=\n\\operatorname{Var}(X)+\\operatorname{Var}(Y)+2\\operatorname{Cov}(X,Y)\n\\]\n\n其中\n\n\\[\n\\operatorname{Cov}(X,Y)=\\mathbb E[(X-\\mathbb E X)(Y-\\mathbb E Y)]\n=\\mathbb E[XY]-\\mathbb E[X]\\mathbb E[Y].\n\\]\n\n---\n\n## 1. 推导一般公式\n\n假设 \\(X,Y\\) 都是实值随机变量，且方差存在，即 \\(\\mathbb E[X^2]<\\infty\\)、\\(\\mathbb E[Y^2]<\\infty\\)。\n\n令 \\(Z=X+Y\\)。由方差定义：\n\n\\[\n\\operatorname{Var}(Z)\n=\\mathbb E[(Z-\\mathbb E Z)^2]\n=\\mathbb E[Z^2]-(\\mathbb E Z)^2.\n\\]\n\n这一步依据方差的标准定义以及平方展开。\n\n于是\n\n\\[\n\\operatorname{Var}(X+Y)\n=\n\\mathbb E[(X+Y)^2]\n-\n(\\mathbb E[X+Y])^2.\n\\]\n\n展开平方：\n\n\\[\n(X+Y)^2 = X^2+2XY+Y^2.\n\\]\n\n依据实数代数，这一步没有任何概率限制。\n\n又因为期望对有限和具有线性性：\n\n\\[\n\\mathbb E[X^2+2XY+Y^2]\n=\n\\mathbb E[X^2]+2\\mathbb E[XY]+\\mathbb E[Y^2],\n\\]\n\n且\n\n\\[\n\\mathbb E[X+Y]=\\mathbb E[X]+\\mathbb E[Y].\n\\]\n\n这里需要 \\(\\mathbb E[XY]\\) 有限。由 \\(X,Y\\) 具有有限二阶矩，Cauchy–Schwarz 不等式保证\n\n\\[\n\\mathbb E|XY|\n\\le\n\\sqrt{\\mathbb E[X^2]\\mathbb E[Y^2]}\n<\\infty.\n\\]\n\n所以上述步骤在有限二阶矩假设下成立。\n\n继续展开：\n\n\\[\n(\\mathbb E[X]+\\mathbb E[Y])^2\n=\n(\\mathbb E[X])^2\n+2\\mathbb E[X]\\mathbb E[Y]\n+(\\mathbb E[Y])^2.\n\\]\n\n因此\n\n\\[\n\\begin{aligned}\n\\operatorname{Var}(X+Y)\n&=\n\\mathbb E[X^2]+2\\mathbb E[XY]+\\mathbb E[Y^2]\n-\n\\left((\\mathbb E[X])^2+2\\mathbb E[X]\\mathbb E[Y]+(\\mathbb E[Y])^2\\right)\n\\\\\n&=\n\\left(\\mathbb E[X^2]-(\\mathbb E[X])^2\\right)\n+\n\\left(\\mathbb E[Y^2]-(\\mathbb E[Y])^2\\right)\n+\n2\\left(\\mathbb E[XY]-\\mathbb E[X]\\mathbb E[Y]\\right)\n\\\\\n&=\n\\operatorname{Var}(X)\n+\n\\operatorname{Var}(Y)\n+\n2\\operatorname{Cov}(X,Y).\n\\end{aligned}\n\\]\n\n所以原命题要想成立，必须有\n\n\\[\n\\operatorname{Cov}(X,Y)=0.\n\\]\n\n例如 \\(X,Y\\) 独立时协方差为 0，等式成立；但“对任意两个随机变量”并不保证协方差为 0。\n\n---\n\n## 2. 反例证伪\n\n取\n\n\\[\nX\\sim \\operatorname{Bernoulli}(1/2),\n\\]\n\n即\n\n\\[\n\\mathbb P(X=0)=\\mathbb P(X=1)=\\frac12.\n\\]\n\n令\n\n\\[\nY=X.\n\\]\n\n这是一个合法的随机变量定义。\n\n计算：\n\n\\[\n\\mathbb E[X]=\\frac12,\n\\qquad\n\\mathbb E[X^2]=\\frac12,\n\\]\n\n所以\n\n\\[\n\\operatorname{Var}(X)\n=\n\\mathbb E[X^2]-(\\mathbb E[X])^2\n=\n\\frac12-\\left(\\frac12\\right)^2\n=\n\\frac14.\n\\]\n\n因为 \\(Y=X\\)，所以\n\n\\[\n\\operatorname{Var}(Y)=\\operatorname{Var}(X)=\\frac14.\n\\]\n\n于是\n\n\\[\n\\operatorname{Var}(X)+\\operatorname{Var}(Y)\n=\n\\frac14+\\frac14\n=\n\\frac12.\n\\]\n\n另一方面，\n\n\\[\nX+Y=2X,\n\\]\n\n所以\n\n\\[\n\\operatorname{Var}(X+Y)\n=\n\\operatorname{Var}(2X)\n=\n4\\operatorname{Var}(X)\n=\n4\\cdot \\frac14\n=\n1.\n\\]\n\n因此\n\n\\[\n\\operatorname{Var}(X+Y)=1\n\\neq\n\\frac12\n=\n\\operatorname{Var}(X)+\\operatorname{Var}(Y).\n\\]\n\n所以原命题被反例推翻。\n\n---\n\n## 3. 用到的假设\n\n- \\(X,Y\\) 是同一概率空间上的实值随机变量。\n- \\(X,Y\\) 具有有限二阶矩，即 \\(\\mathbb E[X^2]<\\infty\\)、\\(\\mathbb E[Y^2]<\\infty\\)，否则方差本身无定义。\n- 由有限二阶矩和 Cauchy–Schwarz 不等式保证 \\(\\mathbb E[XY]\\) 有限。\n- 期望的有限和线性性成立：\n  \\[\n  \\mathbb E[aA+bB]=a\\mathbb E[A]+b\\mathbb E[B].\n  \\]\n- 协方差使用标准定义：\n  \\[\n  \\operatorname{Cov}(X,Y)\n  =\n  \\mathbb E[XY]-\\mathbb E[X]\\mathbb E[Y].\n  \\]\n- 反例中没有涉及分母非零、级数收敛等额外条件。\n\n---\n\n## 4. 没有机械验证的步骤\n\n- Cauchy–Schwarz 不等式用于保证 \\(\\mathbb E|XY|\\) 有限，这里只引用标准结论，未重新机械证明。\n- 期望线性性的有限和情形作为标准定理引用，未从测度积分定义重新机械展开证明。\n\n---\n\n```json\n{\n  \"final_expression\": \"Var(X) + Var(Y) + 2*Cov(X, Y)\",\n  \"verdict\": \"refuted\",\n  \"assumptions\": [\n    \"X, Y 是同一概率空间上的实值随机变量\",\n    \"X, Y 具有有限二阶矩，即 E[X^2]<∞、E[Y^2]<∞，否则方差无定义\",\n    \"由有限二阶矩和 Cauchy-Schwarz 保证 E[XY] 有限\",\n    \"可使用期望的有限和线性性 E[aA+bB]=aE[A]+bE[B]\",\n    \"协方差使用定义 Cov(X,Y)=E[XY]-E[X]E[Y]\",\n    \"反例中取 Y=X 且 X~Bernoulli(1/2)，无分母、无级数收敛问题\"\n  ],\n  \"unverified_steps\": [\n    \"Cauchy-Schwarz 不等式用于保证 E|XY| 有限，仅引用标准结论，未重新机械证明\",\n    \"期望线性性的有限和情形作为标准定理引用，未从测度积分定义重新机械展开证明\"\n  ],\n  \"reasoning_summary\": \"按方差定义展开 Var(X+Y) 得到 Var(X)+Var(Y)+2Cov(X,Y)，所以原命题只在 Cov(X,Y)=0 时成立，对任意随机变量不成立。取 Y=X 的非退化 Bernoulli 反例得到 Var(X+Y)=1 而 Var(X)+Var(Y)=1/2，证伪原命题。\"\n}\n```",
+  "thinking_chars": 31964,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 137.4,
+  "tokens": 12507,
+  "parse_ok": true,
+  "repeat_index": 1
+}

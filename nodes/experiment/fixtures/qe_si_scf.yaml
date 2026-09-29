@@ -1,0 +1,70 @@
+# experiment 节点 fixture —— Quantum ESPRESSO Si DFT
+#
+# 运行：
+#   python run_node.py --harness experiment --sandbox --no-interactive \
+#     --fixture nodes/experiment/fixtures/qe_si_scf.yaml
+#
+# 设计原则（来自 node-iteration-guide.md）：
+#   - pre_registration 只描述"算什么"，不给具体路径/已验证信息
+#   - agent 应自己发现工具位置、赝势文件、FermiLink 覆盖
+#   - 测试诊断管线的核心价值：which → find → diagnose → FermiLink → fix → retry
+
+node_inputs:
+  experiment_focus: |
+    执行 prereg 指定的 Quantum ESPRESSO Si 体材料 DFT SCF 计算。
+    按 harness.yaml 4 阶段工作流自行完成，不要向人类求助。
+    如遇工具不可用、编译错误、输入错误等，自行诊断修复。
+
+upstream_artifacts:
+  - type: claim
+    name: H_QE_Si_SCF_converges
+    metadata:
+      claim_type: hypothesis
+      status: open
+      created_at: "2026-06-03T06:00:00+00:00"
+    content: |
+      Quantum ESPRESSO pw.x 能够正确计算体硅（diamond 结构）的基态电子结构，
+      SCF 收敛并给出合理的总能量（约 -15.8 ± 0.2 Ry，2-atom LDA cell）。
+
+  - type: pre_registration
+    name: QE_Si_DFT_SCF
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-03T06:00:00+00:00"
+      freeze_reason: "baseline DFT validation for experiment node"
+    content: |
+      ## Pre-Registration: QE Silicon DFT SCF
+
+      ### Hypothesis
+      Quantum ESPRESSO pw.x 能够正确计算体硅（diamond 结构）的基态电子结构，
+      SCF 收敛并给出合理的总能量。
+
+      ### Setup
+      - **Computational tool**: Quantum ESPRESSO pw.x (plane-wave self-consistent field)
+      - **Version**: 7.x (any stable release)
+      - **System**: Bulk silicon, diamond structure, 2 atoms per unit cell
+      - **Lattice constant**: 5.43 Å (celldm(1) = 10.2611 bohr)
+      - **Pseudopotential**: Si, LDA norm-conserving (e.g. Si.pz-vbc.UPF)
+      - **ecutwfc**: 20.0 Ry
+      - **ecutrho**: 80.0 Ry
+      - **k-points**: 4×4×4 Monkhorst-Pack
+      - **calculation**: scf (self-consistent field)
+      - **Parallelism**: single process (serial)
+      - **Expected wall time**: < 5 minutes
+
+      ### Falsification criteria
+      - metric: returncode
+      - op: ==
+      - threshold: 0
+      - If returncode != 0 OR output does not contain "JOB DONE" → hypothesis refuted
+
+      ### Expected output
+      - returncode = 0
+      - Output contains "JOB DONE"
+      - Total energy approximately -15.8 ± 0.2 Ry (for Si 2-atom cell with LDA)
+      - SCF convergence in < 20 iterations
+
+memory_entries:
+  - kind: directive
+    text: "本机为 Ubuntu 24.04 WSL2，已装 conda + gfortran + MPI。HPC 工具可能已安装在 ~/ 下某处，用 which / find 自行发现。赝势文件可能在 QE 源码树或 SSSP 下载目录中。如 QE 未安装则从源码编译。如遇工具特定问题，参考 harness.yaml 中的 FermiLink 查询流程。"
+    tags: [experiment, environment]

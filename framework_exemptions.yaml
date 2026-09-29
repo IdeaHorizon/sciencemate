@@ -1,0 +1,328 @@
+# Framework 豁免登记表（v3.1，2026-06 审计引入）
+#
+# 背景：运行时治理边界收紧后（工具同名注册 → 硬错误；hook 传入只读 response
+# 副本；custom agent_loop 须登记），main 上已存在的越权用法在此登记豁免，
+# 按 deadline 迁移。**只有 framework owner (wangd) 能改这份文件**
+# （pre-receive hook 与 .scope_map.yaml 同级保护）。
+#
+# 原则：
+#   - 豁免是过渡态，不是常态。每条必须有 owner / reason / deadline。
+#   - 到期未迁移：bootstrap 从 warn 升级为 error（strict 模式）。
+#   - 新增豁免走 issue + framework owner 批准，不接受先斩后奏。
+
+# ── 工具同名覆盖豁免 ────────────────────────────────────────────────────────
+# 注册表默认：同名注册 = 硬错误（曾经仅 log.debug 静默覆盖，造成跨节点破坏：
+# data 的 web_search(allowed=['data']) 遮蔽共享版 → experiment 的强制 SOP
+# 调不到工具）。下面登记的 (tool, module) 对在迁移期内降级为 WARN。
+tool_name_collisions:
+  - tool: web_search
+    owner_module: "nodes.data.tools.web_search"
+    owner: cuib
+    reason: "data 节点自带带 plan-gate 的 web_search；遮蔽了 shared/tools/web.py 的通用版，其它节点该工具消失"
+    migrate_to: "改名 data_web_search 或与 shared 版合并"
+    deadline: "2026-08-01"
+  - tool: run_bash
+    owner_module: "nodes.experiment.tools.safe_bash"
+    owner: lujy
+    reason: "experiment 的 safe_bash 以同名覆盖 builtin run_bash，替换了全部节点的 shell 语义"
+    migrate_to: "改名 safe_run_bash（experiment 白名单用新名），恢复 builtin run_bash 全局语义"
+    deadline: "2026-08-01"
+  - tool: execute_python
+    owner_module: "nodes.experiment.tools.safe_bash"
+    owner: lujy
+    reason: "同上，覆盖 shared/tools/library/python_exec.py"
+    migrate_to: "改名 safe_execute_python"
+    deadline: "2026-08-01"
+  - tool: write_file
+    owner_module: "nodes.experiment.tools.safe_bash"
+    owner: lujy
+    reason: "同上，safe_bash 连 builtin write_file 一起覆盖（bootstrap 实测发现）"
+    migrate_to: "改名 safe_write_file，恢复 builtin write_file 全局语义"
+    deadline: "2026-08-01"
+  - tool: request_human_input
+    owner_module: "nodes.experiment.tools.safe_bash"
+    owner: lujy
+    reason: "同上，safe_bash 覆盖 builtin request_human_input —— 全平台 HITL 语义被单节点替换（审计原话的实体）"
+    migrate_to: "移除该覆盖（HITL 是框架契约，节点不得改写）；需要定制问法走自己的工具名"
+    deadline: "2026-08-01"
+
+# ── hook 可变 response 豁免 ─────────────────────────────────────────────────
+# 默认：on_llm_response 收到 deepcopy 只读副本（observe-only 从注释变成机制）。
+# 登记的 node_type 在迁移期内仍收到可变原对象（保留现有行为）。
+hook_mutable_response:
+  - node_type: experiment
+    owner: lujy
+    reason: "nodes/experiment/hooks.py 依赖改写 LLM response / 伪造 tool_call（事实上的分布式 custom loop）"
+    migrate_to: "改走 custom agent_loop 正门（登记进下方 custom_agent_loops）或去掉响应改写"
+    deadline: "2026-08-01"
+
+# ── custom agent_loop 正门 ──────────────────────────────────────────────────
+# 政策落地（消除"框架说可以、CI 说不行"的制度矛盾）：节点 MAY ship
+# nodes/<x>/agent_loop.py，条件 = 在此登记（rationale + framework owner 批准）。
+# tests/test_custom_agent_loop.py 断言实际存在的 custom loop 集合 == 此列表。
+custom_agent_loops:
+  - node_type: data
+    owner: cuib
+    # ⚠️ 2026-08-31 变更：批准时的前提**已经不成立**，登记如实改写。
+    #
+    # 原文写的是「Wrapper 模式（import run_default 包装框架默认 loop，保留全部
+    # 框架保证）… 代码审查确认非重写型 loop —— 正门制的标准放行案例」。PR #715
+    # （codex/data-sync）把 `run_default` 整个删掉了：现在的 data_agent_loop.py
+    # 是一条确定性流水线 + 受约束的 LLM 子代理，不再回落到框架 loop。
+    #
+    # 正门制的判据是 rationale 为真，而这张表只有 test_custom_agent_loop.py 在
+    # 比对**节点名集合**，从来没人核对过 rationale —— 于是一份已经作废的批准
+    # 理由可以原样躺着。改判据代价太大（"是不是 wrapper" 不机械可判），所以
+    # 这里只做一件机械能做的事：把事实写对，并把重新批准的问题摆到 framework
+    # owner 面前。
+    rationale: >-
+      重写型 loop（2026-08-31 起）：确定性前处理流水线自己编排
+      requirement-analyst → designer → critic → approve → execute，LLM 只作为
+      受约束的子代理被直接调用，**不经过 core.agent_loop.run_loop**。
+      代价是明确的、已在代码里对齐：框架 loop 提供的装备（loop_hooks 触发、
+      模型工具面/轮循环、跨轮 scratchpad、定向层注入）在本节点上都不在场，
+      三道通用扫盘闸因此按 runs_the_framework_loop() 机械豁免它；
+      结构文件机械校验（issue #166）改由 run_loop 的 finally 显式兜底，
+      不再依赖 on_end hook。实现在 nodes/data/data_agent_loop.py，
+      agent_loop.py 仅为 discovery 入口。
+    approved_by: wangd
+    approved_at: "2026-07-02"
+    # 原批准针对 wrapper 模式；重写型形态待 framework owner 重新确认。
+    rewrite_since: "2026-08-31"
+    rewrite_reapproved_by: ""
+  - node_type: postprocess
+    owner: scientific-visualization
+    rationale: >-
+      Wrapper 模式：只依据可信的 node_inputs 为 routine 请求选择 3-tool fast、
+      4-tool design/capability allowlist，然后完整委托 core.agent_loop.run_loop；
+      复杂、多面板和显式 full 请求仍使用 harness 的完整工具面。默认 loop 的 transcript、hooks、压缩、
+      pause/resume、取消和 token 计数均保留。单节点可靠性 pilot 显示完整 20+
+      tool schema 使首轮 prompt 达 12.7k，并在完成后于 17.5k prompt 触发近空响应，
+      将约 38 秒的真实工作拖到约 8.5 分钟；该 wrapper 的影响仅限 postprocess
+      每次 run 的工具 allowlist。
+    approved_by: project-owner
+    approved_at: "2026-08-04"
+
+
+# ── 阻断检查 require 顶层聚合结果 ─────────────────────────────────────────
+# 规则（2026-08-19 引入，tests/test_advisory_is_not_reblocked_by_an_aggregate.py）：
+# **阻断**类 quality_check 不得把一份报告的顶层聚合字段（passed / ok / valid /
+# errors_count …）当作 require 项。聚合把该报告里 advisory 条目的结果一并算进来，
+# 等于把它们从后门变回完成门 —— 而降级和聚合两边都不报错。
+#
+# 实测：writing 的六条出版结构检查是 `advisory: true`（P-QC2「出版结构是 reviewer
+# 修订项，不是完成门」），但同 harness 里的阻断门 require 了
+# `writing_validation_report.passed`，而 `passed = not errors`、errors 有 140 个
+# append 点含出版格式类 —— 降级整个被抵消。writing 侧已按具体不变量点名重写。
+#
+# 下面登记的是**别人的节点**上同形状的存量，按 owner 红线不代改。
+blocking_check_aggregates:
+  - node: hypothesis
+    check: hypothesis_output_validation_passed
+    field: passed
+    owner: TBD（Analysis/hypothesis 节点 owner）
+    reason: "阻断门 require validation report 顶层 passed；该报告若含 advisory 级条目，它们会被这条门变成完成门"
+    migrate_to: "把 require_all_true 点名到具体不变量字段（参考 writing 的 manuscript_cites_kb_claims 改法）"
+    deadline: "2026-09-15"
+
+# ── 子进程调用点登记（2026-09-04，执行器分档 PR A）────────────────────────────
+# 判据（docs/RFC_EXECUTOR_TIERS_20260904.md §3.3）：模型能影响 argv 的子进程只能经
+# shared/lib/cancellable_subprocess.spawn_and_wait（唯一咽喉）进入操作系统。
+# tests/test_model_commands_reach_the_os_through_one_throat.py 扫盘：运行时 import 面
+# 上每一个 argv **非字面量**的 subprocess / os.system / os.exec* /
+# asyncio.create_subprocess_* 调用点都必须在此登记（按文件 + 所在函数名对账）。
+# 没登记的、登记了但已不存在的、同一文件里数目对不上的，都红。
+#
+# 登记不是放行，是分类。argv_source 四档：
+#   throat        —— 咽喉本身（只允许 shared/lib/cancellable_subprocess.py）
+#   framework     —— argv 完全由框架拼：git plumbing、docker CLI、探针、起 harness 子进程
+#   model_paths   —— 固定程序 + 模型给的路径/参数（pdftotext、gmsh、bash -n）。宿主上的
+#                    二进制读模型指的文件；路径须在 run 根内，由各 owner 负责校验
+#   model_command —— 模型自己拼的命令或模型写的代码在宿主上被执行。必须带
+#                    owner / migrate_to / deadline，到期即红
+#
+# 重新生成登记表骨架：
+#   python tests/test_model_commands_reach_the_os_through_one_throat.py
+subprocess_call_sites:
+  - file: shared/lib/cancellable_subprocess.py
+    sites: [spawn_and_wait, spawn_and_wait]
+    argv_source: throat
+    reason: "唯一咽喉：exec 与 shell 两条 create_subprocess 分支，argv 来自后端交回的 Launch"
+  - file: shared/lib/platform_env.py
+    sites: [ensure_utf8_mode]
+    argv_source: framework
+    reason: "os.execv 原样重跑本进程（sys.orig_argv）带上 PYTHONUTF8=1 进 UTF-8 模式——不是起新命令、不进操作系统起子进程，是同 pid 换镜像；argv 就是本次启动自己的 argv"
+
+  # ── core/isolation（执行器后端自己的探针与启动器）──
+  - file: core/isolation/_native.py
+    sites: [enclosing_git_paths, run_ok]
+    argv_source: framework
+    reason: "run_ok：原生后端的行为探针（sandbox-exec / bwrap / landlock / systemd-run 真跑一次）；enclosing_git_paths：GIT_UNWRITABLE 的结构判据，对每个可写根起一次只读的 git rev-parse 问 gitdir 在哪（#797 WP-01）。argv 全是框架拼的"
+  - file: core/sandbox.py
+    sites: [_visible_gpus]
+    argv_source: framework
+    reason: "gpu_capability 的可见性那一轴：nvidia-smi --query-gpu=uuid,name 只读枚举，argv 全由框架拼、无模型输入。可见 ≠ 可调度 ≠ 受管可执行，这里只答第一轴（#893 阶段 0）"
+  - file: core/isolation/linux.py
+    sites: [_probe_landlock, _probe_landlock, _probe_landlock]
+    argv_source: framework
+    reason: "三次都在探针里：问内核 Landlock ABI（起 _landlock_exec.py abi）；ABI ≥ 4 时再起两次同一条 connect 探针做对照——--network allow 必须连得上、deny 必须 EACCES，只测 deny 会把监听器没起来当成被拒（#797 WP-01）"
+  - file: core/isolation/_landlock_exec.py
+    sites: [main]
+    argv_source: framework
+    reason: "Landlock 启动器在墙内 os.execvp 目标命令；argv 由 linux 后端拼、经咽喉起，本文件本身就是墙的一部分"
+  - file: core/isolation/_exec.py
+    sites: [exec_or_report]
+    argv_source: framework
+    reason: "exec 垫片：bwrap / seatbelt 链的最内层在墙内 os.execvp 载荷，exec 不成按约定说一句 HARNESS_ISOLATION_ERROR exec_failed 让咽喉报 spawn_failed（缺工具链 ≠ 稿子有错）；argv 由后端拼、经咽喉起，本文件是墙的一部分"
+  - file: core/isolation/win32.py
+    sites: [_probe]
+    argv_source: framework
+    reason: "问 win32 后端能力（起 _win32_exec.py probe，真降令牌/打标签/装 job 各一次），argv 全是框架拼的"
+  - file: core/isolation/_win32_exec.py
+    sites: [_icacls]
+    argv_source: framework
+    reason: "win32 启动器给可写根 / .git 打强制完整性标签（icacls /setintegritylevel），argv 是 win32 后端拼的路径；载荷本身走 CreateProcessAsUser（ctypes，不经 subprocess），本文件是墙的一部分"
+  - file: core/isolation/_native_job.py
+    sites: [_run]
+    argv_source: framework
+    reason: "原生 detached 作业的监护进程：Popen 的 argv 来自 core.sandbox.prepare_launch 写好的 launch.json（已经是原生后端包过的命令），替代 Docker Job 容器"
+  - file: shared/lib/process_control.py
+    sites: [daemonize]
+    argv_source: framework
+    reason: "Windows 上「脱开这一轮」没有 fork，只能重起一份**自己**：argv 是 sys.orig_argv（镜像取 sys.executable），不含任何模型输入；带 DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP，**不带** CREATE_BREAKAWAY_FROM_JOB（壳的 Job 是「关掉应用＝全部收摊」的边界，#908/#835）。POSIX 那边是双 fork，不经 subprocess"
+
+  # ── core ──
+  - file: core/capabilities.py
+    sites: [_run]
+    argv_source: framework
+    reason: "部署能力探针（sinfo 等），argv 出自 grant 配置的 probe_cmd"
+  - file: core/materials.py
+    sites: [_git_common_dir]
+    argv_source: framework
+    reason: "git rev-parse --git-common-dir，路径来自 state"
+  - file: core/mcp_client.py
+    sites: [start]
+    argv_source: framework
+    reason: "MCP server 命令来自 mcp_servers.yaml（部署配置），不是模型；服务本身在宿主上跑，模型只发工具调用"
+  - file: core/project_bootstrap.py
+    sites: [_git, open_session_worktree]
+    argv_source: framework
+    reason: "项目仓库 git plumbing（worktree add / rev-parse）"
+  - file: core/project_workspace.py
+    sites: [_git, _git_status]
+    argv_source: framework
+    reason: "工作区 git 状态查询"
+  - file: core/ledger.py
+    sites: [_git_content, _git_content]
+    argv_source: framework
+    reason: "版本历史归 git：按账本里那一版的 sha256 在这条路径的历史里找同哈希 blob（git log --format=%H -- path；git show <commit>:<path>），argv 全是框架拼的"
+
+  # ── platform/backend ──
+  - file: platform/backend/app/main.py
+    sites: [_record_what_this_machine_enforces]
+    argv_source: framework
+    reason: "启动探针起 harness 解释器问这台机器守得住什么；它只记账，不决定服务起不起得来"
+  - file: platform/backend/app/services/compute_inventory.py
+    sites: [_gpu_inventory]
+    argv_source: framework
+    reason: "nvidia-smi 只读查询，argv 固定，可执行文件路径来自 which"
+  - file: platform/backend/app/services/feed/bridge.py
+    sites: [call]
+    argv_source: framework
+    reason: "起 harness 解释器跑资讯流桥"
+  - file: platform/backend/app/services/credential_key.py
+    sites: [_ask_the_keychain]
+    argv_source: framework
+    reason: >-
+      读写 macOS 钥匙串里那把加密凭据的主密钥。argv 全是框架自己的固定字面量
+      （service / account 名是模块常量），模型碰不到其中任何一项；密钥本身经
+      argv 传给 `security` 是它唯一的写入接口。不走 spawn_and_wait 是因为这条
+      发生在**沙箱之外**：它是平台自己的密钥管理，不是模型命令。
+  - file: platform/backend/app/services/harness_bridge_once.py
+    sites: [ask_once]
+    argv_source: framework
+    reason: >
+      「问桥一个问题、拿一个答案」的唯一实现。原先 harness_kb._ask 与
+      session_naming._ask_harness_for_title 各手抄了一遍，两份抄件都把子进程的
+      stderr 收了又扔掉 —— 于是 Windows 上 autoname 失败只留下一个光秃秃的
+      `runtime_error`。收成一处后，那两个调用点从这份名单里消失是**预期**的。
+  - file: platform/backend/app/services/harness_sessions.py
+    sites: [_popen_with_pipes_this_loop_can_read, _popen_with_pipes_this_loop_can_read,
+            _probe, probe_runtime_environment]
+    argv_source: framework
+    reason: >
+      会话 worker 生命周期：spawn（孩子归操作系统不归事件循环）/ 运行环境探针 /
+      读 ps 命令行判活。spawn 那处两条：管道的形状分平台回答，Windows 走
+      `asyncio.windows_utils.Popen`（overlapped 管道，proactor 才接得上），
+      POSIX 走 `subprocess.Popen`；两条都在同一个函数里，所以它在名单上出现两次。
+  - file: platform/backend/app/services/project_repository.py
+    sites: [_git, _git_blob_bytes, _git_env, _git_exit_code]
+    argv_source: framework
+    reason: "项目仓库 git plumbing"
+  - file: platform/backend/app/services/self_update.py
+    sites: [why_the_payload_cannot_start]
+    argv_source: framework
+    reason: "切换载荷前的起动探针：用本解释器 import 一次载荷里的 app.launcher / app.main。argv 全由框架拼（sys.executable -I -c + 载荷目录），模型碰不到；必须是子进程，因为失败之后要原样继续跑旧版"
+
+  # ── nodes/data（owner cuib）──
+  - file: nodes/data/tools/atomic_structure_recovery.py
+    sites: [_read_reference_document]
+    argv_source: model_paths
+    owner: cuib
+    reason: "pdftotext 读模型指定的参考文献 PDF"
+  - file: nodes/data/tools/mesh_generator.py
+    sites: [_import_fluent_reference_mesh, generate_airfoil_gmsh_mesh, generate_airfoil_gmsh_mesh, generate_coordinate_profile_cascade_gmsh_mesh, generate_coordinate_profile_cascade_gmsh_mesh, generate_cylinder_gmsh_mesh, generate_cylinder_gmsh_mesh, generate_geometry_file_gmsh_mesh, generate_geometry_file_gmsh_mesh, generate_geometry_file_gmsh_mesh, run_openfoam_check_mesh]
+    argv_source: model_paths
+    owner: cuib
+    reason: "gmsh / openfoam checkMesh 在宿主上跑，case 目录与几何文件来自工具参数；这是现存最大的一片宿主执行面，PR B 起原生后端可用后应改走 spawn_and_wait"
+  - file: nodes/data/tools/preprocessing_capabilities.py
+    sites: [_validate_generated_artifact_format]
+    argv_source: model_paths
+    owner: cuib
+    reason: "bash -n 语法检查模型生成的脚本（只解析不执行）"
+
+  # ── nodes/experiment（owner lujy）──
+  - file: nodes/experiment/tools/build_graph.py
+    sites: [_run]
+    argv_source: framework
+    reason: "argv 是 prepare_launch 兼容垫片交回的原生后端命令（已在墙内），但自己 subprocess.run 绕开了咽喉"
+  - file: nodes/experiment/tools/build_resource_guard.py
+    sites: [_payload_with_cgroup_events, cgroup_unit_snapshot, kill_guarded_tree, supervise_local_build]
+    argv_source: framework
+    reason: "wrap_with_cgroup 把模型构建命令包成本文件的 guard 进程后经 safe_run_bash → spawn_and_wait 进墙；Popen 的两处是 guard 作为 payload 在墙内起自己的 argv[1:]；另两处是 systemctl 探针"
+  - file: nodes/experiment/tools/repro_snapshot.py
+    sites: [_run]
+    argv_source: framework
+    reason: "shell=True 但命令全是本文件 f-string 拼的 git 查询，路径经 shlex.quote"
+  - file: nodes/experiment/tools/resource_fetch.py
+    sites: [_git_head]
+    argv_source: framework
+    reason: "宿主侧核对取回仓库的 HEAD"
+  - file: nodes/experiment/tools/resource_manager.py
+    sites: [_run]
+    argv_source: framework
+    reason: "sinfo/squeue/sbatch 调度器探针；真实提交对非 local 调度器仍硬拒（PR D 换 slurm 后端时重分类）"
+  - file: nodes/experiment/tools/resume_run.py
+    sites: [main]
+    argv_source: framework
+    reason: "人手跑的续跑 CLI（__main__），起 run_node.py"
+  - file: nodes/experiment/tools/safe_bash.py
+    sites: [_git_text, _sandbox_probe]
+    argv_source: framework
+    reason: "git 只读查询；_sandbox_probe 跑的是 prepare_attempt_command 兼容垫片交回的原生后端命令（已在墙内，绕开咽喉）"
+  - file: nodes/experiment/tools/source_recon.py
+    sites: [g]
+    argv_source: framework
+    reason: "git 只读查询"
+
+  # ── nodes/writing（owner qinp）──
+  - file: nodes/writing/tools/w_render.py
+    sites: [_convert_svg, _pdf_pages, hard_lines, hard_lines, hard_lines, hard_lines]
+    argv_source: framework
+    owner: qinp
+    reason: "渲染器：rsvg-convert 把卷宗里的 svg 转 pdf；pdftotext/pdfinfo 读本 run 编译出的 PDF 与暂存的图 PDF 做硬线（argv 全由框架拼，路径来自工作区）"
+  - file: nodes/writing/tools/w_common.py
+    sites: [figure_text_sample]
+    argv_source: framework
+    owner: qinp
+    reason: "没有图表服务记录的示意图：pdftotext 抽图内文字给审读官与起草器当证据"

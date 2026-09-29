@@ -1,0 +1,135 @@
+# experiment 节点 fixture —— CESM2 B1850 完整编译+运行测试
+#
+# 目标：验证 experiment 节点能否在无人工干预的情况下，从 create_newcase 开始
+# 完整编译并运行 CESM2 F1850 5天模拟。
+#
+# 运行：
+#   cd ~/2026-ai4s-platform-project/node4-experiment/harness-framework
+#   python run_node.py --harness experiment --sandbox --no-interactive \
+#     --fixture nodes/experiment/fixtures/cesm2_b1850_fresh.yaml
+#
+# 已知可用资源（勿重复下载）：
+#   - 源码：/home/lujy/cesm2_clean（已 checkout externals）
+#   - 输入数据：/home/lujy/cesm_inputdata
+#   - FermiLink 覆盖 CESM2（fermilink_packages.txt 含 cesm2.2）
+
+node_inputs:
+  experiment_focus: |
+    执行 prereg 指定的 CESM2 F1850 CPU 气候模拟。
+
+    **任务概述**：
+    - 源码位于 /home/lujy/cesm2_clean（externals 已 checkout，勿重复运行 manage_externals）
+    - 输入数据位于 /home/lujy/cesm_inputdata（DIN_LOC_ROOT）
+    - 从 create_newcase 创建全新 case（名称 agent_f1850_test，路径 ~/cesm_runs/cases/agent_f1850_test）
+    - 完整走 CIME 4 阶段：create_newcase → case.setup → case.build → case.run
+    - 目标：5 天模拟成功完成，无 rsl.error FATAL
+
+    **诊断顺序（harness.yaml 强制）**：
+    ① 官方 CIME 文档（https://esmci.github.io/cime/versions/master/html/）
+    ② grep fermilink_packages.txt → 查 FermiLink GitHub API（CESM2 在列表中）
+    ③ 五层诊断模型自行解决
+
+    **关键配置（上次成功实验验证过，优先直接应用）**：
+    - compset: F1850，res: f19_f19_mg17，machine: ubuntu-wsl，compiler: gnu
+    - user_nl_cam 必须加：micro_mg_version = 2
+    - SourceMods/src.cam/micro_mg3_0.F90 需从旧 case 复制（路径见下）
+    - case.setup 后检查 Macros.make 是否有 gfortran 版本相关问题
+
+upstream_artifacts:
+  - type: claim
+    name: H_CESM2_F1850_builds_and_runs
+    metadata:
+      claim_type: hypothesis
+      status: open
+      created_at: "2026-06-08T00:00:00+00:00"
+    content: |
+      CESM2 F1850 compset 能在本机从 create_newcase 开始完整编译并成功运行
+      5 天气候模拟，CaseStatus 最终含 "model execution success"，
+      archive 目录产出 CAM history 文件（*.h0.*.nc）。
+
+  - type: pre_registration
+    name: CESM2_B1850_Fresh_Build_Test
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-08T00:00:00+00:00"
+      freeze_reason: "CESM2 F1850 自主编译运行测试 - 验证 experiment 节点独立能力"
+    content: |
+      ## Pre-Registration: CESM2 F1850 Autonomous Build & Run Test
+
+      ### Hypothesis
+      experiment 节点可以在无人工干预的情况下，利用官方 CIME 文档和
+      FermiLink 知识库，从 create_newcase 开始完整编译 CESM2 F1850 并成功运行 5 天
+      气候模拟，产出 CAM/CLM history 文件。
+
+      ### Setup
+      - **Model**: CESM2.2（/home/lujy/cesm2_clean）
+      - **Compset**: F1850（1850_CAM60_CLM50%SP_CICE%PRES_DOCN%DOM_MOSART_CISM2%NOEVOLVE_SWAV_SIAC_SESP）
+      - **Grid**: f19_f19_mg17（1.9×2.5°）
+      - **Machine**: ubuntu-wsl，Compiler: gnu (gfortran)
+      - **Case dir**: ~/cesm_runs/cases/agent_f1850_test
+      - **Input data**: /home/lujy/cesm_inputdata（DIN_LOC_ROOT，已存在）
+      - **Simulation length**: 5 model days (STOP_OPTION=ndays, STOP_N=5)
+
+      ### Success Criteria
+      - case.build 成功（无编译错误）
+      - model execution success（CaseStatus 最终行含 "model execution success"）
+      - rsl.out.0000 不含 FATAL 关键词
+      - ~/cesm_runs/archive/agent_f1850_test/atm/hist/ 下存在 *.h0.*.nc 文件
+
+      ### Falsification criteria
+      - metric: returncode from case.run / case.submit
+      - op: ==
+      - threshold: 0
+      - If build fails OR runtime FATAL OR no history files → hypothesis refuted
+
+      ### Known fixes to pre-apply (from 2026-06-02 successful run)
+      1. user_nl_cam: `micro_mg_version = 2`
+      2. SourceMods/src.cam/micro_mg3_0.F90: copy from
+         /home/lujy/cesm_runs/cases/test_f1850_f19/SourceMods/src.cam/micro_mg3_0.F90
+      3. If Macros.make has gfortran version issue: patch FFLAGS
+
+      ### Notes
+      - CESM2 IS in FermiLink knowledge base — use it for unknown errors
+      - DO NOT re-run manage_externals (externals already checked out in cesm2_clean)
+      - DO NOT use --run-unsupported flag unless create_newcase requires it
+      - If case already exists at agent_f1850_test path, clean with ./case.setup --reset or delete dir
+
+memory_entries:
+  - kind: directive
+    text: |
+      CESM2 环境信息（本机已验证，2026-06-02）：
+      - 源码：/home/lujy/cesm2_clean（externals 已 checkout，包含 CAM/CLM/CISM/CICE 等）
+      - 输入数据：/home/lujy/cesm_inputdata（DIN_LOC_ROOT）
+      - Machine config：/home/lujy/cesm2_clean/cime/config/cesm/machines/
+        （ubuntu-wsl 机器定义，gfortran 13，mpirun 并行）
+      - conda 环境 cesm 含所有依赖（netcdf4, lapack, mpi 等）
+      - 上次成功 case 路径：/home/lujy/cesm_runs/cases/test_f1850_f19
+      - 上次成功 SourceMods：/home/lujy/cesm_runs/cases/test_f1850_f19/SourceMods/src.cam/
+    tags: [cesm2, environment, verified]
+
+  - kind: directive
+    text: |
+      CESM2 F1850 已知必须修复（来自 2026-06-02 人工调试，优先应用不要等失败）：
+      1. user_nl_cam 必须加 micro_mg_version = 2
+         原因：CAM6 默认用 micro_mg_version=3，但本机 CISM2 组件存在 module 冲突；
+         version=2 绕过 micro_mg_data 模块依赖。
+      2. SourceMods/src.cam/micro_mg3_0.F90 需要补丁版
+         直接 cp /home/lujy/cesm_runs/cases/test_f1850_f19/SourceMods/src.cam/micro_mg3_0.F90
+            ~/cesm_runs/cases/agent_f1850_test/SourceMods/src.cam/
+      3. case.build 前确认 Macros.make FFLAGS 不含 -fallow-argument-mismatch 以外的
+         破坏性 flag（gfortran 13 下 -fsyntax-only 不应出现在 link 步骤）
+    tags: [cesm2, known-fixes, must-apply]
+
+  - kind: decision
+    text: |
+      不重新运行 manage_externals：cesm2_clean 的 externals 在 2026-06-02 已经 checkout 完毕，
+      重跑会浪费时间并可能因网络代理超时失败。直接用 cesm2_clean 作为 CIMEROOT。
+    tags: [cesm2, build, efficiency]
+
+  - kind: directive
+    text: |
+      experiment_log 的 save_artifact content 字段必须包含独立的
+      "## Verdict" 段落，写明：verdict 结论（validated / refuted / inconclusive）、
+      依据（CaseStatus 末行、history 文件是否存在）、对应 claim_id。
+      流程：freeze_artifact → 将测量、阈值比较和 replay evidence 交给 Analysis
+    tags: [verdict, compliance]

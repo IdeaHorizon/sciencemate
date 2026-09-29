@@ -1,0 +1,238 @@
+/**
+ * Project list + project shell styles.
+ */
+
+.projects-page { width: min(920px, calc(100% - 56px)); margin: 0 auto; padding: clamp(44px, 8vh, 82px) 0 80px; }
+.projects-page .page-header { align-items: flex-end; margin-bottom: 32px; }
+.projects-page .page-title { font-size: 25px; font-weight: 560; letter-spacing: -.025em; }
+.projects-page .page-subtitle { max-width: 650px; font-size: var(--font-size-control); line-height: 1.55; }
+.project-list { border-top: 1px solid var(--color-border); }
+.project-list-loading { display: grid; gap: 4px; border-top: 0; }
+.project-list-row { display: grid; grid-template-columns: 7px minmax(210px, 1.5fr) minmax(140px, .75fr) minmax(140px, .75fr) 15px; align-items: center; gap: 13px; min-height: 70px; padding: 8px 6px; color: var(--color-fg-muted); border-bottom: 1px solid var(--color-border); text-decoration: none; }
+.project-list-row:hover { color: var(--color-fg); background: var(--color-bg-elevated); }
+.project-list-row > i { width: 6px; height: 6px; border-radius: 50%; background: var(--color-success); }
+.project-list-row > i.project-status-archived { background: var(--color-fg-subtle); }
+.project-list-main, .project-list-context { display: grid; min-width: 0; gap: 4px; }
+.project-list-row strong, .project-list-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-list-main strong { color: var(--color-fg); font-size: var(--font-size-control); font-weight: 560; }
+.project-list-main small, .project-list-context small { color: var(--color-fg-subtle); font-size: var(--font-size-meta); }
+.project-list-context strong { color: var(--color-fg-muted); font-size: var(--font-size-meta); font-weight: 540; }
+.project-list-activity { text-align: right; }
+.project-create-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(2, 8, 14, .54);
+  backdrop-filter: blur(3px);
+}
+.project-create-panel {
+  width: min(540px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow: auto;
+  color: var(--color-fg);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg);
+  box-shadow: var(--shadow-lg);
+}
+.project-create-panel > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 15px;
+  padding: 22px 23px 18px;
+  border-bottom: 1px solid var(--color-border);
+}
+.project-create-panel header span { color: var(--color-fg-subtle); font-size: var(--font-size-meta); font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
+.project-create-panel h2 { margin: 5px 0 5px; font-size: 19px; font-weight: 560; letter-spacing: -.02em; }
+.project-create-panel header p { margin: 0; color: var(--color-fg-muted); font-size: var(--font-size-label); }
+.project-create-panel header button { padding: 4px; color: var(--color-fg-muted); border: 0; background: transparent; }
+.project-create-form { display: grid; gap: 15px; padding: 21px 23px 23px; }
+.project-create-form label { display: grid; gap: 7px; }
+.project-create-form label > span { color: var(--color-fg-muted); font-size: var(--font-size-label); font-weight: 550; }
+.project-create-form textarea { resize: vertical; line-height: 1.45; }
+.project-create-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
+.project-create-advanced { border-top: 1px solid var(--color-border); }
+.project-create-advanced > summary { padding: 11px 0 3px; color: var(--color-fg-muted); font-size: var(--font-size-meta); list-style: none; cursor: pointer; }
+.project-create-advanced > summary::-webkit-details-marker { display: none; }
+.project-create-advanced[open] > summary { margin-bottom: 10px; }
+.project-create-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 3px; }
+@media (max-width: 820px) { .project-list-row { grid-template-columns: 7px minmax(180px, 1.4fr) minmax(135px, .8fr) 15px; } .project-list-activity { display: none; } }
+@media (max-width: 600px) { .projects-page { width: calc(100% - 28px); padding-top: 34px; } .projects-page .page-subtitle { display: none; } .project-list-row { grid-template-columns: 7px minmax(0, 1fr) 15px; } .project-list-context { display: none; } .project-list-main small { white-space: normal; } .project-create-grid { grid-template-columns: 1fr; } }
+
+.activity-loading { display: grid; gap: 7px; padding-top: 8px; }
+.project-run-list { border-top: 1px solid var(--color-border); }
+.project-run-row { display: grid; grid-template-columns: 8px minmax(130px, 1.15fr) minmax(95px, .7fr) minmax(180px, 1.35fr) 70px 14px; align-items: center; gap: 11px; min-height: 64px; padding: 7px 3px; color: var(--color-fg-muted); border-bottom: 1px solid var(--color-border); text-decoration: none; }
+.project-run-row:hover { color: var(--color-fg); background: var(--color-bg-elevated); }
+.project-run-row > i { width: 6px; height: 6px; border-radius: 50%; background: var(--color-fg-subtle); }
+.project-run-row > i.run-status-running, .project-run-row > i.run-status-dispatching, .project-run-row > i.run-status-retrying { background: var(--color-accent); }
+.project-run-row > i.run-status-completed { background: var(--color-success); }
+.project-run-row > i.run-status-completed_with_warning, .project-run-row > i.run-status-waiting_human, .project-run-row > i.run-status-waiting_permission, .project-run-row > i.run-status-waiting_compute { background: var(--color-warning); }
+.project-run-row > i.run-status-failed, .project-run-row > i.run-status-stale_unknown { background: var(--color-danger); }
+.project-run-name, .project-run-state, .project-run-usage { display: grid; min-width: 0; gap: 4px; }
+.project-run-row strong, .project-run-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-run-row strong { color: var(--color-fg); font-size: var(--font-size-label); font-weight: 550; }
+.project-run-row small, .project-run-row time { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.project-run-row time { text-align: right; }
+@media (max-width: 850px) { .project-run-row { grid-template-columns: 8px minmax(120px, 1fr) minmax(90px, .7fr) 62px 14px; } .project-run-usage { display: none; } }
+@media (max-width: 560px) { .project-run-row { grid-template-columns: 8px minmax(0, 1fr) 60px 14px; } .project-run-state { display: none; } }
+
+/* Project shell */
+.project-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.project-shell-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-height: 48px;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
+}
+.project-shell-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.project-shell-title h1 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--color-fg);
+}
+.project-shell-title span {
+  padding-left: 12px;
+  border-left: 1px solid var(--color-border);
+  color: var(--color-fg-muted);
+  font-size: var(--font-size-control);
+}
+
+.project-shell-context {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  color: var(--color-fg-muted);
+  font-size: var(--font-size-label);
+}
+
+.project-shell-context > span,
+.project-shell-context > a,
+.project-shell-context > button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.project-shell-context > a {
+  padding: 5px 8px;
+  color: var(--color-fg);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  text-decoration: none;
+}
+
+.project-shell-context > button {
+  padding: 5px;
+  color: var(--color-fg-muted);
+  border: 0;
+  background: transparent;
+}
+
+.project-shell-running i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+
+.project-shell-tabs {
+  display: none;
+  gap: 4px;
+  padding: 0 var(--space-6);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg);
+}
+.project-shell-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3);
+  font-size: 13px;
+  color: var(--color-fg-muted);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+.project-shell-tab:hover { color: var(--color-fg); }
+.project-shell-tab-active {
+  color: var(--color-fg);
+  border-bottom-color: var(--color-accent);
+  font-weight: 500;
+}
+.project-shell-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+@media (max-width: 720px) {
+  .project-shell-context > span,
+  .project-shell-title span {
+    display: none;
+  }
+
+  .project-shell-topbar {
+    padding-inline: 12px;
+  }
+}
+
+/* Project chat (sidebar+chat with shell on top) */
+.project-chat { height: 100%; }
+
+/* ── 项目材料（issue #689）───────────────────────────────────────────────
+ * 文件页顶部的一小节：列 manifest、传文件。刻意比文件树轻一档 —— 它是
+ * 语料入口，不是第二棵文件树。 */
+
+
+/* ── 放在哪：项目出生那一刻挑一个家 ──────────────────────────────────────────
+   一条连接都没有时这一整块不渲染（`WhereItLives` 自己判），所以个人版和一台还
+   没连过组织的专业版桌面上，建项目对话框和从前逐字一样。 */
+.project-home { display: grid; gap: 6px; }
+.project-home-label { color: var(--color-fg); font-size: var(--font-size-caption); font-weight: 540; }
+.project-home-choices { display: flex; flex-wrap: wrap; gap: 6px; }
+.project-home-choice { display: inline-flex; align-items: center; gap: 5px; padding: 6px 10px; color: var(--color-fg-muted); border: 1px solid var(--color-border); border-radius: 999px; background: var(--color-bg); font: inherit; font-size: 13px; cursor: pointer; }
+.project-home-choice:hover:not(:disabled) { color: var(--color-fg); border-color: var(--color-border-strong); }
+.project-home-choice.is-chosen { color: var(--color-accent); border-color: var(--color-accent); background: var(--color-accent-bg); }
+.project-home-choice:disabled { opacity: .5; cursor: not-allowed; }
+.project-home-add { border-style: dashed; }
+.project-home-note { color: var(--color-fg-subtle); font-size: 12px; line-height: 1.5; }
+
+/* ── 清单按家分组 ────────────────────────────────────────────────────────────
+   只有本机一组时不画分组的壳（`ProjectsList` 自己判）—— 一个只有一组的分组界面
+   是在给一件不存在的选择立标题。 */
+.project-groups { display: grid; gap: 22px; }
+.project-group { display: grid; gap: 8px; }
+.project-group-name { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--color-fg-muted); font-size: var(--font-size-caption); font-weight: 600; letter-spacing: .02em; text-transform: uppercase; }
+/* 那台机器说不上话：这一组摆的是上一次问到的名字，灰着，并说清楚为什么。 */
+.project-group.is-out-of-reach .project-list { opacity: .55; }
+.project-group-why { display: inline-flex; align-items: center; gap: 6px; color: var(--color-fg-subtle); font-weight: 400; letter-spacing: 0; text-transform: none; }
+.project-group-why a { color: var(--color-accent); text-decoration: underline; }
+
+/* 归档的项目：一进来就说清楚只能看（项目页顶上）；清单里收在最下面、折起来。 */
+.project-archived-banner { display: flex; align-items: center; gap: 12px; padding: 9px 16px; border-bottom: 1px solid var(--color-border); background: var(--color-bg-subtle); }
+.project-archived-banner > span { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.project-archived-banner strong { color: var(--color-fg); font-size: 13px; font-weight: 600; }
+.project-archived-banner small { color: var(--color-fg-muted); font-size: 12px; line-height: 1.5; }
+.project-archived-group { margin-top: 18px; }
+.project-archived-group > summary { margin-bottom: 8px; color: var(--color-fg-muted); font-size: var(--font-size-caption); font-weight: 600; cursor: pointer; }
+.project-archived-group .project-list { opacity: .75; }
+.project-list-note { margin: 12px 0 0; color: var(--color-fg-muted); font-size: 13px; }

@@ -1,0 +1,348 @@
+{
+ "rootRunId": "run_47c8537f5884487db188d6c476bd63b2",
+ "runs": [
+  {
+   "id": "run_47c8537f5884487db188d6c476bd63b2",
+   "parentRunId": null,
+   "nodeType": "project_chat",
+   "status": "stale_unknown",
+   "summary": {
+    "staleReason": "app_server_restart",
+    "staleFromStatus": "running"
+   }
+  },
+  {
+   "id": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->hypothesis@d1",
+   "parentRunId": "run_47c8537f5884487db188d6c476bd63b2",
+   "nodeType": "hypothesis",
+   "status": "completed",
+   "summary": {}
+  },
+  {
+   "id": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->_reviewer@d1",
+   "parentRunId": "run_47c8537f5884487db188d6c476bd63b2",
+   "nodeType": "_reviewer",
+   "status": "completed",
+   "summary": {}
+  },
+  {
+   "id": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->observation@d1",
+   "parentRunId": "run_47c8537f5884487db188d6c476bd63b2",
+   "nodeType": "observation",
+   "status": "stale_unknown",
+   "summary": {
+    "staleReason": "app_server_restart",
+    "staleFromStatus": "retrying"
+   }
+  },
+  {
+   "id": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->literature@d1",
+   "parentRunId": "run_47c8537f5884487db188d6c476bd63b2",
+   "nodeType": "literature",
+   "status": "incomplete",
+   "summary": {}
+  }
+ ],
+ "lifecycle": [
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2",
+   "sequence": 7,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "project_chat",
+    "attemptNo": 1,
+    "owningRun": true,
+    "modelBackendName": "Kimi K3 · 积算"
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->hypothesis@d1",
+   "sequence": 13,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "hypothesis",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->hypothesis@d1",
+   "sequence": 285,
+   "kind": "run.completed",
+   "payload": {
+    "status": "completed",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->_reviewer@d1",
+   "sequence": 287,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "_reviewer",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->_reviewer@d1",
+   "sequence": 352,
+   "kind": "run.completed",
+   "payload": {
+    "status": "completed",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2",
+   "sequence": 356,
+   "kind": "run.paused",
+   "payload": {
+    "prompt": "Post-node decision for hypothesis",
+    "reason": "waiting_human"
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2",
+   "sequence": 358,
+   "kind": "run.resumed",
+   "payload": {
+    "attemptNo": 1
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->observation@d1",
+   "sequence": 362,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "observation",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->observation@d1",
+   "sequence": 439,
+   "kind": "run.blocked",
+   "payload": {
+    "summary": "confirmatory 取证被环境能力阻塞：本节点无任何公开来源检索通道（无 web/学术检索工具），且上游 literature/data 未交付任何已采集数据集。所需来源（两品牌官网规格表、工信部公告、召回公告、投诉/报价平台、官方网点查询）均为公开渠道，但本环境无法到达。已完成：检索协议冻结（判据集可审计，Q1_CRITERIA_SET 兑现）、observation_log 冻结（覆盖度分母如实为零，31 条闭合条件 1 discharged / 30 not_run，命题未裁决）。",
+    "category": "missing_capability",
+    "blockerId": "1787285467-cfdd87:1",
+    "evidencePaths": [
+     "observation/artifacts/search_protocol__Haojue_Suzuki_125_Confirmatory_Search.json",
+     "observation/artifacts/observation_log__Haojue_Suzuki_125_Observation_Run1.json",
+     "observation/search_protocol_v1.md",
+     "observation/observation_log_v1.md"
+    ],
+    "reportingNode": "observation",
+    "suggestedOwner": "orchestrator",
+    "requestedAction": "三选一（按 research_plan R5 既定降级路径）：①为本项目配置公开网页检索/读取能力后重跑 observation（协议已冻结，可直接按 §3–§7 执行）；②由用户直接提供来源档案（官网规格表文本/截图、工信部公告条目、召回公告、投诉与报价平台条目、网点查询结果、保养手册/三包文本），observation 按冻结协议检视并勾账；③若某节点（如 literature/data）实际具备网页采集能力，派其按冻结协议 §3 检索源清单采集并交付带来源+采集日期的来源登记册，observation 再重跑。注意：30 条 not_run 不是 inconclusive，不得按\"证据不足\"终态处理。",
+    "retryableAfterChange": true
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->observation@d1",
+   "sequence": 443,
+   "kind": "run.incomplete",
+   "payload": {
+    "status": "blocked",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->literature@d1",
+   "sequence": 450,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "literature",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->literature@d1",
+   "sequence": 483,
+   "kind": "run.blocked",
+   "payload": {
+    "summary": "能力缺口（missing_capability）：本 targeted_lookup 任务要求按冻结检索协议 §3 采集六类公开网页来源（豪爵/轻骑铃木官网规格表、工信部车辆公告、市监总局召回公告、车质网投诉条目、媒体评测/长测、官方网点与报价）。本执行环境没有任何 web 检索/网页抓取工具，仅有学术文献检索（search_papers/arxiv_search），学术库在原理上不收录此类网页来源。已按定向纪律执行恰好 2 组探测查询留证：CNKI 未配置（缺 cookie/LID）零结果；国际学术库 30 篇返回文献逐篇核对全部无关。零纳入是环境能力缺口所致，非文献不存在；未编造任何来源。证据与缺口明细已存 literature_evidence_package__Haojue_Suzuki_125_WebSource_Registry_CapabilityGap。在平台补齐 web 检索能力前，Q1–Q14 所有依赖外部取证的预注册闭合条均无法推进，重跑本节点无意义。",
+    "category": "missing_capability",
+    "blockerId": "1787286607-25aed6:1",
+    "evidencePaths": [
+     "literature/artifacts/literature_evidence_package__Haojue_Suzuki_125_WebSource_Registry_CapabilityGap.json",
+     "observation/search_protocol_v1.md"
+    ],
+    "reportingNode": "literature",
+    "suggestedOwner": "platform/orchestrator（环境配置）；能力补齐后由 literature 节点重跑采集",
+    "requestedAction": "为执行环境配置 web 检索/网页抓取能力（通用搜索引擎 API 或网页抓取通道，需覆盖中文站点：haojue.com、qs-suzuki.com.cn、miit.gov.cn、samr.gov.cn、12365auto.com 及摩托媒体/报价平台）；可选：配置 CNKI cookie（LID）作背景补充。能力补齐后重跑本节点即可按协议 §3/§7 执行 S0 来源登记册采集。",
+    "retryableAfterChange": true
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->literature@d1",
+   "sequence": 496,
+   "kind": "run.incomplete",
+   "payload": {
+    "status": "blocked",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->observation@d1",
+   "sequence": 578,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "observation",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->observation@d1",
+   "sequence": 596,
+   "kind": "run.retrying",
+   "payload": {
+    "reason": "llm_truncation_recovery_injected",
+    "attempt": 1,
+    "coverage": "partial",
+    "maxAttempts": 2
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->observation@d1",
+   "sequence": 617,
+   "kind": "run.completed",
+   "payload": {
+    "status": "completed",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->_reviewer@d1",
+   "sequence": 619,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "_reviewer",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->_reviewer@d1",
+   "sequence": 667,
+   "kind": "run.completed",
+   "payload": {
+    "status": "completed",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2",
+   "sequence": 671,
+   "kind": "run.paused",
+   "payload": {
+    "prompt": "Post-node decision for observation",
+    "reason": "waiting_human"
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2",
+   "sequence": 673,
+   "kind": "run.resumed",
+   "payload": {
+    "attemptNo": 1
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->hypothesis@d1",
+   "sequence": 678,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "hypothesis",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->hypothesis@d1",
+   "sequence": 707,
+   "kind": "run.completed",
+   "payload": {
+    "status": "completed",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->_reviewer@d1",
+   "sequence": 709,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "_reviewer",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->_reviewer@d1",
+   "sequence": 831,
+   "kind": "run.completed",
+   "payload": {
+    "status": "completed",
+    "attemptNo": 1,
+    "owningRun": true,
+    "missingRequiredOutputs": []
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2",
+   "sequence": 835,
+   "kind": "run.paused",
+   "payload": {
+    "prompt": "Post-node decision for hypothesis",
+    "reason": "waiting_human"
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2",
+   "sequence": 837,
+   "kind": "run.resumed",
+   "payload": {
+    "attemptNo": 1
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->observation@d1",
+   "sequence": 870,
+   "kind": "run.started",
+   "payload": {
+    "nodeType": "observation",
+    "attemptNo": 1,
+    "owningRun": true
+   }
+  },
+  {
+   "runId": "run_47c8537f5884487db188d6c476bd63b2::_orchestrator->observation@d1",
+   "sequence": 887,
+   "kind": "run.retrying",
+   "payload": {
+    "reason": "llm_truncation_recovery_injected",
+    "attempt": 1,
+    "coverage": "partial",
+    "maxAttempts": 2
+   }
+  }
+ ]
+}

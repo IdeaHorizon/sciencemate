@@ -1,0 +1,1497 @@
+# 新增拒绝点的分类登记表（防复发闸，配 tests/test_refusal_sites_are_classified.py）
+#
+# 每条：{file, class, why}。class ∈ A(安全/资源) B(记录完整性) C(物理/协议) collector。
+# 充分性判决（D）不再是合法类别 —— 写不进这张表的墙必须改写成义务 collector。
+#
+# ── PR#771（experiment 受管执行生命周期）的登记债，2026-09-04 ──────────────
+#
+# 该 PR 在 nodes/experiment/ 内新增 258 个拒绝点（全仓 639 → 897，experiment
+# 82 → 340），逐条分类已由节点 owner 在 PR 内完成，但**没有**落进本表。
+#
+# 合并时的处理：按 owner 决定（"节点各自负责"），把基线一次性抬到合并后的实测
+# 值，而不是逐条代填 —— 代填等于我替 owner 写下 258 条"这不是充分性判决"的
+# 声明，那是把一次别人的判断洗成 258 条记录，正是本战役要拆的东西。
+#
+# 因此：
+#   · 棘轮**没有解除**，只是重置到新水位：这 12 个文件再长一个拒绝点仍然转红。
+#   · 清偿仍是 experiment owner 的义务：把那 258 条按 A/B/C/collector 填进本表，
+#     填不进去的按 RFC §4 改写成义务。
+#   · 当时的分布（合并后实测）：
+#       execution_route.py            0 → 67
+#       resource_manager.py          36 → 96
+#       contract_audit.py             5 → 55
+#       operation_completion.py       3 → 26
+#       safe_bash.py                  7 → 29
+#       execution_envelope.py         0 → 11
+#       external_submission_recovery  0 → 10
+#       build_resource_guard.py       0 → 8
+#       probe_toolchain / resource_fetch / run_contract / hooks   共 +7
+#
+entries:
+  # ── 任务身份与合同（#1080 / #1097，2026-09-21）────────────────────────────
+  #
+  # 这批拒绝点答的都是同一个问题：**这一趟被安排去做哪件事**。它们不是充分性判决
+  # （不评判做得好不好），是协议：派发的 ABI 要求带身份，而引用一份不存在或不确定
+  # 的授权，在协议上就没法执行。全部 C。
+  #
+  # 为什么不做成 collector（照放行、记一笔）：放行等于让子节点回到"扫项目现状认领
+  # 自己该做什么"那条路，而那正是 #1052 里新任务落回旧 child 上下文的成因。记一笔
+  # 事后可查，但那一趟已经按错的任务跑完了。
+  - file: shared/tools/run_node.py
+    class: C
+    why: >-
+      派 experiment / observation / derivation 缺 task_instance_uuid。这三个节点今天
+      都会从全项目冻结 prereg 里自行认领，没有身份它们判不出"这趟在做哪件事"。
+      报错给出两步正确做法（先 task create 再带 uuid 派发）。
+  - file: shared/tools/run_node.py
+    class: C
+    why: >-
+      引用的任务在合同账本上一条 revision 都没有 —— 派发引用的是合同，不是任务标题。
+  - file: shared/tools/run_node.py
+    class: C
+    why: >-
+      task_contract_digest 不在这个任务的合同链上。摘要是精确取一条的唯一方式
+      （这本账没有"取最新"）。
+  - file: shared/tools/run_node.py
+    class: C
+    why: >-
+      同一任务有多条合同 revision 而调用方没指名哪一条。**不替调用方抽签** ——
+      在分叉面前替人选，正是 last-write-wins 的病换个地方再犯。
+  - file: shared/tools/run_node.py
+    class: C
+    why: >-
+      这个 run 没有 project_root，任务账本无处可读（任务是项目级的）。
+  - file: shared/tools/run_node.py
+    class: C
+    why: >-
+      显式 resume_run_id 指向的 run 服务的是另一个任务。续上去等于让同一个 run 先后
+      服务两件不同的事；报错给出合法出口（带对身份，或 resume_run_id='fresh'）。
+  - file: shared/tools/run_node.py
+    class: C
+    why: >-
+      task_contract_digest 与 uuid 的组合解析失败时的兜底出口（上面几条的共用返回点）。
+  - file: shared/tools/library/tasks.py
+    class: C
+    why: >-
+      task(action='contract') 找不到目标任务（Txx 或 uuid 都没命中）。
+  - file: shared/tools/library/tasks.py
+    class: C
+    why: >-
+      目标任务是旧记录、没有 task_instance_uuid。合同必须挂在不可变身份上，
+      挂在会被 last-write-wins 覆盖的别名上等于没挂。
+  - file: shared/tools/library/tasks.py
+    class: C
+    why: >-
+      prereg_artifact_id 与 no_prereg_reason 同时给。两者互斥：绑一份确切的，
+      或明说这一趟不绑并给理由；两个都填等于没做决定。
+  - file: shared/tools/library/tasks.py
+    class: C
+    why: >-
+      TaskContractError 的转述出口（CAS 冲突、字段非法、explicit_none 缺理由）。
+  # check_lean 收进咽喉（#793）：把「调用 Lean 失败」拆成三种可分辨的事实。
+  # 三条都是 C —— 说的是「这一次执行本身没做成，以及是谁的问题」，不是评判命题成不成立。
+  # 拆细是有代价的（拒绝点从 14 涨到 15），但压平的代价已经付过一次：三轮
+  # `execvp latexmk: No such file or directory` 被显示成「LaTeX 编译失败」，模型三轮
+  # 都在查一份完全正确的稿子。归属只能在知道真相的那一层定。
+  - file: shared/tools/library/derivation_check.py
+    class: C
+    why: >-
+      check_lean 编译超时。证明太重、或卡在一个搜索型 tactic 上 —— 这是「这次没跑完」，
+      不是「命题不成立」。报错给出时限，模型可以换更轻的证法或改用 check_step。
+  - file: shared/tools/library/derivation_check.py
+    class: C
+    why: >-
+      check_lean 的 Lean 进程起不来（spawn_failed）。这是**环境**问题不是稿子问题：
+      模型改多少遍证明都没用，要人去装工具链。所以这条必须与「Lean 拒绝了这个证明」
+      分开说，否则模型会一直改一份没错的证明。
+  - file: shared/tools/library/derivation_check.py
+    class: C
+    why: >-
+      check_lean 被取消（人按了停止 / kill_event）。谁都没错，只是这一次没有结果。
+      压进「编译失败」会让一次人为中止读起来像一次证明失败。
+  # 受控能力授权通道（#770）：两处拒绝都不是"这个源够不够格"的充分性判决，
+  # 是"这次申请本身说不成立"的协议事实 —— 判据机械可判，语义判断留给确认框前面的人。
+  - file: shared/tools/library/capability_grants.py
+    class: C
+    why: >-
+      request_egress_grant 收到空 reason。人要在确认框里逐字读到"这些域名是哪个已声明
+      数据源、这一步取什么"才能判断；空理由的确认框只能训练人闭眼点"允许"。
+      不是评判理由够不够好，是没有理由可展示。
+  - file: shared/tools/library/capability_grants.py
+    class: C
+    why: >-
+      request_egress_grant 的申请既没有 prereg_ref 也没有可担保的 redirect_of，
+      或域名形状不是裸域名（IP/通配符/端口/路径）。前者在协议上等于换源，而换源走
+      prereg amendment、不走点头通道（#770 §8）；后者会把"允许这个声明过的源"
+      悄悄变成"允许一片"。两条都机械可判，报错里列出合法形状与当前已放行清单。
+  # write_node_readme（PR#746）：交接自述的窄写入口。两处拒绝都不是充分性判决，
+  # 是「这次写入本身做不成」的物理/协议事实。
+  - file: shared/tools/builtin.py
+    class: C
+    why: >-
+      write_node_readme 收到空 content。README 的第一段就是带给下游的那句话，
+      空内容写下去等于把一个「有自述」的假象留在交接面上。不是评判内容够不够好，
+      是没有内容可写。
+  - file: shared/tools/builtin.py
+    class: C
+    why: >-
+      write_node_readme 在未绑定项目工作区（非 v2 / CLI）时没有节点目录。
+      读端（core/loop_hooks_builtin 的交接面）只读 <node_dir>/README.md，
+      写不到那个位置就没有任何人会读到 —— 说出来，而不是假装写成功了。
+  # 刀1（第三波，2026-09-02）：派发口按 schema 核取值。两处都是 C——参数不合工具
+  # 自己声明的契约（enum/区间/非空/pattern/required），报错列合法值。它们替代的是
+  # 30 个文件里 176 处手写的同一件事；本波内那些手写检查随之删除。
+  - file: core/tool_registry.py
+    class: C
+    why: >-
+      _execute_dispatch：实参取值不合 parameters_schema 声明（enum/minimum/maximum/
+      minLength/pattern/minItems…）。契约只在 schema 里声明一次、这里核一次，
+      报错带 parameter_violations 与合法值。不查 type（有工具刻意宽松）。
+  - file: core/tool_registry.py
+    class: C
+    why: >-
+      _execute_dispatch：schema.required 声明了、调用方没给的参数并入 missing_parameters
+      （从前只看 executor 签名，签名有默认值而 schema 要求必填的参数漏网）。
+  # 执行器分档 PR B（manifest v3 加 backend 字段）：四处都是 manifest 形状的
+  # 协议事实，不是对 attempt 好不好的判决。
+  - file: core/sandbox.py
+    class: C
+    why: >-
+      SandboxManifest.validate：backend 字段为空或含 NUL。manifest 是冻结的能力
+      契约，「谁来守」没写就不是一份 manifest。
+  - file: core/sandbox.py
+    class: C
+    why: >-
+      SandboxManifest.validate：非 image 后端出现在 v1/v2 manifest 里。那两个版本
+      的 canonical payload 根本没有 backend 字段，hash 盖不住它，等于一份没签名的声明。
+  - file: core/sandbox.py
+    class: C
+    why: >-
+      SandboxManifest.validate：非 image 后端却带了 image_id。镜像身份只有 image
+      后端能承诺一致，别的后端带上它是在冒充。
+
+  # hash_files（PR 待编号）：摘要归框架算。三处拒绝都不是"你算得够不够好"，
+  # 是"这次根本没有可算的字节"或"一次给太多"。
+  - file: shared/tools/library/file_digests.py
+    class: C
+    why: >-
+      paths 为空或不是列表。没有任何文件要算摘要 —— 不是评判给的文件够不够，
+      是这次调用没有输入。
+  - file: shared/tools/library/file_digests.py
+    class: A
+    why: >-
+      一次超过 512 个文件。出口有界（工具结果撑爆窗口是真事故），且**拒绝而非
+      静默截断** —— 截断会让下游覆盖检查报"漏文件"，真因却在这儿。报错里给出
+      分批的走法，并明说不要靠少声明文件来绕。
+  - file: shared/tools/library/file_digests.py
+    class: C
+    why: >-
+      给的路径一个都没算成（不存在 / 不是普通文件 / 越出项目边界 / 读不了）。
+      没有字节可摘要是物理事实，不是对内容的评判。半成功不走这里 —— 那种情况
+      照常返回，漏掉的进 skipped 并说明后果。
+  # ── extract_material（2026-09-09）：用户归档只解到材料池。五处全是「这次解不成」
+  #    的物理/协议事实，没有一处评判归档内容够不够好。
+  - file: shared/tools/library/materials_extract.py
+    class: C
+    why: >-
+      这个 run 没有绑定项目工作区（state 上没有 project_worktree）。没有工作区就没有
+      材料目录，也没有池 —— 无处可解，不是对材料的评判。
+  - file: shared/tools/library/materials_extract.py
+    class: C
+    why: >-
+      材料名不合法（safe_name 拒：空名 / 隐藏文件 / `.gitignore` / `.ref` 后缀）。
+      名字进不了材料目录的规矩，与内容无关。
+  - file: shared/tools/library/materials_extract.py
+    class: C
+    why: >-
+      材料目录里没有这个名字的文件。报错列出已登记的材料名，让调用方对着清单改名，
+      不猜、不模糊匹配。
+  - file: shared/tools/library/materials_extract.py
+    class: C
+    why: >-
+      文件既不是 tar 也不是 zip。解不开是格式事实；报错明说"本来就是数据文件就直接读"。
+  - file: shared/tools/library/materials_extract.py
+    class: C
+    why: >-
+      解包过程中 tarfile / zipfile / OSError 抛错（损坏的归档、磁盘写不下）。半成品
+      目录整个删掉，不留一个看起来解开了其实缺文件的目录。
+  # ── F9（PR#844）：experiment owner lujy 的交接件
+  #    nodes/experiment/docs/refusal_registry_F9_entries.yaml，由 framework owner
+  #    按其 (a) 项原样落表（2026-09-08）。why 为 owner 原文，未改一字。
+  # F9 修复（operation closure 的 external_job_refs 改为账本自动派生）：以下均为
+  # 记录完整性墙 —— closure 是 finalize 的唯一证据载体，漏记/错记开放作业身份
+  # 会铸出永不能 finalize 的假终态。出口都写在错误体里（BF-12）。
+  # 登记数 = AST 可见位点数（4）：external_job_adoption_ambiguous 本体无
+  # status 键、扫描器不可见，其到达模型只经下面两个透传位点，故并入登记。
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      fresh 收尾的收养解析失败透传（identity_missing/ambiguous 等既有 code 的
+      新调用位点，含 external_job_adoption_ambiguous——continuation run 面对
+      多个未决 workflow 无法唯一收养时的一次性教育，错误体逐行给出候选完整
+      external_job_ref，重调时任选其一整项复制即可）：自动派生的引用必须
+      解析到唯一受管记录，否则 closure 会绑错身份。错误体含近似候选与差异字段。
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      resumed 回填的收养解析失败透传（同样承载 external_job_adoption_ambiguous
+      透传）：同上，存量 partial closure 续写前的引用解析。
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      resumed 回填的核验失败透传：回填 refs 必须经同一 identity/terminal
+      核验路径，否则续写件会携带未核验身份。
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      存量 partial-success 回填后无终态成功证据时拒绝续写 success：续传路径
+      不启用降级（closure_input 复制冻结输入，改判会造成 outcome/status
+      分叉）；出口是 continuation run 重新诚实收尾。
+  # ── PR#909（data 节点前处理规划/自修复重构）新增 4 处，2026-09-09 ──────────
+  #
+  # ⚠️ 出处说明：这 4 条分类是**我（wangd 侧）在落地 #909 时替 owner(cuib) 判的**，
+  # 不是 owner 自己写下的声明。之所以没照 PR#771 那样一次性抬基线：那次是 258 条，
+  # 代填等于把一次别人的判断洗成 258 条记录；这次是 4 条、逐条都读过上下文、
+  # 且四条都明显不是充分性判决。owner 若不认同任何一条，改这里即可 —— 但别
+  # 把「谁判的」这行删掉。
+  - file: nodes/data/data_agent_loop.py
+    class: C
+    why: >-
+      _advance_generation_revision：run_preprocessing_planning_loop 返回的不是
+      dict。这不是「方案不够好」的判决，是规划器根本没给回结构化结果 ——
+      下面每一步都要从这个 dict 上取字段，没有它就没有可继续的协议。
+  - file: nodes/data/tools/execute_preprocessing_plan.py
+    class: C
+    why: >-
+      invoke_once：被授权工具自身抛异常，包成 error 信封透传（并按
+      _TRANSIENT_ERROR_PATTERN 标 status_class=transient 供重试判断）。
+      报告的是「这次调用没做成」这一既成事实，不评判该不该做。
+  - file: nodes/data/tools/execute_preprocessing_plan.py
+    class: C
+    why: >-
+      _repair_step_from_feedback：模型给的 parameter_updates 为空、或键超出该
+      producer 自己声明的 allowed 参数面。不是判自修复方案好不好，是这次意见
+      落不进参数契约 —— 而且出口本身就是义务形态（needs_revision + issues
+      原样带走 + local_repair_exhausted 标记），不是死路。
+  - file: nodes/data/tools/preprocessing_capabilities.py
+    class: C
+    why: >-
+      generate_preprocessing_artifact：产出的 artifact 过不了格式校验
+      （blocked_reason=generated_artifact_format_validation，错误体带
+      validation_diagnostics 逐条指明）。格式合不合法是物理事实，与
+      structure_format / mesh_topology 那批同族。
+
+  # ── #879 experiment 受管执行生命周期修复（2026-09-09，owner lujy 自填）──────
+  #
+  # 【2026-09-09 修订】本段原有 21 条（execution_route +4 / resource_manager +14
+  # / contract_audit +3，全部 B 类）。逐条复审后，那 21 处拒绝点里只有下面 4 条
+  # 站得住，其余 17 处已在代码里删除、合并或改成记账（见 fix/experiment-refusal-21
+  # 的四个提交）。原 21 条登记随之撤下 —— 留着就是 17 点永久造墙额度：本闸的
+  # registered[file] 只数**条目条数**当上限，条目不与位点对应、why 从不校验、
+  # 额度用掉也不消耗。留下不再对应任何位点的条目，等于亲手给这三个文件发一张
+  # 长期通行证。
+  #
+  # 改后实测：execution_route 71→68（基线 67，+1）、resource_manager 110→99
+  # （基线 96，+3）、contract_audit 58→55（基线 55，+0）。基线一行未动。
+  #
+  # 撤下的 17 条各自的处置与证据，见对应提交的正文。最常见的三个原因：
+  #   · 拒绝造出的正是它声称要防的状态（contract_audit 的成对否定三条）；
+  #   · 拒绝排在归属判定之前，于是别的 run 的坏数据钉死本 run（resource_manager
+  #     的 RM-01/03/04）；
+  #   · 同一堵墙被切成 N 处返回，error_code 逐字相同、机制相同，调用方只能逐条
+  #     打地鼠（解析流水线 5→1、violations 汇总 3→1）。
+  #
+  # 计数复核方式沿用上一版：除本闸自带的助手命名识别（只认 `_error` 精确名与
+  # `_err`/`_fail`/`_reject` 前缀）外，另用名字无关的语义计数复核，确认本批没有
+  # 靠 helper 命名对棘轮隐身的拒绝点。本次刻意**没有**用 helper 把多处返回收成
+  # 一个计数点 —— 那是做账不是修墙。
+  #
+  # why 字段是 owner 原文，非代填。
+
+  - file: nodes/experiment/tools/execution_route.py
+    class: B
+    why: >-
+      已验证的路线纠正只允许对同一不可变终态重评，不把旧的成功终态验证本身改写
+      成成功。重评后 route_outcome 仍非 success 时若放行，会写出一条
+      supersedes_failure_class=expected_outputs_missing 而 route_outcome=failed
+      的自相矛盾事件：同一条投影既声称取代了那次失败、又记着仍然失败，此后任何
+      读者都读不出该 attempt 的终态。信封已修：回吐**本次**重评算出的缺失清单
+      （原先回吐的是陈旧缓存），并以 lock_reason=corrected_but_still_missing 与
+      「尚未做过纠正」那一处区分开。诚实标注：该分支目前构造不到 ——
+      _validated_expected_outputs_correction 只认纯删减的纠正，而纯删减不可能
+      留下缺失产物；保留它是因为它防的自相矛盾事件确有其事。
+
+  # ── #879 在 resource_manager.py 的登记已全部撤回（2026-09-10）──────────────
+  #
+  # 撤回理由是净增归零，但**净增 0 是抵消出来的，不是「这个文件没有新东西」**。
+  # 按函数看（af0450c5 共同起点 → 合并后）：
+  #   _operation_closure_receipt      12 → 3   收敛后剩三堵：本 run 自己的收据
+  #                                            不可读 / 同 identity 多份收据冲突 /
+  #                                            收据不能作为恢复依据。这三堵是新的。
+  #   _finalize_external_job          14 → 10  作业收尾不再读 run 模式：删掉模式
+  #                                            词表墙、传证据直拒、以及被收窄的
+  #                                            class_unverified 判定。
+  #   _record_operation_job_closure    1 → 0
+  #   合计                           110 → 96 = 基线，故登记额度归零。
+  #
+  # 也就是说：新增三堵、删掉四堵，总数回到基线。棘轮只数每文件总数，分不出
+  # 「组成变了」和「没变」，所以账本上此后读作「这个文件没新东西」。上面这段
+  # 就是那三堵墙的分类声明留在账本上的唯一位置。
+  #
+  # 这是同一道闸门的第二个计量缺陷。第一个是：登记表实为按文件的永久配额，
+  # 条目不与位点对应、why 从不校验。两条都值得提给 framework owner。
+
+  # 编译失败的归属拆分（2026-09-09）：此前四类失败压成一句「LaTeX 编译失败」，
+  # 界面统一建议「去查你的源码」。三条新拒绝点全是 C —— 它们陈述的是**物理事实**
+  # （程序不在场 / 进程没起来 / 人按了停止），一句都不评判稿件够不够好。
+  - file: shared/tools/library/latex.py
+    class: C
+    why: >-
+      两个编译器（latexmk / tectonic）都不在 PATH 上，编译器进程没能启动。
+      这是「这台机器缺东西」的物理事实，不是对稿件的判决 —— 模型改多少次源码
+      都不会让它变好，所以必须说出来并指向能装 TeX 的那个人。
+  - file: shared/tools/library/latex.py
+    class: C
+    why: >-
+      编译器在 PATH 上但进程仍未启动（隔离后端 / 沙箱契约问题）。同样是物理
+      事实，且归属是平台侧；不分开就会被当成「这台机器没装 LaTeX」而误导安装。
+  - file: shared/tools/library/latex.py
+    class: C
+    why: >-
+      编译被取消（有人停止了这次运行）。协议事实，不是失败也不是判决 —— 以前
+      压成非零退出会长得像「编译失败」，让模型回头去改一份没毛病的稿子。
+
+  # ── 记录=原生文件+账本（C1，2026-09-12）──────────────────────────────────
+  - file: core/state.py
+    class: B
+    why: >-
+      save_artifact：同 id 的记录住在别的节点目录里（一个工作区一本账之后同 id 就是
+      同一份记录）。普通覆盖等于改写别人目录里的文件 —— 写不跨节点。拒绝并指路：
+      由产出方修订 / 对冻结版带 amendment_reason / 换 name 另起自己的一份。
+  - file: core/state.py
+    class: C
+    why: >-
+      undo_last_overwrite：head 已冻结不可回滚，或 run 内快照已不存在 —— 这次撤销
+      本身做不成，不是评判该不该撤。
+  - file: shared/tools/run_node.py
+    class: A
+    why: >-
+      read_external_artifact：账本说文件在那个 run 目录里，文件真身却解析到目录之外
+      （symlink 逃逸）。读到的会是别处的字节，拒绝。
+
+  # ── #893 节点侧：本地 GPU 申请在确认卡之前说清（2026-09-13，owner lujy 自填）──
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: >-
+      submit_job(scheduler=local, gpus>0)：本机原生隔离后端不提供 GPU 执行，
+      core/sandbox.prepare_launch 对 gpus>0 直接抛 SandboxContractError。这是物理
+      事实，不是判决。原先那道拒绝发生在人批准之后，确认卡白弹；这里不新增约束，
+      只把同一个事实挪到确认卡之前、零副作用时说出，并给出 gpus=0 或改用 GPU
+      调度器两条出口。
+
+  # ── #770 节点侧：fetch_resource 在联网之前核对目标域名（2026-09-13，owner lujy 自填）──
+  #
+  # 71f2e20c 删掉 Docker 执行器时一并删了 egress 白名单代理，原生后端的取物段直接给网；
+  # core/sandbox.py 写明这份白名单"是策略不是墙"、由取物工具自己核对。此前工具只在失败
+  # 之后读白名单写指引，名单外域名照样发出请求，curl --location 与 git 子模块还能把请求
+  # 带到任意域名。以下三处拒绝都发生在对应请求发出之前，无副作用；真正的出网墙归 Core。
+  - file: nodes/experiment/tools/resource_fetch.py
+    class: A
+    why: >-
+      _require_allowlisted：目标域名不在生效 egress 白名单内。源地址、每一跳重定向、
+      每个子模块 URL 共用这一处判定（同一道约束，没有拆成多处计数）。拒绝给出生效名单、
+      取值来源和让部署方加域名的现成操作。
+  - file: nodes/experiment/tools/resource_fetch.py
+    class: A
+    why: >-
+      文件下载的重定向超过上限跳数。每一跳都要重新核对域名、各起一次联网进程，不设上限
+      就是一条由源站控制的无界请求链。
+  - file: nodes/experiment/tools/resource_fetch.py
+    class: A
+    why: >-
+      Git 子模块嵌套超过上限层数。逐层核对再逐层拉取，层数由上游仓库内容决定，不设上限
+      就是一条由上游仓库控制的无界请求链。
+
+  # ── fix/external-output-correction 第 3 步：作业状态读不出时不装作读得出（2026-09-13，owner lujy 自填）──
+  - file: nodes/experiment/tools/resource_manager.py
+    class: B
+    why: >-
+      _operation_closure_receipt：枚举本作业的终态收据失败（记录账本读不出）。原先回退去扫
+      C1 已删除的 artifacts_dir，恒为空，读不出被当成「没有收据」，于是重铸第二份同键终态
+      收据、此后永久 conflict。失败关闭、不重铸；修复账本可读性后重试。
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: >-
+      _external_job_state_unknown_exit：作业状态读不出——本地作业账本里已没有它的记录（进程
+      可能仍在运行，物理进程事实归 Core），或远端调度器已不再认得它。这是物理事实，不是判决；
+      替换原先那句不带出口的「仍在运行或状态未知」，不宣称结束也不宣称取消，给出精确身份、
+      owner 与诚实收尾（report_blocker 后 record_operation_completion(outcome=blocked)）。
+
+  # ── 第 5 步 5b：预期终止声明必须锚定任务原文（2026-09-14，owner lujy 自填）──
+  - file: nodes/experiment/tools/resource_manager.py
+    class: B
+    why: >-
+      submit_job(expected_termination=...)：声明「这个作业预期以非零码退出」之后，一次
+      非零退出会被路线步骤与 operation 成功门算作达成契约。这份声明是记录完整性问题：
+      依据必须来自任务、不能来自模型自己的观测（AGENTS L54）——确认卡在 benchmark 里自动
+      批准、预授权时没人看，「不许追认」也挡不住先跑一次看到退出码再声明。所以 task_quote
+      必须逐字出自本 run 首条 loop_seed 的 user 消息、每个码以独立数字出现、只允许 1..123。
+      确认卡之前零副作用地拒绝；出口是去掉声明再提交，作业非零退出如实记 operation_failed。
+
+  # ── verify 清单 #4：路线记录正文缺失或被改动时不按初次声明处理（2026-09-14，owner lujy 自填）──
+  - file: nodes/experiment/tools/execution_route.py
+    class: B
+    why: >-
+      declare_execution_route：账本里已有本 run 的 canonical 路线身份，正文文件却读不到或与账本
+      sha256 不符。原先按初次声明处理、恢复门被跳过，失败的外部步骤不带 recovery_basis 就能重开并
+      重提（不变量 2）。这是记录完整性问题：账本 sha256 是权威，按它从历史取回 head 正文需要 Core
+      接口，节点不另起 git 查找，所以失败关闭；出口是 report_blocker 后 record_operation_completion
+      (outcome=blocked) 诚实收尾。
+  # ── fix/external-output-correction（experiment，lujy）第三会话复审 307e4079 P2，2026-09-15 ──
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      verify_external_job_execution 遇到该作业已由 finalize 写下路线收尾事实、投影被跳过时，
+      生效收尾事件的 route_outcome 不是 success（例如缺预期产物 failure_class=expected_outputs_missing）
+      且步骤未 verified，或读不出这条事实：拒绝报 success。原先按「已投影」返回 success，与路线里
+      步骤 failed、路线 blocked 的记录矛盾。不是评判作业好坏，是不能写出与已记录事实相反的结论；
+      错误体附 missing_expected_outputs 与恢复出口（改指向纠正或如实按失败收尾）。
+
+  # ── data 节点 PR#1036（四例 E2E 跑通后的快照，2026-09-16）─────────────────
+  #
+  # 四条全是 C。逐条看它到底在陈述什么：文件不在、字节不是 UTF-8、编辑落不到
+  # 底稿上、改了等于没改 —— 都是关于世界/协议的既成事实，一条都没有在评判这份
+  # 前处理产物够不够好。出口也都是义务形态（needs_revision + 指名下一步该动哪里），
+  # 不是死路。
+  #
+  # 登记人不是节点 owner（cuibing）本人：分类由 wangd 在 2026-09-16 拍板代填，
+  # 依据是上面逐条读过的代码。owner 如不同意任何一条的归类，直接改本表。
+  - file: nodes/data/tools/execute_preprocessing_plan.py
+    class: C
+    why: >-
+      _repair_step_from_feedback：模型给的 parameter_updates 合法，但并进去之后
+      canonical_hash 和原参数一模一样 —— 这次修复没提出任何可执行的改动，照原样
+      再调一次工具只会得到同一个结果。跳过是省一次空转，不是判方案不行；出口带
+      issues 原样带走 + local_repair_exhausted，交回上一层继续。
+      与紧邻的「更新超出 allowed 参数面」同族。
+  - file: nodes/data/tools/preprocessing_capabilities.py
+    class: C
+    why: >-
+      generate_preprocessing_artifact：声明的输入文件解析后不在盘上
+      （_resolve 之后 is_file() 为假）。没有源文件就没有可编辑的底稿，必须说出来 ——
+      revision_feedback 明确要求去把真源文件解决掉，而不是按文件名把它编出来。
+  - file: nodes/data/tools/preprocessing_capabilities.py
+    class: C
+    why: >-
+      generate_preprocessing_artifact：唯一输入是二进制（read_bytes().decode("utf-8")
+      抛 UnicodeDecodeError）且这一步是同后缀的"就地改写"。UTF-8 文本写手物理上
+      编辑不了这串字节，报错同时指名该走格式感知的那个 producer。
+  - file: nodes/data/tools/preprocessing_capabilities.py
+    class: C
+    why: >-
+      generate_preprocessing_artifact：写手返回的编辑指令落不到底稿上
+      （_apply_artifact_edits 抛 ValueError/TypeError/AttributeError）。是这次编辑
+      本身应用不了的协议事实，不是产物质量判决；错误体带 validation_diagnostics
+      指明是哪个输出路径、卡在哪一句。
+
+# ── 图合同（PR#1045，postprocess 出图）的登记，2026-09-18 ───────────────────
+#
+# 79 条全是 **C（物理/协议）**，而且是同一个命题的 79 个面：
+#   **一份自相矛盾的声明没有对应的图可画。**
+# 这套架构从第一天就把拒绝的边界划在自相矛盾上 —— 「画得不够好」从不拒绝，
+# 只出 findings（层面判据 + 覆盖判据），交给作者自己决定改不改。所以这里一条
+# D（充分性判决）都没有，也不该有。
+#
+# 逐条列出来而不是抬基线：这些墙是我砌的，分类就该我写。PR#771 那 258 条抬
+# 基线的做法在表头写明「清偿仍是 owner 的义务」—— 不重复那个欠账。
+
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L430：must be a short identifier matching ; got
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L438：must be an array
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L462：A selector picks nodes by role, by group, or by an explicit id list. has unknown keys ; allowed: . . Did you mean ? ,
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L482：assertions[ ].kind must be one of ; got
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L487：assertions[ ] needs exactly one comparator from
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L496：assertions[ ]. must be an integer
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L510：assertions[ ].derived_from is required: quote the fragment of the request this assertion comes from, so contract coverage can be reviewed
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L526：assertions[ ] uses kind='degree' without saying whose degree. Two legal forms: degree + node=<id> (that one node's edge count), or degree + selector={
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L534：assertions[ ] uses kind='neighbors' but names no node: add node=<id> (and within={'role': ...} to restrict which neighbours count).
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L548：must be one of
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L550：must be one of ; got
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L559：nodes[ ].ports must be an integer
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L561：nodes[ ].ports must be between 0 and 64
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L564：nodes[ ].shape must be one of ; got . chip = densely packed small tile for a bank of identical parts; bar = full-width bar for a shared backbone; box 
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L628：groups[ ].style must be one of ; got . dashed = a boundary/enclosure (chassis, room, trust zone); solid = a real sub-system.
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L635：groups[ ].label_position must be 'top' or 'bottom'; got
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L663：must be an integer >= 1
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L665：must be between 1 and 64; got
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L673：edges[ ].kind must be one of ['bus', 'dashed', 'link']; got
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L711：bands[ ] entries must be 'group:<id>' or 'node:<id>'; got
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L738：panels[ ].axes. must be a matplotlib scale name ('linear', 'log', 'symlog', 'logit')
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L759：contract family is not one of
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L808：a schematic contract must declare nodes: the framework renders the diagram from this declaration, so an empty node list draws nothing
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L823：a schematic contract must declare bands (the top-level rows): bands=[['group:<id>' | 'node:<id>', ...], ...]
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L831：every band is empty, so nothing would be placed: bands are the top-level rows — put 'group:<id>' or 'node:<id>' entries in them
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L874：blocks[ ].kind must be one of ; got . diagram = a graph; spec = a bulleted summary (optionally in columns); note = a paragraph.
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L886：blocks[ ].row must be an integer
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L893：blocks[ ] is a diagram with no nodes; a diagram block renders from its declaration, so an empty node list draws nothing
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L909：blocks[ ] is a diagram without bands: bands=[['group:<id>' | 'node:<id>', ...], ...]
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L933：blocks[ ] is a spec block with no items
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L937：blocks[ ].columns must be an integer
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L939：blocks[ ].columns must be between 1 and 4
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L943：blocks[ ] is a note block with no text
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L959：.annotations[ ].anchor references unknown node ; declared nodes:
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L965：.annotations[ ].side must be one of ; got
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L971：.annotations[ ] has no text
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L990：a schematic contract needs at least one diagram block; spec and note blocks annotate a figure, they are not a figure by themselves
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1068：duplicate node ids:
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1076：nodes[ ].detail_of= names no group. It must be the id of a group drawn elsewhere in this figure; known groups: . id (none)
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1082：nodes[ ].detail_of= points at a group that contains this very node. A collapsed node lives outside the group it collapses. id
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1097：nodes[ ].detail_of= names a group in the same block. A collapsed node and the group it collapses belong in different blocks — otherwise the figure dra
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1108：duplicate group ids:
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1117：group declares parent , which is not a declared group. Declared groups:
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1125：group nesting forms a cycle through
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1138：: a group is a box around some nodes, and a box around nothing takes up room without saying anything. Put node ids in ranks, give it child groups (gro
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1153：group places unknown node ; declared nodes: id
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1165：bands reference unknown node ; declared nodes:
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1171：bands reference unknown group ; declared groups:
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1183：this figure declares message steps, so **every** edge needs one: have no step. Mixing stepped and unstepped messages leaves the unstepped ones with no
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1189：a stepped (sequence) figure places participants in one row and messages down a time axis, so it has no groups; drop them, or drop the steps
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1194：a stepped (sequence) figure needs exactly one band listing the participants left to right; got bands bands
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1202：nodes declare side=… and must not also appear in bands or group ranks: the framework places a side node beside the whole stack, so putting it in a row
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1209：node declares side=… but connects to nothing; a side column only makes sense for something the rows talk to
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1217：nodes declared but never placed in a group rank or a band: ; every node must appear exactly once in the layout
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1223：nodes placed more than once:
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1229：top-level groups declared but not placed in any band:
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1234：nested groups may not be placed in a band directly: ; their position comes from their parent group
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1240：groups placed in more than one band:
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1250：edges[ ]. = names no group. Declared groups:
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1266：edges[ ]. = is a group, not a node. To draw one line to the whole group, write 'group: ' — that is one edge instead of one per member, and it is the s
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1274：edges[ ]. references unknown node ; declared nodes:
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1293：every node is emphasis=primary — emphasis is a relation, and a relation that holds for everything distinguishes nothing. Mark the one or two things th
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1319：nodes are drawn but connected to nothing: ; either declare the edges that connect them, or mark them isolated=true if standing alone is the intended m
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1332：duplicate panel ids:
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1336：duplicate series ids:
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1340：series targets unknown panel ; declared panels: id panel
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1345：an asserted-family contract must declare panels and/or series: without them there is nothing for the object-model check to compare against
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1481：unevaluated assertion kind
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      L496：asset_kind has no figure contract family. Contracts cover: schematic (compiled from the contract), quantitative and composite (checked against the ren
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      L534：. Fix the nodes/edges so the declared structure satisfies the assertion, or narrow the selector if it caught more than you meant (the list above each 
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      L656：contract_id was never declared in this run. Declared contracts: . Call declare_figure_contract first — the contract must exist before the pixels do. (
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      L667：a schematic figure must be rendered from a declared contract: call declare_figure_contract(request_id=..., asset_kind='schematic', contract={nodes, gr
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      L708：a schematic is rendered from its contract, not from hand-written plotting code: drop code/script_path. Change the diagram by declaring a new contract.
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      L732：generative pixels may not serve as evidence figures: declare generative={'role': ..., 'evidence_bearing': false} explicitly, or render the figure dete
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      L778：backend must be one of ; got
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      L790：the contract backend writes ; cannot produce
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      L843：none of the declared output files were produced by the render code: ; the code must actually write the files it declares
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      L853：declared output files were not written by this execution: ; re-render instead of binding pre-existing files
+  - file: nodes/postprocess/vlm_extraction.py
+    class: C
+    why: >-
+      L342：model role 'visual_review' is not bound; the caller must resolve the role before calling extract_against_contract
+
+  # ── #1050 第二批：015 完成后置条件 + 007 本地纠正见证（2026-09-17，owner lujy 自填）──
+  - file: nodes/experiment/tools/execution_route.py
+    class: B
+    why: record_external_route_execution_verification 拒绝一份与当前 attempt、冻结的 step contract 或 expected-output
+      分区不一致的预计算 observation。writer 只有在这份记录事实可由同一权威 route 重放时才能写入；错误体保留原 observation 上游可重新解析并重试，或走 blocker
+      终态，不评判实验结果是否充分。
+  - file: nodes/experiment/tools/execution_route.py
+    class: B
+    why: record_external_route_finalization 发现同 identity/attempt 已有的 execution verification 与本次终态处置互相冲突时拒绝覆盖。既有物理执行观察不可被后来的
+      workflow 处置改写；operation_blocked 只有显式的双轴兼容矩阵可保留旧观察并收尾。
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: route completion observation 在写入前没有独立物理成功证据（exit 0，或既有远端 fresh-health fallback）时拒绝持久化。把 exit unknown
+      硬写成 succeeded=True 会 伪造 exact-output correction basis；出口是 report_blocker 后 operation_blocked。
+  - file: nodes/experiment/tools/resource_manager.py
+    class: B
+    why: 持久化 route completion observation 的既有 writer 无法加载或抛异常时返回明确 错误。此时没有 durable correction basis，不能告诉调用方继续
+      correction；可修复 持久化/identity 后重试，或用 blocker 终态接管。
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: operation_completed 的统一完成后置条件视图未通过：已声明的 health 路径或 route outputs 缺失/陈旧/不可唯一解析，或 toolchain_build
+      零声明。它报告的是机械 completion protocol 未兑现，不是结果充分性判断；声明错误可精确纠正，真实缺产物 可 report_blocker 后 operation_blocked。
+  - file: nodes/experiment/tools/resource_manager.py
+    class: B
+    why: 铸造 schema-v2 operation_completed closure 前，冻结的 completion-postcondition view 未通过语义与 identity 校验时拒绝铸造和
+      cleanup。closure 是 cleanup 后唯一 恢复事实，写入不自洽 view 会制造不可重放的成功终态。
+  - file: nodes/experiment/tools/resource_manager.py
+    class: B
+    why: route missing 已被同一次只读 observation 判定，但既有 writer 未能持久化 expected_outputs_missing 时拒绝宣称 correction
+      可用。错误体明确 correction basis 尚不存在，要求先修复持久化/identity 或转 operation_blocked。
+  - file: nodes/experiment/tools/resource_manager.py
+    class: B
+    why: 全部 completion postconditions 已通过，但同一冻结 route observation 无法在 closure 与 cleanup 前持久化时拒绝继续。否则会出现
+      closure 说成功、route 没有 durable success fact 的分裂账本；没有铸 closure、没有 cleanup，可安全重试或阻塞交接。
+
+
+  # ── #1050 第二批续：007 addendum 披露不变量（2026-09-17，owner lujy 自填）──
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: record_operation_completion 在冻结三件套前无法从 route owner 的 validated recovery lineage 派生 correction disclosure
+      时拒绝继续。欠的是可读、可重放的 权威 lineage 及其限制投影；否则会把已知的本地见证边界静默漏出冻结交付。这不是 判断结果是否充分。合法出口是修复或恢复 route/artifact 读取链后以同一
+      completion 重试；无法恢复时把精确账本故障交给该 owner，不能由调用方补写一份限制。
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: route owner 返回的 disclosure 缺少框架拥有的具名 check 时拒绝冻结。欠的是 LOCAL_CORRECTION_LIMITATION_CHECK 这一稳定身份，它把
+      limitations 与冻结 checks 机械绑定；没有名字就无法审计省略或冒名。这是 producer 接口完整性，不是实验质量 判决。合法出口是修复或版本对齐 execution_route
+      producer 后重试，调用方不能自造 check 名称绕过。
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: 调用方在 checks 中自行声明框架保留的 correction-limitation check 时拒绝写入。 该 check 必须从 validated recovery receipt
+      自动生成，调用方提供的同名内容可能把 semantic_identity_independently_verified=false 伪写成 true。这是证据来源完整性 义务，不评判结果充分性；合法出口是删除调用方的保留
+      check 后原样重试，由框架自动 注入权威投影。
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: 幂等返回或 partial closure 续写前，任一 active raw_results、clean_results 或 experiment_log 的限制元数据及具名 check
+      与当前权威 disclosure 不完全一致时拒绝 混接。这报告的是冻结证据被省略、改写或损坏的事实，不是任务结果是否够好的判决。 未冻结的损坏草稿可用 supersede_closure_draft
+      追加否定后重试；冻结记录或读取链 损坏则交 artifact/route owner 恢复，不能在本工具内覆盖历史。
+
+# ── tikz 编译搬出沙箱、经唯一咽喉执行（2026-09-18）：4 个新拒绝点，全是 C ─────────
+# 说的都是「这一次编译没做成/没法做」，不是评判图好不好。
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      _finish_tikz_render：沙箱脚本没写出 _contract_tikz/figure.tex —— 编译无从开始（协议：编译路径的脚本必须先写 .tex）。
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      _finish_tikz_render：铸图主机上没有 xelatex/lualatex —— 物理缺席，提示改用 matplotlib 后端。
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      _finish_tikz_render：xelatex 非零退出/超时/被取消 —— 这一次没编成，附 log 尾巴；不是稿子的充分性判决。
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      _render_figure：框架侧 tikz 编译失败时把 _finish_tikz_render 的错误原样交回（同一条事实的出口，不另下判决）。
+
+  # ── writing 节点重建（2026-09-18，docs/WRITING_NODE_REBUILD_PLAN_20260918.md）──
+  # 旧节点 20 个拒绝点整批删除（基线已降）；新节点 28 个，逐条登记。全部是 B（简报/提纲/审读报告
+  # 这些记录必须存在且自洽，后面的验收要读它们）或 C（调用形状、语法、编译这类协议/物理事实），
+  # 没有一条在判「稿子够不够好」—— 那是审读官报告与作者备注里的事，不是拒绝。
+  - file: nodes/writing/tools/w_bib.py
+    class: C
+    why: >-
+      write_bibliography 收到的文本没有一条能按 BibTeX 花括号配平切出来 —— 这是格式事实，模型改格式再交。
+  - file: nodes/writing/tools/w_brief.py
+    class: C
+    why: 体裁 id 不在 genres/ 里；报错列出可用体裁。
+  - file: nodes/writing/tools/w_brief.py
+    class: C
+    why: 骨架变体不在体裁的 variants 里；报错列出可选项。
+  - file: nodes/writing/tools/w_brief.py
+    class: B
+    why: 简报没有工作标题 —— 标题块是 H1 要对账的记录，不能为空。
+  - file: nodes/writing/tools/w_brief.py
+    class: C
+    why: must_haves 的机械规则不符合三种子句语法（refs>=N / forbid=正则 / require=片段），报错回给语法。
+  - file: nodes/writing/tools/w_brief.py
+    class: B
+    why: >-
+      重命名/替换类要求必须登记成 mechanical + forbid=旧名（iter7 实测模型标成 referee 绕过闸）——
+      否则旧名残留在图里无人能查，验收记录就是假的。
+  - file: nodes/writing/tools/w_brief.py
+    class: B
+    why: >-
+      用户原话里有编号要求而 must_haves 为空（iter10 实测）—— 简报是唯一登记用户要求的记录，空了 H6 整轮无牙。
+  - file: nodes/writing/tools/w_brief.py
+    class: B
+    why: write_outline 前必须先 write_brief —— 提纲要对着简报的体裁与部件表检查。
+  - file: nodes/writing/tools/w_brief.py
+    class: C
+    why: outline 不是对象或 parts 为空 —— 调用形状。
+  - file: nodes/writing/tools/w_deliver.py
+    class: B
+    why: >-
+      submit_manuscript 的阻塞项：没简报/渲染未成功/硬线未过/没审读报告/审读结论针对的是另一版 PDF/没作者备注。
+      每一条都是「交付记录不完整」，force+reason 可越过并记进记录。
+  - file: nodes/writing/tools/w_dossier.py
+    class: C
+    why: read_dossier 的 part 不在五种之一。
+  - file: nodes/writing/tools/w_dossier.py
+    class: C
+    why: read_dossier(part=entries) 没给 ids。
+  - file: nodes/writing/tools/w_dossier.py
+    class: C
+    why: read_dossier(part=search) 没给 query。
+  - file: nodes/writing/tools/w_draft.py
+    class: B
+    why: 起草前必须有简报。
+  - file: nodes/writing/tools/w_draft.py
+    class: B
+    why: 起草前必须有提纲。
+  - file: nodes/writing/tools/w_draft.py
+    class: C
+    why: 部件不在体裁里。
+  - file: nodes/writing/tools/w_draft.py
+    class: B
+    why: 提纲里没有这个部件 —— 先补提纲，主张要有卷宗证据。
+  - file: nodes/writing/tools/w_draft.py
+    class: C
+    why: 有界起草调用没有返回内容（模型服务的物理事实）。
+  - file: nodes/writing/tools/w_draft.py
+    class: B
+    why: revise_section 的目标片段还不存在 —— 先 draft_section。
+  - file: nodes/writing/tools/w_figures.py
+    class: B
+    why: 派图前必须有简报 —— 语言与命名政策从简报灌进请求。
+  - file: nodes/writing/tools/w_figures.py
+    class: C
+    why: 请求缺 intent、示意图缺 spec、或不是对象 —— 调用形状；图表服务不该猜结构。
+  - file: nodes/writing/tools/w_referee.py
+    class: B
+    why: 审读前必须有简报（rubric 要对着用户要求）。
+  - file: nodes/writing/tools/w_referee.py
+    class: B
+    why: 审读前必须有一次成功的渲染（审读对象是 PDF 逐页文字）。
+  - file: nodes/writing/tools/w_referee.py
+    class: C
+    why: 审读轮次到达上限（3）—— 协议上限，报错指明按最近报告修完提交、未采纳写备注。
+  - file: nodes/writing/tools/w_referee.py
+    class: C
+    why: 审读官没有返回合法 JSON（模型输出格式事实），附原文前 1500 字。
+  - file: nodes/writing/tools/w_render.py
+    class: B
+    why: 渲染前必须有简报（标题、作者、体裁决定模板）。
+  - file: nodes/writing/tools/w_render.py
+    class: C
+    why: LaTeX 编译失败 —— 物理事实，收据带 file:line 的错误。
+  - file: nodes/writing/tools/w_render.py
+    class: B
+    why: read_pages 前必须先 render_manuscript（pages.txt 是渲染的产物）。
+
+  # ── PR#1050 冻结批（2026-09-22）：owner lujy 在 ──────────────────────────
+  #    nodes/experiment/docs/refusal_registry_batch_0922_entries.yaml 逐条分类，
+  #    root owner 照单合入（不代填、不抬基线）。同批 safe_bash.py 基线 29→27：
+  #    _exec_and_log 里两处直接 return 的「启动 shell 失败」信封已并入统一的
+  #    census terminalization 路径，两个 scanner 可见的 return 已删除 —— 先收紧
+  #    再登记，免得留下两个能被未来拒绝点静默复用的槽位。
+  # ── nodes/experiment/tools/contract_audit.py（+2）────────────────────────────
+  # [carried] _dispatch_data_request → execution_action_census_guard_unavailable
+  - file: nodes/experiment/tools/contract_audit.py
+    class: B
+    why: >-
+      _dispatch_data_request 在 Data child 尚未启动前无法加载或执行 pending-assignment
+      action-census guard 时拒绝派发。此时缺的是可核验的动作授权/记账边界；继续会让
+      一个外部 child 脱离 P0a 的完整动作账本。没有副作用，可在修复 guard 后安全重试。
+  # [new · P0a v4 (e39debac)] _dispatch_data_request → dispatch_committed_but_receipt_event_not_durable
+  - file: nodes/experiment/tools/contract_audit.py
+    class: B
+    why: >-
+      _dispatch_data_request 在 Data child 已跑完、input delivery ledger 已提交之后，
+      census 收据事件 data_request_dispatched 追加失败时返回
+      dispatch_committed_but_receipt_event_not_durable，带 side_effect_committed=true、
+      payload_must_not_rerun=true。副作用已经发生：返回普通 success 会让模型再派一个子
+      run，吞掉则 census 看不见这次派发、build 收尾能绿。唯一出口是
+      reconcile_data_dispatch(spec_id) 补记缺失的收据事件，不重跑派发。
+
+  # ── nodes/experiment/tools/execution_action_census.py（+16）─────────────────
+  # [carried] _error 助手本体
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      _error 是本模块拒绝信封的单一构造器；scanner 会同时计这个返回点和各调用点。
+      本体只渲染已由下列调用点判定的协议错误，不新增策略或结果充分性判断；各 caller
+      仍逐点登记，不能把这个 helper 条目当作未来通用造墙额度。
+  # [carried] begin_execution_action → execution_action_census_input_invalid（非 object）
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      begin_execution_action 收到非 object 的 action 或 decision 时无法构造动作协议记录，
+      在任何 payload 启动前返回 execution_action_census_input_invalid。
+  # [carried] begin_execution_action → execution_action_census_tool_unsupported
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      begin_execution_action 只接受声明进入三阶段 census 的执行工具；unsupported tool
+      无对应 spawn/terminal owner，故在副作用前按协议拒绝。
+  # [carried] begin_execution_action → execution_action_census_input_invalid（tools disagree）
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      action.tool 与 resolver decision.tool 不一致时无法把 admission 绑定到同一动作身份；
+      拒绝写入避免产生两个互相矛盾的事实来源。
+  # [carried] begin_execution_action → execution_action_route_binding_invalid（normalize）
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      route-backed admission 缺少、误带或错配 exact route attempt binding 时拒绝；否则
+      action census 会把物理动作记到错误 step/attempt。
+  # [carried] begin_execution_action → execution_action_route_binding_invalid（not persisted）
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      exact route binding 未在 route owner 中唯一持久化时拒绝 admission；调用方内存里的
+      binding 不能代替 durable route_step_bound 事实。
+  # [carried] begin_execution_action → execution_action_census_state_invalid
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      state 缺少 run identity 时拒绝创建 action_id；无 run_id 的事件无法在恢复时证明
+      归属，不能进入持久账本。
+  # [carried] begin_execution_action → execution_action_census_history_invalid
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      route-backed admission 发现 transcript 损坏或读取告警时拒绝追加；在不完整历史上
+      继续写会把重复 admission 或冲突身份伪装成唯一事实。
+  # [carried] begin_execution_action → execution_action_route_attempt_already_admitted
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      同一 persisted route attempt 已存在不等价 admission 时拒绝覆盖；旧动作事实不可被
+      后来的重调改写，需先由账本 owner 对账。
+  # [carried] begin_execution_action → execution_action_census_persistence_failed
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      admission append 未能证明 durable 时禁止 payload 启动；否则副作用可能发生却没有
+      可恢复的 action identity。append 已成功但响应丢失时 exact reread 仍可幂等收敛。
+  # [carried] _append_followup → execution_action_{phase}_conflict
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      _append_followup 对同 action/phase 的非等价重调返回 conflict，不覆盖已有 spawn 或
+      terminal 事实；这是不可变事件完整性，不是实验结果判决。
+  # [carried] _append_followup → execution_action_census_persistence_failed
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      spawn/terminal follow-up 无法证明 durable 时返回 persistence_failed，并携带只补该
+      phase 的恢复胶囊和 payload_must_not_rerun，防止用重跑物理载荷补账。
+  # [carried] observe_execution_action_spawn → execution_action_spawn_observation_invalid
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      observe_execution_action_spawn 只接受 bool/null 的 spawn/submission 事实及稳定
+      proof_source；形状不合法就没有可写入三阶段协议的物理观察。
+  # [carried] defer_execution_action_terminal → execution_action_terminal_input_invalid
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      defer_execution_action_terminal 同时收到 result 与 error 时终态协议自相矛盾；该纯函数
+      不写事件，调用方修正为二选一即可。
+  # [carried] finish_execution_action → execution_action_terminal_input_invalid
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      finish_execution_action 同时收到 result 与 error 时无法形成唯一 terminal projection；
+      在写账前拒绝，修正调用参数后可重试，不涉及结果充分性。
+  # [revised · P0a v2] pending_operation_action_block → prereg_pending_operation_action_ineligible
+  #   044 交接件把它记为 collector（待拆分标记），理由是 route_exempt_effectful_action_not_compatible
+  #   同时挡住 fetch_resource / safe_write_file / dispatch_data_request 且让 egress 回归转红。
+  #   P0a v2（裁决 (a)）已删掉这一分支：三个 support tool 在此放行并以 receipted 入账，
+  #   路线层放行的低风险写入记 incidental。剩余分支按 044 自己的判断「属于 B」登记。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      pending_operation_action_block 是临时 pending-assignment 兼容 lane 的副作用前守门，
+      单一 return 携带 reason 之一：prereg_assignment_authority_unavailable（run acceptance
+      收据读不到或不是 v2）、prior_scientific_signal_requires_redispatch、
+      pending_assignment_requires_explicit_operational_scope、
+      scientific_execution_requires_exact_prereg_assignment、unknown_execution_tool、
+      route_exempt_effectful_action_not_compatible（无路线且非 read-only / dry-run /
+      authoritative mechanical 的执行工具）。它们共守一条不变量：run 的 prereg assignment
+      authority 未定或不可读时，不产生任何无法归属的执行事实；缺失事实不能推断为许可。
+      只读诊断始终放行；support tool 放行并入账为 receipted（P0a v2）。无副作用，
+      retryable_in_current_run=false，出口是派发方以 typed bound/none 重派或 framework
+      修复收据，随 release_marker 一起下线。备注：explicit_operational_scope 分支目前
+      没有直接测试。
+
+  # ── nodes/experiment/tools/execution_route.py（+1，另 7 处为搬家不登记）───────
+  # [carried] enforce_execution_route → execution_action_census_guard_unavailable
+  - file: nodes/experiment/tools/execution_route.py
+    class: B
+    why: >-
+      enforce_execution_route 在动作本来可能到达副作用、但 pending-operation census guard
+      无法加载或判定时 fail closed。缺失 guard 不能被解释成许可；无副作用，修复节点 guard
+      后可重试，并保留明确 owner/blocker。
+
+  # ── nodes/experiment/tools/operation_completion.py（+3）──────────────────────
+  # [new · P0a v2→v4] _record_operation_completion → operation_build_artifact_not_produced_by_satisfying_attempt
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      新 closure 的 build 成功声明里，任一 artifact_paths / executable_paths / json_paths
+      不在满足真实执行义务的那次 attempt 收尾时冻结的产物身份收据（lexical 路径、kind、
+      inode、sha256）里，或此刻身份已与收据不同，返回
+      operation_build_artifact_not_produced_by_satisfying_attempt。它只判产物归属、不判
+      产物质量：路线之外由 shell / Python / safe_write_file 写出或事后 ln / mv 顶替的文件
+      不能被铸成构建结果。无副作用，retryable_in_current_run=true、payload_must_not_rerun=
+      false——把产物写进产出步骤的 expected_outputs 并真实执行后，用相同输入重试。
+  # [carried] _record_operation_completion → operation_task_kind_mismatch
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      operation closure 的调用方 task_kind 与 immutable operation category 不兼容时返回
+      operation_task_kind_mismatch；它机械阻止用 generic 等标签降低既有 build 执行义务，
+      不评判结果质量。物理 payload 不重跑，只以兼容 task_kind 重试 completion。
+  # [carried] _record_operation_completion → operation_real_execution_required
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      成功 toolchain_build 没有完整、权威且非 dry-run 的 action-census 执行事实时返回
+      operation_real_execution_required。退出码、只读探测或文字声明不能替代真实 build；
+      可实际执行并核验后重试，无法执行则以诚实 blocked closure 收尾。
+
+  # ── nodes/experiment/tools/run_contract.py（+2）─────────────────────────────
+  # [carried] _pending_scientific_block_payload → prereg_assignment_required
+  - file: nodes/experiment/tools/run_contract.py
+    class: B
+    why: >-
+      prereg_assignment 为 pending 且当前动作出现科学信号时返回 prereg_assignment_required；
+      项目 catalog 只是观察，不能替派发方选择治理本 run 的 exact prereg。错误体要求新 run
+      携带 typed bound/none，保留候选 witness，不在 child 内猜测或覆写 authority。
+  # [carried] prereg_assignment_scientific_block → prereg_assignment_authority_unavailable
+  - file: nodes/experiment/tools/run_contract.py
+    class: B
+    why: >-
+      科学动作发生前无法读取唯一 run-acceptance/prereg-assignment authority 时返回
+      prereg_assignment_authority_unavailable；缺失或损坏的权威记录不能当作 none。
+      这是身份/记录完整性门，需由 framework/dispatch owner 修复或重派。
+
+  # ── nodes/experiment/tools/safe_bash.py（+5，配 29→27 收紧）──────────────────
+  # [carried] _exec_and_log → execution_action_census_input_invalid
+  - file: nodes/experiment/tools/safe_bash.py
+    class: C
+    why: >-
+      _exec_and_log 只接受 execution_action 与 execution_decision 同时提供或同时省略；半组
+      参数无法建立同一 admission，故在 spawn 前返回 execution_action_census_input_invalid。
+  # [carried] _begin_execution_action_census → tuple (None, {status: error, phase: admission})
+  - file: nodes/experiment/tools/safe_bash.py
+    class: B
+    why: >-
+      _begin_execution_action_census 把 action-census admission 的异常或非成功响应规范化为
+      pre-spawn 错误；没有 durable admission 就不启动 payload，避免无身份副作用。
+  # [carried] _settle_execution_action_census → {status: error, execution_action_phase, ...}
+  - file: nodes/experiment/tools/safe_bash.py
+    class: B
+    why: >-
+      _settle_execution_action_census 在物理 outcome 已存在但 spawn/terminal phase 未完整持久化
+      时返回不可重跑错误，附 phase facts 与恢复胶囊；这保护账本完整性并明确禁止重复副作用。
+  # [carried] _exec_and_log._census_block → {**census_error, status: error, execution_outcome}
+  - file: nodes/experiment/tools/safe_bash.py
+    class: B
+    why: >-
+      _census_block 将已发生的物理 execution_outcome 与 census 持久化失败合成一个模型可见
+      信封；它不改写物理结果、不新判充分性，并统一携带 payload_must_not_rerun。
+  # [new · P0a v2 B2 / v3 / v4] _safe_write_file → write_committed_but_census_settlement_uncertain
+  - file: nodes/experiment/tools/safe_bash.py
+    class: B
+    why: >-
+      _safe_write_file 在文件已经写入、但三阶段 census 的 settle 未能证明 passed（含 settle
+      自身抛错）时返回 write_committed_but_census_settlement_uncertain，带
+      side_effect_committed=true、written_path、census_action_id、payload_must_not_rerun=true。
+      写入已发生：返回普通 success 会让 ROC(build) 对照不到这次写入（P0a v2 B2 实测可铸
+      假成功），盲重跑会重复写。next_action 原样透传 census 的 runtime-owned 结算出口
+      （retry_missing_census_phase_only，model_callable=false），模型侧按 model_next_action
+      报 blocker 结束本 run。
+
+  # ── 图合同：印刷版心 + 数据图设计合同 + 调用方绑定（#1088，2026-09-22）─────
+  #
+  # 这批 20 个拒绝点分三组，没有一条在评判"这张图画得好不好"：
+  #   · 调用方绑定（家族 / 版心 / 语言 / request_id ↔ contract_id）—— 两方之间的
+  #     ABI。绑不上或对不上，后面每一条判据都没有可依据的尺子。C。
+  #   · 印刷物理 —— 版心尺寸固定，画布与面板数决定每一档文字的终字号。低于下限
+  #     不是"难看"，是印出来读不了。**而且只在有人真说了印在哪儿时才拒**
+  #     （调用方绑定或作者声明）；版心是按 purpose 猜的就只记不罚 —— 拿猜的
+  #     版心去罚作者，报的是他交不出的东西（iter48 实测三版画布一模一样）。C。
+  #   · 数据图的记录完整性 —— 轴没有名字、数没有单位、序列没有互异的标签，
+  #     这张图作为证据读不出它在测什么。不是审美，是这份证据不可解读。B。
+  #
+  # 为什么这三组都不做成 collector（照放行、记一笔）：这三件事全部发生在
+  # **声明那一刻**，此时还没有像素。放行等于让模型先烧一次渲染预算（每请求 ≤3）
+  # 再从事后的 layout.digest 去倒推该改哪一步 —— iter11 实测同一张总览就是这么
+  # 渲了 7 次的。记一笔事后可查，但那一趟的预算已经烧完了。
+
+  - file: nodes/postprocess/contracts.py
+    class: C
+    why: >-
+      caller_policy：constraints.width 不在 CALLER_WIDTHS 里。版心是一张封闭词表
+      （single_column / double_column / slide / poster），不认识的名字没有对应的
+      印刷尺寸，后面的缩放与终字号都无从算起。报错列出合法值。
+  - file: nodes/postprocess/contracts.py
+    class: C
+    why: >-
+      caller_policy：constraints.min_font_pt 不是数。它要参与印刷字号计算，不是数
+      就没有"下限"这个量。
+  - file: nodes/postprocess/contracts.py
+    class: C
+    why: >-
+      caller_policy：constraints.forbid_text 不是字符串数组。它要逐条当正则去匹配
+      合同里的人读文字，别的形状喂不进 re。
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      _normalize_axis：轴写成了裸的 scale 名（如 "log"）而不是 {label, unit, scale}
+      对象。类型不对，报错里直接给出正确写法的样例。
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      _normalize_axis：axes.scale 不是 matplotlib 认识的 scale 名。这个值原样交给
+      matplotlib，不在名单里它自己会崩在渲染那一刻（更难诊断）。
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      _check_asserted_structure：声明的面板数超过 MAX_PANELS。印刷物理——版心尺寸
+      固定，8 面板图在 170mm 里每个面板都是邮票（iter11 实测刻度 5.2pt）。报错给的
+      是拆图的改法（一个模型/一个网络族一张），不是"画得不好"。
+  - file: nodes/postprocess/figure_contract.py
+    class: B
+    why: >-
+      _check_asserted_structure：quantitative 的轴没有 label。图是证据，轴没有名字
+      就读不出它在测什么——这份记录不完整，不是审美判断。
+  - file: nodes/postprocess/figure_contract.py
+    class: B
+    why: >-
+      _check_asserted_structure：quantitative 的轴没有 unit（无量纲/分类轴要明写
+      "none"）。一个数没有单位不是测量；而空字段分不清"忘了写"和"本来没有"，
+      所以要求明写。
+  - file: nodes/postprocess/figure_contract.py
+    class: B
+    why: >-
+      _check_asserted_structure：多序列时有序列没有 label。图例就是由这些 label
+      生成的，缺了读者分不出哪根是哪根——证据不可解读。
+  - file: nodes/postprocess/figure_contract.py
+    class: B
+    why: >-
+      _check_asserted_structure：序列 label 重复。两条同名图例条目对读者就是一条，
+      这张图读不出它画了几件事。
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      _declare_figure_contract：声明的 asset_kind 与调用方 visual_request 绑定的家族
+      不符。家族是调用方的决定（ABI）；iter7/iter11 实测 schematic 请求被改标
+      composite 就绕过了"schematic 不许传 code"。报错指出正确做法是回话给调用方，
+      不是改标。
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      _declare_figure_contract：合同里的人读文字违反调用方声明的语言政策 / 禁用词
+      （text_policy_failures）。语言与禁用词是调用方 constraints 的一部分，是协议
+      不是文风评判。
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      _declare_figure_contract：合同的 medium 与调用方 constraints.width 钉住的版心
+      冲突。两个真相源打架，只能由调用方那条定；报错给的改法是去掉合同里的 medium
+      或改成与调用方一致。
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      _declare_figure_contract：印刷终字号低于下限且**版心是有人真说的**（调用方绑定
+      或作者声明）。物理——170mm 里印出来读不了。拒绝信里是算过的改法（独立单元
+      几个一行、拆两张、去掉最小那档文字），不是"再试试"。版心只是按 purpose 猜的
+      时候不拒，事实进结果与记录。
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      _bound_policy：这一轮有调用方请求，但 request_id 认不到其中任何一条。绑不上
+      就没有家族、版心、语言可核，而合同的每一条判据都靠它们；报错带上偏差诊断。
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      _render_figure：render_figure 传的 asset_kind 与调用方请求的家族不符。与声明口
+      同一条协议，堵的是"声明时守规矩、渲染时改标"的另一半。
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      _render_figure：contract_id 是为另一条 request 声明的。一份合同属于一条调用方
+      请求；跨着用，合同里的版心/语言/家族核的就不是这张图。
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      _render_figure：渲染代码没有干净退出（沙箱执行 status != success）。把执行层的
+      失败原样转交，附 execution 与剩余渲染额度；不另下判决。
+  - file: nodes/postprocess/tools/figure.py
+    class: C
+    why: >-
+      _render_figure：tikz 收尾（框架侧 xelatex）失败。同上——同一条事实的出口，
+      原样转交 _finish_tikz_render 的错误与剩余额度。
+  - file: nodes/postprocess/tools/figure.py
+    class: B
+    why: >-
+      _render_figure：渲染出来的对象模型与它自己声明的合同矛盾（断言失败 / 设计合同
+      失败）。读的是渲染后的 matplotlib 对象模型，不是作者对它的描述——声明的事实与
+      产物不一致，记录就是假的。报错逐条列出"声明 vs 实际"并指回 render_guidance。
+  # ── C 批（组织页·知识）：晋升真的交给组织，2026-09-24 ─────────────────────
+  - file: core/kb_promotion.py
+    class: B
+    why: >-
+      promote（书目候选）：读不到那段文献，或它没有外部锚。书目的身份就是锚
+      （同锚合并），没有锚写出来的是一条没有身份的 org 记录。
+  - file: core/kb_promotion.py
+    class: B
+    why: >-
+      adopt：组织的待审里没有这个 id。裁的对象不存在，不能凭空写一条"采纳过"。
+  - file: core/kb_promotion.py
+    class: B
+    why: >-
+      adopt：这一条已经裁过了（采纳 / 退回）。一条待审只有一个裁决；再裁一次会让
+      记录里出现两个互相矛盾的决定。
+  - file: core/kb_promotion.py
+    class: B
+    why: >-
+      adopt：给的 State 不是提出它的那个项目的。原结论和证据闭包住在那个项目的知识层；
+      换一个项目去读，落进 org 的就是别处的正文配这条的出处 —— 出处是假的。
+  - file: core/kb_promotion.py
+    class: B
+    why: >-
+      adopt：promote 自己拒了（候选不合格 / 书目写不出）。原样转交 promote 的
+      blocking，不另下判决。
+  - file: core/kb_promotion.py
+    class: B
+    why: >-
+      decline：退回没写理由。退回记录是说给提上来的项目听的——没有理由的退回记录
+      缺了它唯一的内容（提的人不知道差在哪、下次照样提）。不判理由写得好不好。
+  - file: core/kb_promotion.py
+    class: B
+    why: >-
+      decline：组织的待审里没有这个 id（同 adopt）。
+  - file: core/kb_promotion.py
+    class: B
+    why: >-
+      decline：这一条已经裁过了（同 adopt）。
+
+  # ── 组织的知识会被改正（core/org_corrections + propose_org_correction，2026-09-24）──────
+  #
+  # 这批拒绝点答的是同一个问题：**一条组织裁定 / 更正记录要成立，至少得有什么**。
+  # 它们不评判理由写得好不好、证据够不够强 —— 那是管理员裁的事（人批）；只拒
+  # 「写下去就是一条缺了主语 / 对象 / 理由的记录」。B 为主，枚举与来源是 C。
+  - file: core/org_corrections.py
+    class: C
+    why: >-
+      _error 是本模块拒绝信封的单一构造器；scanner 会同时计这个返回点和各调用点。
+      本体只渲染下列调用点已判定的拒绝，不新增判断；各调用点逐条登记。
+  - file: core/org_corrections.py
+    class: C
+    why: >-
+      retire：裁定不在 refuted / superseded 里。组织的知识没有「删掉」这一种裁定 ——
+      词表外的值写进 org_standing，送达面的 in_force 就答不出它作不作数。
+  - file: core/org_corrections.py
+    class: B
+    why: >-
+      retire：没写理由。一条「不再作数」的记录，以后读到它的人唯一要知道的就是为什么；
+      没有理由的裁定缺了它的内容。不判理由写得好不好。
+  - file: core/org_corrections.py
+    class: B
+    why: >-
+      retire：没说谁裁的。裁定记录的主语缺了，账本上留下一条无主的「组织不认了」。
+  - file: core/org_corrections.py
+    class: B
+    why: >-
+      retire：组织里没有这一条（或它不是 org 层的）。裁的对象不存在，不能凭空写一条裁定。
+  - file: core/org_corrections.py
+    class: B
+    why: >-
+      retire：这一条已经不作数了。一条知识同一时刻只有一个裁定；要改先撤回（reinstate），
+      历史里两次都留着。
+  - file: core/org_corrections.py
+    class: B
+    why: >-
+      retire：写 lifecycle 时那一条不见了（读和写之间被移走）。同上，不凭空写。
+  - file: core/org_corrections.py
+    class: B
+    why: >-
+      reinstate：没写理由。它曾被裁定不作数，重新作数的那一条记录要说为什么。
+  - file: core/org_corrections.py
+    class: B
+    why: >-
+      reinstate：没说谁裁的（同 retire）。
+  - file: core/org_corrections.py
+    class: B
+    why: >-
+      reinstate：组织里没有这一条（同 retire）。
+  - file: core/org_corrections.py
+    class: B
+    why: >-
+      reinstate：这一条本来就作数。撤回一个不存在的裁定会在历史里留一条假的「重新作数」。
+  - file: core/org_corrections.py
+    class: B
+    why: >-
+      reinstate：写 lifecycle 时那一条不见了（同 retire）。
+  - file: core/org_corrections.py
+    class: C
+    why: >-
+      propose：更正提的裁定不在 refuted / superseded 里（同 retire 的词表）。
+  - file: core/org_corrections.py
+    class: C
+    why: >-
+      propose：来源不在 member / agent / contradiction 里。来源决定待审里谁看得见它
+      （成员看自己提的）和它怎么去重；词表外的来源两件事都答不出。
+  - file: core/org_corrections.py
+    class: B
+    why: >-
+      propose：没写理由。管理员裁的就是这句话；没有它，待审里是一条只说「这条错了」的记录。
+  - file: core/org_corrections.py
+    class: B
+    why: >-
+      propose：没说谁提的。成员看得见自己提的那条、同一人不重复挂，都靠这个字段。
+  - file: core/org_corrections.py
+    class: B
+    why: >-
+      propose：组织里没有这一条（同 retire）。
+  - file: core/org_corrections.py
+    class: B
+    why: >-
+      propose：这一条已经不作数了。对一条已被推翻的知识再提「推翻它」，认可了也改不了什么，
+      只会在待审里留一条无从裁的记录。
+  - file: core/org_corrections.py
+    class: B
+    why: >-
+      adopt（认可一条更正）：它指的那一条组织里没有了。裁的对象不存在，不能凭空写裁定。
+  - file: shared/tools/library/kb.py
+    class: C
+    why: >-
+      propose_org_correction：这一轮不在任何项目里。更正要引用「这个项目里」的证据，
+      没有项目就没有证据可指，协议上无从成立。
+  - file: shared/tools/library/kb.py
+    class: B
+    why: >-
+      propose_org_correction：evidence_ids 为空。更正记录的证据闭包是管理员裁的时候
+      回去读的入口；空的闭包写下去就是一条只有看法的更正。不判证据强不强。
+  - file: shared/tools/library/kb.py
+    class: B
+    why: >-
+      propose_org_correction：给的证据 id 在本项目里查不到（包括拿组织自己的条目当证据）。
+      写下去就是一条指向不存在之物的证据闭包 —— 管理员点进去什么也读不到。
+  - file: core/kb_promotion.py
+    class: B
+    why: >-
+      adopt：在那个项目的项目层里读不到原结论（RFC_PROJECT_HOME：项目层一个项目一份）。读不到时
+      promote 照样能拿卡片正文写出一条 org 记录，但证据闭包一条都带不过去、出处是空的 —— 一条
+      说不出凭什么的「组织知识」。拒的是记录不完整，不判结论好不好。

@@ -1,0 +1,30 @@
+{
+  "task_id": "relativistic_ke_correction",
+  "arm": "B0",
+  "model": "deepseek-v4-pro",
+  "final_expression": "3*m*v**4/(8*c**2)",
+  "verdict": "derived",
+  "assumptions": [
+    "采用题目给出的相对论动能公式",
+    "c > 0 且有限，m 为有限静止质量",
+    "|v| < c，即分母 sqrt(1 - v^2/c^2) 非零且取实值",
+    "v^2/c^2 << 1，使得低阶泰勒展开与截断近似成立",
+    "泰勒/二项式展开在 u = v^2/c^2 = 0 附近有效",
+    "展开保留到 v^4 项，忽略 O(v^6/c^6) 及更高阶项"
+  ],
+  "unverified_steps": [
+    "未重新机械验证二项式级数收敛半径，引用标准泰勒展开结果",
+    "未显式估计泰勒余项数值，只写出 O(v^6/c^6)",
+    "未从相对论基本原理重新推导动能公式"
+  ],
+  "reasoning_summary": "令 β = v/c，对 (1 - β^2)^(-1/2) - 1 做小量展开；v^2 项给出经典动能 m v^2/2，v^4 项给出首阶相对论修正 3/8 m v^4/c^2。适用范围是 v/c << 1。",
+  "raw_text": "相对论动能：\n\n\\[\nK=\\frac{m c^2}{\\sqrt{1-v^2/c^2}}-m c^2\n\\]\n\n令\n\n\\[\n\\beta=\\frac v c\n\\]\n\n则\n\n\\[\nK=m c^2\\left[(1-\\beta^2)^{-1/2}-1\\right]\n\\]\n\n这一步只是做了无量纲代换，因为原式只通过 \\(v/c\\) 进入。\n\n---\n\n## 1. 泰勒展开\n\n设\n\n\\[\nu=\\beta^2=\\frac{v^2}{c^2}\n\\]\n\n展开函数\n\n\\[\nf(u)=(1-u)^{-1/2}\n\\]\n\n在 \\(u=0\\) 附近：\n\n\\[\nf(u)=1+\\frac12 u+\\frac38 u^2+O(u^3)\n\\]\n\n这里用的标准二项式/泰勒展开，要求 \\(|u|<1\\)，并且在 \\(u\\ll 1\\) 时截断才有意义。\n\n代回 \\(u=\\frac{v^2}{c^2}\\)：\n\n\\[\n(1-\\beta^2)^{-1/2}\n=\n1+\\frac12\\frac{v^2}{c^2}\n+\\frac38\\frac{v^4}{c^4}\n+O\\left(\\frac{v^6}{c^6}\\right)\n\\]\n\n---\n\n## 2. 代回动能表达式\n\n\\[\nK\n=\nm c^2\n\\left[\n\\frac12\\frac{v^2}{c^2}\n+\\frac38\\frac{v^4}{c^4}\n+O\\left(\\frac{v^6}{c^6}\\right)\n\\right]\n\\]\n\n所以\n\n\\[\nK\n=\n\\frac12 m v^2\n+\n\\frac38 \\frac{m v^4}{c^2}\n+\nO\\left(\\frac{m v^6}{c^4}\\right)\n\\]\n\n经典项是：\n\n\\[\n\\frac12 m v^2\n\\]\n\n经典项之后的首阶修正项是：\n\n\\[\n\\boxed{\\frac38 \\frac{m v^4}{c^2}}\n\\]\n\n---\n\n## 3. 适用范围\n\n原公式要求：\n\n\\[\n|v|<c\n\\]\n\n但作为低阶展开，实际适用条件是：\n\n\\[\n\\frac{v^2}{c^2}\\ll 1\n\\]\n\n也就是：\n\n\\[\nv\\ll c\n\\]\n\n修正项与经典项之比为：\n\n\\[\n\\frac{\\frac38 \\frac{m v^4}{c^2}}{\\frac12 m v^2}\n=\n\\frac34 \\left(\\frac v c\\right)^2\n\\]\n\n所以当 \\(v/c\\ll 1\\) 时，展开才是一个好的近似。\n\n```json\n{\n  \"final_expression\": \"3*m*v**4/(8*c**2)\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"采用题目给出的相对论动能公式\",\n    \"c > 0 且有限，m 为有限静止质量\",\n    \"|v| < c，即分母 sqrt(1 - v^2/c^2) 非零且取实值\",\n    \"v^2/c^2 << 1，使得低阶泰勒展开与截断近似成立\",\n    \"泰勒/二项式展开在 u = v^2/c^2 = 0 附近有效\",\n    \"展开保留到 v^4 项，忽略 O(v^6/c^6) 及更高阶项\"\n  ],\n  \"unverified_steps\": [\n    \"未重新机械验证二项式级数收敛半径，引用标准泰勒展开结果\",\n    \"未显式估计泰勒余项数值，只写出 O(v^6/c^6)\",\n    \"未从相对论基本原理重新推导动能公式\"\n  ],\n  \"reasoning_summary\": \"令 β = v/c，对 (1 - β^2)^(-1/2) - 1 做小量展开；v^2 项给出经典动能 m v^2/2，v^4 项给出首阶相对论修正 3/8 m v^4/c^2。适用范围是 v/c << 1。\"\n}\n```",
+  "thinking_chars": 18803,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 82.5,
+  "tokens": 7798,
+  "parse_ok": true,
+  "repeat_index": 1
+}

@@ -1,0 +1,28 @@
+{
+  "task_id": "exponential_mle_fisher",
+  "arm": "A0",
+  "model": "deepseek-v4-flash",
+  "final_expression": "lam_hat = n/sum(x); I_lam = 1/lam**2",
+  "verdict": "derived",
+  "assumptions": [
+    "λ>0",
+    "n 为正整数且样本非空",
+    "X_i 来自给定密度 f(x)=λ exp(-λx)，x>0",
+    "X_1,...,X_n 相互独立",
+    "∑X_i>0，所以 MLE 分母非零",
+    "取对数不影响最大值位置，因为对数严格单调递增",
+    "二阶导数存在且 -n/λ^2<0，用于确认全局最大",
+    "指数分布一、二阶矩 E[X]=1/λ、E[X^2]=2/λ^2 有限",
+    "未使用级数展开"
+  ],
+  "unverified_steps": [],
+  "reasoning_summary": "对对数似然求导解出 λ̂=n/∑X_i，二阶导恒负确认最大；单个观测的 score 为 1/λ-X，其方差为 1/λ^2，故 I(λ)=1/λ^2。",
+  "raw_text": "设观测值为 \\(x_1,\\dots,x_n\\)，\\(\\lambda>0\\)。\n\n### 1. 似然函数\n因为 \\(X_1,\\dots,X_n\\) iid，所以联合密度为\n\\[\nL(\\lambda)=\\prod_{i=1}^n \\lambda e^{-\\lambda x_i}\n=\\lambda^n e^{-\\lambda\\sum_{i=1}^n x_i}.\n\\]\n取对数：\n\\[\n\\ell(\\lambda)=\\ln L(\\lambda)\n=n\\ln\\lambda-\\lambda\\sum_{i=1}^n x_i.\n\\]\n取对数不影响最大值点，因为 \\(\\ln\\) 严格单调递增。\n\n### 2. 最大似然估计\n对 \\(\\lambda\\) 求导：\n\\[\n\\ell'(\\lambda)=\\frac{n}{\\lambda}-\\sum_{i=1}^n x_i.\n\\]\n令 \\(\\ell'(\\lambda)=0\\)：\n\\[\n\\frac{n}{\\lambda}=\\sum_{i=1}^n x_i\n\\quad\\Rightarrow\\quad\n\\hat\\lambda_{\\mathrm{MLE}}=\\frac{n}{\\sum_{i=1}^n x_i}=\\frac{1}{\\bar x}.\n\\]\n这里 \\(\\lambda>0\\)，且 \\(\\sum x_i>0\\)，所以分母不为零。\n\n再求二阶导：\n\\[\n\\ell''(\\lambda)=-\\frac{n}{\\lambda^2}<0,\n\\]\n所以 \\(\\ell(\\lambda)\\) 是严格凹函数，上面的驻点是全局最大值点。\n\n因此：\n\\[\n\\boxed{\\hat\\lambda_{\\mathrm{MLE}}=\\frac{1}{\\bar X}}\n\\]\n\n### 3. 单个观测的 Fisher 信息\n单个观测 \\(X\\) 的对数密度为\n\\[\n\\ln f(x;\\lambda)=\\ln\\lambda-\\lambda x.\n\\]\n得分函数为\n\\[\nU(\\lambda)=\\frac{\\partial}{\\partial\\lambda}\\ln f(x;\\lambda)\n=\\frac{1}{\\lambda}-x.\n\\]\nFisher 信息定义为\n\\[\nI(\\lambda)=E_\\lambda\\left[U(\\lambda)^2\\right].\n\\]\n因为\n\\[\nE_\\lambda\\left[\\frac{1}{\\lambda}-X\\right]\n=\\frac{1}{\\lambda}-E_\\lambda[X]\n=\\frac{1}{\\lambda}-\\frac{1}{\\lambda}=0,\n\\]\n所以\n\\[\nI(\\lambda)=\\operatorname{Var}\\left(\\frac{1}{\\lambda}-X\\right)\n=\\operatorname{Var}(X)\n=\\frac{1}{\\lambda^2}.\n\\]\n\n因此单个观测的 Fisher 信息为\n\\[\n\\boxed{I(\\lambda)=\\frac{1}{\\lambda^2}}\n\\]\n\n若考虑全部 \\(n\\) 个样本，则由独立性：\n\\[\nI_n(\\lambda)=nI(\\lambda)=\\frac{n}{\\lambda^2}.\n\\]\n\n```json\n{\n  \"final_expression\": \"lam_hat = n/sum(x); I_lam = 1/lam**2\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"λ>0\",\n    \"n 为正整数且样本非空\",\n    \"X_i 来自给定密度 f(x)=λ exp(-λx)，x>0\",\n    \"X_1,...,X_n 相互独立\",\n    \"∑X_i>0，所以 MLE 分母非零\",\n    \"取对数不影响最大值位置，因为对数严格单调递增\",\n    \"二阶导数存在且 -n/λ^2<0，用于确认全局最大\",\n    \"指数分布一、二阶矩 E[X]=1/λ、E[X^2]=2/λ^2 有限\",\n    \"未使用级数展开\"\n  ],\n  \"unverified_steps\": [],\n  \"reasoning_summary\": \"对对数似然求导解出 λ̂=n/∑X_i，二阶导恒负确认最大；单个观测的 score 为 1/λ-X，其方差为 1/λ^2，故 I(λ)=1/λ^2。\"\n}\n```",
+  "thinking_chars": 43281,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 135.2,
+  "tokens": 14986,
+  "parse_ok": true
+}

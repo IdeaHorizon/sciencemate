@@ -1,0 +1,314 @@
+{
+ "assertions": [
+  {
+   "derived_from": "六种 GPU 服务器拓扑总览（Topology 1-6）",
+   "equals": 6,
+   "id": "six-topos",
+   "kind": "group_count"
+  },
+  {
+   "derived_from": "六种拓扑各含 GPU 要素",
+   "equals": 6,
+   "id": "six-gpu",
+   "kind": "node_count",
+   "selector": {
+    "role": "GPU"
+   }
+  },
+  {
+   "derived_from": "六种拓扑 CPU 要素（T3 双 CPU）",
+   "equals": 7,
+   "id": "seven-cpu",
+   "kind": "node_count",
+   "selector": {
+    "role": "CPU"
+   }
+  }
+ ],
+ "bands": [
+  [
+   "group:g1",
+   "group:g2"
+  ],
+  [
+   "group:g3",
+   "group:g4"
+  ],
+  [
+   "group:g5",
+   "group:g6"
+  ]
+ ],
+ "edges": [
+  {
+   "from": "t1_cpu",
+   "role": "PCIe",
+   "to": "t1_gpu"
+  },
+  {
+   "from": "t1_cpu",
+   "role": "PCIe",
+   "to": "t1_nic"
+  },
+  {
+   "from": "t2_cpu",
+   "role": "PCIe",
+   "to": "t2_pcie"
+  },
+  {
+   "from": "t2_pcie",
+   "role": "PCIe",
+   "to": "t2_gpu"
+  },
+  {
+   "from": "t3_cpu0",
+   "role": "UPI",
+   "to": "t3_cpu1"
+  },
+  {
+   "from": "t3_cpu0",
+   "role": "PCIe",
+   "to": "t3_gpu"
+  },
+  {
+   "from": "t4_cpu",
+   "role": "PCIe",
+   "to": "t4_gpu"
+  },
+  {
+   "from": "t4_cpu",
+   "role": "PCIe",
+   "to": "t4_nic"
+  },
+  {
+   "from": "t5_cpu",
+   "role": "PCIe",
+   "to": "t5_gpu"
+  },
+  {
+   "from": "t5_cpu",
+   "role": "PCIe",
+   "to": "t5_nic"
+  },
+  {
+   "from": "t6_cpu",
+   "role": "PCIe",
+   "to": "t6_gpu"
+  }
+ ],
+ "groups": [
+  {
+   "id": "g1",
+   "label": "Topology 1",
+   "label_position": "top",
+   "ranks": [
+    [
+     "t1_cpu"
+    ],
+    [
+     "t1_gpu",
+     "t1_nic"
+    ]
+   ],
+   "style": "dashed"
+  },
+  {
+   "id": "g2",
+   "label": "Topology 2",
+   "label_position": "top",
+   "ranks": [
+    [
+     "t2_cpu"
+    ],
+    [
+     "t2_pcie"
+    ],
+    [
+     "t2_gpu"
+    ]
+   ],
+   "style": "dashed"
+  },
+  {
+   "id": "g3",
+   "label": "Topology 3",
+   "label_position": "top",
+   "ranks": [
+    [
+     "t3_cpu0",
+     "t3_cpu1"
+    ],
+    [
+     "t3_gpu"
+    ]
+   ],
+   "style": "dashed"
+  },
+  {
+   "id": "g4",
+   "label": "Topology 4",
+   "label_position": "top",
+   "ranks": [
+    [
+     "t4_cpu"
+    ],
+    [
+     "t4_gpu",
+     "t4_nic"
+    ]
+   ],
+   "style": "dashed"
+  },
+  {
+   "id": "g5",
+   "label": "Topology 5",
+   "label_position": "top",
+   "ranks": [
+    [
+     "t5_cpu"
+    ],
+    [
+     "t5_gpu",
+     "t5_nic"
+    ]
+   ],
+   "style": "dashed"
+  },
+  {
+   "id": "g6",
+   "label": "Topology 6",
+   "label_position": "top",
+   "ranks": [
+    [
+     "t6_cpu"
+    ],
+    [
+     "t6_gpu"
+    ]
+   ],
+   "style": "dashed"
+  }
+ ],
+ "nodes": [
+  {
+   "id": "t1_cpu",
+   "label": "CPU",
+   "role": "CPU",
+   "shape": "box",
+   "sublabel": "x1"
+  },
+  {
+   "id": "t1_gpu",
+   "label": "GPU",
+   "role": "GPU",
+   "shape": "box",
+   "sublabel": "x1"
+  },
+  {
+   "id": "t1_nic",
+   "label": "NIC",
+   "role": "NIC",
+   "shape": "box",
+   "sublabel": "x1"
+  },
+  {
+   "id": "t2_cpu",
+   "label": "CPU",
+   "role": "CPU",
+   "shape": "box",
+   "sublabel": "x1"
+  },
+  {
+   "id": "t2_pcie",
+   "label": "PCIe",
+   "role": "PCIe Switch",
+   "shape": "box",
+   "sublabel": "x1"
+  },
+  {
+   "id": "t2_gpu",
+   "label": "GPU",
+   "role": "GPU",
+   "shape": "box",
+   "sublabel": "x2"
+  },
+  {
+   "id": "t3_cpu0",
+   "label": "CPU 0",
+   "role": "CPU",
+   "shape": "box",
+   "sublabel": ""
+  },
+  {
+   "id": "t3_cpu1",
+   "label": "CPU 1",
+   "role": "CPU",
+   "shape": "box",
+   "sublabel": ""
+  },
+  {
+   "id": "t3_gpu",
+   "label": "GPU",
+   "role": "GPU",
+   "shape": "box",
+   "sublabel": "x2"
+  },
+  {
+   "id": "t4_cpu",
+   "label": "CPU",
+   "role": "CPU",
+   "shape": "box",
+   "sublabel": "x2"
+  },
+  {
+   "id": "t4_gpu",
+   "label": "GPU",
+   "role": "GPU",
+   "shape": "box",
+   "sublabel": "x8"
+  },
+  {
+   "id": "t4_nic",
+   "label": "NIC",
+   "role": "NIC",
+   "shape": "box",
+   "sublabel": "x2"
+  },
+  {
+   "id": "t5_cpu",
+   "label": "CPU",
+   "role": "CPU",
+   "shape": "box",
+   "sublabel": "x2"
+  },
+  {
+   "id": "t5_gpu",
+   "label": "GPU",
+   "role": "GPU",
+   "shape": "box",
+   "sublabel": "x16"
+  },
+  {
+   "id": "t5_nic",
+   "label": "NIC",
+   "role": "NIC",
+   "shape": "box",
+   "sublabel": "x4"
+  },
+  {
+   "id": "t6_cpu",
+   "label": "CPU",
+   "role": "CPU",
+   "shape": "box",
+   "sublabel": "x2"
+  },
+  {
+   "id": "t6_gpu",
+   "label": "GPU",
+   "role": "GPU",
+   "shape": "box",
+   "sublabel": "x32"
+  }
+ ],
+ "title": "Six GPU server topologies"
+}

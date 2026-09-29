@@ -1,0 +1,57 @@
+# Minimal upstream-style fixture for E3SM GPU autonomous probe.
+#
+# Purpose:
+#   Test experiment node behavior with only upstream scientific artifacts
+#   (claim + frozen pre_registration), without hand-written build guidance.
+#
+# Run:
+#   cd /home/lujy/2026-ai4s-platform-project/node4-experiment/harness-framework
+#   PYTHONUNBUFFERED=1 python run_node.py \
+#   （⚠️ v0.11：EXPERIMENT_AUTONOMOUS=1 auto-answer 已移除，无人值守待框架 headless-hitl feature）
+#     --harness experiment \
+#     --no-interactive \
+#     --stream \
+#     --fixture nodes/experiment/fixtures/e3sm_gpu_minimal_prereg.yaml \
+#     --project-id e3sm-gpu-minimal-20260623
+
+upstream_artifacts:
+  - type: claim
+    name: H_E3SM_GPU_Minimal_Probe
+    metadata:
+      claim_type: hypothesis
+      status: open
+      created_at: "2026-06-23T00:00:00+08:00"
+    content: |
+      Current experiment node can use the existing E3SM source tree and local GPU toolchain
+      to produce and start a GPU+MPI ocean / MPAS-Ocean related minimal target.
+
+  - type: pre_registration
+    name: E3SM_GPU_Minimal_Probe
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-23T00:00:00+08:00"
+      freeze_reason: "Minimal upstream-style E3SM GPU compile/startup probe"
+    content: |
+      ## Pre-Registration: E3SM GPU Minimal Probe
+
+      ### Goal
+      Test whether the experiment node can autonomously inspect existing E3SM source
+      and attempt a GPU-enabled MPI build/startup for an ocean / MPAS-Ocean related
+      minimal target.
+
+      ### Setup
+      - Existing source: `/home/lujy/experiments/e3sm-gpu-hitl-clean`
+      - Available workspace root: `/home/lujy/experiments`
+      - GPU: NVIDIA RTX 5070 Laptop, compute capability sm_120
+      - NVIDIA HPC SDK: `/opt/nvidia/hpc_sdk/Linux_x86_64/26.3`
+      - CUDA: 13.1
+
+      ### Success Criteria
+      - A GPU+MPI ocean / MPAS-Ocean related build target is produced.
+      - A minimal startup or run is attempted for that target.
+      - The result has enough recorded evidence to judge whether the GPU+MPI target
+        worked, failed, or remains inconclusive.
+
+      ### Non-Goals
+      - Full coupled E3SM production simulation.
+      - CPU-only fallback as a substitute for the GPU target.

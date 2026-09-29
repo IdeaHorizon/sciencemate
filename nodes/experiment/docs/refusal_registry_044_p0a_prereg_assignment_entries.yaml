@@ -1,0 +1,296 @@
+# #1099 / task 044 P0a 的 root-owner 交接件。
+#
+# 目标 worktree HEAD: 5ae74712c0bc53a386a3b9ccff77e754d17eea0c
+# 根文件 docs/verdict_demolition/refusal_registry.yaml、
+# docs/verdict_demolition/refusal_baseline.json 与 tests/** 对 Experiment owner
+# 只读；以下内容供 framework owner 合入，不能用抬高 baseline 代替登记。
+#
+# 2026-09-20 实测：root refusal gate 当前报告 24 个“净欠额”。其中 safe_bash.py
+# 实际新增 4 个 scanner-visible return，同时删除 2 个旧的 shell-spawn error return；
+# 文件级净计数只显示 +2。为避免把被删除的两个旧槽位变成永久隐性额度，正确落法是
+# 将 safe_bash.py baseline 从 29 收紧到 27，并登记下面 4 条。因此本交接件共有
+# 26 条新登记；配合这一次 -2 baseline 收紧后，额度恰好等于当前实测，不留余量。
+
+baseline_tightening:
+  - file: nodes/experiment/tools/safe_bash.py
+    from: 29
+    to: 27
+    why: >-
+      P0a 把 _exec_and_log 中两个直接返回的 shell 启动失败信封收进统一的
+      census terminalization 路径；旧的两个 scanner-visible return 已删除。
+      先收紧再登记四个新位点，等价于 root gate 当前看到的净 +2，但不会留下
+      两个可被未来拒绝点静默复用的 baseline 槽位。
+
+entries:
+  - file: nodes/experiment/tools/contract_audit.py
+    class: B
+    why: >-
+      _dispatch_data_request 在 Data child 尚未启动前无法加载或执行 pending-assignment
+      action-census guard 时拒绝派发。此时缺的是可核验的动作授权/记账边界；继续会让
+      一个外部 child 脱离 P0a 的完整动作账本。没有副作用，可在修复 guard 后安全重试。
+
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      _error 是本模块拒绝信封的单一构造器；scanner 会同时计这个返回点和各调用点。
+      本体只渲染已由下列调用点判定的协议错误，不新增策略或结果充分性判断；各 caller
+      仍逐点登记，不能把这个 helper 条目当作未来通用造墙额度。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      begin_execution_action 收到非 object 的 action 或 decision 时无法构造动作协议记录，
+      在任何 payload 启动前返回 execution_action_census_input_invalid。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      begin_execution_action 只接受声明进入三阶段 census 的执行工具；unsupported tool
+      无对应 spawn/terminal owner，故在副作用前按协议拒绝。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      action.tool 与 resolver decision.tool 不一致时无法把 admission 绑定到同一动作身份；
+      拒绝写入避免产生两个互相矛盾的事实来源。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      route-backed admission 缺少、误带或错配 exact route attempt binding 时拒绝；否则
+      action census 会把物理动作记到错误 step/attempt。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      exact route binding 未在 route owner 中唯一持久化时拒绝 admission；调用方内存里的
+      binding 不能代替 durable route_step_bound 事实。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      state 缺少 run identity 时拒绝创建 action_id；无 run_id 的事件无法在恢复时证明
+      归属，不能进入持久账本。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      route-backed admission 发现 transcript 损坏或读取告警时拒绝追加；在不完整历史上
+      继续写会把重复 admission 或冲突身份伪装成唯一事实。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      同一 persisted route attempt 已存在不等价 admission 时拒绝覆盖；旧动作事实不可被
+      后来的重调改写，需先由账本 owner 对账。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      admission append 未能证明 durable 时禁止 payload 启动；否则副作用可能发生却没有
+      可恢复的 action identity。append 已成功但响应丢失时 exact reread 仍可幂等收敛。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      _append_followup 对同 action/phase 的非等价重调返回 conflict，不覆盖已有 spawn 或
+      terminal 事实；这是不可变事件完整性，不是实验结果判决。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: B
+    why: >-
+      spawn/terminal follow-up 无法证明 durable 时返回 persistence_failed，并携带只补该
+      phase 的恢复胶囊和 payload_must_not_rerun，防止用重跑物理载荷补账。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      observe_execution_action_spawn 只接受 bool/null 的 spawn/submission 事实及稳定
+      proof_source；形状不合法就没有可写入三阶段协议的物理观察。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      defer_execution_action_terminal 同时收到 result 与 error 时终态协议自相矛盾；该纯函数
+      不写事件，调用方修正为二选一即可。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: C
+    why: >-
+      finish_execution_action 同时收到 result 与 error 时无法形成唯一 terminal projection；
+      在写账前拒绝，修正调用参数后可重试，不涉及结果充分性。
+  - file: nodes/experiment/tools/execution_action_census.py
+    class: collector
+    why: >-
+      pending_operation_action_block 的单一 return 当前混合了两种语义：assignment authority
+      不可读、已有科学信号或 scientific_execution 分支属于 B；但
+      route_exempt_effectful_action_not_compatible 同时挡住 fetch_resource、safe_write_file
+      和 dispatch_data_request，尚无证据证明诚实记账后仍会形成假账，且已使既有 egress
+      回归转红。该位点不能用一个笼统 B/C 条目洗白；合入 root registry 前必须拆分：保留
+      可证明的 B 分支，并让 operational action 接入真实 census/既有 receipt，或把其余分支
+      改成结构化义务 collector。这里的 collector 是待改写标记，不是批准现状硬拒绝。
+
+  - file: nodes/experiment/tools/execution_route.py
+    class: B
+    why: >-
+      enforce_execution_route 在动作本来可能到达副作用、但 pending-operation census guard
+      无法加载或判定时 fail closed。缺失 guard 不能被解释成许可；无副作用，修复节点 guard
+      后可重试，并保留明确 owner/blocker。
+
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      operation closure 的调用方 task_kind 与 immutable operation category 不兼容时返回
+      operation_task_kind_mismatch；它机械阻止用 generic 等标签降低既有 build 执行义务，
+      不评判结果质量。物理 payload 不重跑，只以兼容 task_kind 重试 completion。
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      成功 toolchain_build 没有完整、权威且非 dry-run 的 action-census 执行事实时返回
+      operation_real_execution_required。退出码、只读探测或文字声明不能替代真实 build；
+      可实际执行并核验后重试，无法执行则以诚实 blocked closure 收尾。
+
+  - file: nodes/experiment/tools/run_contract.py
+    class: B
+    why: >-
+      prereg_assignment 为 pending 且当前动作出现科学信号时返回 prereg_assignment_required；
+      项目 catalog 只是观察，不能替派发方选择治理本 run 的 exact prereg。错误体要求新 run
+      携带 typed bound/none，保留候选 witness，不在 child 内猜测或覆写 authority。
+  - file: nodes/experiment/tools/run_contract.py
+    class: B
+    why: >-
+      科学动作发生前无法读取唯一 run-acceptance/prereg-assignment authority 时返回
+      prereg_assignment_authority_unavailable；缺失或损坏的权威记录不能当作 none。
+      这是身份/记录完整性门，需由 framework/dispatch owner 修复或重派。
+
+  - file: nodes/experiment/tools/safe_bash.py
+    class: C
+    why: >-
+      _exec_and_log 只接受 execution_action 与 execution_decision 同时提供或同时省略；半组
+      参数无法建立同一 admission，故在 spawn 前返回 execution_action_census_input_invalid。
+  - file: nodes/experiment/tools/safe_bash.py
+    class: B
+    why: >-
+      _begin_execution_action_census 把 action-census admission 的异常或非成功响应规范化为
+      pre-spawn 错误；没有 durable admission 就不启动 payload，避免无身份副作用。
+  - file: nodes/experiment/tools/safe_bash.py
+    class: B
+    why: >-
+      _settle_execution_action_census 在物理 outcome 已存在但 spawn/terminal phase 未完整持久化
+      时返回不可重跑错误，附 phase facts 与恢复胶囊；这保护账本完整性并明确禁止重复副作用。
+  - file: nodes/experiment/tools/safe_bash.py
+    class: B
+    why: >-
+      _census_block 将已发生的物理 execution_outcome 与 census 持久化失败合成一个模型可见
+      信封；它不改写物理结果、不新判充分性，并统一携带 payload_must_not_rerun。
+
+root_test_handoff:
+  files:
+    - tests/test_prereg_to_experiment_contract_chain.py
+  current_result: "4 tests: 1 pass, 2 prereg-chain failures, plus refusal gate failure elsewhere"
+  root_chain_failures:
+    - test_parameter_drift_is_still_blocked
+    - test_a_primary_prereg_without_params_would_have_been_blocked
+  diagnosis: >-
+    三个 chain 用例都只把冻结 prereg 放进项目 catalog，却没有给 Experiment run 提供 typed
+    prereg_assignment，也没有铸造 write-once run acceptance。P0a 后 catalog 不再拥有 assignment
+    authority，因此 load_run_contract 把该 run 视为未绑定；parameter drift 与 expected_params
+    门没有进入 applicable 分支。两个失败断言不应通过恢复 unique_auto_claim 来修。
+  false_green: >-
+    test_frozen_prereg_lets_a_primary_simulation_through 当前仍可能绿，但不是链路真的 through：
+    没有 exact assignment 时 requires_hypothesis_verdict 为 false，audit_execution_contract
+    返回 secondary/non-applicable 的 passed=true。该测试必须额外断言 applicable=true、
+    run acceptance 中 prereg_assignment.kind=bound，才能防止继续假绿。
+  minimal_patch: |-
+    1. 从 nodes.experiment.tools.run_contract 导入 resolve_run_acceptance。
+    2. 新增 helper，接收已冻结 record，并为每个 e1/e2/e3 State 设置：
+
+       state.hook_state["node_inputs"] = {
+           "experiment_focus": "Exercise the exact frozen prereg contract.",
+           "prereg_assignment": {
+               "kind": "bound",
+               "artifact_id": frozen["id"],
+               "version": int(frozen["version"]),
+               "content_hash": frozen["content_hash"],
+           },
+       }
+       accepted = resolve_run_acceptance(
+           state, bind_if_absent=True, requested_mode="scientific"
+       )
+       assert accepted["passed"] is True, accepted
+       assert accepted["receipt"]["prereg_assignment"]["kind"] == "bound"
+
+       caller 输入不得带 source；receipt writer 会规范化为 source=explicit_node_input。
+    3. 让 _draft_prereg/_freeze 路径在 freeze 后通过
+       state.latest_frozen_artifact("pre_registration__X") 取得 version/content_hash，补上
+       id 后传给 helper。手工 write_record(..., frozen=True) 的第三个用例直接保留其返回值。
+    4. 三个 audit 都复用各自已铸 run acceptance 的同一个 State，不要在 audit 调用处再
+       _node_state(...) 创建一个没有 receipt 的新 State。
+    5. 首个 through 用例增加 assert audit["applicable"] is True；第二个继续断言
+       execution_params_mismatch；第三个继续断言 expected_params_missing。
+  verified_reproduction:
+    exact_match: {passed: true, applicable: true, blocking_reasons: []}
+    parameter_drift:
+      {passed: false, applicable: true, blocking_reasons: [execution_params_mismatch]}
+    expected_params_missing:
+      {passed: false, applicable: true, blocking_reasons: [expected_params_missing]}
+  forbidden_shortcut: >-
+    不得恢复“catalog 中只有一个冻结 prereg 就自动认领”的旧逻辑，也不得仅把两个 failing
+    assert 改成 true。assignment 必须来自 typed caller input 并冻结到本 run acceptance；
+    catalog 可用于取得被 caller 指名版本的内容/哈希，但不能替 caller 作选择。
+
+additional_root_test_handoffs:
+  - file: tests/test_prereg_version_binding.py
+    newly_failing_tests:
+      - test_the_contract_binds_the_version_triple
+      - test_refreezing_the_amendment_clears_the_block
+      - test_two_parallel_studies_are_still_a_real_ambiguity
+      - test_the_manifest_carries_the_binding
+    diagnosis: >-
+      四个用例都把“catalog 中唯一或最新冻结 prereg”当作当前 run 的 assignment authority。
+      P0a 后冻结、修订和重新冻结只改变可见候选，不会把候选自动绑定到既有或新 run；因此
+      contract/manifest 不应凭 catalog 自行出现 prereg version triple。pending amendment 的
+      fail-loud 用例与显式版本选择用例仍通过，说明版本读取和合法显式逃生路径没有回归。
+    minimal_patch: |-
+      1. version-triple、refreeze 与 manifest 三个用例在取得目标 frozen record 后，为 State
+         设置 exact typed prereg_assignment，并调用 resolve_run_acceptance(...,
+         bind_if_absent=True, requested_mode="scientific")；随后再读 contract/manifest。
+      2. refreeze 用例应显式绑定 v2 的 artifact_id/version/content_hash，不能假定重新冻结会
+         改写已存在 receipt；若还要覆盖旧 run，另加断言旧 receipt 仍逐字绑定 v1。
+      3. two-parallel-studies 用例若测真实 assignment 歧义，应把两份 id 放入 caller 的
+         forwarded_input_ids；若测 catalog 语义，则断言 assignment.kind=pending，两个候选
+         仅出现在 authorizing=false visibility witness，且 contract 不选任一参数。
+    forbidden_shortcut: >-
+      不得恢复 sole/latest frozen auto-claim，也不得让 refreeze 静默改写 write-once run
+      acceptance；版本三元组必须来自派发方 exact assignment。
+
+  - file: tests/test_run_contract_cross_node_read.py
+    newly_failing_tests:
+      - test_contract_is_read_from_the_analysis_node_directory
+      - test_a_single_frozen_prereg_still_needs_no_declaration
+      - test_multiple_frozen_preregs_are_never_guessed_between
+      - test_gate_blocks_a_submit_when_the_prereg_is_ambiguous
+    diagnosis: >-
+      第一条跨目录读取目的仍正确，但夹具没有 assignment；第二条的“唯一就直接认领”已被
+      #1099 明确废止；后两条仍把 catalog ambiguity 当 run authority。新契约下 catalog 只
+      提供候选可见性，omitted assignment 是 pending。科学意图应在 classification/admission
+      处返回 prereg_assignment_required，而不是先猜出 ambiguous_preregs 再由执行参数门阻断。
+    minimal_patch: |-
+      1. 跨目录读取用例用 plan/ 中 frozen record 的 exact id/version/hash 建 typed bound
+         assignment 并铸 run acceptance，再断言 metadata 和 contract_source 来自该 artifact。
+      2. 单一候选用例重命名为 no-auto-claim，断言 assignment.kind=pending、候选只出现在
+         authorizing=false visibility witness，run_role 不被提升为 primary。
+      3. 多候选用例同样断言 pending witness 完整列出两份候选且不选择参数；如要测真正
+         assignment ambiguity，则明确设置 forwarded_input_ids，不得由 catalog 推断。
+      4. “ambiguous submit”改为显式 scientific scope/route 的 reverse-guard 测试，断言
+         prereg_assignment_required、dispatching_parent 和全部 candidate_bindings；或让 caller
+         明确 forwarded choices 后测试该输入本身的歧义。不能靠纯 catalog 重建旧门。
+    forbidden_shortcut: >-
+      不得保留或恢复“single frozen prereg needs no declaration”这一旧断言；它正是本次 P0a
+      要删除的自动认领行为。跨节点读取能力与 assignment authority 必须分开测试。
+
+gate_observation:
+  command: >-
+    bash nodes/experiment/collab/gate.sh
+    /home/lujy/2026-ai4s/node4-experiment/harness-framework-task-1099-p0a-prereg-assignment
+    --base 5ae74712c0bc53a386a3b9ccff77e754d17eea0c
+  head: 9a57145e
+  result: failed_cross_owner_integration
+  head_totals: {root_tests_failed: 14, node_tests_failed: 1}
+  newly_failing_root_tests: 11
+  decomposition:
+    prereg_chain_old_implicit_assignment: 2
+    prereg_version_old_implicit_assignment: 4
+    cross_node_old_implicit_assignment: 4
+    refusal_registry_owner_update: 1
+  node_delta: >-
+    节点片仅有 postprocess benchmark 一条失败，base 同样失败，C5 未把它列为新增。
+  merge_status: >-
+    节点实现已通过自身全量，但 root owner 尚未更新上述测试与拒绝点登记；当前可供审查，
+    不可声称跨 owner 集成完成或可合并。

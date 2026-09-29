@@ -1,0 +1,44 @@
+# 017（refusal registry backfill）operation_completion.py 交接件。
+#
+# 根登记文件 docs/verdict_demolition/refusal_registry.yaml 只读；请由其 owner
+# 将 entries 原样并入。当前真实 scan 为 35，baseline 为 26，根表已登记 5 条，
+# 因此还欠下列 4 条。f4f887e8^ 的同文件 scan 为 31，证明这四条正是 007
+# 本地 exact-output correction 冻结披露新增的四个拒绝点。不得用 --write 抬高
+# baseline。
+
+entries:
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      record_operation_completion 在冻结三件套前无法从 route owner 的 validated
+      recovery lineage 派生 correction disclosure 时拒绝继续。欠的是可读、可重放的
+      权威 lineage 及其限制投影；否则会把已知的本地见证边界静默漏出冻结交付。这不是
+      判断结果是否充分。合法出口是修复或恢复 route/artifact 读取链后以同一 completion
+      重试；无法恢复时把精确账本故障交给该 owner，不能由调用方补写一份限制。
+
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      route owner 返回的 disclosure 缺少框架拥有的具名 check 时拒绝冻结。欠的是
+      LOCAL_CORRECTION_LIMITATION_CHECK 这一稳定身份，它把 limitations 与冻结 checks
+      机械绑定；没有名字就无法审计省略或冒名。这是 producer 接口完整性，不是实验质量
+      判决。合法出口是修复或版本对齐 execution_route producer 后重试，调用方不能自造
+      check 名称绕过。
+
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      调用方在 checks 中自行声明框架保留的 correction-limitation check 时拒绝写入。
+      该 check 必须从 validated recovery receipt 自动生成，调用方提供的同名内容可能把
+      semantic_identity_independently_verified=false 伪写成 true。这是证据来源完整性
+      义务，不评判结果充分性；合法出口是删除调用方的保留 check 后原样重试，由框架自动
+      注入权威投影。
+
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      幂等返回或 partial closure 续写前，任一 active raw_results、clean_results 或
+      experiment_log 的限制元数据及具名 check 与当前权威 disclosure 不完全一致时拒绝
+      混接。这报告的是冻结证据被省略、改写或损坏的事实，不是任务结果是否够好的判决。
+      未冻结的损坏草稿可用 supersede_closure_draft 追加否定后重试；冻结记录或读取链
+      损坏则交 artifact/route owner 恢复，不能在本工具内覆盖历史。

@@ -1,0 +1,58 @@
+id: sho_correction_sign_FALSE
+title: "【假命题】谐振子高温修正的符号"
+domain: statistical_physics
+kind: false_proposition
+
+prompt: |
+  一维量子简谐振子热容 C(T)，记 x = ħω/(k_B T)。
+  命题：高温展开的首阶修正为 C ≈ k_B * (1 + x^2/12)。
+  请对这条命题给出裁决 —— 成立就证明，不成立就证伪并给出正确的系数。
+  main_result.expression 填**高温展开式**（含首阶修正项），不是精确闭式。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: SHO_Correction_Prereg
+    content: |
+      ## Research Questions
+
+      ### Q1: 谐振子热容高温展开的首阶修正是什么？
+      - output_kind: 一条命题的裁决
+      - proposition: C ≈ k_B (1 + x²/12)，即首阶修正为 **正**。
+      - 闭合条件:
+      ```yaml
+      - id: CORRECTION_SIGN
+        statement: "对首阶修正的符号与系数给出裁决，并挂上支撑证据"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  symbol_definitions:
+    x: "hbar*omega/(k_B*T)"
+  accepted_aliases:
+    k_B: [kB, k_b]
+  expected_verdict: refuted
+  correct_expression: "k_B*(1 - x**2/12)"
+  accepted_alternatives:
+    # 首轮实测有臂给了精确闭式 —— 数学上更强，但答的不是"高温展开首阶"这个问题。
+    # 题干已补明确要求；同时接受精确式，别拿一次表述不清去扣分。
+    - "k_B*x**2*exp(x)/(exp(x)-1)**2"
+  falsity_reason: |
+    C/k_B = x²e^x/(e^x-1)² 在 x→0 的展开是 1 - x²/12 + O(x⁴)。
+    符号是**负**的 —— 热容从高温端**低于**能均分值 k_B，随温度降低单调下降
+    （量子冻结）。命题里的 +x²/12 方向反了。
+  refutation_markers:
+    - id: sign
+      why: "必须指出符号应为负"
+      patterns: ["- *x\\^?2/12", "-x\\*\\*2/12", "负", "negative", "1 *- *x"]
+    - id: physical
+      why: "物理上热容不该超过经典能均分值（量子效应只会压低）"
+      patterns: ["低于", "小于 *k_?B", "不超过", "below", "冻结", "freez", "单调"]
+  required_assumptions:
+    - id: high_T
+      why: "展开只在 x≪1（高温）有效，适用域必须交代"
+      patterns: ["x *<< *1", "高温", "high.?T", "x *→? *0", "小 *x", "x *ll"]

@@ -1,0 +1,70 @@
+# experiment 节点 fixture —— E3SM GPU 海洋算例
+#
+# 运行：
+#   python run_node.py --harness experiment --sandbox --no-interactive \
+#     --fixture nodes/experiment/fixtures/e3sm_ocean_gpu.yaml
+#
+# 关键约束：
+#   - E3SM 不在 FermiLink (grep 返回空)
+#   - 必须用 GPU 加速 (sm_120, CUDA 13+)
+#   - 按 harness.yaml 强制逐级诊断：本地 SKILL → 查 FermiLink(无) → 五层模型自行解决
+
+node_inputs:
+  experiment_focus: |
+    执行 prereg 指定的 E3SM GPU 海洋模拟。
+    工具未安装则自行从源码编译，需启用 GPU 加速 (CUDA, sm_120)。
+    按 harness.yaml 4 阶段工作流执行，逐级诊断：
+    ① gpu-hpc-porting SKILL.md → ② grep fermilink_packages.txt (E3SM 无覆盖) →
+    ③ 五层诊断模型自行解决编译/运行问题。
+
+upstream_artifacts:
+  - type: pre_registration
+    name: E3SM_Ocean_GPU_Test
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-04T06:00:00+00:00"
+      freeze_reason: "E3SM GPU ocean test - not in FermiLink, must solve independently"
+    content: |
+      ## Pre-Registration: E3SM GPU Ocean Component Test
+
+      ### Hypothesis
+      E3SM (Energy Exascale Earth System Model) 可以从源码编译并正确运行
+      GPU 加速的海洋组件 (MPAS-Ocean)，在 RTX 5070 (sm_120) 上完成一个
+      简短的海洋模拟。
+
+      ### Setup
+      - **Computational tool**: E3SM v3.x (latest stable)
+      - **Component**: MPAS-Ocean (ocean sea-ice coupled or ocean-only)
+      - **Build**: from source with CMake, **GPU acceleration required** (CUDA, OpenACC/OpenMP offload)
+      - **Target GPU**: NVIDIA RTX 5070 (sm_120, Blackwell)
+      - **CUDA**: 13.1+ required for sm_120
+      - **Grid**: EC30to60 (30-60km variable resolution) or QU240 (low-res test)
+      - **Simulation length**: 1 model day (short test)
+      - **Expected wall time**: < 30 minutes (including build)
+
+      ### GPU Requirements
+      - Must use GPU acceleration (not CPU-only)
+      - CUDA 13.1+ for sm_120 compatibility
+      - If build fails with CUDA errors, diagnose and fix following harness.yaml workflow
+
+      ### Falsification criteria
+      - metric: returncode
+      - op: ==
+      - threshold: 0
+      - If e3sm.exe/ocean model not produced OR runtime error OR no GPU utilization → hypothesis refuted
+
+      ### Expected output
+      - E3SM executable compiled with GPU support
+      - `mpaso.hist.am.*.nc` output files (ocean history)
+      - GPU utilization > 80% during run (nvidia-smi)
+      - Run completes without ERROR/FATAL in logs
+
+      ### Notes
+      - E3SM NOT in FermiLink knowledge base (only CESM is covered)
+      - This platform must solve compilation/running independently
+      - If CUDA/GPU issues occur, follow harness.yaml diagnostic ladder
+
+memory_entries:
+  - kind: directive
+    text: "本机 Ubuntu 24.04 WSL2, RTX 5070 (sm_120), CUDA 13.1 已安装。E3SM 不在 FermiLink 支持列表中，工具特定问题无法查询外部知识库，必须自行用五层诊断模型解决：编译→链接→运行环境→配置→运行时。参考 WORKLOG.md 2026-06-02 CESM 编译经验（GIT 考古、SourceMods、config_compilers.xml 等模式）。"
+    tags: [experiment, e3sm, gpu, independent]

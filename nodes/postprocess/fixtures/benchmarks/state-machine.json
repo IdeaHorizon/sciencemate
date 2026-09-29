@@ -1,0 +1,173 @@
+{
+ "assertions": [
+  {
+   "derived_from": "状态有 待派发、运行中、等待审批、已暂停、已完成、已失败",
+   "equals": 6,
+   "id": "state_count",
+   "kind": "node_count"
+  },
+  {
+   "derived_from": "转移关系为：待派发→运行中…运行中→运行中（心跳续期）",
+   "equals": 10,
+   "id": "transition_count",
+   "kind": "edge_count"
+  },
+  {
+   "derived_from": "标出初态",
+   "equals": 1,
+   "id": "initial_count",
+   "kind": "node_count",
+   "selector": {
+    "role": "初态"
+   }
+  },
+  {
+   "derived_from": "两个终态",
+   "equals": 2,
+   "id": "terminal_count",
+   "kind": "node_count",
+   "selector": {
+    "role": "终态"
+   }
+  }
+ ],
+ "blocks": [
+  {
+   "bands": [
+    [
+     "node:pending"
+    ],
+    [
+     "node:approval",
+     "node:paused"
+    ],
+    [
+     "node:running"
+    ],
+    [
+     "node:done",
+     "node:failed"
+    ]
+   ],
+   "edges": [
+    {
+     "from": "pending",
+     "label": "被 worker 领取",
+     "role": "转移",
+     "to": "running"
+    },
+    {
+     "from": "running",
+     "label": "命中人工闸",
+     "role": "转移",
+     "to": "approval"
+    },
+    {
+     "from": "approval",
+     "label": "批准",
+     "role": "转移",
+     "to": "running"
+    },
+    {
+     "from": "approval",
+     "label": "否决",
+     "role": "转移",
+     "to": "failed"
+    },
+    {
+     "from": "running",
+     "label": "用户点停止",
+     "role": "转移",
+     "to": "paused"
+    },
+    {
+     "from": "paused",
+     "label": "恢复",
+     "role": "转移",
+     "to": "running"
+    },
+    {
+     "from": "running",
+     "label": "正常收尾",
+     "role": "转移",
+     "to": "done"
+    },
+    {
+     "from": "running",
+     "label": "异常",
+     "role": "转移",
+     "to": "failed"
+    },
+    {
+     "from": "failed",
+     "label": "重试（最多 3 次）",
+     "role": "转移",
+     "to": "pending"
+    },
+    {
+     "from": "running",
+     "label": "心跳续期（每 30 秒）",
+     "role": "转移",
+     "to": "running"
+    }
+   ],
+   "groups": [],
+   "kind": "diagram",
+   "nodes": [
+    {
+     "id": "pending",
+     "label": "待派发",
+     "role": "初态"
+    },
+    {
+     "id": "running",
+     "label": "运行中",
+     "role": "状态"
+    },
+    {
+     "id": "approval",
+     "label": "等待审批",
+     "role": "状态"
+    },
+    {
+     "id": "paused",
+     "label": "已暂停",
+     "role": "状态"
+    },
+    {
+     "id": "done",
+     "label": "已完成",
+     "role": "终态"
+    },
+    {
+     "id": "failed",
+     "label": "已失败",
+     "role": "终态"
+    }
+   ],
+   "title": "① 状态与转移"
+  },
+  {
+   "columns": 1,
+   "items": [
+    "待派发 → 运行中：被 worker 领取",
+    "运行中 → 等待审批：命中人工闸",
+    "等待审批 → 运行中：批准",
+    "等待审批 → 已失败：否决",
+    "运行中 → 已暂停：用户点停止",
+    "已暂停 → 运行中：恢复",
+    "运行中 → 已完成：正常收尾",
+    "运行中 → 已失败：异常",
+    "已失败 → 待派发：重试（最多 3 次）",
+    "运行中 → 运行中：心跳续期（每 30 秒一次）"
+   ],
+   "kind": "spec",
+   "title": "② 触发条件摘要"
+  },
+  {
+   "kind": "note",
+   "text": "初态：待派发。终态：已完成、已失败。运行中→运行中为自环（心跳续期）。"
+  }
+ ],
+ "title": "Run 生命周期状态机"
+}

@@ -46,7 +46,7 @@ $ProgressPreference = 'SilentlyContinue'
 
 # 下面这一行由打包器整行替换（占位符只许出现在这里 —— install.sh 第一版把占位符
 # 也写进了判断里，替换后要么语法错、要么把正确的地址当成"没填"拒掉）。
-$DefaultUrl = 'https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.4'
+$DefaultUrl = 'https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.6'
 
 $Base    = if ($env:AFS_RELEASE_URL) { $env:AFS_RELEASE_URL } else { $DefaultUrl }
 $Auth    = $env:AFS_AUTH

@@ -1,0 +1,40 @@
+id: reduced_mass
+title: 二体问题的约化质量
+domain: classical_mechanics
+kind: normal
+
+prompt: |
+  两个质量 m_1、m_2 通过只依赖相对位置的中心力相互作用。
+  把二体问题化为单体问题，导出约化质量 mu 的表达式，并说清质心坐标与相对坐标的分离依据。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: reduced_mass_prereg
+    content: |
+      ## Research Questions
+      
+      ### Q1: 二体问题化为单体问题后的等效质量是什么？
+      - output_kind: 一条命题的裁决
+      - proposition: mu = m_1 m_2/(m_1 + m_2)。
+      - 闭合条件:
+      ```yaml
+      - id: REDUCED_MASS
+        statement: "导出 mu 的表达式，并说清坐标分离用到了什么条件"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  final_expression: "m_1*m_2/(m_1 + m_2)"
+  expected_verdict: derived
+  required_assumptions:
+    - id: central_force
+      why: "力只依赖相对位置（否则分离不了）"
+      patterns: ["中心力", "central.?force", "相对位置", "relative.?coord", "只依赖", "两体间"]
+    - id: no_external
+      why: "无外力 → 质心匀速，可选质心系"
+      patterns: ["无外力", "外力.*零", "no.?external", "质心", "center.?of.?mass", "动量守恒"]

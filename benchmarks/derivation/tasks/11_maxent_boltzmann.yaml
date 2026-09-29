@@ -1,0 +1,50 @@
+id: maxent_boltzmann
+title: 最大熵导出玻尔兹曼分布
+domain: statistical_physics
+kind: normal
+
+prompt: |
+  在归一化约束 sum_i p_i = 1 与能量约束 sum_i p_i E_i = U 下，
+  用拉格朗日乘子法最大化 Gibbs 熵 S = -k_B sum_i p_i ln p_i，
+  导出 p_i 的形式，并说明 beta 的物理含义。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: maxent_boltzmann_prereg
+    content: |
+      ## Research Questions
+      
+      ### Q1: 在给定平均能量下最大化熵会得到什么分布？
+      - output_kind: 一条命题的裁决
+      - proposition: p_i = exp(-beta E_i)/Z，其中 beta = 1/(k_B T)。
+      - 闭合条件:
+      ```yaml
+      - id: BOLTZMANN_FORM
+        statement: "导出 p_i 的形式，并说清两个乘子各自对应哪个约束"
+      - id: SECOND_ORDER
+        statement: "说明这是极大而非极小（熵函数的凹性），或如实标注该步未做机械验证"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  final_expression: "exp(-beta*E_i)/Z"
+  accepted_alternatives:
+    # Z 就是配分函数本身；模型把它写开是更完整的答案，不该判错
+    - "exp(-beta*E_i)/Sum(exp(-beta*E_j), (j, 1, n))"
+    - "exp(-beta*E_i)/Sum(exp(-beta*E_j), (j, 0, N-1))"
+  expected_verdict: derived
+  required_assumptions:
+    - id: normalization
+      why: "归一化约束"
+      patterns: ["归一", "normaliz", "sum.*p_?i *= *1", "\\\\sum p", "概率和"]
+    - id: energy_constraint
+      why: "平均能量固定"
+      patterns: ["能量约束", "平均能量", "average.?energy", "sum.*E_?i", "= *U", "内能"]
+    - id: concavity
+      why: "熵的凹性保证驻点是极大 —— 最常被跳过"
+      patterns: ["凹", "concav", "极大", "maxim", "二阶", "second.?order", "驻点"]

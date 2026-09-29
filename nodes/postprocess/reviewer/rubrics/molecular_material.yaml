@@ -1,0 +1,8 @@
+rubric_id: molecular_material
+extends: base
+checks:
+  - atom bond surface or unit-cell visibility
+  - orientation cues
+  - selection and color legend correspondence
+  - label collisions
+  - false-looking contacts caused by perspective or periodic replicas

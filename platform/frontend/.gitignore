@@ -1,0 +1,14 @@
+# dependencies
+# 不带斜杠：`node_modules/` 只匹配目录，匹配不上**同名的符号链接**。
+# 2026-08-10：我在删图引擎那个 PR 里把 node_modules 当成一个指向自己的
+# 符号链接提交了进去（mode 120000），本地一 checkout 就是死循环。
+node_modules
+.pnpm-store/
+
+# next.js
+.next/
+out/
+
+# misc
+*.tsbuildinfo
+next-env.d.ts

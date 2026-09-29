@@ -1,0 +1,65 @@
+# 015（声明完成后置条件是必要条件）refusal registry 交接件。
+#
+# 根登记文件 docs/verdict_demolition/refusal_registry.yaml 只读；请由其 owner
+# 将 entries 原样并入。修复前真实 scan：execution_route.py=69、
+# resource_manager.py=100；修复后分别为 71、106。根门禁在修复前通过，修复后
+# 需要下列 2+6 条登记才能恢复。不得用 --write 抬高 baseline。
+
+entries:
+  - file: nodes/experiment/tools/execution_route.py
+    class: B
+    why: >-
+      record_external_route_execution_verification 拒绝一份与当前 attempt、冻结的
+      step contract 或 expected-output 分区不一致的预计算 observation。writer
+      只有在这份记录事实可由同一权威 route 重放时才能写入；错误体保留原 observation
+      上游可重新解析并重试，或走 blocker 终态，不评判实验结果是否充分。
+
+  - file: nodes/experiment/tools/execution_route.py
+    class: B
+    why: >-
+      record_external_route_finalization 发现同 identity/attempt 已有的 execution
+      verification 与本次终态处置互相冲突时拒绝覆盖。既有物理执行观察不可被后来的
+      workflow 处置改写；operation_blocked 只有显式的双轴兼容矩阵可保留旧观察并收尾。
+
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: >-
+      route completion observation 在写入前没有独立物理成功证据（exit 0，或既有远端
+      fresh-health fallback）时拒绝持久化。把 exit unknown 硬写成 succeeded=True 会
+      伪造 exact-output correction basis；出口是 report_blocker 后 operation_blocked。
+
+  - file: nodes/experiment/tools/resource_manager.py
+    class: B
+    why: >-
+      持久化 route completion observation 的既有 writer 无法加载或抛异常时返回明确
+      错误。此时没有 durable correction basis，不能告诉调用方继续 correction；可修复
+      持久化/identity 后重试，或用 blocker 终态接管。
+
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: >-
+      operation_completed 的统一完成后置条件视图未通过：已声明的 health 路径或 route
+      outputs 缺失/陈旧/不可唯一解析，或 toolchain_build 零声明。它报告的是机械
+      completion protocol 未兑现，不是结果充分性判断；声明错误可精确纠正，真实缺产物
+      可 report_blocker 后 operation_blocked。
+
+  - file: nodes/experiment/tools/resource_manager.py
+    class: B
+    why: >-
+      铸造 schema-v2 operation_completed closure 前，冻结的 completion-postcondition
+      view 未通过语义与 identity 校验时拒绝铸造和 cleanup。closure 是 cleanup 后唯一
+      恢复事实，写入不自洽 view 会制造不可重放的成功终态。
+
+  - file: nodes/experiment/tools/resource_manager.py
+    class: B
+    why: >-
+      route missing 已被同一次只读 observation 判定，但既有 writer 未能持久化
+      expected_outputs_missing 时拒绝宣称 correction 可用。错误体明确 correction basis
+      尚不存在，要求先修复持久化/identity 或转 operation_blocked。
+
+  - file: nodes/experiment/tools/resource_manager.py
+    class: B
+    why: >-
+      全部 completion postconditions 已通过，但同一冻结 route observation 无法在 closure
+      与 cleanup 前持久化时拒绝继续。否则会出现 closure 说成功、route 没有 durable
+      success fact 的分裂账本；没有铸 closure、没有 cleanup，可安全重试或阻塞交接。

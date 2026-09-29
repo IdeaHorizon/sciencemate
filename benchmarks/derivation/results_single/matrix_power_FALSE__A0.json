@@ -1,0 +1,27 @@
+{
+  "task_id": "matrix_power_FALSE",
+  "arm": "A0",
+  "model": "deepseek-v4-flash",
+  "final_expression": "A*(B*A - A*B)*B == 0",
+  "verdict": "refuted",
+  "assumptions": [
+    "A、B 是同阶 n×n 方阵，元素在通常数域（如 R 或 C）中；反例是 2×2 实矩阵",
+    "使用通常的矩阵加法与乘法，且矩阵乘法满足结合律、对加法满足左右分配律",
+    "未假设 A、B 可逆；一般充要条件不涉及除法",
+    "仅在讨论可逆特例时，额外假设 det(A)≠0 且 det(B)≠0",
+    "推导只涉及有限矩阵运算，不使用级数收敛、独立性或展开式适用域",
+    "0 指同阶零矩阵；两矩阵相等当且仅当它们的差为零矩阵"
+  ],
+  "unverified_steps": [
+    "矩阵乘法的结合律与分配律按标准矩阵代数性质直接引用，未逐元素重新证明；反例中的具体矩阵乘积已按定义手算核验"
+  ],
+  "reasoning_summary": "命题被反例 A=E12, B=E21 证伪：左边为 E11，右边为 0。一般地，(AB)^2 - A^2B^2 = A(BA-AB)B，所以等式成立当且仅当 A(BA-AB)B=0；当 A、B 都可逆时该条件等价于 AB=BA，但通常不能化为交换性。",
+  "raw_text": "命题不成立。\n\n反例如下：\n\n\\[\nA=\\begin{pmatrix}0&1\\\\0&0\\end{pmatrix},\\qquad\nB=\\begin{pmatrix}0&0\\\\1&0\\end{pmatrix}.\n\\]\n\n则\n\n\\[\nAB=\\begin{pmatrix}1&0\\\\0&0\\end{pmatrix},\\qquad\n(AB)^2=\\begin{pmatrix}1&0\\\\0&0\\end{pmatrix},\n\\]\n\n但\n\n\\[\nA^2=0,\\qquad B^2=0,\\qquad A^2B^2=0.\n\\]\n\n所以\n\n\\[\n(AB)^2\\ne A^2B^2.\n\\]\n\n因此“对任意方阵 A,B”不成立。\n\n一般地，对任意同阶方阵 \\(A,B\\)：\n\n\\[\n(AB)^2-A^2B^2\n=ABAB-AABB\n=A(BA)B-A(AB)B\n=A(BA-AB)B.\n\\]\n\n所以等式成立的充要条件是\n\n\\[\nA(BA-AB)B=0.\n\\]\n\n注意：这里不能一般地写成 \\(AB=BA\\)；\\(AB=BA\\) 是充分条件，但不是一般必要条件。若额外假设 \\(A,B\\) 都可逆，则可两边左乘 \\(A^{-1}\\)、右乘 \\(B^{-1}\\)，得到 \\(BA-AB=0\\)，即 \\(AB=BA\\)。\n\n```json\n{\n  \"final_expression\": \"A*(B*A - A*B)*B == 0\",\n  \"verdict\": \"refuted\",\n  \"assumptions\": [\n    \"A、B 是同阶 n×n 方阵，元素在通常数域（如 R 或 C）中；反例是 2×2 实矩阵\",\n    \"使用通常的矩阵加法与乘法，且矩阵乘法满足结合律、对加法满足左右分配律\",\n    \"未假设 A、B 可逆；一般充要条件不涉及除法\",\n    \"仅在讨论可逆特例时，额外假设 det(A)≠0 且 det(B)≠0\",\n    \"推导只涉及有限矩阵运算，不使用级数收敛、独立性或展开式适用域\",\n    \"0 指同阶零矩阵；两矩阵相等当且仅当它们的差为零矩阵\"\n  ],\n  \"unverified_steps\": [\n    \"矩阵乘法的结合律与分配律按标准矩阵代数性质直接引用，未逐元素重新证明；反例中的具体矩阵乘积已按定义手算核验\"\n  ],\n  \"reasoning_summary\": \"命题被反例 A=E12, B=E21 证伪：左边为 E11，右边为 0。一般地，(AB)^2 - A^2B^2 = A(BA-AB)B，所以等式成立当且仅当 A(BA-AB)B=0；当 A、B 都可逆时该条件等价于 AB=BA，但通常不能化为交换性。\"\n}\n```",
+  "thinking_chars": 55726,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 171.8,
+  "tokens": 20078,
+  "parse_ok": true
+}

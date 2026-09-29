@@ -1,0 +1,678 @@
+# 通用诊断模式库
+# 来源: 跨编译、链接、运行、配置和环境故障的 HPC/AI 实践
+# 设计: 数据与代码分离；应用专属修复由官方文档、FermiLink 或项目知识库提供
+
+schema_version: "1.0"
+description: "通用 HPC/AI 应用错误诊断模式 - 涵盖编译、链接、运行、配置、环境五层"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 1. 编译错误 (Compilation)
+# ═════════════════════════════════════════════════════════════════════════════
+
+patterns:
+  # ─── 通用编译错误 ───────────────────────────────────────────────────────────
+  - id: "generic_compile_error"
+    regex: '(?i)error:\s*(.+)'
+    category: "compilation"
+    severity: "error"
+    confidence: 0.8
+    description: "通用编译错误"
+    generic_fix: "检查编译器输出，定位具体错误位置"
+    auto_fixable: false
+
+  - id: "undefined_reference"
+    regex: '(?i)undefined reference to (.+)'
+    category: "compilation"
+    severity: "error"
+    confidence: 0.9
+    description: "链接时符号未定义"
+    generic_fix: "确认符号定义的库已正确链接"
+    auto_fixable: false
+
+  - id: "cannot_find_library"
+    regex: '(?i)cannot find (-l\w+|lib\w+\.so|lib\w+\.a)'
+    category: "compilation"
+    severity: "error"
+    confidence: 0.9
+    description: "找不到库文件"
+    generic_fix: "检查库路径(LD_LIBRARY_PATH)，确认库已安装"
+    auto_fixable: false
+
+  # ─── MPI wrapper 后端选择 ────────────────────────────────────────────────────
+  # 必须排在 environment.path_not_set 之前并给更高 confidence：wrapper 内部 compiler
+  # not found 不是 PATH 缺失，加 PATH 是死路（classic 编译器根本没装）。
+  - id: "mpi_wrapper_backend_missing"
+    regex: '(?i)\bmpi\w+\b.*\b(ifort|ifx|icpx|icpc|icx|icc|gfortran|g\+\+|gcc|nvfortran|nvc\+\+|nvcc|nvc|pgf90|pgcc)\s*:\s*command not found'
+    category: "compilation"
+    severity: "error"
+    confidence: 0.95
+    description: "MPI wrapper 内部调用的后端编译器不存在（wrapper 后端选择错误，非源码/PATH 问题）"
+    generic_fix: "重定向 wrapper 后端到已安装的编译器，而非改 PATH 或怀疑源码"
+    auto_fixable: false
+    context_hint: >-
+      这是 MPI wrapper 后端选择错误，不是 PATH 缺失、也不是源码兼容问题：wrapper（如
+      mpiifort/mpiicpc）默认调用 classic 编译器（ifort/icc/icpc），但本机只装了 LLVM 版
+      （ifx/icx/icpx；oneAPI ≥2024 已移除 classic）。修法是显式重定向后端 ——
+      mpiifort -fc=ifx / mpiicpc -cxx=icpx / mpiicc -cc=icx，或改用官方 oneapi 模板。
+      不要把缺失的 classic 编译器加进 PATH（它根本没装），更不要修改上游源码。
+
+  # ─── Fortran 特定 ───────────────────────────────────────────────────────────
+  - id: "fortran_argument_mismatch"
+    regex: '(?i)type mismatch|argument mismatch|rank mismatch'
+    category: "compilation"
+    severity: "error"
+    confidence: 0.85
+    description: "Fortran 类型/参数不匹配"
+    generic_fix: "添加编译器标志 -fallow-argument-mismatch 或修正接口"
+    auto_fixable: true
+    suggested_fix:
+      type: "compiler_flag"
+      flag: "-fallow-argument-mismatch"
+
+  - id: "fortran_boz_literal"
+    regex: '(?i)BOZ literal constant|invalid BOZ'
+    category: "compilation"
+    severity: "error"
+    confidence: 0.85
+    description: "Fortran 二进制/八进制/十六进制字面量错误"
+    generic_fix: "添加编译器标志 -fallow-invalid-boz"
+    auto_fixable: true
+    suggested_fix:
+      type: "compiler_flag"
+      flag: "-fallow-invalid-boz"
+
+  - id: "fortran_real_kind"
+    regex: '(?i)real kind|kind parameter|default real'
+    category: "compilation"
+    severity: "warning"
+    confidence: 0.7
+    description: "Fortran 实数精度问题"
+    generic_fix: "统一默认实数精度 -fdefault-real-8"
+    auto_fixable: true
+    suggested_fix:
+      type: "compiler_flag"
+      flag: "-fdefault-real-8"
+
+  # ─── CUDA/GPU 编译 ──────────────────────────────────────────────────────────
+  - id: "cuda_no_kernel_image"
+    regex: '(?i)no kernel image|invalid device function'
+    category: "compilation"
+    severity: "critical"
+    confidence: 0.95
+    description: "GPU 架构与 CUDA 版本不匹配"
+    generic_fix: "检查 CUDA 版本是否支持目标 GPU 架构 (sm_XX)"
+    auto_fixable: false
+    context_hint: "Blackwell (RTX 5070) = sm_120 需要 CUDA 13+"
+
+  - id: "cuda_cccl_fpclassify"
+    regex: 'global scope has no.*fpclassify|::isgreater|::isless'
+    category: "compilation"
+    severity: "error"
+    confidence: 0.9
+    description: "CUDA 13 CCCL 与 GCC 14 不兼容"
+    generic_fix: "改用原生 GPU package 替代 KOKKOS 抽象层，或降级 GCC"
+    auto_fixable: false
+    context_hint: "原生 GPU 包 (.cpp→g++, .cu→nvcc) 编译链隔离更安全"
+
+  - id: "cuda_arch_not_specified"
+    regex: '(?i)gpu arch|architecture|sm_\d+|compute_\d+'
+    category: "compilation"
+    severity: "warning"
+    confidence: 0.7
+    description: "GPU 架构未显式指定"
+    generic_fix: "显式指定 GPU 架构 -arch=sm_XX，不要依赖 auto-detect"
+    auto_fixable: false
+
+  # ─── 模块/头文件 ────────────────────────────────────────────────────────────
+  - id: "module_not_found"
+    regex: '(?i)module (\w+) not found|cannot open module|missing module'
+    category: "compilation"
+    severity: "error"
+    confidence: 0.85
+    description: "Fortran/Python 模块未找到"
+    generic_fix: "检查模块搜索路径，确认依赖已安装"
+    auto_fixable: false
+
+  - id: "header_not_found"
+    regex: '(?i)cannot open.*\.h|cannot open.*\.hpp|No such file or directory.*include'
+    category: "compilation"
+    severity: "error"
+    confidence: 0.9
+    description: "头文件未找到"
+    generic_fix: "检查 include 路径，安装缺失的开发包"
+    auto_fixable: false
+
+  - id: "symbol_not_exported"
+    regex: 'symbol.*not exported|stdout.*not declared'
+    category: "compilation"
+    severity: "error"
+    confidence: 0.8
+    description: "符号未导出或未声明"
+    generic_fix: "在适当位置添加符号声明"
+    auto_fixable: true
+    suggested_fix:
+      type: "source_edit"
+      description: "添加符号声明"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 2. 链接错误 (Linking)
+# ═════════════════════════════════════════════════════════════════════════════
+
+  - id: "ld_error"
+    regex: 'ld: .*error:'
+    category: "linking"
+    severity: "error"
+    confidence: 0.9
+    description: "链接器错误"
+    generic_fix: "检查库路径和依赖关系"
+    auto_fixable: false
+
+  - id: "unresolved_symbol"
+    regex: '(?i)unresolved.*symbol|undefined.*symbol'
+    category: "linking"
+    severity: "error"
+    confidence: 0.9
+    description: "未解析的符号"
+    generic_fix: "确认符号定义的库已正确链接"
+    auto_fixable: false
+
+  - id: "netcdf_not_linked"
+    regex: '(?i)netcdf|libnetcdf'
+    category: "linking"
+    severity: "error"
+    confidence: 0.85
+    description: "NetCDF 库未链接"
+    generic_fix: "在链接器标志中添加 -lnetcdff -lnetcdf"
+    auto_fixable: true
+    suggested_fix:
+      type: "linker_flag"
+      flags: ["-lnetcdff", "-lnetcdf"]
+
+  - id: "lapack_not_linked"
+    regex: '(?i)lapack|blas|dgemm|dgesv'
+    category: "linking"
+    severity: "error"
+    confidence: 0.85
+    description: "LAPACK/BLAS 库未链接"
+    generic_fix: "添加 -llapack -lblas 到链接器标志"
+    auto_fixable: true
+    suggested_fix:
+      type: "linker_flag"
+      flags: ["-llapack", "-lblas"]
+
+  - id: "mpi_not_linked"
+    regex: '(?i)mpi_|mpif90|mpicc|libmpi'
+    category: "linking"
+    severity: "error"
+    confidence: 0.85
+    description: "MPI 库链接问题"
+    generic_fix: "使用 mpif90/mpicc 作为链接器而非 ld"
+    auto_fixable: true
+    suggested_fix:
+      type: "linker_change"
+      from: "ld 或 gfortran"
+      to: "mpif90"
+
+  - id: "lib_not_found_runtime"
+    regex: '(?i)cannot open shared object|error while loading shared libraries|lib.*\.so.*not found'
+    category: "linking"
+    severity: "error"
+    confidence: 0.95
+    description: "运行时找不到动态库"
+    generic_fix: "设置 LD_LIBRARY_PATH 或更新 ldconfig"
+    auto_fixable: true
+    suggested_fix:
+      type: "environment"
+      variable: "LD_LIBRARY_PATH"
+
+  - id: "pnetcdf_missing"
+    regex: 'libpnetcdf\.so|pnetcdf'
+    category: "linking"
+    severity: "error"
+    confidence: 0.85
+    description: "PNetCDF 库未找到"
+    generic_fix: "检查并行 NetCDF 安装，设置 LD_LIBRARY_PATH"
+    auto_fixable: false
+
+  - id: "multiple_definition"
+    regex: '(?i)multiple definition|redefinition of'
+    category: "linking"
+    severity: "error"
+    confidence: 0.8
+    description: "符号重复定义"
+    generic_fix: "检查是否有重复链接的库或重复定义的符号"
+    auto_fixable: false
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 3. 运行时错误 (Runtime)
+# ═════════════════════════════════════════════════════════════════════════════
+
+  # ─── 崩溃类 ─────────────────────────────────────────────────────────────────
+  # FMS/MOM6 的 domain stack 是应用工作区，不是进程调用栈；专用规则必须
+  # 排在会匹配任意 overflow 的通用崩溃规则之前。
+  - id: "fms_mpp_domains_stack_overflow"
+    regex: '(?i)mpp_domains_stack[^\n]*(?:overflow|too small|exceed)|domains_stack_size[^\n]*(?:too small|insufficient|increase)'
+    category: "runtime"
+    severity: "critical"
+    confidence: 0.98
+    description: "FMS/MOM6 domain decomposition stack space is insufficient"
+    generic_fix: "按目标版本的 FMS/MOM6 官方输入说明，在 namelist 中增大 domains_stack_size，并用同一 decomposition 重新验证"
+    auto_fixable: false
+    context_hint: "mpp_domains_stack 是 FMS 的 domain-decomposition 工作区；应调整 domains_stack_size，而不是进程调用栈限制"
+
+  # 通用进程栈错误应排在任何数值 overflow 兜底之前；FMS 专用规则仍
+  # 位于它前面，因此 domain-decomposition 工作区不会被误诊为进程栈。
+  - id: "stack_overflow"
+    regex: '(?i)stack overflow|stack smashing|__stack_chk_fail'
+    category: "runtime"
+    severity: "critical"
+    confidence: 0.9
+    description: "栈溢出"
+    generic_fix: "先识别报错的库或程序，再按其官方配置接口调整相应栈或工作区；若由递归或大局部数组引起，则修正实现或资源布局"
+    auto_fixable: false
+
+  - id: "segfault"
+    regex: '(?i)segmentation fault|sigsegv|segfault|SIGSEGV'
+    category: "runtime"
+    severity: "critical"
+    confidence: 0.95
+    description: "段错误 - 内存访问违规"
+    generic_fix: "检查数组越界、空指针、栈溢出"
+    auto_fixable: false
+
+  - id: "sigfpe"
+    regex: '(?i)floating point (?:exception|overflow|underflow)|sigfpe|divide by zero|numeric(?:al)? (?:overflow|underflow)|(?:integer|real) (?:overflow|underflow)'
+    category: "runtime"
+    severity: "critical"
+    confidence: 0.9
+    description: "浮点异常 - 数值计算错误"
+    generic_fix: "检查除零、溢出、无效数值操作"
+    auto_fixable: false
+
+  - id: "sigabrt"
+    regex: '(?i)sigabrt|abort|assertion.*failed|assert.*fail'
+    category: "runtime"
+    severity: "critical"
+    confidence: 0.85
+    description: "程序异常终止"
+    generic_fix: "检查断言条件，查看详细错误信息"
+    auto_fixable: false
+
+  # ─── CFL/数值稳定性 ─────────────────────────────────────────────────────────
+  - id: "cfl_violation"
+    regex: '(?i)CFL violation|cfl.*exceed|time step.*too large|dt.*stability'
+    category: "runtime"
+    severity: "error"
+    confidence: 0.9
+    description: "CFL 条件违反 - 时间步过大"
+    generic_fix: "减小时间步 dt，或调整空间分辨率"
+    auto_fixable: false
+
+  - id: "nan_inf"
+    regex: '(?i)NaN|Inf|Infinity|not a number'
+    category: "runtime"
+    severity: "error"
+    confidence: 0.85
+    description: "出现非数值(NaN)或无穷大(Inf)"
+    generic_fix: "检查初始化、边界条件、数值稳定性"
+    auto_fixable: false
+
+  # ─── 资源限制 ─────────────────────────────────────────────────────────────────
+  - id: "oom"
+    regex: '(?i)out of memory|oom|cannot allocate|memory allocation failed'
+    category: "runtime"
+    severity: "critical"
+    confidence: 0.9
+    description: "内存不足"
+    generic_fix: "减少并行进程数、优化内存使用、增加物理内存"
+    auto_fixable: false
+
+  - id: "disk_full"
+    regex: '(?i)no space left|disk full|write error|cannot write'
+    category: "runtime"
+    severity: "critical"
+    confidence: 0.9
+    description: "磁盘空间不足"
+    generic_fix: "清理磁盘空间或更换输出目录"
+    auto_fixable: false
+
+  # ─── MPI 运行时 ───────────────────────────────────────────────────────────────
+  - id: "mpi_abort"
+    regex: '(?i)MPI_Abort|MPI_INIT|MPI Error|MPI_Finalize'
+    category: "runtime"
+    severity: "error"
+    confidence: 0.85
+    description: "MPI 初始化或通信错误"
+    generic_fix: "检查 MPI 环境、进程数、网络配置"
+    auto_fixable: false
+
+  - id: "mpi_rank_died"
+    regex: '(?i)rank.*died|process.*exited|MPI.*terminate'
+    category: "runtime"
+    severity: "critical"
+    confidence: 0.9
+    description: "MPI 进程异常退出"
+    generic_fix: "检查各 rank 日志，定位崩溃进程"
+    auto_fixable: false
+
+  - id: "mpi_oversubscribe"
+    regex: '(?i)oversubscribe|not enough slots'
+    category: "runtime"
+    severity: "error"
+    confidence: 0.8
+    description: "MPI 进程数超过可用核心"
+    generic_fix: "减少 np 进程数或添加 --oversubscribe"
+    auto_fixable: true
+    suggested_fix:
+      type: "mpirun_flag"
+      flag: "--oversubscribe"
+
+  # ─── 输入/文件 ────────────────────────────────────────────────────────────────
+  - id: "input_error"
+    regex: '(?i)input.*error|bad.*input|invalid.*value|namelist.*error|read.*error'
+    category: "runtime"
+    severity: "error"
+    confidence: 0.8
+    description: "输入数据或配置错误"
+    generic_fix: "检查输入文件格式、参数范围、namelist"
+    auto_fixable: false
+
+  - id: "file_not_found"
+    regex: '(?i)cannot open.*file|file not found|no such file'
+    category: "runtime"
+    severity: "error"
+    confidence: 0.9
+    description: "文件未找到"
+    generic_fix: "检查文件路径、确认文件存在"
+    auto_fixable: false
+
+  # ─── GPU 运行时 ───────────────────────────────────────────────────────────────
+  - id: "gpu_out_of_memory"
+    regex: '(?i)out of memory.*gpu|cuda.*oom|gpu.*memory'
+    category: "runtime"
+    severity: "critical"
+    confidence: 0.9
+    description: "GPU 显存不足"
+    generic_fix: "减小体系规模、降低精度、使用更少的 GPU"
+    auto_fixable: false
+
+  - id: "cuda_error"
+    regex: '(?i)CUDA error|cuda.*error|cuda.*fail'
+    category: "runtime"
+    severity: "error"
+    confidence: 0.85
+    description: "CUDA 运行时错误"
+    generic_fix: "检查 CUDA 版本、驱动、GPU 可用性"
+    auto_fixable: false
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 4. 配置错误 (Configuration)
+# ═════════════════════════════════════════════════════════════════════════════
+
+  - id: "namelist_read_error"
+    regex: '(?i)namelist.*read.*error|invalid.*namelist|namelist.*not found'
+    category: "configuration"
+    severity: "error"
+    confidence: 0.9
+    description: "Namelist 读取错误"
+    generic_fix: "检查 namelist 语法、变量名拼写、引号匹配"
+    auto_fixable: false
+
+  - id: "namelist_variable_error"
+    regex: '(?i)unknown.*variable|invalid.*variable|not.*in.*namelist'
+    category: "configuration"
+    severity: "error"
+    confidence: 0.85
+    description: "Namelist 变量错误"
+    generic_fix: "检查变量名拼写，确认变量在对应 namelist 组中"
+    auto_fixable: false
+
+  - id: "parameter_out_of_range"
+    regex: '(?i)out of range|invalid.*value|value.*exceed|must be between'
+    category: "configuration"
+    severity: "error"
+    confidence: 0.8
+    description: "参数值超出有效范围"
+    generic_fix: "检查参数范围限制，调整至合理值"
+    auto_fixable: false
+
+  - id: "xml_parse_error"
+    regex: '(?i)xml.*parse.*error|malformed.*xml|invalid.*xml'
+    category: "configuration"
+    severity: "error"
+    confidence: 0.9
+    description: "XML 解析错误"
+    generic_fix: "检查 XML 语法，确保标签正确闭合"
+    auto_fixable: false
+
+  - id: "component_mismatch"
+    regex: '(?i)incompatible|mismatch|conflict.*component'
+    category: "configuration"
+    severity: "error"
+    confidence: 0.8
+    description: "组件配置不匹配"
+    generic_fix: "检查各组件版本兼容性、接口一致性"
+    auto_fixable: false
+
+  - id: "tracer_number_mismatch"
+    regex: '(?i)tracer|pcnst|number.*species|chem.*species'
+    category: "configuration"
+    severity: "error"
+    confidence: 0.8
+    description: "化学示踪剂数量不匹配"
+    generic_fix: "检查 cam/chem 配置中的示踪剂数量一致性"
+    auto_fixable: true
+    suggested_fix:
+      type: "config_change"
+      parameter: "micro_mg_version"
+      value: "2"
+
+  - id: "physics_scheme_error"
+    regex: '(?i)physics.*option|mp_physics|cu_physics|ra_physics'
+    category: "configuration"
+    severity: "error"
+    confidence: 0.75
+    description: "物理方案配置问题"
+    generic_fix: "检查物理方案选项的兼容性"
+    auto_fixable: false
+
+  - id: "accelerator_setup_order"
+    regex: '(?i)package.*command.*after|after.*simulation.*box'
+    category: "configuration"
+    severity: "error"
+    confidence: 0.9
+    description: "加速器初始化顺序与输入状态冲突"
+    generic_fix: "按目标软件官方输入语法确认加速器初始化与体系定义的先后顺序"
+    auto_fixable: false
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 5. 环境错误 (Environment)
+# ═════════════════════════════════════════════════════════════════════════════
+
+  - id: "path_not_set"
+    regex: '(?i)command not found|not in PATH|PATH.*not.*set'
+    category: "environment"
+    severity: "error"
+    confidence: 0.9
+    description: "命令未找到，PATH 未配置"
+    generic_fix: "添加工具 bin 目录到 PATH"
+    auto_fixable: true
+    suggested_fix:
+      type: "environment"
+      variable: "PATH"
+
+  - id: "ld_library_path_missing"
+    regex: '(?i)LD_LIBRARY_PATH|library.*path|cannot find.*library'
+    category: "environment"
+    severity: "error"
+    confidence: 0.85
+    description: "动态库路径未配置"
+    generic_fix: "添加库目录到 LD_LIBRARY_PATH"
+    auto_fixable: true
+    suggested_fix:
+      type: "environment"
+      variable: "LD_LIBRARY_PATH"
+
+  - id: "module_not_found"
+    regex: '(?i)module.*not found|module.*error|cannot find.*module'
+    category: "environment"
+    severity: "error"
+    confidence: 0.8
+    description: "Environment module 未找到"
+    generic_fix: "module avail 查看可用模块，或安装缺失模块"
+    auto_fixable: false
+
+  - id: "permission_denied"
+    regex: '(?i)permission denied|access denied|not permitted'
+    category: "environment"
+    severity: "error"
+    confidence: 0.9
+    description: "权限不足"
+    generic_fix: "检查文件/目录权限，使用 chmod/chown 修改或切换用户"
+    auto_fixable: false
+
+  - id: "executable_not_permission"
+    regex: '(?i)cannot execute|exec format error|bad interpreter'
+    category: "environment"
+    severity: "error"
+    confidence: 0.8
+    description: "文件不可执行"
+    generic_fix: "chmod +x 添加执行权限，或检查 shebang 行"
+    auto_fixable: true
+    suggested_fix:
+      type: "shell_command"
+      command: "chmod +x filename"
+
+  - id: "quota_exceeded"
+    regex: '(?i)quota.*exceeded|disk.*quota|user.*quota'
+    category: "environment"
+    severity: "critical"
+    confidence: 0.9
+    description: "磁盘配额超限"
+    generic_fix: "清理文件或申请增加配额"
+    auto_fixable: false
+
+  - id: "ulimit_reached"
+    regex: '(?i)too many open files|ulimit|resource.*limit'
+    category: "environment"
+    severity: "error"
+    confidence: 0.8
+    description: "系统资源限制"
+    generic_fix: "ulimit -n 增大文件描述符限制，或 ulimit -s 增大栈"
+    auto_fixable: true
+    suggested_fix:
+      type: "shell_command"
+      command: "ulimit -n 4096 && ulimit -s unlimited"
+
+  - id: "conda_env_not_activated"
+    regex: '(?i)conda.*not.*activate|environment.*not.*found|package.*not.*installed'
+    category: "environment"
+    severity: "error"
+    confidence: 0.8
+    description: "Conda 环境未激活或包未安装"
+    generic_fix: "conda activate env_name 或 conda install package"
+    auto_fixable: false
+
+  - id: "python_version_mismatch"
+    regex: '(?i)python.*version|requires.*python|incompatible.*python'
+    category: "environment"
+    severity: "error"
+    confidence: 0.8
+    description: "Python 版本不匹配"
+    generic_fix: "切换到正确版本的 Python 环境"
+    auto_fixable: false
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 6. 调度器终止消息 (Scheduler)  —— 049-1
+# ═════════════════════════════════════════════════════════════════════════════
+# 这些行是调度器自己写进作业 stderr（-j oe 时进 stdout）的，不是程序输出。
+# 来源（源码，官方文档均无此文案）：
+#   Slurm  src/slurmd/slurmstepd/req.c（_handle_signal_container 的 SIG_* 横幅；
+#          ≤24.11 前缀 "slurmstepd: error: "，≥25.05 前缀 "[<时间>] error: "——所以只锚横幅正文）；
+#          src/plugins/task/cgroup/task_cgroup_memory.c（cgroup OOM，17.11–22.05 写
+#          "oom-kill event(s)"，≥23.02 写 "oom_kill event"；≤17.02 写 "Exceeded … memory limit at some point."）；
+#          src/interfaces/jobacct_gather.c（OverMemoryKill："… exceeded memory limit (a > b), being killed"）。
+#   OpenPBS/Torque  src/resmom/mom_main.c："=>> PBS: job killed: <资源> <用量> exceeded limit <上限>"。
+# 整行锚定（^.*…$）：让本条在同一行上机械覆盖 generic_compile_error 的 "error:" 解释，
+# 否则模型会先看到「通用编译错误」。事实与判据见
+# skills/scheduler-longrun/references/{slurm,pbs-torque}-terminal-facts.md。
+
+  - id: "slurm_job_cancelled_time_limit"
+    regex: '^.*\*\*\* (?:JOB|STEP) \S+ ON \S+ CANCELLED AT \S+ DUE TO TIME LIMIT \*\*\*.*$'
+    category: "resource"
+    severity: "critical"
+    confidence: 0.98
+    description: "Slurm 作业/step 到达 walltime 被调度器结束（sacct State=TIMEOUT）"
+    generic_fix: "这是墙钟到点被杀，不是程序错误；按 sacct 的 TIMEOUT 收尾（不算成功、不算符合预期终止），部分产物不进结果；重投前加大 walltime 或改用检查点续跑"
+    context_hint: "ExitCode 低位为 0（0:0 / 0:15）不表示跑完；终态以 sacct allocation 行 State 为准"
+    auto_fixable: false
+
+  - id: "slurm_job_cancelled_preemption_or_requeue"
+    regex: '^.*\*\*\* (?:JOB|STEP) \S+ ON \S+ CANCELLED AT \S+ DUE TO (?:PREEMPTION|JOB REQUEUE) \*\*\*.*$'
+    category: "resource"
+    severity: "error"
+    confidence: 0.98
+    description: "Slurm 作业被抢占或被重排（sacct State=PREEMPTED / 同一 JobID 会从头再跑）"
+    generic_fix: "不是程序错误；先查 sacct -D 看同一 JobID 是否已重跑，重跑会从头执行并可能覆盖/追加同一批输出文件；只收最后一次运行的产物"
+    context_hint: "PREEMPTED 的 ExitCode 通常是 0:0；被抢占又在 GraceTime 内自己结束的作业也按抢占处理"
+    auto_fixable: false
+
+  - id: "slurm_job_cancelled_node_failure"
+    regex: '^.*\*\*\* (?:JOB|STEP) \S+ ON \S+ CANCELLED AT \S+ DUE TO NODE FAILURE.*\*\*\*.*$'
+    category: "resource"
+    severity: "critical"
+    confidence: 0.98
+    description: "Slurm 分配节点故障导致作业结束（sacct State=NODE_FAIL）"
+    generic_fix: "不是程序错误；作业没有返回过退出码（ExitCode 0:0）；查 sacct 是否已 requeue 后再决定重投，重投时避开该节点或让调度器选"
+    context_hint: "NODE_FAIL 不算成功也不算符合预期终止；Requeue=1 时同一 JobID 的新记录会盖住这条"
+    auto_fixable: false
+
+  - id: "slurm_job_cancelled_by_signal"
+    regex: '^.*\*\*\* (?:JOB|STEP) \S+ ON \S+ CANCELLED AT \S+(?: DUE to SIGNAL [^*]+)? \*\*\*.*$'
+    category: "runtime"
+    severity: "error"
+    confidence: 0.98
+    description: "Slurm 作业被 scancel / SIGTERM / SIGKILL 显式取消（sacct State=CANCELLED by <uid>）"
+    generic_fix: "先查 sacct 的 State（CANCELLED by <uid> 说明谁取消的），确认是计划内取消还是意外；取消的作业不算成功，只有 cancel_job 记录的计划内取消才按计划收尾"
+    context_hint: "≤24.11 的横幅只有 CANCELLED AT <时间>，≥25.05 带 DUE to SIGNAL <名>；都不带原因——OverMemoryKill 杀作业时也打这条横幅（前后有 exceeded memory limit 行，sacct 记 FAILED 0:9）"
+    auto_fixable: false
+
+  - id: "slurm_job_failed_or_task_failure"
+    regex: '^.*\*\*\* (?:JOB|STEP) \S+ ON \S+ (?:FAILED \(non-zero exit code or other failure mode\)|CANCELLED AT \S+ DUE TO TASK FAILURE) \*\*\*.*$'
+    category: "runtime"
+    severity: "error"
+    confidence: 0.98
+    description: "Slurm 因批处理脚本非零退出或 --kill-on-bad-exit 的任务失败而结束其余 step"
+    generic_fix: "真正的错误在这条横幅之前的程序输出里；按 sacct 的 FAILED/ExitCode 收尾，定位失败的 step（sacct 不带 -X 看 step 行）"
+    context_hint: "这条横幅本身不是根因"
+    auto_fixable: false
+
+  - id: "slurm_step_oom_killed"
+    regex: '^.*(?:Detected \d+ oom[-_]kill event|Exceeded (?:job|step) memory limit|exceeded (?:virtual )?memory limit \(\d+ > \d+\), being killed).*$'
+    category: "memory"
+    severity: "critical"
+    confidence: 0.98
+    description: "Slurm 报告 step 内进程被 cgroup OOM 杀掉或被 OverMemoryKill 杀掉（sacct step 行 State=OUT_OF_MEMORY）"
+    generic_fix: "内存超过申请量：按 sacct step 行的 MaxRSS 重新申请内存（--mem / --mem-per-cpu）或减少每节点进程数；cgroup OOM 下作业可能仍显示 COMPLETED，要看 step 行"
+    context_hint: "cgroup OOM 只杀一个进程、step 继续跑；OverMemoryKill 杀整个 step 且基于轮询有延迟"
+    auto_fixable: false
+
+  - id: "pbs_job_killed_time_or_cpu_limit"
+    regex: '^.*=>> PBS: job killed: (?:(?:walltime|cput|pcput|ncpus)\b.*exceeded limit|cput job total \d+ secs exceeded limit).*$'
+    category: "resource"
+    severity: "critical"
+    confidence: 0.98
+    description: "PBS Pro/OpenPBS/Torque 的 MoM 因 walltime / cput / ncpus 超限杀掉作业"
+    generic_fix: "这是时间/CPU 限制到点被杀，不是程序错误；按 qstat 的终态与 Exit_status 收尾（不算成功）；重投前加大 walltime 或改用检查点续跑"
+    context_hint: "PBS Pro 的 Exit_status 会是 128+信号（如 143/137），Torque 可能是 -11 或 >255 的值；具体数值分不出超时与其他信号死亡，这行文案才是证据"
+    auto_fixable: false
+
+  - id: "pbs_job_killed_memory_limit"
+    regex: '^.*=>> PBS: job killed: (?:(?:mem|vmem|pvmem)\b.*exceeded limit|mem job total \d+ kb exceeded limit).*$'
+    category: "memory"
+    severity: "critical"
+    confidence: 0.98
+    description: "PBS Pro/OpenPBS/Torque 的 MoM 因 mem / vmem / pvmem 超限杀掉作业"
+    generic_fix: "内存超过申请量：按这行给出的用量重新申请 mem/vmem 或减少每节点进程数；不算成功"
+    context_hint: "Torque 记 -10（OVERLIMIT_MEM）；PBS Pro 只在 enforce_mem 时按 mem 杀"
+    auto_fixable: false

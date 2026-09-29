@@ -1,0 +1,30 @@
+# postprocess 节点的最小 fixture（图子系统重建后形态，2026-09-01）。
+# 运行:  python run_node.py --harness postprocess --fixture nodes/postprocess/fixtures/minimal.yaml
+#
+# 重建后没有 typed brief/plan 链：节点收到可视化请求后自己在沙箱写 matplotlib，
+# 经 render_figure 铸唯一 figure 记录（三重 hash 出处绑定 + 恒跑审计 + VLM 证人）。
+
+node_inputs:
+  visual_requests:
+    - intent: >
+        用一张散点图说明测试温度与测得屈服强度的关系，标出两个异常点。
+      asset_kind: quantitative
+      purpose: exploration
+
+upstream_artifacts:
+  - artifact_type: clean_results
+    name: yield_strength_vs_temperature
+    content: |
+      temperature_K,yield_strength_MPa
+      300,412
+      350,398
+      400,371
+      450,344
+      500,289
+      550,301
+      600,240
+    metadata:
+      generated_by: experiment
+      units: {temperature_K: K, yield_strength_MPa: MPa}
+
+memory_entries: []

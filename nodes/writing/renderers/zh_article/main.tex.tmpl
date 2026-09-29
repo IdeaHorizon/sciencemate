@@ -1,0 +1,34 @@
+% 由 writing 节点的渲染器装配；模型只写 sections/ 下的片段。
+\documentclass[12pt,a4paper]{ctexart}
+\usepackage[margin=2.5cm]{geometry}
+% 浮动体页面比例：不让一张半页高的图独占一整页（iter9 实测第 5 页整页只有图 1 与大片空白）
+\renewcommand{\topfraction}{0.9}\renewcommand{\bottomfraction}{0.7}
+\renewcommand{\textfraction}{0.1}\renewcommand{\floatpagefraction}{0.8}
+\usepackage{booktabs,graphicx,caption,subcaption,amsmath,amssymb,array,multirow,longtable,float,adjustbox}
+\usepackage[backend=biber,style=gb7714-2015,gbnamefmt=lowercase,sorting=none,url=false,doi=true]{biblatex}
+\addbibresource{refs.bib}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\captionsetup{font=small,labelfont=bf,labelsep=quad}
+\ctexset{section/format=\Large\bfseries,subsection/format=\large\bfseries,subsubsection/format=\normalsize\bfseries}
+\graphicspath{{./}{figures/}}
+\emergencystretch=3em
+\tolerance=1500
+\setlength{\parskip}{0.3em}
+
+\title{<<TITLE>>}
+\author{<<AUTHORS>>}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\input{sections/abstract}
+\end{abstract}
+
+<<SECTIONS>>
+
+\printbibliography[title=参考文献]
+
+<<APPENDIX>>
+\end{document}

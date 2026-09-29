@@ -1,0 +1,106 @@
+{
+ "assertions": [
+  {
+   "derived_from": "四个参与者从左到右是 用户、前端、调度器、执行节点",
+   "equals": 4,
+   "id": "participant_count",
+   "kind": "node_count"
+  },
+  {
+   "derived_from": "七步消息 + 一条失败重派（⑤a）",
+   "equals": 8,
+   "id": "msg_count",
+   "kind": "edge_count"
+  }
+ ],
+ "bands": [
+  [
+   "node:user",
+   "node:fe",
+   "node:sched",
+   "node:node"
+  ]
+ ],
+ "edges": [
+  {
+   "from": "user",
+   "label": "① 提交课题",
+   "role": "消息",
+   "step": 1,
+   "to": "fe"
+  },
+  {
+   "from": "fe",
+   "label": "② 创建 run",
+   "role": "消息",
+   "step": 2,
+   "to": "sched"
+  },
+  {
+   "from": "sched",
+   "label": "③ 派发第一个节点任务",
+   "role": "消息",
+   "step": 3,
+   "to": "node"
+  },
+  {
+   "from": "node",
+   "label": "④ 回报进度（循环，重复多次）",
+   "role": "循环",
+   "step": 4,
+   "to": "node"
+  },
+  {
+   "from": "node",
+   "label": "⑤ 提交产物",
+   "role": "消息",
+   "step": 5,
+   "to": "sched"
+  },
+  {
+   "from": "sched",
+   "label": "⑤a 失败则重新派发",
+   "role": "重试",
+   "step": 6,
+   "to": "node"
+  },
+  {
+   "from": "sched",
+   "label": "⑥ 通知刷新",
+   "role": "消息",
+   "step": 7,
+   "to": "fe"
+  },
+  {
+   "from": "fe",
+   "label": "⑦ 呈现结果",
+   "role": "消息",
+   "step": 8,
+   "to": "user"
+  }
+ ],
+ "groups": [],
+ "nodes": [
+  {
+   "id": "user",
+   "label": "用户",
+   "role": "参与者"
+  },
+  {
+   "id": "fe",
+   "label": "前端",
+   "role": "参与者"
+  },
+  {
+   "id": "sched",
+   "label": "调度器",
+   "role": "参与者"
+  },
+  {
+   "id": "node",
+   "label": "执行节点",
+   "role": "参与者"
+  }
+ ],
+ "title": "课题执行时序图"
+}

@@ -1,0 +1,43 @@
+id: kepler_third_law
+title: 开普勒第三定律
+domain: classical_mechanics
+kind: normal
+
+prompt: |
+  对圆轨道情形，从牛顿万有引力定律与向心力条件出发，推导 T^2 = 4 pi^2 a^3/(G M)，
+  并说明把它推广到椭圆轨道时 a 的含义变成什么。
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+
+upstream_artifacts:
+  - type: pre_registration
+    name: kepler_third_law_prereg
+    content: |
+      ## Research Questions
+      
+      ### Q1: 开普勒第三定律的形式与适用条件是什么？
+      - output_kind: 一条命题的裁决
+      - proposition: T^2 = 4 pi^2 a^3/(G M)。
+      - 闭合条件:
+      ```yaml
+      - id: PERIOD_RELATION
+        statement: "给出 T 与 a 关系的推导，每步经机械验证或如实标注未验"
+      - id: ELLIPSE_NOTE
+        statement: "说明推广到椭圆时 a 是半长轴，以及 M 应换成 (M+m) 的条件"
+      ```
+    metadata:
+      frozen: true
+
+ground_truth:
+  final_expression: "4*pi**2*a**3/(G*M)"
+  expression_note: "判 T^2 的表达式"
+  expected_verdict: derived
+  required_assumptions:
+    - id: two_body
+      why: "M>>m 才能把中心天体当固定；否则要用约化质量/(M+m)"
+      patterns: ["M *>> *m", "远大于", "中心天体", "固定", "约化", "reduced.?mass", "M *\\+ *m", "两体"]
+    - id: circular_or_ellipse
+      why: "圆轨道假设（或椭圆下 a 为半长轴）"
+      patterns: ["圆轨道", "circular", "半长轴", "semi.?major", "椭圆", "ellip"]

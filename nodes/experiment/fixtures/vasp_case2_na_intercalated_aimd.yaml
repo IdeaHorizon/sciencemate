@@ -1,0 +1,92 @@
+node_inputs:
+  path_roles:
+    experiment_root: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-work
+    run_root: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-work/run
+  experiment_focus: |
+    这是 VASP case2：Na intercalated tC40 AIMD 的完整 experiment 节点任务。
+    本任务在 spr-cu01 提交，通过 SLURM 定向到 spr-cu05 运行；复用已经编译好的 VASP 6.5.1 `vasp_std`，
+    不重新编译 VASP，除非二进制不可执行或依赖缺失。
+
+    科学目标：
+    1. 使用 case2 输入目录中的 `predecessor/` 先完成 Na-intercalated tC40 predecessor 弛豫。
+    2. predecessor 产生合格 `CONTCAR` 后，将其复制为 AIMD 阶段的 `POSCAR`。
+    3. 使用 case2 根目录 AIMD 输入参数运行 300 K AIMD。
+    4. 冻结 `experiment_log`，记录 predecessor/AIMD 是否完成、关键输出路径、失败原因或 blocker。
+    5. 本节点只产出 experiment 阶段证据；不做 band/gap postprocess，也不得仅凭本 run 声称 H24 validated/refuted。
+
+    路径：
+    - 提交端仓库: /mnt/beegfs/ai4s-test/ai4s-platform/test_20260625/harness-framework
+    - case2 输入目录: /mnt/beegfs/ai4s-test/ai4s-platform/test1_vasp/case2.na_intercalated_aimd
+    - 已编译 VASP: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-spr-cu04-smoke-work/build_src/vasp.6.5.1/bin/vasp_std
+    - 本 run 共享 workdir: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-work
+    - predecessor 运行目录: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-work/run/predecessor
+    - AIMD 运行目录: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-work/run/aimd
+    - logs 目录: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case2-na-aimd-work/run/logs
+
+    输入事实：
+    - case2/predecessor/POSCAR: C40 Na1，共 41 原子。
+    - case2/predecessor/INCAR/KPOINTS/POTCAR 是 predecessor 阶段输入。
+    - case2 根目录 INCAR/KPOINTS/POTCAR 是 AIMD 阶段输入。
+    - case2/structure.pending.json 声明 AIMD POSCAR 应来自 predecessor/CONTCAR。
+    - 原始输入只读；所有修改都必须在 workdir 的 run 目录副本中完成。
+
+    执行约束：
+    - 不要修改 `/mnt/beegfs/ai4s-test/ai4s-platform/test1_vasp/case2.na_intercalated_aimd` 下的原始输入。
+    - 不要修改 VASP `.F` / `.F90` / `.c` / `.py` 等上游源码；本任务默认不编译。
+    - 运行前必须检查 `vasp_std` 存在、可执行、`ldd` 无 `not found`，并确认 OpenMP/MPI 运行环境。
+    - 正式提交前必须 `request_human_input`，说明 scheduler、partition、nodelist、mpi ranks、threads、walltime、
+      workdir、script_path、是否会编译 VASP，以及 predecessor/AIMD 阶段范围。
+    - 等待 SLURM 作业时不要使用长阻塞：单次 `sleep` 不超过 60 秒，单次 `safe_run_bash timeout` 不超过 90 秒；
+      作业长时间运行时给出 job id、日志路径和 watch 命令，让用户自行观察。
+
+    SLURM 目标：
+    - scheduler: slurm
+    - queue: debug
+    - nodelist: spr-cu05
+    - gpus: 0
+    - predecessor 建议资源: 4 MPI ranks x 4 OpenMP threads, 64 GB, 6 hours
+    - AIMD 建议资源: 4 MPI ranks x 4 OpenMP threads, 64 GB, 24 hours
+    - 若 OUTCAR 显示只启动 1 mpi-rank，必须取消并重写脚本；`srun` 需显式带 `--ntasks`、`--cpus-per-task`、`--cpu-bind=cores`。
+    - 脚本必须包含 `ulimit -s unlimited`、`MKL_NUM_THREADS=1`、`OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK`。
+
+    参数边界：
+    - 科学参数默认保持输入文件原值，例如 `ENCUT=520`、`PREC=Accurate`、`KPOINTS=3 3 3`。
+    - 可以设置和记录性能参数（例如 `NCORE` / `KPAR` / OMP / MPI 布局），但不得把它们伪装成科学参数。
+    - 如需为了 smoke/preflight 临时缩短 `NSW`，必须明确标注该 run 不是正式结果；正式 AIMD 应回到输入要求。
+
+    完成标准：
+    - predecessor: SLURM `COMPLETED 0:0`，`OSZICAR` 有 ionic-step 能量行，`CONTCAR` 非空且结构有效。
+    - AIMD: SLURM `COMPLETED 0:0` 或达到明确可解释的阶段性输出；`OUTCAR`/`OSZICAR`/`XDATCAR`/`CONTCAR` 至少一组可归档。
+    - 若任一阶段失败，必须记录最后一个真实错误、日志路径、资源配置和下一步建议，不得伪造完成。
+
+upstream_artifacts:
+  - type: claim
+    name: H24_thermal_nodal_surface_robustness
+    metadata:
+      claim_type: hypothesis
+      status: open
+      derived_from: pre_registration__tC40_nodal_surface_SIB_anode_prereg.json
+      source_section: "Hypothesis H24"
+      note: "Derived summary, not a standalone upstream claim artifact file"
+    content: |
+      tC40 中 Γ 点四重简并节点面在 300 K 热扰动和 Na 嵌入下更脆弱；
+      AIMD snapshots 的后续能带分析应检验 Γ/K 节点面的开隙差异。
+      本 experiment 节点任务只负责生成 VASP predecessor/AIMD 运行证据；
+      最终 validated/refuted verdict 必须结合后续 postprocess 的 band/gap 证据。
+
+  - type: pre_registration
+    name: tC40_nodal_surface_SIB_anode_prereg
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-16T03:33:56+00:00"
+      freeze_reason: "Imported upstream hypothesis pre-registration for VASP case2 Na-intercalated AIMD experiment"
+      source_artifact: pre_registration__tC40_nodal_surface_SIB_anode_prereg.json
+    content: |
+      上游 prereg artifact 位于：
+      /mnt/beegfs/ai4s-test/ai4s-platform/test1_vasp/vasp-upstream-artifacts.zip
+
+      本次 case2 运行范围：
+      - 先运行 Na-intercalated tC40 predecessor 弛豫。
+      - predecessor/CONTCAR 合格后，作为 AIMD 阶段 POSCAR。
+      - 运行 AIMD 阶段并归档 VASP 输出。
+      - 不在 experiment 节点做 snapshots band/gap postprocess。

@@ -1,0 +1,89 @@
+{
+  "task_id": "ols_variance",
+  "arm": "A1",
+  "final_expression": "sigma**2*Inverse(X.T*X)",
+  "final_expression_source": "main_result",
+  "main_result_statement": "OLS 估计量 beta_hat=(X'X)^(-1)X'y 的协方差矩阵 Var(beta_hat)=sigma^2*(X'X)^(-1)；适用域：X 满秩非随机（A1,A2）、E[eps]=0（A3）、Cov(eps)=sigma^2*I（A4）、sigma^2>0（A5）",
+  "verdict": "derived",
+  "verification_evidence": [
+    {
+      "step": "S3",
+      "probe": "4ffd868b06f216c4",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S4",
+      "probe": "9e3efafe9ced6936",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S9",
+      "probe": "ab310bccb63ca379",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "S12",
+      "probe": "4f5f37e2c559dc87",
+      "status": "verified",
+      "in_ledger": true
+    },
+    {
+      "step": "C1",
+      "probe": "37252d94fc0f539a",
+      "status": "verified",
+      "in_ledger": true
+    }
+  ],
+  "claimed_verified_steps": 5,
+  "step_count": 14,
+  "assumptions": [
+    "A1: X ∈ R^{n×k} 满秩（rank=k≤n），X'X 可逆正定",
+    "A2: X 非随机（固定设计）",
+    "A3: E[eps] = 0",
+    "A4: Cov(eps) = sigma^2*I（同方差且误差互不相关），等价 E[eps*eps']=sigma^2*I",
+    "A5: sigma^2 > 0"
+  ],
+  "unverified_steps": null,
+  "validity_domain": null,
+  "credibility": {
+    "algebraic_core": "S3/S4/S9/S12 四步核心代数全部 check_step 符号 verified（非数值支持），维度覆盖 2×2 与 3×2",
+    "assumption_sensitivity": "A1（满秩）与 A2（X 非随机）为承重假设，边界已如实标注（findings F2/F3）",
+    "overall": "高：推导链代数骨架全部机械确证，结论与经典文献一致，无反例",
+    "probabilistic_steps": "S6/S8/S10 为标准定理（期望线性性、方差定义）引用，锚定教科书（Durrett 2019 Ch.1）"
+  },
+  "findings": [
+    {
+      "confidence": "high",
+      "id": "F1",
+      "statement": "主结果与文献标准结论一致（Hayashi 2000 Ch.1；Greene 2018 Ch.2）"
+    },
+    {
+      "confidence": "high",
+      "id": "F2",
+      "statement": "最脆环节在 A1：X 不满秩时公式失效（需广义逆），结论适用域边界"
+    },
+    {
+      "confidence": "high",
+      "id": "F3",
+      "statement": "A2 承重：去掉后只能得条件协方差 Var(beta_hat|X)=sigma^2(X'X)^(-1)"
+    },
+    {
+      "confidence": "high",
+      "id": "F4",
+      "statement": "A4 放宽为一般 Omega 时结论为 GLS 形式 (X'X)^(-1)X'Omega X(X'X)^(-1)"
+    },
+    {
+      "confidence": "high",
+      "id": "F5",
+      "statement": "S9 转置恒等式依赖 (X'X)^(-1) 对称性，已 3×2 机械确证（probe 8e959de67b340bd6）"
+    }
+  ],
+  "frozen": false,
+  "turns": 17,
+  "tool_calls": 24,
+  "elapsed_s": 325.0,
+  "run_dir": "/private/tmp/claude-501/-Users-wddddds-Desktop-Work-Projects-Agent-research-platform/bfbd1577-ff7f-4566-afb5-05fe9791f9bf/scratchpad/wt-deriv/output/1787417129-f7807e"
+}

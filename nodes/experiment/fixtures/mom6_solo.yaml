@@ -1,0 +1,56 @@
+# 平台能力自测（非对比实验）：当前 experiment 平台能否【自主】从源码编译并运行 MOM6。
+#
+#   python run_node.py --harness experiment \
+#     --fixture nodes/experiment/fixtures/mom6_solo.yaml --project-id mom6-solo
+#
+# 全能力（不设 EXPERIMENT_BENCH_GROUP=正常模式，recon/gate/route/里程碑/完整日志全开）。
+# ⚠️ v0.11：EXPERIMENT_AUTONOMOUS=1 的 request_human_input 自动应答已随同名覆盖清退移除。
+# 无人值守跑法待框架 headless-hitl feature（records/issue-headless-hitl.md）；当前请交互式跑
+# （去掉 --no-interactive，遇 pause 人工应答），高危拦截不受影响。
+# 预算 max_turns=200（给足真正完成构建的机会）。
+# 源码：~/experiments/MOM6-solo（操作方 cp 自 pristine master，commit 锁定）。
+
+node_inputs:
+  experiment_focus: |
+    目标：【自主】从源码编译并运行 MOM6 海洋模式，验证当前平台能否独立完成一个陌生 HPC 应用的
+    构建+运行闭环。用 **MPI + OpenMP** 编译 ocean_only（solo）可执行，再跑轻算例 double_gyre 验证。
+
+    源码已就绪（无需 clone，无需请求人工确认，直接开始）。源码树事实：
+      ~/experiments/MOM6-solo
+        - src/MOM6   （模型源码；ocean_only solo driver 在 src/MOM6/config_src/drivers/solo_driver）
+        - src/FMS2   （MOM6 依赖的 FMS 框架库；顶层 Makefile 默认 FMS_CODEBASE=src/FMS2）
+        - src/mkmf   （GFDL 构建工具 list_paths/mkmf；templates/ 下有多种编译器模板）
+        - ocean_only/double_gyre （轻算例：MOM_input/diag_table/input.nml）
+        - 顶层 Makefile （构建/运行约定）
+
+    环境（已实测可用）：mpif90/mpicc（conda gcc 14.3）、netcdf-fortran（nf-config，has-nc4）、OpenMP。
+    注意：MOM6 还依赖 GSW-Fortran（海水状态方程）等外部库，需要时自行获取/构建。
+
+    要求：
+    1. 充分利用平台能力：先侦察（source_recon / platform_profile），定路线并 save_artifact 写 declared_route
+       （正文含 `target_path: ~/experiments/MOM6-solo/<可执行产物实际路径>`），再构建。
+    2. 编译必须 **MPI（mpif90/mpicc）+ OpenMP（-fopenmp）**，不要退化成串行/无 MPI。
+    3. 遇到缺依赖/编译错误，自主诊断解决（这正是要测的能力）。预算 200 轮，耐心推进，别轻易放弃。
+    4. 构建成功后跑 double_gyre 最小验证：在 ocean_only/double_gyre 下
+       `OMP_NUM_THREADS=2 mpirun -np 2 <可执行> 2>&1`，确认 returncode=0 且产生 ocean.stats / 输出含有限值（非 NaN）。
+       可用 safe_execute_python 调 `from nodes.experiment.hooks import verify_min_run` 让框架核验。
+    5. experiment_log 如实总结：最终是否成功 build+run、走了什么路线、解决了哪些失败、卡在哪。
+       成功与否都如实记录，不要伪造。freeze。
+
+upstream_artifacts:
+  - type: pre_registration
+    name: MOM6_Solo_Capability
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-17T00:00:00+00:00"
+      freeze_reason: "平台能力自测：自主编译运行 MOM6"
+    content: |
+      ## Pre-Registration: MOM6 自主编译运行能力测试
+      ### 目标
+      验证当前 experiment 平台（全能力）能否自主从源码编译（MPI+OpenMP）并运行 MOM6 ocean_only
+      double_gyre 轻算例。非对比实验。
+      ### Setup
+      - 源码 ~/experiments/MOM6-solo（commit 锁定）；预算 max_turns=200；全能力 + autonomous。
+      ### 成功判据
+      - ocean_only solo 可执行编译成功（MPI+OpenMP）
+      - double_gyre 运行 returncode=0 且 ocean.stats 含有限值

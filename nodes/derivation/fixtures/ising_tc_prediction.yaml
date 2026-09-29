@@ -1,0 +1,59 @@
+# T 线第一步：derivation 先推 2D Ising 的临界温度，**在实验开始之前冻结**。
+#
+# 这份 fixture 是「预注册纪律在理论-实验协作上的自然延伸」的载体：
+# prereg 里的数值条阈值**故意留空**（写成待定），由本次推导的结果填进去，
+# 然后 Analysis 重新冻结，experiment 才开跑。账本的时间戳链证明
+# 「预测先于实验」—— 那是任何 prover 实验室给不出的东西。
+#
+# 选 Ising 的理由：E2E v26 已有全套模拟资产；Onsager 精确解
+# kT_c/J = 2/ln(1+√2) ≈ 2.269185 给推导一个非平凡但可验的目标。
+#
+# 承重步骤已离线确认工具验得了（tests/test_derivation_check_tools.py）：
+#   sinh(2*log(1+sqrt(2))/2) = 1   → verified   （Kramers–Wannier 自对偶点）
+
+node_inputs:
+  mode: confirmatory
+  rigor_level: L1
+  propositions:
+    - "二维方格 Ising 模型（零外场、最近邻耦合 J>0）的临界温度有闭式解"
+  known_results:
+    - "Kramers–Wannier 对偶：低温展开与高温展开在 sinh(2K)sinh(2K*)=1 下互换（K=J/k_BT）"
+
+upstream_artifacts:
+  - type: pre_registration
+    name: Ising_Tc_Prereg
+    content: |
+      ## Research Questions
+
+      ### Q1: 二维 Ising 模型的临界温度是多少，理论值与蒙特卡洛外推是否一致？
+      - output_kind: 一条命题的裁决
+      - proposition: 存在唯一临界温度 T_c，其闭式由自对偶条件确定；
+        有限尺寸 MC 外推应在给定容差内与之一致。
+      - 闭合条件:
+      ```yaml
+      - id: TC_CLOSED_FORM
+        statement: "由对偶性论证给出 kT_c/J 的闭式，承重步骤经机械验证或如实标注未验"
+      - id: SELF_DUAL_POINT
+        statement: "验证所推临界点确实满足自对偶条件 sinh(2K_c)=1"
+      - id: TC_NUMERIC
+        metric: "kT_c/J"
+        comparison: "=="
+        threshold: 2.269185314
+      ```
+    metadata:
+      frozen: true
+
+memory_entries:
+  - kind: directive
+    text: >
+      本次是理论-实验闭环的第一步：你的结果会成为 experiment 的对照基准，
+      并且**在实验开跑之前被冻结**。所以 main_result.expression 必须是机器可解析的
+      闭式（下游要拿它与 MC 外推值对账），validity_domain 要如实反映
+      （二维、方格、零外场、最近邻、热力学极限）。
+    tags: [methodology]
+  - kind: directive
+    text: >
+      数值核对用不等式：check_step(lhs="Abs(你的闭式 - 2.269185314)", rhs="1e-6",
+      relation="lt")。容差你自己定并说明依据，别直接用 relation=eq
+      —— 闭式与十进制近似值不会精确相等。
+    tags: [methodology]

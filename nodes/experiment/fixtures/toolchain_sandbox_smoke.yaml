@@ -1,0 +1,65 @@
+# 轻量、可重复的 experiment sandbox smoke。
+# 目标：验证 source_baseline_root、动态 build_root、run_root 三者不会混淆。
+# 运行：
+# python run_node.py --harness experiment --sandbox \
+#   --fixture nodes/experiment/fixtures/toolchain_sandbox_smoke.yaml \
+#   --project-id toolchain-sandbox-smoke
+
+node_inputs:
+  path_roles:
+    source_baseline_root:
+      path: /home/lujy/2026-ai4s-platform-project/node4-experiment/review-managed-lifecycle/harness-framework/nodes/experiment/fixtures/toolchain_smoke_src
+      writable: false
+  experiment_focus: |
+    这是一个【路径角色 sandbox smoke】，不是科学实验。不要联网、不要安装依赖、不要修改源码。
+
+    已声明 source_baseline_root（只读）为
+    /home/lujy/2026-ai4s-platform-project/node4-experiment/review-managed-lifecycle/harness-framework/nodes/experiment/fixtures/toolchain_smoke_src。
+    turn-1 注入的 build_root 和 run_root 是本 run 唯一允许写入的位置。
+
+    必须执行以下流程：
+    1. 用 classify_experiment_scope 声明 scope=operation、
+       operation_category=toolchain_build；不要把本平台 smoke 包装成 scientific run。
+    2. 记录三个路径角色；确认 source_baseline_root 中只有 CMakeLists.txt 和 main.c，
+       并在执行前记录两个源码文件的 SHA-256。
+    3. declare_execution_route 时，这个原子 smoke 只能声明一个名为
+       build_and_run 的 submit_job route step：同一个受管 payload 串行完成
+       configure、build 和 run。不要把 configure、build、run_smoke 拆成多个
+       external-job step；operation 的三件套只能在全部真实检查完成后生成，
+       不能用最终 finalize 去关闭一个中间步骤。
+       在 declare_execution_route 前，分别用 safe_write_file 在
+       <build_root>/.hf-route-ready 与 <run_root>/.hf-route-ready 写入无害标记，
+       仅物化这两个动态路径角色；不要用 mkdir 或把目录创建塞进正式 payload。
+       route 的 expected_outputs 只能声明 run_root 中的 smoke_stdout.txt；
+       build_root 中的 hf_toolchain_smoke 由随后 record_operation_completion 的
+       executable_paths 核验，不能作为 run_root step 的 expected_output。
+       为使 configure、build、run 仍属于同一个可审计的受管 job，route action
+       必须声明 program=cmake、workdir_role=run_root，并声明完整、有序的
+       program_sequence=["cmake", "cmake", "<build_root>/hf_toolchain_smoke"]；
+       实际声明时把 <build_root> 替换为本 run 注入的绝对路径，不能省略、重排
+       或把任何入口合并为 compound。program_sequence 只属于 route action，
+       submit_job 没有同名参数。
+       submit_job 的 command 必须是一条静态内联 payload，精确按
+       `cmake -S <source_baseline_root> -B <build_root> && cmake --build <build_root>
+       && <build_root>/hf_toolchain_smoke > <run_root>/smoke_stdout.txt` 串行执行，
+       并传 route_step_id=build_and_run、stage=toolchain_build、workdir=<run_root>，
+       output_paths 同时覆盖 <build_root> 与 <run_root>。不要使用任何外部 shell
+       script、Makefile、CMake -P、sh -c、eval、pipeline、subshell 或 function
+       来隐藏实际 payload。
+       若 submit_job 在任何 intent/job/container 前却已把该 step 写成 terminal receipt，
+       停止并报告 framework blocker；不得 amend route 或重试该坏 receipt。
+    4. 上述同一静态内联 payload 的 build 阶段必须以 stage=toolchain_build 执行；其
+       唯一 CMake source 是
+       /home/lujy/2026-ai4s-platform-project/node4-experiment/review-managed-lifecycle/harness-framework/nodes/experiment/fixtures/toolchain_smoke_src。
+    5. 同一 payload 随后在 run_root 中执行 <build_root>/hf_toolchain_smoke，预期 stdout 包含
+       HF_TOOLCHAIN_SMOKE_OK；随后重新计算源码 SHA-256，必须与执行前一致。
+    6. 在该唯一 job 成功并取得全部检查证据后，调 record_operation_completion(
+       task_kind="toolchain_build", outcome="success",
+       executable_paths=[<build_root>/hf_toolchain_smoke])，以 checks 记录 configure、
+       build、HF_TOOLCHAIN_SMOKE_OK、源码哈希不变和 build_root/run_root 分离的真实证据，
+       原子生成并冻结 raw_results、clean_results、experiment_log 三件套。
+       若 job 已成功终态，先把其 exact job_id 和 container_runtime_id 作为
+       external_job_refs 传入 completion，再按工具给出的顺序 finalize，不得先写
+       failed completion 或为成功 smoke 创建中间失败闭环。
+       不要自行 save/freeze operation 三件套，不要写 Hypothesis Verdict，不要调用
+       create_experiment、preview_experiment_contract 或 scientific sediment 工具。

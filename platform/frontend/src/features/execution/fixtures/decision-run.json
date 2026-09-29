@@ -1,0 +1,217 @@
+[
+  {
+    "schemaVersion": 1,
+    "id": "decision-001",
+    "sequence": 1,
+    "at": "2026-08-03T07:00:00.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-decision",
+    "origin": "app_command",
+    "source": {},
+    "kind": "session.started",
+    "visibility": "summary",
+    "payload": { "title": "Validate an evidence gap" }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "decision-002",
+    "sequence": 2,
+    "at": "2026-08-03T07:00:01.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-decision",
+    "origin": "app_command",
+    "source": {},
+    "kind": "session.message",
+    "visibility": "summary",
+    "payload": {
+      "role": "user",
+      "text": "Check whether the current evidence is sufficient to support the draft conclusion."
+    }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "decision-003",
+    "sequence": 3,
+    "at": "2026-08-03T07:00:02.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-decision",
+    "runId": "run-decision",
+    "origin": "raw_transcript",
+    "source": { "rawEvent": "assistant_message", "fileRef": "fixture-decision-transcript", "byteOffset": 0 },
+    "kind": "session.message",
+    "visibility": "summary",
+    "payload": {
+      "role": "assistant",
+      "text": "I’ll verify the primary evidence and surface any gap that needs a research decision."
+    }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "decision-004",
+    "sequence": 4,
+    "at": "2026-08-03T07:00:03.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-decision",
+    "runId": "run-decision",
+    "origin": "raw_transcript",
+    "source": { "rawEvent": "run_start", "fileRef": "fixture-decision-transcript", "byteOffset": 192 },
+    "kind": "run.started",
+    "visibility": "trace",
+    "payload": {}
+  },
+  {
+    "schemaVersion": 1,
+    "id": "decision-005",
+    "sequence": 5,
+    "at": "2026-08-03T07:00:04.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-decision",
+    "runId": "run-validate-evidence",
+    "parentRunId": "run-decision",
+    "origin": "raw_transcript",
+    "source": { "rawEvent": "subagent_call_start", "fileRef": "fixture-decision-transcript", "byteOffset": 324 },
+    "kind": "step.started",
+    "visibility": "summary",
+    "payload": { "stepId": "step-validate-evidence", "title": "Validate the evidence" }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "decision-006",
+    "sequence": 6,
+    "at": "2026-08-03T07:00:05.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-decision",
+    "runId": "run-validate-evidence",
+    "parentRunId": "run-decision",
+    "origin": "raw_transcript",
+    "source": { "rawEvent": "tool_call", "fileRef": "fixture-decision-transcript", "byteOffset": 512 },
+    "kind": "tool.started",
+    "visibility": "standard",
+    "payload": {
+      "stepId": "step-validate-evidence",
+      "toolCallId": "tool-open-primary-source",
+      "title": "Opening primary source",
+      "technicalName": "read_source",
+      "detail": "Accessing the referenced primary record"
+    }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "decision-007",
+    "sequence": 7,
+    "at": "2026-08-03T07:00:12.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-decision",
+    "runId": "run-validate-evidence",
+    "parentRunId": "run-decision",
+    "origin": "raw_transcript",
+    "source": { "rawEvent": "tool_result", "fileRef": "fixture-decision-transcript", "byteOffset": 738 },
+    "kind": "tool.failed",
+    "visibility": "standard",
+    "payload": {
+      "stepId": "step-validate-evidence",
+      "toolCallId": "tool-open-primary-source",
+      "title": "Could not open primary source",
+      "durationMs": 7000,
+      "error": {
+        "message": "The source requires access that is not available in this environment.",
+        "impact": "The central claim cannot be verified from the primary record.",
+        "recovery": "Continue with the accessible secondary evidence, or pause until access is provided."
+      }
+    }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "decision-008",
+    "sequence": 8,
+    "at": "2026-08-03T07:00:15.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-decision",
+    "runId": "run-validate-evidence",
+    "parentRunId": "run-decision",
+    "origin": "raw_transcript",
+    "source": { "rawEvent": "review_completed", "fileRef": "fixture-decision-transcript", "byteOffset": 1052 },
+    "kind": "review.completed",
+    "visibility": "standard",
+    "payload": {
+      "stepId": "step-validate-evidence",
+      "summary": "Primary verification is blocked; secondary evidence is directionally consistent but incomplete."
+    }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "decision-009",
+    "sequence": 9,
+    "at": "2026-08-03T07:00:16.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-decision",
+    "runId": "run-decision",
+    "origin": "raw_transcript",
+    "source": { "rawEvent": "decision_package_presented", "fileRef": "fixture-decision-transcript", "byteOffset": 1288 },
+    "kind": "decision.required",
+    "visibility": "summary",
+    "payload": {
+      "stepId": "step-validate-evidence",
+      "title": "Primary evidence is unavailable",
+      "decision": {
+        "id": "decision-evidence-access",
+        "reason": "Continuing now would require clearly qualifying the conclusion.",
+        "recommendation": "Go back upstream and provide access to the primary source.",
+        "evidence": "One primary record is inaccessible; three secondary sources agree on direction but omit the decisive measurement.",
+        "reversible": true,
+        "options": [
+          {
+            "id": "proceed",
+            "label": "Continue",
+            "consequence": "Proceed using secondary evidence and mark the conclusion as provisional."
+          },
+          {
+            "id": "revise",
+            "label": "Revise this step",
+            "consequence": "Revise the evidence review before continuing."
+          },
+          {
+            "id": "redirect_upstream",
+            "label": "Go back upstream",
+            "consequence": "Provide source access, then resume primary verification.",
+            "recommended": true
+          },
+          {
+            "id": "abort",
+            "label": "Stop research",
+            "consequence": "Keep the current record without producing a final brief."
+          },
+          {
+            "id": "edit",
+            "label": "Edit manually",
+            "consequence": "Edit the research direction before resuming."
+          }
+        ]
+      }
+    }
+  },
+  {
+    "schemaVersion": 1,
+    "id": "decision-010",
+    "sequence": 10,
+    "at": "2026-08-03T07:00:17.000Z",
+    "workspaceId": "workspace-fixture",
+    "projectId": "fixture-project",
+    "sessionId": "fixture-decision",
+    "runId": "run-decision",
+    "origin": "raw_transcript",
+    "source": { "rawEvent": "loop_pause", "fileRef": "fixture-decision-transcript", "byteOffset": 1750 },
+    "kind": "run.paused",
+    "visibility": "standard",
+    "payload": { "title": "Waiting for a decision" }
+  }
+]

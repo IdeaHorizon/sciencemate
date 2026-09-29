@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-research-platform.local/contracts/execution-event.schema.json",
+  "title": "ExecutionEvent",
+  "description": "Canonical, sanitized execution event exposed by the Research App Server. Sequence is allocated transactionally by the server within a Session; wall-clock time never determines ordering.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "sequence",
+    "at",
+    "workspaceId",
+    "projectId",
+    "sessionId",
+    "origin",
+    "source",
+    "kind",
+    "visibility",
+    "payload"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1,
+      "description": "Canonical event schema version."
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable event identifier. Clients use it to de-duplicate at-least-once delivery."
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Server-assigned, strictly increasing sequence within sessionId."
+    },
+    "at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Source occurrence time for display only; it does not define event order."
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "projectId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "parentRunId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "origin": {
+      "type": "string",
+      "enum": [
+        "raw_transcript",
+        "adapter_derived",
+        "app_command",
+        "reconciliation"
+      ]
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "kind": {
+      "$ref": "#/$defs/kind"
+    },
+    "visibility": {
+      "type": "string",
+      "enum": ["summary", "standard", "trace"]
+    },
+    "payload": {
+      "type": "object",
+      "description": "Kind-specific sanitized data. Secrets, full connection strings, unrestricted local paths, and unbounded prompts or output must not be stored here.",
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "origin": {"const": "raw_transcript"}
+        },
+        "required": ["origin"]
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "required": ["rawEvent", "fileRef", "byteOffset"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "origin": {"const": "adapter_derived"}
+        },
+        "required": ["origin"]
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "required": ["derivedFrom"]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rawEvent": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Original Harness event name, not the raw record body."
+        },
+        "fileRef": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Opaque server reference. Local absolute paths are never exposed through the canonical event."
+        },
+        "byteOffset": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Starting byte offset of the complete source JSONL record."
+        },
+        "derivedFrom": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Canonical event IDs used by a deterministic adapter derivation."
+        }
+      }
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "session.started",
+        "session.message",
+        "session.completed",
+        "step.started",
+        "step.progress",
+        "step.completed",
+        "step.failed",
+        "tool.started",
+        "tool.progress",
+        "tool.retrying",
+        "tool.long_running",
+        "tool.completed",
+        "tool.failed",
+        "task.created",
+        "task.started",
+        "task.updated",
+        "task.completed",
+        "task.blocked",
+        "artifact.created",
+        "artifact.versioned",
+        "artifact.frozen",
+        "review.completed",
+        "knowledge.updated",
+        "knowledge.conflict_detected",
+        "decision.required",
+        "decision.resolved",
+        "permission.required",
+        "permission.resolved",
+        "run.queued",
+        "run.started",
+        "run.paused",
+        "run.resumed",
+        "run.injected",
+        "run.cancelled",
+        "run.retrying",
+        "run.recovering",
+        "run.completed",
+        "run.incomplete",
+        "run.failed",
+        "run.status_unknown",
+        "run.blocked",
+        "run.parked",
+        "interject.queued",
+        "usage.updated",
+        "context.updated",
+        "budget.warning",
+        "redaction.warning",
+        "connection.lost",
+        "connection.recovered"
+      ]
+    }
+  }
+}

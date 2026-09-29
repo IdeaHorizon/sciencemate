@@ -1,0 +1,37 @@
+{
+  "task_id": "maxent_boltzmann",
+  "arm": "B0",
+  "model": "deepseek-v4-pro",
+  "final_expression": "exp(-beta*E_i)/Sum(exp(-beta*E_j), (j, 0, N-1))",
+  "verdict": "derived",
+  "assumptions": [
+    "p_i 为实数概率且 p_i > 0，使 ln p_i 有定义",
+    "所有相关求和（归一化、平均能量、熵、配分函数）收敛",
+    "配分函数 Z(β)=∑e^{-βE_i} 有限且非零",
+    "能级 E_i 固定且不依赖于概率 p_i",
+    "能量 U 在可达范围内",
+    "能级 E_i 不完全相同，使约束梯度线性无关",
+    "可在求和号下对 β 求导",
+    "最大值发生在内部，不是边界 p_i=0",
+    "S 在正概率区域严格凹，一阶条件给出全局最大",
+    "热力学关系 dS=dU/T 在固定外参量时成立",
+    "拉格朗日乘子符号约定为 L=S−k_Bα(∑p_i−1)−k_Bβ(∑p_iE_i−U)"
+  ],
+  "unverified_steps": [
+    "未对无限维 Lagrange 乘子定理和约束规范做严格证明",
+    "未对 Z(β) 逐项求导做一致收敛性或控制收敛验证",
+    "未对边界 p_i=0 做完整 KKT 分析",
+    "热力学关系 dS=dU/T 是引用热力学第一/第二定律，未从统计力学第一性原理推出",
+    "未证明 U(β) 隐式方程对任意能谱都唯一或单调"
+  ],
+  "reasoning_summary": "用拉格朗日乘子法最大化 Gibbs 熵，得到 Boltzmann 分布 p_i=e^{-βE_i}/Z。由最大熵对 U 的微分并与热力学关系 dS=dU/T 比较，得到 β=1/(k_BT)。命题成立。",
+  "raw_text": "结论：这个命题是标准最大熵推导，**成立**。下面我用 \\(\\beta\\) 表示 Boltzmann 因子 \\(e^{-\\beta E_i}\\) 中的物理参数；若你把能量约束的原始拉格朗日乘子记作 \\(\\lambda\\)，则 \\(\\lambda=k_B\\beta=1/T\\)。\n\n---\n\n## 1. 写出目标与约束\n\n最大化的熵为\n\n\\[\nS[p]=-k_B\\sum_i p_i\\ln p_i.\n\\]\n\n约束为\n\n\\[\n\\sum_i p_i=1,\\qquad \\sum_i p_i E_i=U.\n\\]\n\n这一步隐含假设：\n\n- \\(p_i>0\\)，使 \\(\\ln p_i\\) 有定义；\n- 所有求和都收敛；\n- 给定的 \\(U\\) 在可达能量区间内；\n- 能级 \\(E_i\\) 固定，不依赖 \\(p_i\\)。\n\n---\n\n## 2. 构造拉格朗日函数\n\n为了处理两个等式约束，引入两个拉格朗日乘子 \\(\\alpha,\\beta\\)：\n\n\\[\n\\mathcal L\n=\n-k_B\\sum_i p_i\\ln p_i\n-k_B\\alpha\\left(\\sum_i p_i-1\\right)\n-k_B\\beta\\left(\\sum_i p_iE_i-U\\right).\n\\]\n\n为什么这样写？因为：\n\n- 归一化约束对应乘子 \\(k_B\\alpha\\)；\n- 能量约束对应乘子 \\(k_B\\beta\\)；\n- 乘子前的负号是为了最后得到 \\(p_i\\propto e^{-\\beta E_i}\\)；\n- 因子 \\(k_B\\) 只是约定，使最后 \\(\\beta\\) 成为标准物理记号 \\(\\beta=1/(k_BT)\\)。\n\n---\n\n## 3. 对 \\(p_i\\) 求导\n\n在内部极大值点，对每个 \\(p_i\\) 求偏导并令其为零：\n\n\\[\n\\frac{\\partial \\mathcal L}{\\partial p_i}\n=\n-k_B(\\ln p_i+1)-k_B\\alpha-k_B\\beta E_i=0.\n\\]\n\n这里用到了\n\n\\[\n\\frac{d}{dp}(p\\ln p)=\\ln p+1.\n\\]\n\n两边除以 \\(-k_B\\)，得到\n\n\\[\n\\ln p_i+1+\\alpha+\\beta E_i=0,\n\\]\n\n所以\n\n\\[\n\\ln p_i=-1-\\alpha-\\beta E_i.\n\\]\n\n于是\n\n\\[\np_i=e^{-1-\\alpha}e^{-\\beta E_i}.\n\\]\n\n---\n\n## 4. 用归一化约束确定配分函数\n\n归一化条件为\n\n\\[\n\\sum_i p_i=1.\n\\]\n\n代入上面的形式：\n\n\\[\ne^{-1-\\alpha}\\sum_i e^{-\\beta E_i}=1.\n\\]\n\n定义配分函数\n\n\\[\nZ(\\beta)=\\sum_i e^{-\\beta E_i}.\n\\]\n\n于是\n\n\\[\ne^{-1-\\alpha}=\\frac{1}{Z(\\beta)}.\n\\]\n\n所以\n\n\\[\np_i=\\frac{e^{-\\beta E_i}}{Z(\\beta)}.\n\\]\n\n这就是 Boltzmann 分布。\n\n这里要求：\n\n\\[\nZ(\\beta)\\neq 0,\\qquad Z(\\beta)<\\infty,\n\\]\n\n也就是配分函数有限且非零。\n\n---\n\n## 5. 用能量约束确定 \\(\\beta\\)\n\n将 Boltzmann 分布代入能量约束：\n\n\\[\nU=\\sum_i p_i E_i\n=\n\\frac{\\sum_i E_i e^{-\\beta E_i}}{Z(\\beta)}.\n\\]\n\n注意到\n\n\\[\n\\frac{dZ}{d\\beta}\n=\n-\\sum_i E_i e^{-\\beta E_i},\n\\]\n\n所以\n\n\\[\nU=-\\frac{1}{Z}\\frac{dZ}{d\\beta}\n=\n-\\frac{d}{d\\beta}\\ln Z(\\beta).\n\\]\n\n因此 \\(\\beta\\) 由隐式方程\n\n\\[\nU=-\\frac{\\partial}{\\partial\\beta}\\ln Z(\\beta)\n\\]\n\n决定。这一步假设可以交换求和与求导。\n\n---\n\n## 6. 说明 \\(\\beta\\) 的物理含义\n\n在最大值处，代入\n\n\\[\n\\ln p_i=-\\beta E_i-\\ln Z\n\\]\n\n可得\n\n\\[\nS\n=\n-k_B\\sum_i p_i\\ln p_i\n=\n-k_B\\sum_i p_i(-\\beta E_i-\\ln Z).\n\\]\n\n因此\n\n\\[\nS=k_B\\beta U+k_B\\ln Z.\n\\]\n\n对 \\(U\\) 微分，注意 \\(\\beta\\) 也通过能量约束依赖于 \\(U\\)：\n\n\\[\ndS\n=\nk_B\\beta\\,dU\n+k_BU\\,d\\beta\n+k_B\\frac{d\\ln Z}{d\\beta}\\,d\\beta.\n\\]\n\n但\n\n\\[\n\\frac{d\\ln Z}{d\\beta}=-U,\n\\]\n\n所以\n\n\\[\ndS\n=\nk_B\\beta\\,dU\n+k_BU\\,d\\beta\n-k_BU\\,d\\beta\n=\nk_B\\beta\\,dU.\n\\]\n\n于是\n\n\\[\n\\left(\\frac{\\partial S}{\\partial U}\\right)_{\\{E_i\\}}\n=\nk_B\\beta.\n\\]\n\n热力学中，固定外参量、体积和粒子数时，\n\n\\[\n\\frac{\\partial S}{\\partial U}=\\frac{1}{T},\n\\]\n\n其中 \\(T\\) 是绝对温度。因此\n\n\\[\nk_B\\beta=\\frac{1}{T},\n\\]\n\n即\n\n\\[\n\\beta=\\frac{1}{k_BT}.\n\\]\n\n所以 \\(\\beta\\) 的物理含义是：\n\n\\[\n\\boxed{\\beta=\\frac{1}{k_BT}}\n\\]\n\n它是平均能量约束的共轭拉格朗日参数，控制分布随能量的衰减速度。通常稳定热平衡中 \\(T>0\\)，故 \\(\\beta>0\\)，高能态概率被指数压低；负 \\(\\beta\\) 对应于有限能谱系统或粒子数反转，即“负温度”情形。\n\n---\n\n## 7. 二阶条件\n\n熵的 Hessian 为\n\n\\[\n\\frac{\\partial^2 S}{\\partial p_i\\partial p_j}\n=\n-\\frac{k_B}{p_i}\\delta_{ij}.\n\\]\n\n由于 \\(p_i>0\\) 且 \\(k_B>0\\)，该矩阵负定，所以熵是严格凹函数。因此满足一阶条件的点确实是最大值。\n\n---\n\n## 8. 用到的假设\n\n- \\(p_i\\) 是实变量且 \\(p_i>0\\)，使 \\(\\ln p_i\\) 有定义；\n- 所有相关求和收敛；\n- 配分函数 \\(Z(\\beta)=\\sum_i e^{-\\beta E_i}\\) 有限且非零；\n- 能级 \\(E_i\\) 固定且与 \\(p_i\\) 无关；\n- 给定 \\(U\\) 在可达范围内；\n- 能级 \\(E_i\\) 不完全相同，否则能量约束可能与归一化约束线性相关，拉格朗日乘子不能唯一确定；\n- 可对 \\(Z(\\beta)\\) 在求和号下求导；\n- 最大值是内部点，不是边界 \\(p_i=0\\)；\n- 热力学关系 \\(\\partial S/\\partial U=1/T\\) 成立，即固定体积、粒子数或固定外参量；\n- 拉格朗日乘子符号约定如前所述。\n\n---\n\n## 9. 未做机械验证的步骤\n\n- 没有显式验证无限维或无限状态下的 Lagrange 乘子定理约束规范；\n- 没有对 \\(Z(\\beta)\\) 逐项求导做一致收敛性或控制收敛的严格证明；\n- 没有对边界 \\(p_i=0\\) 做完整 KKT 分析；\n- 热力学温度关系 \\(dS=dU/T\\) 是引用热力学第一/第二定律，不是从统计力学第一性原理推导；\n- 没有证明对任意能谱 \\(U(\\beta)\\) 的隐式方程一定唯一或单调，只依赖物理常见情形。\n\n---\n\n```json\n{\n  \"final_expression\": \"exp(-beta*E_i)/Sum(exp(-beta*E_j), (j, 0, N-1))\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"p_i 为实数概率且 p_i > 0，使 ln p_i 有定义\",\n    \"所有相关求和（归一化、平均能量、熵、配分函数）收敛\",\n    \"配分函数 Z(β)=∑e^{-βE_i} 有限且非零\",\n    \"能级 E_i 固定且不依赖于概率 p_i\",\n    \"能量 U 在可达范围内\",\n    \"能级 E_i 不完全相同，使约束梯度线性无关\",\n    \"可在求和号下对 β 求导\",\n    \"最大值发生在内部，不是边界 p_i=0\",\n    \"S 在正概率区域严格凹，一阶条件给出全局最大\",\n    \"热力学关系 dS=dU/T 在固定外参量时成立\",\n    \"拉格朗日乘子符号约定为 L=S−k_Bα(∑p_i−1)−k_Bβ(∑p_iE_i−U)\"\n  ],\n  \"unverified_steps\": [\n    \"未对无限维 Lagrange 乘子定理和约束规范做严格证明\",\n    \"未对 Z(β) 逐项求导做一致收敛性或控制收敛验证\",\n    \"未对边界 p_i=0 做完整 KKT 分析\",\n    \"热力学关系 dS=dU/T 是引用热力学第一/第二定律，未从统计力学第一性原理推出\",\n    \"未证明 U(β) 隐式方程对任意能谱都唯一或单调\"\n  ],\n  \"reasoning_summary\": \"用拉格朗日乘子法最大化 Gibbs 熵，得到 Boltzmann 分布 p_i=e^{-βE_i}/Z。由最大熵对 U 的微分并与热力学关系 dS=dU/T 比较，得到 β=1/(k_BT)。命题成立。\"\n}\n```",
+  "thinking_chars": 64144,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 263.2,
+  "tokens": 22679,
+  "parse_ok": true,
+  "repeat_index": 1
+}

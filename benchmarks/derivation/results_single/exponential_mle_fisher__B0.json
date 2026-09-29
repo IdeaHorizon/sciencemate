@@ -1,0 +1,34 @@
+{
+  "task_id": "exponential_mle_fisher",
+  "arm": "B0",
+  "model": "deepseek-v4-pro",
+  "final_expression": "lambda_hat = n/sum(x_i); I_single = 1/lam**2",
+  "verdict": "derived",
+  "assumptions": [
+    "λ>0，参数空间为 (0,∞)",
+    "样本量 n 为正整数",
+    "观测 x_i>0 且有限，因此 ∑x_i>0 且有限",
+    "X_1,...,X_n 独立同分布",
+    "密度 f(x;λ)=λ exp(-λx) 在 (0,∞) 上正确且积分为 1",
+    "似然 L(λ)>0，因此取对数后最大化与原问题等价",
+    "对数似然在 λ>0 上可二次求导",
+    "在边界 λ→∞ 时，要求 ∑x_i>0，使得线性项 -λ∑x_i 支配 n log λ",
+    "指数分布标准矩 E[X]=1/λ、Var(X)=1/λ² 成立",
+    "Fisher 信息定义适用；单观测 score 平方期望有限，或 regular model 的 Fisher 恒等式成立"
+  ],
+  "unverified_steps": [
+    "未机械重算指数分布的归一化积分和 Gamma 矩（∫f=1、E[X]=1/λ、Var(X)=1/λ²），这些作为标准性质引用",
+    "未用数值优化或数值 Hessian 校验全局最大，仅使用解析凹性和边界极限论证",
+    "未对样本是否存在截断、删失、异常值或模型误设做统计检验"
+  ],
+  "reasoning_summary": "由 iid 写出联合密度并对数化，求导置零得到 λ̂=n/∑x_i；二阶导数为负且边界趋于 -∞，保证全局最大。单个观测 score 为 1/λ−X，其方差为 1/λ²，因此 Fisher 信息为 1/λ²。",
+  "raw_text": "先说明：题目中的 \\(\\lambda\\) 是“速率参数”，指数分布密度为  \n\\[\nf(x;\\lambda)=\\lambda e^{-\\lambda x},\\quad x>0,\\ \\lambda>0.\n\\]\n\n## 1. 写出似然函数\n\n因为 \\(X_1,\\dots,X_n\\) 独立同分布，所以联合密度是每个观测密度的乘积：\n\n\\[\nL(\\lambda)=\\prod_{i=1}^n \\lambda e^{-\\lambda x_i}\n=\\lambda^n e^{-\\lambda\\sum_{i=1}^n x_i}.\n\\]\n\n用到的假设：\n\n- \\(X_i\\) 独立同分布；\n- 每个 \\(x_i>0\\)；\n- \\(\\lambda>0\\)。\n\n## 2. 取对数似然\n\n因为 \\(\\lambda>0\\) 且 \\(e^{-\\lambda x_i}>0\\)，所以 \\(L(\\lambda)>0\\)。对数函数严格单调递增，因此最大化 \\(L(\\lambda)\\) 等价于最大化 \\(\\log L(\\lambda)\\)。\n\n\\[\n\\ell(\\lambda)=\\log L(\\lambda)\n=n\\log \\lambda-\\lambda\\sum_{i=1}^n x_i.\n\\]\n\n## 3. 求导并置零\n\n对 \\(\\lambda\\) 求导：\n\n\\[\n\\ell'(\\lambda)=\\frac{n}{\\lambda}-\\sum_{i=1}^n x_i.\n\\]\n\n令其为零：\n\n\\[\n\\frac{n}{\\lambda}-\\sum_{i=1}^n x_i=0\n\\]\n\n解得\n\n\\[\n\\hat\\lambda=\\frac{n}{\\sum_{i=1}^n x_i}.\n\\]\n\n这里假设 \\(\\sum_{i=1}^n x_i>0\\)，保证分母非零。在指数分布连续支撑 \\((0,\\infty)\\) 下，实际观测和为正的概率为 1。\n\n## 4. 验证最大值\n\n二阶导数为\n\n\\[\n\\ell''(\\lambda)=-\\frac{n}{\\lambda^2}<0\n\\]\n\n对任意 \\(\\lambda>0\\) 成立，所以 \\(\\ell(\\lambda)\\) 是严格凹函数。这个唯一的驻点就是全局最大值点。\n\n另外边界上：\n\n- 当 \\(\\lambda\\to 0^+\\)，\\(\\ell(\\lambda)\\to -\\infty\\)；\n- 当 \\(\\lambda\\to\\infty\\)，若 \\(\\sum_i x_i>0\\)，则 \\(-\\lambda\\sum_i x_i\\) 主导 \\(n\\log\\lambda\\)，所以 \\(\\ell(\\lambda)\\to -\\infty\\)。\n\n因此最大似然估计为\n\n\\[\n\\boxed{\\hat\\lambda_{\\text{MLE}}=\\frac{n}{\\sum_{i=1}^n X_i}=\\frac1{\\bar X}}\n\\]\n\n其中 \\(\\bar X=\\frac1n\\sum_{i=1}^n X_i\\) 是样本均值。\n\n## 5. 单个观测的 Fisher 信息\n\n对单个观测 \\(X\\sim \\mathrm{Exponential}(\\lambda)\\)，对数密度为\n\n\\[\n\\ell_1(\\lambda)=\\log f(X;\\lambda)\n=\\log\\lambda-\\lambda X.\n\\]\n\nScore 函数为\n\n\\[\nS(\\lambda)=\\frac{\\partial \\ell_1}{\\partial\\lambda}\n=\\frac1\\lambda-X.\n\\]\n\nFisher 信息定义为\n\n\\[\nI(\\lambda)=\\mathbb E\\left[S(\\lambda)^2\\right].\n\\]\n\n因为 \\(\\mathbb E[X]=1/\\lambda\\)，所以 \\(\\mathbb E[S(\\lambda)]=0\\)。于是\n\n\\[\nI(\\lambda)=\\operatorname{Var}(S(\\lambda))\n=\\operatorname{Var}\\left(\\frac1\\lambda-X\\right)\n=\\operatorname{Var}(X).\n\\]\n\n指数分布 \\(X\\sim \\mathrm{Exponential}(\\lambda)\\) 满足\n\n\\[\n\\operatorname{Var}(X)=\\frac1{\\lambda^2}.\n\\]\n\n所以单个观测的 Fisher 信息为\n\n\\[\n\\boxed{I(\\lambda)=\\frac1{\\lambda^2}}.\n\\]\n\n等价的二阶导做法：\n\n\\[\n\\frac{\\partial^2 \\ell_1}{\\partial\\lambda^2}\n=-\\frac1{\\lambda^2},\n\\]\n\n因此\n\n\\[\nI(\\lambda)\n=-\\mathbb E\\left[\\frac{\\partial^2 \\ell_1}{\\partial\\lambda^2}\\right]\n=\\frac1{\\lambda^2}.\n\\]\n\n```json\n{\n  \"final_expression\": \"lambda_hat = n/sum(x_i); I_single = 1/lam**2\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"λ>0，参数空间为 (0,∞)\",\n    \"样本量 n 为正整数\",\n    \"观测 x_i>0 且有限，因此 ∑x_i>0 且有限\",\n    \"X_1,...,X_n 独立同分布\",\n    \"密度 f(x;λ)=λ exp(-λx) 在 (0,∞) 上正确且积分为 1\",\n    \"似然 L(λ)>0，因此取对数后最大化与原问题等价\",\n    \"对数似然在 λ>0 上可二次求导\",\n    \"在边界 λ→∞ 时，要求 ∑x_i>0，使得线性项 -λ∑x_i 支配 n log λ\",\n    \"指数分布标准矩 E[X]=1/λ、Var(X)=1/λ² 成立\",\n    \"Fisher 信息定义适用；单观测 score 平方期望有限，或 regular model 的 Fisher 恒等式成立\"\n  ],\n  \"unverified_steps\": [\n    \"未机械重算指数分布的归一化积分和 Gamma 矩（∫f=1、E[X]=1/λ、Var(X)=1/λ²），这些作为标准性质引用\",\n    \"未用数值优化或数值 Hessian 校验全局最大，仅使用解析凹性和边界极限论证\",\n    \"未对样本是否存在截断、删失、异常值或模型误设做统计检验\"\n  ],\n  \"reasoning_summary\": \"由 iid 写出联合密度并对数化，求导置零得到 λ̂=n/∑x_i；二阶导数为负且边界趋于 -∞，保证全局最大。单个观测 score 为 1/λ−X，其方差为 1/λ²，因此 Fisher 信息为 1/λ²。\"\n}\n```",
+  "thinking_chars": 26991,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 119.1,
+  "tokens": 10104,
+  "parse_ok": true,
+  "repeat_index": 1
+}

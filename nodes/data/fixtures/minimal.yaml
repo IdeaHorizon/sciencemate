@@ -1,0 +1,24 @@
+# data 节点 fixture：入口节点，无上游 artifact，给一个 AI4S 前处理 spec。
+#
+# 运行：
+#   python run_node.py --harness data --sandbox --fixture nodes/data/fixtures/minimal.yaml
+#
+# 预期产出：
+#   - dataset artifact
+#   - state.root/data_preprocessing/<run_case>/manifest.json
+#   - VASP计算所需参数文件
+
+node_inputs:
+  spec: |
+    在/Users/cuibing/Desktop/data/case1目录中存放了多个由假设生成节点生成的参数文件，请阅读文件中的信息，生成后续使用目标仿真软件所需的所有前处理文件，
+    参数文件要保证正确，不要因为一些错误影响其运行。
+  reproducibility:
+    seed: 17
+    notes: "默认单位使用 SI；缺失参数必须写入 manifest 的 assumptions 或 quality_gates。"
+
+upstream_artifacts: []
+
+memory_entries:
+  - kind: directive
+    text: "data 节点必须优先生成可复现前处理包，再保存 dataset artifact。"
+    tags: [AI4S, preprocessing, reproducibility]

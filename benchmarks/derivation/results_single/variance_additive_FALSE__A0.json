@@ -1,0 +1,30 @@
+{
+  "task_id": "variance_additive_FALSE",
+  "arm": "A0",
+  "model": "deepseek-v4-flash",
+  "final_expression": "Eq(Var(X + Y), Var(X) + Var(Y) + 2*Cov(X, Y))",
+  "verdict": "refuted",
+  "assumptions": [
+    "X、Y 是同一概率空间上的实值随机变量。",
+    "采用方差标准定义 Var(Z)=E[(Z-E[Z])^2]。",
+    "X、Y 的二阶矩有限：E[X^2]<∞，E[Y^2]<∞；因此方差和协方差存在且有限。",
+    "期望线性性成立：E[aX+bY]=aE[X]+bE[Y]。",
+    "二次展开 (a+b)^2=a^2+2ab+b^2 对实数值恒成立，不涉及收敛半径。",
+    "没有使用无穷级数展开，因此不涉及级数收敛；期望绝对收敛性由有限二阶矩和柯西-施瓦茨不等式保证。",
+    "推导不假设 X、Y 独立；原命题要成立需要额外条件 Cov(X,Y)=0。",
+    "公式中没有分母，因此不要求分母非零。"
+  ],
+  "unverified_steps": [
+    "期望线性性、柯西-施瓦茨不等式、有限二阶矩蕴含可积性：这些作为标准定理引用，未在本回答中重新证明。",
+    "反例中的算术是解析验算，没有使用软件做机械验证。"
+  ],
+  "reasoning_summary": "将 Var(X+Y) 按中心化变量展开，得到 Var(X)+Var(Y)+2Cov(X,Y)，所以原命题漏掉了协方差项。取 X 为 ±1 等概率、Y=X 时，左边为 4，右边为 2，因此命题被证伪。",
+  "raw_text": "裁决：**不成立（证伪）**。\n\n正确的一般公式是：\n\n\\[\n\\operatorname{Var}(X+Y)\n=\n\\operatorname{Var}(X)+\\operatorname{Var}(Y)+2\\operatorname{Cov}(X,Y),\n\\]\n\n其中\n\n\\[\n\\operatorname{Cov}(X,Y)=E[(X-E[X])(Y-E[Y])].\n\\]\n\n推导如下。\n\n设 \\(\\mu_X=E[X]\\)，\\(\\mu_Y=E[Y]\\)。\n\n1. 由方差定义：\n\\[\n\\operatorname{Var}(X+Y)\n=\nE\\left[\\left((X+Y)-E[X+Y]\\right)^2\\right].\n\\]\n\n2. 由期望线性：\n\\[\nE[X+Y]=E[X]+E[Y]=\\mu_X+\\mu_Y.\n\\]\n\n所以\n\\[\n\\operatorname{Var}(X+Y)\n=\nE\\left[\\left((X-\\mu_X)+(Y-\\mu_Y)\\right)^2\\right].\n\\]\n\n3. 展开平方：\n\\[\n((X-\\mu_X)+(Y-\\mu_Y))^2\n=\n(X-\\mu_X)^2+(Y-\\mu_Y)^2+2(X-\\mu_X)(Y-\\mu_Y).\n\\]\n这是实值代数恒等式。\n\n4. 对展开式逐项取期望，利用期望线性：\n\\[\n\\operatorname{Var}(X+Y)\n=\nE[(X-\\mu_X)^2]\n+\nE[(Y-\\mu_Y)^2]\n+\n2E[(X-\\mu_X)(Y-\\mu_Y)].\n\\]\n\n5. 根据方差和协方差的定义：\n\\[\nE[(X-\\mu_X)^2]=\\operatorname{Var}(X),\n\\]\n\\[\nE[(Y-\\mu_Y)^2]=\\operatorname{Var}(Y),\n\\]\n\\[\nE[(X-\\mu_X)(Y-\\mu_Y)]=\\operatorname{Cov}(X,Y).\n\\]\n\n因此：\n\n\\[\n\\boxed{\n\\operatorname{Var}(X+Y)\n=\n\\operatorname{Var}(X)+\\operatorname{Var}(Y)+2\\operatorname{Cov}(X,Y)\n}\n\\]\n\n原命题只有在 \\(\\operatorname{Cov}(X,Y)=0\\) 时才成立，例如 \\(X,Y\\) 独立时。但“任意两个随机变量”并不能保证协方差为零。\n\n反例证伪：\n\n取\n\\[\nP(X=1)=P(X=-1)=\\frac12,\n\\quad\nY=X.\n\\]\n则\n\\[\n\\operatorname{Var}(X)=1,\\quad \\operatorname{Var}(Y)=1.\n\\]\n但\n\\[\nX+Y=2X,\n\\]\n所以\n\\[\n\\operatorname{Var}(X+Y)=\\operatorname{Var}(2X)=4\\operatorname{Var}(X)=4.\n\\]\n而\n\\[\n\\operatorname{Var}(X)+\\operatorname{Var}(Y)=1+1=2.\n\\]\n因此\n\\[\n4\\neq 2,\n\\]\n原命题不成立。\n\n```json\n{\n  \"final_expression\": \"Eq(Var(X + Y), Var(X) + Var(Y) + 2*Cov(X, Y))\",\n  \"verdict\": \"refuted\",\n  \"assumptions\": [\n    \"X、Y 是同一概率空间上的实值随机变量。\",\n    \"采用方差标准定义 Var(Z)=E[(Z-E[Z])^2]。\",\n    \"X、Y 的二阶矩有限：E[X^2]<∞，E[Y^2]<∞；因此方差和协方差存在且有限。\",\n    \"期望线性性成立：E[aX+bY]=aE[X]+bE[Y]。\",\n    \"二次展开 (a+b)^2=a^2+2ab+b^2 对实数值恒成立，不涉及收敛半径。\",\n    \"没有使用无穷级数展开，因此不涉及级数收敛；期望绝对收敛性由有限二阶矩和柯西-施瓦茨不等式保证。\",\n    \"推导不假设 X、Y 独立；原命题要成立需要额外条件 Cov(X,Y)=0。\",\n    \"公式中没有分母，因此不要求分母非零。\"\n  ],\n  \"unverified_steps\": [\n    \"期望线性性、柯西-施瓦茨不等式、有限二阶矩蕴含可积性：这些作为标准定理引用，未在本回答中重新证明。\",\n    \"反例中的算术是解析验算，没有使用软件做机械验证。\"\n  ],\n  \"reasoning_summary\": \"将 Var(X+Y) 按中心化变量展开，得到 Var(X)+Var(Y)+2Cov(X,Y)，所以原命题漏掉了协方差项。取 X 为 ±1 等概率、Y=X 时，左边为 4，右边为 2，因此命题被证伪。\"\n}\n```",
+  "thinking_chars": 40771,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 135.5,
+  "tokens": 14615,
+  "parse_ok": true
+}

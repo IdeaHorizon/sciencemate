@@ -1,0 +1,309 @@
+/**
+ * Styles for shared/ui primitives. Loaded by app/globals.css.
+ *
+ * All values reference design tokens from tokens.css.
+ */
+
+/* ── Badge ───────────────────────────────────────────────────────── */
+.ui-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.2;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-elevated);
+  color: var(--color-fg);
+  white-space: nowrap;
+}
+.ui-badge-md { font-size: 12px; padding: 4px 10px; }
+.badge-neutral { /* default */ }
+.badge-accent { border-color: var(--color-accent); color: var(--color-accent); background: var(--color-accent-bg); }
+.badge-success { border-color: var(--color-success); color: var(--color-success); background: var(--color-success-bg); }
+.badge-warning { border-color: var(--color-warning); color: var(--color-warning); background: var(--color-warning-bg); }
+.badge-danger { border-color: var(--color-danger); color: var(--color-danger); background: var(--color-danger-bg); }
+.badge-info { border-color: var(--color-info); color: var(--color-info); background: var(--color-info-bg); }
+.badge-muted { color: var(--color-fg-muted); }
+
+/* ── ScoreBadge ──────────────────────────────────────────────────── */
+.ui-score {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 1px;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  border-radius: var(--radius-pill);
+  border: 1px solid currentColor;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+.ui-score-sm { font-size: 11px; padding: 1px 6px; }
+.ui-score-md { font-size: 13px; padding: 2px 9px; }
+.ui-score-lg { font-size: 18px; padding: 4px 14px; }
+.ui-score-of { opacity: 0.6; font-size: 0.85em; margin-left: 1px; }
+.score-excellent { color: var(--color-score-excellent); }
+.score-good { color: var(--color-score-good); }
+.score-fair { color: var(--color-score-fair); }
+.score-weak { color: var(--color-score-weak); }
+.score-bad { color: var(--color-score-bad); }
+.score-muted { color: var(--color-fg-muted); }
+
+/* ── Card ────────────────────────────────────────────────────────── */
+.ui-card {
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  transition: border-color 120ms ease, transform 120ms ease;
+}
+.ui-card-interactive { cursor: pointer; }
+.ui-card-interactive:hover {
+  border-color: var(--color-border-strong);
+  transform: translateY(-1px);
+}
+.ui-card-interactive:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+.ui-card-accent-success { border-left: 3px solid var(--color-success); }
+.ui-card-accent-warning { border-left: 3px solid var(--color-warning); }
+.ui-card-accent-danger { border-left: 3px solid var(--color-danger); }
+.ui-card-accent-info { border-left: 3px solid var(--color-info); }
+.ui-card-accent-muted { border-left: 3px solid var(--color-border-strong); }
+.ui-card-header {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.ui-card-body { padding: var(--space-4); }
+.ui-card-footer {
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg);
+}
+
+/* ── Button ──────────────────────────────────────────────────────── */
+.ui-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-family: inherit;
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: color var(--duration-hover) ease, background-color var(--duration-hover) ease,
+    border-color var(--duration-hover) ease, box-shadow var(--duration-hover) ease,
+    opacity var(--duration-hover) ease, transform var(--duration-press) var(--ease-out);
+  user-select: none;
+}
+.ui-button:disabled, .ui-button-loading { opacity: 0.6; cursor: not-allowed; }
+.ui-button-sm { font-size: 12px; padding: 5px 10px; }
+.ui-button-md { font-size: 13px; padding: 7px 14px; }
+.ui-button-lg { font-size: 14px; padding: 10px 20px; }
+.ui-button-primary {
+  background: var(--color-accent);
+  color: white;
+  border-color: var(--color-accent);
+}
+.ui-button-primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+.ui-button-secondary {
+  background: var(--color-bg-elevated);
+  color: var(--color-fg);
+  border-color: var(--color-border);
+}
+.ui-button-secondary:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+  background: var(--color-bg-overlay);
+}
+.ui-button-ghost {
+  background: transparent;
+  color: var(--color-fg-muted);
+}
+.ui-button-ghost:hover:not(:disabled) {
+  color: var(--color-fg);
+  background: var(--color-bg-elevated);
+}
+.ui-button-danger {
+  background: var(--color-danger);
+  color: white;
+  border-color: var(--color-danger);
+}
+.ui-button-success {
+  background: var(--color-success);
+  color: white;
+  border-color: var(--color-success);
+}
+.ui-button-icon { display: flex; align-items: center; }
+
+/* ── Empty ───────────────────────────────────────────────────────── */
+.ui-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-12) var(--space-6);
+  text-align: center;
+  color: var(--color-fg-muted);
+}
+.ui-empty-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-pill);
+  background: var(--color-bg-elevated);
+  margin-bottom: var(--space-4);
+  color: var(--color-fg-subtle);
+}
+.ui-empty-title {
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--color-fg);
+  margin-bottom: var(--space-2);
+}
+.ui-empty-hint {
+  font-size: 13px;
+  max-width: 360px;
+  line-height: 1.5;
+}
+.ui-empty-action { margin-top: var(--space-4); }
+
+/* ── Skeleton ────────────────────────────────────────────────────── */
+.ui-skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--color-bg-elevated) 0%,
+    var(--color-bg-overlay) 50%,
+    var(--color-bg-elevated) 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer var(--motion-status-cycle) infinite;
+}
+.ui-skeleton-r-sm { border-radius: var(--radius-sm); }
+.ui-skeleton-r-md { border-radius: var(--radius-md); }
+.ui-skeleton-r-lg { border-radius: var(--radius-lg); }
+.ui-skeleton-r-pill { border-radius: var(--radius-pill); }
+.ui-skeleton-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+@keyframes skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ── Tabs ────────────────────────────────────────────────────────── */
+.ui-tabs {
+  display: flex;
+  gap: var(--space-1);
+  border-bottom: 1px solid var(--color-border);
+  padding: 0 var(--space-2);
+}
+.ui-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--color-fg-muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+  font-family: inherit;
+}
+.ui-tab:hover { color: var(--color-fg); }
+.ui-tab-active {
+  color: var(--color-fg);
+  border-bottom-color: var(--color-accent);
+}
+.ui-tab-icon { display: flex; align-items: center; }
+.ui-tab-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--color-bg-elevated);
+  color: var(--color-fg-muted);
+}
+
+/* ── Toast ───────────────────────────────────────────────────────── */
+.ui-toast-root {
+  position: fixed;
+  bottom: var(--space-6);
+  right: var(--space-6);
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-width: 400px;
+  pointer-events: none;
+}
+.ui-toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-bg-overlay);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  pointer-events: auto;
+  /* transition 而不是 keyframes：toast 是典型的快速重复触发元素，keyframes
+     从零重启 —— 第二条入栈时第一条的动画会被打断重来。transition 从当前值
+     重定向。入场用 ease-out，别用默认 ease（起手慢，正好压在用户视线最集中
+     的那一刻）。 */
+  opacity: 1;
+  transform: translateX(0);
+  transition:
+    opacity var(--duration-popover) var(--ease-out),
+    transform var(--duration-popover) var(--ease-out);
+
+  @starting-style {
+    opacity: 0;
+    transform: translateX(calc(20px * var(--motion-shift)));
+  }
+}
+.ui-toast-error { border-left: 3px solid var(--color-danger); }
+.ui-toast-success { border-left: 3px solid var(--color-success); }
+.ui-toast-warning { border-left: 3px solid var(--color-warning); }
+.ui-toast-info { border-left: 3px solid var(--color-info); }
+.ui-toast-body { flex: 1; min-width: 0; }
+.ui-toast-title { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+.ui-toast-text { font-size: 13px; color: var(--color-fg-muted); line-height: 1.4; }
+.ui-toast-dismiss {
+  background: transparent;
+  border: none;
+  color: var(--color-fg-muted);
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+}
+.ui-toast-dismiss:hover { color: var(--color-fg); }
+.ui-toast-action {
+  margin-top: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  cursor: pointer;
+}
+.ui-toast-action:hover { border-color: var(--color-fg-muted); }
+

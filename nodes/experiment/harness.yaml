@@ -1,0 +1,254 @@
+# experiment.yaml —— AI4S experiment node v0.9 (v2.0 职责对齐)
+#
+# 职责边界：执行 + 监控 + 结果解析/清洗/聚合/异常标记 + 归档 + 执行层评估 + sediment
+# v2.1 变更：clean_results 归 Experiment；Scientific Visualization 只读结果并画图
+
+node_type: experiment
+version: "0.14"
+risk_level: high
+
+system_prompt: |
+  **语言要求：默认用中文回复；命令、路径和代码保持英文。**
+
+  你是 Experiment 执行节点：如实执行、保存证据、冻结结果并交给 Analysis
+  做科学裁决。你不负责数据预处理、项目级综合判断或 hypothesis status 裁决。
+
+  ## 开局与按需 SOP
+  读取调用输入和绑定 artifact 后调用 `classify_experiment_scope`；它决定
+  operation 或 scientific，primary 不得借 operation 绕开 frozen prereg。
+
+  详细 SOP 不常驻在上下文中。只在适用时通过 `load_skill` 读取：
+  - 源码编译前：`hpc-build`
+  - 明确 GPU 后端：`gpu-hpc-porting`
+  - scheduler 或长任务前：`scheduler-longrun`
+  - scientific 结果解析/冻结：`scientific-results`
+  - primary simulation 的 verdict/sediment/credibility 收尾：`primary-scientific-closure`
+  - 正式输入缺失：`formal-input-recovery`
+  - 资源/软件/数据/凭证拿不到，或撞上平台限制：`feasibility-ladder`
+
+  服务端始终执行 contract、freeze、路径、参数和权限门。无法解决时保存证据，
+  `report_blocker` 写明所需变化。
+
+rules:
+  - "中文回复；命令、路径、代码用英文。"
+  - "不得修改 frozen prereg；设计变更由 hypothesis 重新登记。"
+  - "不得伪造输出；失败记录 returncode、stderr 和证据路径；耗时、PID、退出码只写工具返回的实测值，没有就写「未记录」。"
+  - "改软件、目录、启动或提交前先分类；operation 不得包装 scientific，primary 不得绕过 prereg；prereg 绑定失败或门禁拦截时登记 blocker 如实收尾，不得为绕开门禁改判为 operation。"
+  - "run_role 的正式声明入口只有本 run 绑定的 frozen prereg metadata；node_inputs 只能用 prereg_artifact_id/prereg_version 指定冻结 prereg，不能直接指定 run_role。当前兼容层仍可能从 legacy hook_state.run_contract 读取并影响有效角色，返回中会明确标记 legacy_hook_state 来源；该兼容状态不是新调用方的声明入口。primary 必须绑定 prereg。"
+  - "只写 worktree/patch/build/run；baseline/dependency 只读，禁直写 experiment_root 或用 `cd` 绕过。"
+  - "会写的构建/运行不用 baseline；改源码用独立 worktree 并留 patch/revision。"
+  - "高危、源码、路径和参数均走服务端 gate，不得绕过。"
+  - "不得自行改上游目标：不得把模型、数据、分辨率、时段、体系、比较或成功判据换成 proxy/toy/估计并称原任务完成；按 probe→acquire→ask→infeasible 取证。只有上游在新的 run 中绑定其冻结 amendment（或新的 prereg）并明确授权后，才可执行 pilot。"
+  - "缺正式输入不自造；调用 `dispatch_data_request(spec_id=..., user_note=...)` 走受管 Data child 并验收。若该 child pause 后恢复，先调 `reconcile_data_dispatch()` 机械取回完整终态 artifact receipt（唯一 dataset 验收，唯一 blocker 记录），绝不重派。读 `formal-input-recovery`，或留可审计 blocker。裸 `run_node(data)` 的报告不能授权 Experiment fallback。"
+  - "冻结顺序 raw→clean→log，实质工作核验通过就先冻结三件套、再修记账；operation 用 `record_operation_completion`，只关闭技术子任务。"
+  - "无执行、未冻结或审计失败不交接；无新证据不重试，被拒的调用不原样重发（先读拒绝原因与下一步），外部身份未知先对账。"
+  - "scientific 只执行 frozen prereg 参数；获授权 deviation 要入 log，结论不得冒充原任务完成；无 prereg 的探索性运行在 log 写明「探索性、无 prereg」、实际参数点与观测量，结果意义交下游判断。"
+  - "长任务/提交/timeout 前读 `scheduler-longrun`；禁 nohup、裸 `&`、手工 ps 轮询和无管理 job。跑一段就要停的作业：能设时长/步数就让它自己结束；非停不可（常驻服务、按判据停、重启测试）就在 submit_job 声明 expected_termination.planned_stop 并逐字引用任务原文，停止用 cancel_job。"
+  - "**问人判据**：owner 独有且不问即停车才问（源不可达/凭证/资源不足/prereg 未定），能自查的自查；一次问全带 options+推荐+无应答默认；专用通道除外。"
+  - "**按机械判定和当前路线执行**：工具返回需要路线时，先用 `declare_execution_route` 冻结一条 v2 路线，使一个 step 的 action 与本次动作对应，再按返回要求传 route_step_id；不要靠命令名称清单猜测。当前冻结路线已有与本次调用对应的就绪步骤时，按解析结果执行绑定；safe_run_bash 以本次命令入口匹配步骤。safe_execute_python 的对应就绪步骤只承接真实计算：真实计算必须传该步骤的 route_step_id；只读诊断改用 `safe_run_bash`，不会消耗该步骤。不要把诊断绑定到步骤上，否则会把步骤记成已完成。有界且被机械判定为 low_risk_effectful 的 run-local 写入通常无需新建路线。直接写出的 `tarfile`/`zipfile` `extractall` 或 `extract`，以及 `shutil.unpack_archive` 会被识别为 `environment_change`，必须先声明对应 Python 路线步骤；动态调用、别名和其他 Python 未识别效果不因此自动获得路线保护，应改用 `safe_run_bash` 取得可审计的机械效果判定。route_step_id 本身不授权，构建先 hpc-build/preflight。另：`declared_route`（构建证据，非 canonical 路线）四字段必填，缺任一被拒 —— `route_type`、`activities`、`env_domains`（每域至少一个客观探针）、`expected_artifacts`。"
+skills:
+  - claim_evidence_link
+  # 049-0：节点自己的 skill 进 L1 索引（只渲染名字 + description + 适用 + 取法，正文仍按需
+  # load_skill）。此前 7 个节点 skill 一个都不在索引里，模型只有 list_skills 才撞得见——
+  # 活体里 hpc-build 全程只被读 7 次。gpu-hpc-porting 仍走 gpu_skill_injector 条件注入
+  # （test_gpu_skill_is_conditional_hook_not_global_context），不进这里。
+  - feasibility-ladder
+  - formal-input-recovery
+  - hpc-build
+  - primary-scientific-closure
+  - scheduler-longrun
+  - scientific-results
+
+tools:
+  - run_node                  # 派 data（数据/前处理服务）；见 callable_nodes
+  - read_external_artifact    # 读子 run 里未回填的产物（如 data 的 preprocessing_blocked_report）
+  - validate_data_request_spec  # JSON/YAML data request schema gate
+  - dispatch_data_request  # managed Data child + request/payload/child receipt
+  - reconcile_data_dispatch  # recover a paused direct Data child receipt
+  - verify_dataset_consumption  # dataset contract + asset verification
+  - record_data_delivery_outcome  # Data 三档终态记账（fatal 才是终态）
+  - authorize_experiment_fallback  # frozen Data-failure backstop authorization
+  - verify_experiment_fallback_inputs  # fallback package + parameters verification
+  - save_artifact
+  - declare_execution_envelope      # 冻结 target/storage/lock 证据，作为 submit_job route step 的 evidence_ref
+  - declare_execution_route         # 唯一 canonical declared_route：校验、同身份修订并冻结
+  - classify_experiment_scope # 节点内判定 operation 或 scientific，并记录调用来源
+  - freeze_artifact
+  - record_operation_completion      # operation：自动生成并冻结 raw→clean→experiment_log 三件套
+  - read_artifact
+  - list_files                       # P6：通用文件工具（读全 worktree，替代 artifact CRUD 的读侧）
+  - search_files                       # P6：通用文件工具（读全 worktree，替代 artifact CRUD 的读侧）
+  - list_artifacts
+  - safe_write_file
+  - read_file
+  - safe_run_bash
+  - safe_execute_python
+  - fetch_resource           # 空 staging 联网下载文件/公开 Git；Attempt 仍保持无网
+  - request_network_access   # 名单外主机逐个申请本 run 精确授权；拒绝或未答不放行
+  - describe_acquisition_capabilities  # E-9：只读查询运行时生效 egress 白名单/大小上限，规划数据源前先查
+  - memory_note                     # 一条可复用教训 → 直接入册（无候选队列）
+  - memory_recall                   # 主动深查记忆（开工已按适用面送过一批）
+  - search_kb
+  - get_kb_record           # v2.0：判 verdict 前精读单条 hypothesis claim（含 review_history）
+  - read_profile
+  - create_experiment       # v3：登记当前 run 的实验动作与 outcome
+  - create_claim            # v2.0：写 methodological / dead_end claim
+  - resolve_prereg_questions  # frozen research questions + numeric/statement closure evidence contract
+  - resolve_prereg_hypotheses # provenance-based prereg hypothesis-claim resolution (proposition questions only)
+  - declare_inconclusive_verdict # auditable verdict fallback after freeze
+  - assess_sediment_candidate # freeze 前用同一 KB schema 预检 sediment 准入
+  - declare_no_sediment       # 显式无 sediment finding（冻结后可审计 addendum）
+  - preview_experiment_contract # 最终回答前复用终态审计自检
+  - supersede_closure_draft   # 误建第二份 experiment_log 草稿时的恢复通道 ——
+                              # 完整性闸的拒绝理由指的就是它（#832）。**正名**
+  - supersede_experiment_log  # 过渡期旧名，与上一条同一实现。保留原因与删除条件
+                              # 见 tools/contract_audit.py 的别名注册段（#923 落地即删）
+  - create_concept          # v2.0：偶尔 sediment 时需新建 concept
+  - scan_artifact_disagreements   # v2.0：写 verdict 前看 KB 有没有反对意见
+  - request_human_input     # 关键 hyperparam / 资源约束 / 跑不通的环境问题随时问 user
+  # Phase 3 resource orchestration: local/SLURM/PBS/Kubernetes discovery and submission
+  - discover_resources
+  - probe_toolchain
+  - recommend_resources
+  - preflight_build_resources # advisory build-mode/capacity read before configuration locks MPI/GPU ABI（只咨询不拦）
+  - submit_job
+  - reconcile_external_submission # submit identity 未落盘时按 route attempt/nonce 对账；禁止凭 caller job_id 恢复
+  - record_unknown_orphan # 历史/外部进程无法证明归属时，隔离并锁死其输出路径（阻断，不是释放）
+  - resolve_unknown_orphan # 隔离锁的唯一解除通道：自述进程确证已死 + 输出根静默 + reason，铸不可变 resolution
+  - job_status
+  - check_external_job_health # 只读健康快照；供会话内 monitor / re-entry 对账
+  - wait_for_external_job    # chat 存活时受管等待；健康则继续，异常/终止才交回模型
+  - verify_external_job_execution # 终态成功执行回执；解锁依赖 submit_job 步骤，不做 closure/finalize
+  - finalize_external_job     # frozen 分析记录后关闭 handoff workflow
+  - cancel_job               # 受管取消整组本地进程/调度作业；禁止裸 kill 后重提
+  - consult_other_model       # v1.5：向其它注册 LLM 拿第二意见（带 reason 强制审计）
+  - write_scratchpad         # v1.6: 跨轮工作笔记（pair with scratchpad hook）
+  - web_search               # 诊断阶段搜报错原文（SKILL.md 未命中时强制先用）
+  - web_fetch                # 配合 web_search 读取页面正文（GitHub issues / 文档页）
+
+loop_hooks:
+  - project_orientation   # v2.1 定向层：开局注入项目现状（交付面/research_state/MEMORY 头）
+  - experiment_progress_reporter # 控制台打印 turn / tool 调用 / tool 完成进度（不用另开 watch_run.py）
+  - turn_one_briefing       # 本节点开局提示合并成一条（K11）：path_role_convention + task_briefing + prereg_binding_briefing + data_source_reachability_preflight，判定与副作用不变
+  - foreign_owner_blocker_ask_nudge # blocker 判给 experiment 之外的 owner 且本 run 没问过人时提醒一次（不阻断）
+  - platform_limit_ask_nudge # 工具返回呈现平台限制形状的失败时注入一次「请求拆墙」指引（不阻断，同 run 一次）
+  - gpu_skill_injector      # 仅明确 NVIDIA CUDA 时注入 gpu-hpc-porting；其他后端走官方文档
+  - experiment_skill_router # scope 确认后仅向 scientific run 路由按需 SOP
+  - experiment_scheduler_facts_router # 049-1：外部作业到终态时点名 scheduler-longrun 的调度器终态事实 references（按 job 一次）
+  - citation_integrity_check  # v2.0：experiment_log 含 verdict reasoning 引用 claim_id；扫 phantom
+  - scratchpad                # v1.6: 跨轮工作笔记 hook（pair with write_scratchpad）
+  - generic_failure_detector
+  - repeated_error_detector
+  - strategic_review_injector  # 长期编译失败未收敛时强制战略复盘
+  - provisioned_build_tracker  # provision-first：DAG 节点证据推进(outputs 落盘→verified) + env.sh 变更 stale 传播（C/D 组）
+  - execution_control         # 通用执行控制层：阶段锁 + issue ledger + 根因证据门槛
+  - critical_rules_reminder    # turn-1 briefing；health tick 仅上报给 execution_supervisor
+  - execution_supervisor       # 中途建议唯一仲裁：每轮最多一条；工具硬门/终态审计不经过此处
+  - plan_before_compile        # 首次编译前无计划仅产出规划候选；由 execution_supervisor 注入
+  - high_risk_command_audit    # run 结束机械对账高危命令（safe_bash 同款 pattern + blocked/allowed 事件），结论写 memory 供 no_unauthorized_high_risk_commands QC 判定
+  - preprocessing_boundary_audit # run 结束机械对账前处理产物生成（生成器命令 + 正式输入文件写入 - 运行化白名单），结论供 no_self_fabricated_preprocessing QC 判定；只观察不拦截
+  - route_block_resolution     # run 结束从 transcript 消解已被后续成功路线步骤解决的 execution_route 拒绝（E-3）；成功自我纠偏不再被终局 gate_block_evidence 记为未解决阻断
+  - external_job_reconciliation # 新 experiment run 启动时先对账项目未完成 external job，禁止重叠重提
+  - external_job_handoff      # 所有未 finalize 的外部作业均创建可恢复 workflow task；scheduler 终止仍须分析收尾
+  - output_corruption_sentinel # LLM 输出损坏通用哨兵（数字参数垃圾/类型错误/失败命令异常 token），实证触发
+  - secondary_experiment_log_recovery # secondary 缺失固有 experiment_log 时生成不可分析的最小记录
+  - sediment_closure_advisor # claim 被拒/冻结 log 未闭环时即时注入恢复与 preview 指引
+  - experiment_contract_audit    # verdict/sediment 终态机械审计
+  - repro_snapshot             # ⑦.3/.6: run 结束自动采集环境快照 + 可复现包 + 提取 credibility/verdict
+  - callee_contracts          # v2.1: 注入可调子节点的输入契约
+
+context_config:
+  memory_query: "experiment execution, failure modes, MPI execution, reproducibility, hypothesis verdict, methodological sediment"
+  kb_query: "hypothesis, falsification_criteria, claim_status"
+  max_output_tokens: 16384
+  # 2026-06-12 两次实测校准：temp=1.0 → 8次参数损坏/104轮；temp=0.2 → 损坏率
+  # 没降（7次/51轮）反而引发复读锁死（58% 轮次逐字复读 hook 注入文本，低温
+  # 贪心解码+自我条件化）。结论：参数损坏与温度无关（deepseek 解码层问题，由
+  # output_corruption_sentinel 兜底）；温度只影响复读 → 取 0.6 避免锁死。
+  temperature: 0.6
+
+# 每个 Experiment run 的必产出证据三件套。此字段表达产出契约，不表达调用方
+# 回传哪些 artifact 或如何进行后处理；这些行为不由 Experiment 节点配置决定。
+# 顺序即冻结顺序：raw → clean → log（与 rules 中「冻结顺序 raw→clean→log」一致）。
+# 集合成员不变，只把展示顺序改成与实际执行一致 —— 模型按这份清单理解先后关系，
+# 倒着写会诱导它先建 log 再补证据。
+required_output_artifact_types:
+  - raw_results
+  - clean_results
+  - experiment_log
+
+expected_inputs:
+  experiment_spec: |
+    （可选）本次任务说明：目标软件/模型、要执行或验证的工作、预期交付、资源或
+    时间约束。它不能覆盖 frozen pre_registration 的科学参数；primary simulation
+    的参数权威始终是该 prereg 的 execution_contract.scientific_params（兼容旧
+    expected_params）。
+  prereg_artifact_id: |
+    兼容输入：调用方明确选择的冻结 `pre_registration` artifact ID。Experiment
+    不会按文件名、时间或“项目里只有一份”自动认领；传入的 ID 必须指向已冻结的
+    pre_registration。新调用方应使用 typed `prereg_assignment`。
+    示例：`pre_registration__abc12345`。
+  prereg_version: |
+    （与 prereg_artifact_id 配套可选）正整数，精确选择该 artifact 已冻结的版本；
+    不能脱离 prereg_artifact_id 单独提供，也不能指向未冻结版本。
+  prereg_assignment: |
+    （推荐）调用方对本 run 的显式预注册安排。`kind=bound` 必须给出精确
+    artifact_id/version/content_hash；`kind=none` 必须给出 reason，表示本 run
+    没有 governing prereg，但不替 Experiment 决定 scientific/operation 分类。
+    省略此键表示 pending，不等于 none；项目 catalog 只作为候选观察，不能授权。
+  stage: |
+    （兼容输入，可省略）旧调用方给出的 `simulation`、`diagnostic` 或
+    `toolchain_build` 提示。它不能替代 Experiment 的路线规划，不能授予路径或资源
+    权限，也不能把 operation 变成 scientific；正式科学执行身份仍由 frozen
+    run_contract/prereg 与机械动作共同判定。
+  dataset_artifact_id: |
+    （可选）已由 data 节点交付的 `dataset` artifact ID，供本节点读取并在正式
+    使用前以 `verify_dataset_consumption` 验收。不得传本地猜测路径来替代 dataset。
+    示例：`dataset__abc12345`。
+  input_package_artifact_id: |
+    （可选）本次真实执行要消费的、已经验收的数据/输入包 artifact ID。primary
+    simulation 必须通过 `submit_job`，并将同一 ID 传给工具的
+    `input_package_artifact_id` 参数，供执行前机械检查；`safe_run_bash` 与
+    `safe_execute_python` 只作诊断，不能承担正式 simulation 生命周期。
+  execution_params: |
+    （仅 primary simulation）本次实际科学执行参数对象；键和值必须与冻结 prereg
+    的 `execution_contract.scientific_params`（兼容 `expected_params`）完全一致。
+    该对象必须原样传给实际执行工具的 `execution_params` 参数；缺键、额外键或值
+    不同都会在运行前被拒绝。示例：`{temperature_K: 300, timestep_fs: 1}`。
+  path_roles: "（可选，由调用方在启动前提供）本 run 的受信任绝对路径角色。scheduler 的外部 workdir/输出只接受 writable 的 run_root 或 build_root；省略时 Experiment 使用 Core 分配的默认 run_root。approved_write_root 仅用于受限普通写入，不能作为 scheduler workdir 或输出目录。"
+
+# 哪些 node input 承载本轮任务正文，是 Experiment 自己的机器可读事实源；不能从
+# expected_inputs 的人类说明、键名或值类型猜测。canonical 必须属于 expected_inputs。
+task_prose_input_keys:
+  - experiment_spec
+
+# 历史兼容别名不是正式输入契约：当前只在 hooks 与 fixtures 中存在。owner: lujy
+# （Experiment 节点）；删除条件：fixtures、真实调用方与支持窗口内可恢复 loop_seed
+# 都不再出现该别名，并有回归证明 legacy key 不再静默用于 briefing 或 termination anchor。
+task_prose_compatibility_input_keys:
+  - experiment_focus
+
+expected_outputs:
+  experiment_log: "三件套中的执行记录（三件套 raw_results → clean_results → experiment_log 都要冻结，这一件不是唯一交付）：operation 为简版执行回执（scope、来源、status、命令/输出、验证、blocker）；scientific 为完整运行记录（参数、资源、raw/clean evidence、执行层评估、sediment）。Experiment 只记录调用来源，不决定下游。"
+  raw_results: "冻结的 JSON manifest；每项含绝对 path、实测 sha256、bytes、role、retention。freeze 与最终 evidence closure 均逐项校验真实文件、大小和 SHA-256；protected 项不得清理。"
+  clean_results: "由真实运行输出可回放生成的结构化结果；含 source/hash、冻结 raw_results artifact ID、单位、样本单位、missingness、聚合与不确定性语义、anomaly flags/exclusions；无结果时含显式状态。"
+
+handoff_policy:
+  strategy: summary
+  max_tokens: 2000
+
+
+# scientific experiment 的当前后处理链是 reviewer -> decision package；仅在 review
+# 有效且无框架覆盖时，运行时才将裁决顺延到 Analysis(hypothesis)。curator 已退出默认
+# post-producing flow，仅作为按需后台节点。
+# 红线：review 失败时立即呈递失败决策包并继续拦截下游。顺延不是放行 —— 在
+# Analysis 完成前，其他 producing 节点仍被机械拦截。
+# Core 目前只接受静态 post_run_flow，尚不能按 run contract 与调用来源切换。
+# Core 接入后，operation 应将其冻结证据交回直接调用方，并跳过 reviewer、decision
+# package 和 Analysis；Experiment 只记录来源和就绪状态，不选择下游。
+post_run_flow: review_curate
+
+max_turns: 0       # 语义由 Core 决定；当前默认无上限，设 HARNESS_DEFAULT_MAX_TURNS=<N> 可限制！
+
+callable_nodes:
+  - data                      # v2.0：缺正式输入直接调数据服务，不再打回 orchestrator

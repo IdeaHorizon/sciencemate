@@ -1,0 +1,186 @@
+node_inputs:
+  path_roles:
+    experiment_root: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work
+    run_root: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work/run
+  experiment_focus: |
+    这是 VASP case3：electron_phonon_coupling_analysis 的 gnr 平台 continuation 任务。
+    本任务从已经完成的 predecessor 弛豫继续，只运行 electron-phonon / DFPT 阶段。
+
+    关键背景：
+    - spr 平台已完成 predecessor 弛豫：
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work/run/predecessor/OUTCAR`
+      中应包含 `reached required accuracy - stopping structural energy minimisation`。
+    - predecessor 的 `CONTCAR` 非空，应作为 electron-phonon 阶段的 `POSCAR`。
+    - spr 上的 electron-phonon job 111 在 8h walltime 后 TIMEOUT，仅推进到 `Degree of freedom: 13/120`。
+      该输出只能作为 timeout 证据；不要声称 electron-phonon 阶段完成。
+    - gnr 节点没有 SLURM；必须通过 passwordless SSH + `mpirun` 运行。
+    - spr 编译的 `vasp_std` 不能复用到 gnr：
+      它依赖 `GLIBC_2.34`，而 gnr 计算节点是 glibc 2.28。
+      因此必须先在 gnr 平台重新编译 gnr-compatible `vasp_std`。
+
+    平台与资源：
+    - 提交/控制端: gnr-cu01，账号 ai4s-test
+    - 计算节点: gnr-cu02, gnr-cu03, gnr-cu04
+    - 节点访问: ai4s-test 免密 SSH 已配置
+    - 调度器: 无 SLURM；禁止使用 `submit_job`、`sbatch`、`srun`
+    - 每节点资源:
+      - gnr-cu02: 192 CPU cores, 约 740 GB 内存
+      - gnr-cu03: 192 CPU cores, 约 740 GB 内存
+      - gnr-cu04: 192 CPU cores, 约 740 GB 内存
+    - 推荐初始运行布局:
+      - 48 MPI ranks / node
+      - 4 OpenMP threads / rank
+      - total MPI ranks = 144
+      - total CPU threads = 576
+      - `OMP_NUM_THREADS=4`
+      - `MKL_NUM_THREADS=1`
+      - `ulimit -s unlimited`
+
+    路径：
+    - 提交端仓库: /mnt/beegfs/ai4s-test/ai4s-platform/test_20260625/harness-framework
+    - case3 输入目录: /mnt/beegfs/ai4s-test/ai4s-platform/test1_vasp/case3.electron_phonon_coupling_analysis
+    - VASP 源码包: /mnt/beegfs/ai4s-test/ai4s-platform/test1_vasp/vasp.6.5.1.tgz
+    - gnr VASP build 根目录: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-gnr-build
+    - gnr VASP 源码副本: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-gnr-build/vasp.6.5.1
+    - gnr 目标 VASP: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-gnr-build/vasp.6.5.1/bin/vasp_std
+    - case3 workdir: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work
+    - predecessor 运行目录: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work/run/predecessor
+    - electron-phonon 运行目录: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work/run/electron_phonon
+    - logs/scripts 目录: /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work/run/logs
+
+    必须先做的 gnr preflight：
+    1. 在 gnr-cu02/gnr-cu03/gnr-cu04 上检查：
+       - `hostname`
+       - `whoami`
+       - `nproc`
+       - `/mnt/beegfs/ai4s-test` 共享盘可见
+       - `source /opt/intel/oneapi/setvars.sh` 可用
+       - `which mpirun`
+       - `ldd --version | head -1`
+       - `ulimit -s`；运行脚本中必须改成 unlimited
+    2. 检查是否已经存在 gnr-compatible VASP：
+       `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-gnr-build/vasp.6.5.1/bin/vasp_std`
+       若存在，必须在所有 gnr 计算节点上运行：
+       `source /opt/intel/oneapi/setvars.sh; ldd <vasp_std> | grep "not found" || echo libs-ok`
+    3. 若 gnr-compatible VASP 不存在或 `ldd` 失败，则在 gnr 平台重新编译 VASP 6.5.1。
+
+    gnr 编译要求：
+    - 编译发生在 gnr 兼容环境，建议通过 ssh 到 gnr-cu02 或 gnr-cu04 执行，避免在 gnr-cu01 控制端长时间占用。
+    - 解压源码包到 gnr VASP 源码副本路径，不要修改原始源码包目录。
+    - 第一选择使用 VASP 官方 `arch/makefile.include*` 中匹配 Intel oneAPI / Intel MPI / MKL / OpenMP 的模板。
+      不要凭空手写整套 makefile.include；只有模板缺失或不兼容时，才做最小适配。
+    - 必须记录:
+      - oneAPI 路径和版本
+      - Fortran compiler/wrapper (`mpiifort`/`mpiifx`/`mpif90`)
+      - MKL/ScaLAPACK/BLACS 链接方式
+      - `makefile.include` 来源模板和改动点
+    - 编译后必须在 gnr-cu02/gnr-cu03/gnr-cu04 全部节点上验证 `ldd` 无 `not found`，
+      且不得再出现 `GLIBC_2.34 not found`。
+
+    electron-phonon 阶段要求：
+    - 不要重跑 predecessor。
+    - 首先验证 predecessor:
+      - `predecessor/OUTCAR` 含 `reached required accuracy - stopping structural energy minimisation`
+      - `predecessor/CONTCAR` 非空且结构有效
+    - 在写入 electron-phonon 目录前，先备份 job111 timeout 输出：
+      - `OUTCAR -> OUTCAR.job111.timeout`
+      - `OSZICAR -> OSZICAR.job111.timeout`
+      - `vasprun.xml -> vasprun.xml.job111.timeout`（若存在）
+      - `DYNMAT -> DYNMAT.job111.timeout`（若存在）
+    - 复制 `predecessor/CONTCAR` 为 `electron_phonon/POSCAR`。
+    - 保持 electron-phonon 阶段的 `INCAR`、`KPOINTS`、`POTCAR` 不变；
+      不要修改科学参数，不要把 KPOINTS 降级，不要改 `IBRION=8`。
+    - job111 的 `13/120` 结果不应被视为可续算完成点；VASP DFPT 中断后的可靠续算不应假设存在。
+      若无明确可靠 restart 证据，应从当前 converged POSCAR 重新运行完整 electron-phonon 阶段。
+
+    非 SLURM mpirun 运行要求：
+    - 禁止调用 `submit_job`、`sbatch`、`srun`。
+    - 在 logs/scripts 目录生成可审计脚本，例如：
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work/run/logs/run_case3_eph_gnr.sh`
+    - 生成 hostfile，例如：
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work/run/logs/hosts.gnr`
+      内容应按确认后的 ranks_per_node 写入 gnr-cu02/gnr-cu03/gnr-cu04。
+    - 运行脚本必须包含：
+      - `set -eo pipefail`
+      - `ulimit -s unlimited`
+      - `source /opt/intel/oneapi/setvars.sh --force`
+      - `export OMP_NUM_THREADS=4`
+      - `export MKL_NUM_THREADS=1`
+      - `export OMP_STACKSIZE=512M`
+      - `export OMP_PROC_BIND=close`
+      - `export OMP_PLACES=cores`
+      - `cd /mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work/run/electron_phonon`
+      - `mpirun -np 144 -hostfile <hosts.gnr> <gnr_vasp_std>`
+    - stdout/stderr 必须写入 logs 目录，文件名包含时间戳或 run id。
+    - 为避免 scope_guard 误判 heredoc 中的变量路径，运行脚本里的日志重定向必须使用固定绝对路径，
+      不要使用 `${WORKDIR}/${STDOUT_LOG}`、`${LOGDIR}/${name}` 这类变量拼接路径。
+      示例：
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work/run/logs/case3_eph_gnr_<timestamp>.out`
+      和
+      `/mnt/beegfs/ai4s-test/ai4s-platform/vasp-case3-eph-work/run/logs/case3_eph_gnr_<timestamp>.err`。
+    - 若创建脚本被 scope_guard 拦截，先改为固定绝对路径日志和不含变量路径重定向的脚本；
+      不要改写到 harness-framework 仓库路径下，也不要重复启动计算。
+    - 正式启动前必须 `request_human_input`，说明：
+      - hosts
+      - ranks_per_node
+      - total MPI ranks
+      - OpenMP threads
+      - 是否会编译 VASP
+      - VASP binary 路径
+      - electron-phonon workdir
+      - stdout/stderr 日志路径
+      - 预计耗时：job111 8h 到 13/120，完整运行粗估可能需要 3-4 天；gnr 资源更强但仍应按长任务处理
+
+    监控要求：
+    - 不要使用长阻塞等待：单次 `sleep` 不超过 60 秒，单次 `safe_run_bash timeout` 不超过 90 秒。
+    - 长任务启动后，给用户清晰 watch 命令，例如：
+      - `ps -ef | grep vasp_std`
+      - `tail -f <stdout_log>`
+      - `tail -30 electron_phonon/OSZICAR`
+      - `grep "Degree of freedom" electron_phonon/OUTCAR | tail`
+    - 如果 mpirun 已在后台/远程运行，agent 不应重复启动第二个相同任务。
+
+    完成标准：
+    - gnr 编译阶段（若执行）：
+      - `bin/vasp_std` 存在且可执行
+      - gnr-cu02/03/04 上 `ldd` 无 `not found`
+      - 不再有 `GLIBC_2.34 not found`
+    - electron-phonon 阶段：
+      - VASP 正常完成完整 `IBRION=8` 线性响应；
+      - `OUTCAR` 中 `Degree of freedom` 到达 `120/120` 或有等价完整完成证据；
+      - `OUTCAR` 有正常 timing/accounting 结尾；
+      - 保留 `OUTCAR`、`OSZICAR`、`vasprun.xml`、`DYNMAT`（若生成）等输出。
+    - 若失败或中断，必须记录真实错误、最后自由度进度、日志路径、节点/rank/thread 配置和下一步建议。
+    - 冻结 `experiment_log`，记录本次是 gnr mpirun continuation，不做最终 postprocess verdict。
+
+upstream_artifacts:
+  - type: claim
+    name: H24_thermal_nodal_surface_robustness
+    metadata:
+      claim_type: hypothesis
+      status: open
+      derived_from: pre_registration__tC40_nodal_surface_SIB_anode_prereg.json
+      source_section: "Hypothesis H24"
+      note: "Derived summary, not a standalone upstream claim artifact file"
+    content: |
+      tC40 中 Γ 点四重简并节点面在 300 K 热扰动和 Na 嵌入下更脆弱；
+      case3 负责生成 electron-phonon coupling analysis 相关 VASP 输出。
+      最终 validated/refuted verdict 必须结合后续 postprocess 的定量证据。
+
+  - type: pre_registration
+    name: tC40_nodal_surface_SIB_anode_prereg
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-16T03:33:56+00:00"
+      freeze_reason: "Imported upstream hypothesis pre-registration for VASP case3 gnr electron-phonon continuation"
+      source_artifact: pre_registration__tC40_nodal_surface_SIB_anode_prereg.json
+    content: |
+      上游 prereg artifact 位于：
+      /mnt/beegfs/ai4s-test/ai4s-platform/test1_vasp/vasp-upstream-artifacts.zip
+
+      本次 gnr continuation 运行范围：
+      - 不重跑 predecessor；predecessor 已在 spr 平台达到结构弛豫收敛。
+      - 如无 gnr-compatible VASP，则先在 gnr 平台编译 VASP 6.5.1。
+      - 使用 predecessor/CONTCAR 作为 electron-phonon 阶段 POSCAR。
+      - 通过 SSH + mpirun 在 gnr-cu02/gnr-cu03/gnr-cu04 上运行完整 electron-phonon / DFPT 阶段。
+      - experiment 节点只归档 VASP 运行证据，不做最终 band/gap/postprocess 判定。

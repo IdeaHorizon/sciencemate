@@ -1,0 +1,65 @@
+/**
+ * 交互基础层 —— 键盘焦点、按压反馈、hover 门控。
+ *
+ * 这三样此前全站为零：
+ *   - 115 条 `:hover` 规则，0 条包在 `@media (hover: hover)` 里 —— 触屏点一下
+ *     会误触发 hover 态并粘住，直到点别处
+ *   - 128 个可点选择器，0 条 `:active` —— 按下去界面毫无回应
+ *   - 十几处 `outline: 0/none`，其中主对话输入框、审批面板的 textarea、KB 搜索框
+ *     等 7 处没有任何替代，键盘用户完全看不到焦点在哪
+ *
+ * 本文件必须最后 import（在 globals.css 的 @import 列表末尾）：模块之间靠顺序
+ * 定胜负，焦点环得排在各组件自己的 outline 声明之后。
+ */
+
+/* ── 键盘焦点 ────────────────────────────────────────────────
+   `:where()` 让选择器本身零特异性，只有 `:focus-visible` 贡献 0-1-0 —— 不会
+   撞掉任何组件已有的 focus 样式（那些通常是 border-color + box-shadow），
+   而是叠在上面补一个真正看得见的环。 */
+:where(
+  a[href],
+  button,
+  summary,
+  input,
+  select,
+  textarea,
+  [tabindex]:not([tabindex="-1"]),
+  [role="button"],
+  [role="radio"],
+  [role="tab"]
+):focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: inherit;
+}
+
+/* ── 按压反馈 ────────────────────────────────────────────────
+   按下去要有回应，这是「确认界面听见了你」里最基本的一项。
+   `:active:not(:disabled)` 的特异性（0-2-1）足以压过 `.card:hover`
+   那类 0-2-0 的 transform —— 鼠标按下时必然同时处在 hover 上，特异性不够
+   的话这个反馈永远不会出现。 */
+button:not(:disabled):active,
+summary:active,
+[role="button"]:not([aria-disabled="true"]):active {
+  transform: scale(var(--press-scale));
+}
+
+/* 输入框和整块面板不做缩放：文字跟着缩会看着廉价，大块面积缩放也不像被按下。 */
+:where(input, textarea, select):active {
+  transform: none;
+}
+
+/* transition 由各组件的 transition 属性负责；这里只保证没写的也有。 */
+:where(button, summary, [role="button"]) {
+  transition: transform var(--duration-press) var(--ease-out);
+}
+
+/* ── hover 门控 ──────────────────────────────────────────────
+   触屏上点一下会先合成一次 hover，位移类 hover 效果因此会「粘住」。
+   位移只在真有指针设备时启用；颜色/背景类 hover 不受影响（那些在触屏上
+   跟着点击反馈一起出现是合理的）。 */
+@media not all and (hover: hover) and (pointer: fine) {
+  .ui-card-interactive:hover {
+    transform: none;
+  }
+}

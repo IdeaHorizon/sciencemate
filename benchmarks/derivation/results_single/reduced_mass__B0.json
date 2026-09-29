@@ -1,0 +1,34 @@
+{
+  "task_id": "reduced_mass",
+  "arm": "B0",
+  "model": "deepseek-v4-pro",
+  "final_expression": "m_1*m_2/(m_1 + m_2)",
+  "verdict": "derived",
+  "assumptions": [
+    "经典非相对论点粒子，牛顿第二定律成立",
+    "系统无外力，只存在两质点之间的内力",
+    "m_1>0, m_2>0，且 M=m_1+m_2≠0",
+    "相互作用为中心力：只依赖相对距离 r=|r_1-r_2|，方向沿两质点连线",
+    "中心力满足 F_{21}=-F_{12}",
+    "若使用势能 V(r)，V(r) 只依赖 r 且至少 C^1，使梯度存在",
+    "使用单位向量 r_hat 时要求 r>0；r=0 的碰撞或奇点情况单独处理",
+    "坐标变换 (r_1,r_2)->(R,r) 可逆，且反解时除以 M 合法",
+    "运动足够光滑，r_1(t), r_2(t) 二次可微",
+    "动能展开使用普通欧氏点积双线性性；无级数展开，因此无级数收敛条件"
+  ],
+  "unverified_steps": [
+    "引用标准 Euler-Lagrange 方程/循环坐标结论：由 ∂L/∂R=0 推出 d/dt(∂L/∂Ṙ)=0，未重新推导该定理",
+    "未对 r=0 处的中心力奇异或碰撞动力学做正则化或全局解分析",
+    "使用势能 V(r) 时未机械验证任意中心力场的势函数存在性；在三维 r>0 区域通常可通过 V(r)=-∫^r f(s)ds 构造"
+  ],
+  "reasoning_summary": "通过把牛顿方程按质心坐标和相对坐标重写，质心方程中内力抵消得到 R̈=0；相对坐标方程中出现 1/m_1+1/m_2，其倒数即为约化质量。动能展开后交叉项严格抵消，使拉格朗日量分离为自由质心部分和约化质量在中心势中的运动部分。",
+  "raw_text": "设两个质点的位置为 \\(\\mathbf r_1,\\mathbf r_2\\)，定义相对向量  \n\\[\n\\mathbf r:=\\mathbf r_1-\\mathbf r_2,\\qquad r:=|\\mathbf r|.\n\\]\n中心力只依赖相对距离，并沿两质点连线方向。记质点 1 受到质点 2 的力为  \n\\[\n\\mathbf F_{12}=f(r)\\hat{\\mathbf r},\\qquad \\hat{\\mathbf r}:=\\frac{\\mathbf r}{r}.\n\\]\n则质点 2 受到质点 1 的力为  \n\\[\n\\mathbf F_{21}=-f(r)\\hat{\\mathbf r}=-\\mathbf F_{12}.\n\\]\n若用力学势 \\(V(r)\\) 描述，则 \\(f(r)=-V'(r)\\)。\n\n---\n\n## 1. 写出牛顿方程\n\n在惯性系中，无外力时：\n\n\\[\nm_1\\ddot{\\mathbf r}_1 = \\mathbf F_{12}=f(r)\\hat{\\mathbf r},\n\\]\n\\[\nm_2\\ddot{\\mathbf r}_2 = \\mathbf F_{21}=-f(r)\\hat{\\mathbf r}.\n\\]\n\n这一步用到了牛顿第二定律，以及中心力等大反向。\n\n---\n\n## 2. 定义质心坐标\n\n令总质量  \n\\[\nM:=m_1+m_2,\n\\]\n定义质心坐标  \n\\[\n\\mathbf R:=\\frac{m_1\\mathbf r_1+m_2\\mathbf r_2}{M}.\n\\]\n这是质量加权平均位置。它的运动方程为\n\n\\[\nM\\ddot{\\mathbf R}\n=m_1\\ddot{\\mathbf r}_1+m_2\\ddot{\\mathbf r}_2\n=\\mathbf F_{12}+\\mathbf F_{21}\n=0.\n\\]\n\n所以\n\n\\[\n\\boxed{\\ddot{\\mathbf R}=0.}\n\\]\n\n也就是说质心做匀速直线运动。这里能分离出质心，是因为内力之和为零；这里用到了 \\(M\\ne 0\\)。\n\n---\n\n## 3. 定义相对坐标并导出约化质量\n\n相对向量为\n\n\\[\n\\mathbf r=\\mathbf r_1-\\mathbf r_2.\n\\]\n\n对时间求二阶导数：\n\n\\[\n\\ddot{\\mathbf r}\n=\\ddot{\\mathbf r}_1-\\ddot{\\mathbf r}_2.\n\\]\n\n代入牛顿方程：\n\n\\[\n\\ddot{\\mathbf r}\n=\\frac{\\mathbf F_{12}}{m_1}\n-\\frac{\\mathbf F_{21}}{m_2}.\n\\]\n\n因为 \\(\\mathbf F_{21}=-\\mathbf F_{12}\\)，所以\n\n\\[\n\\ddot{\\mathbf r}\n=\\frac{\\mathbf F_{12}}{m_1}+\\frac{\\mathbf F_{12}}{m_2}\n=\\left(\\frac{1}{m_1}+\\frac{1}{m_2}\\right)\\mathbf F_{12}.\n\\]\n\n定义约化质量 \\(\\mu\\) 满足\n\n\\[\n\\frac{1}{\\mu}:=\\frac{1}{m_1}+\\frac{1}{m_2},\n\\]\n\n因此\n\n\\[\n\\boxed{\\mu=\\frac{m_1m_2}{m_1+m_2}.}\n\\]\n\n于是相对运动方程成为\n\n\\[\n\\boxed{\\mu\\ddot{\\mathbf r}=\\mathbf F_{12}.}\n\\]\n\n若用力学势 \\(V(r)\\)，则\n\n\\[\n\\boxed{\\mu\\ddot{\\mathbf r}=-\\nabla_{\\mathbf r}V(r).}\n\\]\n\n这就是一个质量为 \\(\\mu\\) 的质点在势 \\(V(r)\\) 中运动的方程。也就是说，二体问题化成了约化质量为 \\(\\mu\\) 的单体问题。\n\n---\n\n## 4. 坐标分离的完整表示\n\n由定义有\n\n\\[\n\\mathbf R=\\frac{m_1\\mathbf r_1+m_2\\mathbf r_2}{M},\\qquad\n\\mathbf r=\\mathbf r_1-\\mathbf r_2.\n\\]\n\n反解得到\n\n\\[\n\\mathbf r_1=\\mathbf R+\\frac{m_2}{M}\\mathbf r,\n\\]\n\\[\n\\mathbf r_2=\\mathbf R-\\frac{m_1}{M}\\mathbf r.\n\\]\n\n于是\n\n\\[\n\\dot{\\mathbf r}_1=\\dot{\\mathbf R}+\\frac{m_2}{M}\\dot{\\mathbf r},\n\\]\n\\[\n\\dot{\\mathbf r}_2=\\dot{\\mathbf R}-\\frac{m_1}{M}\\dot{\\mathbf r}.\n\\]\n\n动能为\n\n\\[\nT=\\frac12 m_1|\\dot{\\mathbf r}_1|^2+\\frac12 m_2|\\dot{\\mathbf r}_2|^2.\n\\]\n\n展开后：\n\n\\[\nT\n=\\frac12 m_1\\left(\\dot{\\mathbf R}+\\frac{m_2}{M}\\dot{\\mathbf r}\\right)^2\n+\\frac12 m_2\\left(\\dot{\\mathbf R}-\\frac{m_1}{M}\\dot{\\mathbf r}\\right)^2.\n\\]\n\n交叉项为\n\n\\[\nm_1\\frac{m_2}{M}\\dot{\\mathbf R}\\cdot\\dot{\\mathbf r}\n-\nm_2\\frac{m_1}{M}\\dot{\\mathbf R}\\cdot\\dot{\\mathbf r}\n=0.\n\\]\n\n所以交叉项严格抵消，得到\n\n\\[\n\\boxed{T=\\frac12 M|\\dot{\\mathbf R}|^2+\\frac12 \\mu|\\dot{\\mathbf r}|^2.}\n\\]\n\n这正是为什么约化质量是  \n\\[\n\\mu=\\frac{m_1m_2}{M}.\n\\]\n\n因此拉格朗日量\n\n\\[\nL=T-V(r)\n\\]\n\n可以写成\n\n\\[\n\\boxed{\nL\n=\n\\left(\\frac12 M|\\dot{\\mathbf R}|^2\\right)\n+\n\\left(\\frac12 \\mu|\\dot{\\mathbf r}|^2-V(r)\\right).\n}\n\\]\n\n第一项只含质心坐标 \\(\\mathbf R\\)，第二项只含相对坐标 \\(\\mathbf r\\)。二者没有交叉项，也没有通过势能耦合。于是质心运动和相对运动完全分离。\n\n---\n\n## 5. 分离依据\n\n分离的关键在于：\n\n1. 质心坐标通过动量守恒或内力抵消，满足 \\(\\ddot{\\mathbf R}=0\\)；\n2. 相对坐标的方程只含有 \\(\\mathbf r\\)，不含有 \\(\\mathbf R\\)；\n3. 动能展开后交叉项正好抵消，这是由质心定义中质量加权系数 \\(\\frac{m_2}{M}\\) 和 \\(\\frac{m_1}{M}\\) 保证的。\n\n因此系统可以化为：\n\n- 一个自由运动的质心，质量 \\(M\\)；\n- 一个在中心势 \\(V(r)\\) 中运动的约化质量 \\(\\mu\\)。\n\n---\n\n```json\n{\n  \"final_expression\": \"m_1*m_2/(m_1 + m_2)\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"经典非相对论点粒子，牛顿第二定律成立\",\n    \"系统无外力，只存在两质点之间的内力\",\n    \"m_1>0, m_2>0，且 M=m_1+m_2≠0\",\n    \"相互作用为中心力：只依赖相对距离 r=|r_1-r_2|，方向沿两质点连线\",\n    \"中心力满足 F_{21}=-F_{12}\",\n    \"若使用势能 V(r)，V(r) 只依赖 r 且至少 C^1，使梯度存在\",\n    \"使用单位向量 r_hat 时要求 r>0；r=0 的碰撞或奇点情况单独处理\",\n    \"坐标变换 (r_1,r_2)->(R,r) 可逆，且反解时除以 M 合法\",\n    \"运动足够光滑，r_1(t), r_2(t) 二次可微\",\n    \"动能展开使用普通欧氏点积双线性性；无级数展开，因此无级数收敛条件\"\n  ],\n  \"unverified_steps\": [\n    \"引用标准 Euler-Lagrange 方程/循环坐标结论：由 ∂L/∂R=0 推出 d/dt(∂L/∂Ṙ)=0，未重新推导该定理\",\n    \"未对 r=0 处的中心力奇异或碰撞动力学做正则化或全局解分析\",\n    \"使用势能 V(r) 时未机械验证任意中心力场的势函数存在性；在三维 r>0 区域通常可通过 V(r)=-∫^r f(s)ds 构造\"\n  ],\n  \"reasoning_summary\": \"通过把牛顿方程按质心坐标和相对坐标重写，质心方程中内力抵消得到 R̈=0；相对坐标方程中出现 1/m_1+1/m_2，其倒数即为约化质量。动能展开后交叉项严格抵消，使拉格朗日量分离为自由质心部分和约化质量在中心势中的运动部分。\"\n}\n```",
+  "thinking_chars": 47711,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 204.8,
+  "tokens": 18069,
+  "parse_ok": true,
+  "repeat_index": 1
+}

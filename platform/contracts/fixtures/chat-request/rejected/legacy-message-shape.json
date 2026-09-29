@@ -1,0 +1,5 @@
+{
+  "message": "REVISE (re-run source_node with reviewer feedback)",
+  "conversation_id": "de4632cc-8a94-4c02-abb3-6a51ca48c155",
+  "choice": { "offer_id": null, "choice_id": "revise" }
+}

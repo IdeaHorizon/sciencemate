@@ -1,0 +1,4 @@
+interface:
+  display_name: "Relational Scientific Figures"
+  short_description: "Build rigorous flows, networks, dendrograms, and phylogenies"
+  default_prompt: "Use $relational-networks-flows-and-trees to plan a structurally faithful scientific relationship figure from upstream-computed data."

@@ -1,0 +1,8 @@
+rubric_id: generative_illustration
+extends: base
+checks:
+  - no visible data chart axes measurements or quantitative claims
+  - no unintended text numbers logos signatures or watermarks
+  - no implied scientific evidence or diagnostic imagery
+  - visual coherence and absence of obvious generation artifacts
+  - suitability as clearly non-evidence conceptual or decorative material

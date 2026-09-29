@@ -1,0 +1,104 @@
+# experiment 节点 fixture —— E3SM GPU 海洋算例（严格 GPU 模式）
+#
+# 运行：
+#   python run_node.py --harness experiment --sandbox --no-interactive \
+#     --fixture nodes/experiment/fixtures/e3sm_ocean_gpu_strict.yaml
+#
+# 核心约束：
+#   - GPU 加速是**硬性要求**，绝不允许擅自回退 CPU-only
+#   - 遇 GPU 启用障碍时，必须 request_human_input 询问用户
+#   - 不得在无用户许可的情况下修改 pre_registration 目标
+
+node_inputs:
+  experiment_focus: |
+    执行 prereg 指定的 E3SM GPU 海洋模拟。
+
+    **硬性约束**：
+    - GPU 加速（CUDA, sm_120）是**必须**，非可选
+    - 如 GPU 编译遇阻，**必须**尝试所有可能路径（Conda nvidia-hpc-sdk, OpenMP offload, 容器等）
+    - 如所有路径失败，**必须**调用 request_human_input 询问用户，**绝不允许**擅自回退 CPU
+    - 未获用户明确许可前，不得将 GPU 目标改为 CPU-only
+
+    按 harness.yaml 4 阶段工作流执行，逐级诊断：
+    ① gpu-hpc-porting SKILL.md → ② grep fermilink_packages.txt (E3SM 无覆盖) →
+    ③ 五层诊断模型自行解决 → ④ 如 GPU 无法启用则 request_human_input
+
+upstream_artifacts:
+  - type: claim
+    name: H_E3SM_MPAS_Ocean_GPU_builds_and_runs
+    metadata:
+      claim_type: hypothesis
+      status: open
+      created_at: "2026-06-10T08:00:00+00:00"
+    content: |
+      E3SM 的 MPAS-Ocean 组件可以用 nvfortran + OpenACC 在 RTX 5070 (sm_120)
+      上编译为 GPU 加速版本，并完成 1 模拟日的海洋模拟：运行期间 GPU kernel
+      确实在执行（nvidia-smi 可见显著非零利用率），输出 mpaso.hist.am.*.nc
+      且日志无 ERROR/FATAL。
+
+  - type: pre_registration
+    name: E3SM_Ocean_GPU_Test_Strict
+    metadata:
+      frozen: true
+      frozen_at: "2026-06-04T12:00:00+00:00"
+      freeze_reason: "E3SM GPU ocean test - GPU is MANDATORY, no CPU fallback without user approval"
+    content: |
+      ## Pre-Registration: E3SM GPU Ocean Component Test (STRICT MODE)
+
+      ### Hypothesis
+      E3SM (Energy Exascale Earth System Model) 可以从源码编译并正确运行
+      **GPU 加速的海洋组件 (MPAS-Ocean)**，在 RTX 5070 (sm_120) 上完成一个
+      简短的海洋模拟。
+
+      ### Setup
+      - **Computational tool**: E3SM v3.x (latest stable)
+      - **Component**: MPAS-Ocean (ocean sea-ice coupled or ocean-only)
+      - **Build**: from source with CMake, **GPU acceleration MANDATORY** (CUDA/OpenACC/OpenMP offload)
+      - **Target GPU**: NVIDIA RTX 5070 (sm_120, Blackwell)
+      - **CUDA**: 13.1+ required for sm_120
+      - **Grid**: EC30to60 (30-60km variable resolution) or QU240 (low-res test)
+      - **Simulation length**: 1 model day (short test)
+      - **Expected wall time**: build ≤ 4 hours（E3SM 全量编译本身 > 30 min，
+        含诊断调试按小时计）; 1 model day run < 30 minutes
+
+      ### GPU Requirements (MANDATORY)
+      - **Must use GPU acceleration** - CPU-only is NOT acceptable
+      - CUDA 13.1+ for sm_120 compatibility
+      - GPU kernels demonstrably executing during the timestep loop:
+        nvidia-smi shows the model process on GPU with **peak utilization > 30%**
+        （测量窗口：积分循环期间每 2s 采样取峰值；低分辨率海洋算例的
+        OpenACC offload 不要求持续高利用率）
+      - If build fails with CUDA errors, diagnose and fix following harness.yaml workflow
+      - **If GPU cannot be enabled**: Must request human input - do NOT proceed with CPU-only
+
+      ### Falsification criteria
+      - metric: peak GPU utilization during timestep loop (nvidia-smi, 2s sampling)
+      - op: >
+      - threshold: 0.3
+      - If GPU process absent OR peak utilization ≤ 30% OR no GPU acceleration
+        compiled in → hypothesis REFUTED
+
+      ### Expected output
+      - E3SM executable compiled **with GPU support**
+      - `mpaso.hist.am.*.nc` output files (ocean history)
+      - GPU process visible in nvidia-smi with peak utilization > 30% during run
+      - Run completes without ERROR/FATAL in logs
+
+      ### Notes
+      - E3SM NOT in FermiLink knowledge base (only CESM is covered)
+      - This platform must solve compilation/running independently
+      - **GPU is MANDATORY** - CPU fallback requires explicit user approval via request_human_input
+
+memory_entries:
+  - kind: directive
+    text: "本机 Ubuntu 24.04 WSL2, RTX 5070 (sm_120), CUDA 13.1 已安装。E3SM 不在 FermiLink 支持列表中，工具特定问题无法查询外部知识库，必须自行用五层诊断模型解决。GPU 加速是硬性要求，如无法启用必须 request_human_input 询问用户，绝不允许擅自回退 CPU-only。"
+    tags: [experiment, e3sm, gpu, mandatory, strict]
+  - kind: directive
+    text: "E3SM 源码已在 ~/E3SM_src/，禁止重新克隆。直接使用现有源码（已恢复干净状态，无需处理之前的 patch）。"
+    tags: [experiment, e3sm, source, no-clone]
+  - kind: directive
+    text: "**NVIDIA HPC SDK 已安装**：nvfortran 26.3 在 /opt/nvidia/hpc_sdk/Linux_x86_64/26.3/compilers/bin/nvfortran（~/.bashrc 已加 PATH；如当前 shell 未生效则直接用完整路径或自行 export PATH）。**必须使用 nvfortran 编译 MPAS-Ocean**，不要使用 GCC/gfortran。nvfortran 原生支持 !$acc 和 !$omp 混合代码，无需任何源码 patch。编译 OpenACC GPU 代码用 -acc=gpu -gpu=cc120 标志（sm_120 = RTX 5070 Blackwell）。"
+    tags: [experiment, gpu, nvfortran, required]
+  - kind: directive
+    text: "harness.yaml 规则强制执行：节点不得修改 pre_registration。如 GPU 无法实现，正确行为是：尝试所有修复路径 → 如均失败则 request_human_input → 如用户批准才可降级。擅自改为 CPU 是违规。"
+    tags: [experiment, compliance, rules]

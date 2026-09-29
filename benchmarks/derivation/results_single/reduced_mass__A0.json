@@ -1,0 +1,30 @@
+{
+  "task_id": "reduced_mass",
+  "arm": "A0",
+  "model": "deepseek-v4-flash",
+  "final_expression": "m_1*m_2/(m_1+m_2)",
+  "verdict": "derived",
+  "assumptions": [
+    "经典非相对论力学适用，拉格朗日量 L=T-U 有效",
+    "m_1、m_2 是正常数，且 M=m_1+m_2≠0；所有出现分母 m_1、m_2、M 都非零",
+    "没有外力和外势，只有两个质点之间的相互作用",
+    "相互作用是中心力，力/势只依赖相对位置 r=r_1-r_2，通常进一步只依赖 |r|",
+    "势函数 U(r) 足够光滑，可求梯度；若势在 r=0 奇异，则限定在 r>0 区域讨论",
+    "牛顿第三定律成立：F_21=-F_12",
+    "坐标系为惯性系，坐标变换 (r_1,r_2) -> (R,r) 可逆，R、r 可作为独立广义坐标",
+    "质量不随时间变化，也没有速度依赖的力"
+  ],
+  "unverified_steps": [
+    "动能展开中交叉项抵消及 mu=m_1*m_2/(m_1+m_2) 的代数化简是笔算给出，未用数值或符号计算软件逐项验证",
+    "循环坐标对应守恒量（总动量守恒）是引用经典力学标准结论，未在本推导中重新证明 Noether 定理"
+  ],
+  "reasoning_summary": "把两体坐标换成质心坐标 R 和相对坐标 r 后，动能化为 1/2 M \\dot R^2 + 1/2 mu \\dot r^2，势能只含 r，因此质心运动自由，相对运动等价于质量为 mu 的单粒子；由牛顿方程比较得 mu=m_1*m_2/(m_1+m_2)。",
+  "raw_text": "设两质点在惯性系中的位置为 \\(\\vec r_1,\\vec r_2\\)。\n\n定义质心坐标和相对坐标：\n\n\\[\n\\vec R=\\frac{m_1\\vec r_1+m_2\\vec r_2}{M},\\qquad \n\\vec r=\\vec r_1-\\vec r_2,\\qquad \nM=m_1+m_2.\n\\]\n\n这是可逆线性变换，因为 \\(M>0\\)。逆变换为：\n\n\\[\n\\vec r_1=\\vec R+\\frac{m_2}{M}\\vec r,\\qquad\n\\vec r_2=\\vec R-\\frac{m_1}{M}\\vec r.\n\\]\n\n为什么要走这一步：中心力只依赖于相对位置 \\(\\vec r\\)，所以把“整体运动”和“相对运动”拆开，才能看到二体问题如何约化为单体问题。\n\n把动能写成新坐标：\n\n\\[\nT=\\frac12 m_1\\left|\\dot{\\vec R}+\\frac{m_2}{M}\\dot{\\vec r}\\right|^2\n+\\frac12 m_2\\left|\\dot{\\vec R}-\\frac{m_1}{M}\\dot{\\vec r}\\right|^2.\n\\]\n\n展开后：\n\n\\[\nT=\\frac12 M|\\dot{\\vec R}|^2\n+\\frac12\\left(\n\\frac{m_1m_2^2}{M^2}+\\frac{m_2m_1^2}{M^2}\n\\right)|\\dot{\\vec r}|^2\n+\\dot{\\vec R}\\cdot\\dot{\\vec r}\n\\left(\\frac{m_1m_2}{M}-\\frac{m_2m_1}{M}\\right).\n\\]\n\n交叉项系数为零，因此：\n\n\\[\nT=\\frac12 M|\\dot{\\vec R}|^2+\\frac12\\mu|\\dot{\\vec r}|^2,\n\\]\n\n其中\n\n\\[\n\\mu=\\frac{m_1m_2^2+m_2m_1^2}{M^2}\n=\\frac{m_1m_2(m_1+m_2)}{(m_1+m_2)^2}\n=\\frac{m_1m_2}{m_1+m_2}.\n\\]\n\n势能只依赖于相对位置：\n\n\\[\nU=U(\\vec r),\n\\]\n\n所以拉格朗日量为\n\n\\[\nL=\\frac12 M|\\dot{\\vec R}|^2+\\frac12\\mu|\\dot{\\vec r}|^2-U(\\vec r).\n\\]\n\n分离依据：拉格朗日量中没有 \\(\\dot{\\vec R}\\cdot\\dot{\\vec r}\\) 交叉项，并且势能不含 \\(\\vec R\\)，所以质心坐标 \\(\\vec R\\) 是循环坐标。于是：\n\n\\[\n\\frac{d}{dt}(M\\dot{\\vec R})=0,\n\\]\n\n质心做匀速直线运动；相对运动部分等价于一个质量为 \\(\\mu\\) 的粒子在势能 \\(U(\\vec r)\\) 中运动。\n\n用牛顿方程也能直接得到同一结果。设两质点间相互作用力为 \\(\\vec F\\)，则\n\n\\[\nm_1\\ddot{\\vec r}_1=\\vec F,\\qquad\nm_2\\ddot{\\vec r}_2=-\\vec F.\n\\]\n\n两式相减：\n\n\\[\n\\ddot{\\vec r}\n=\\ddot{\\vec r}_1-\\ddot{\\vec r}_2\n=\\left(\\frac1{m_1}+\\frac1{m_2}\\right)\\vec F.\n\\]\n\n因此\n\n\\[\n\\mu\\ddot{\\vec r}=\\vec F,\n\\qquad\n\\mu=\\frac{1}{\\frac1{m_1}+\\frac1{m_2}}\n=\\frac{m_1m_2}{m_1+m_2}.\n\\]\n\n所以约化质量为：\n\n\\[\n\\boxed{\\mu=\\frac{m_1m_2}{m_1+m_2}}\n\\]\n\n```json\n{\n  \"final_expression\": \"m_1*m_2/(m_1+m_2)\",\n  \"verdict\": \"derived\",\n  \"assumptions\": [\n    \"经典非相对论力学适用，拉格朗日量 L=T-U 有效\",\n    \"m_1、m_2 是正常数，且 M=m_1+m_2≠0；所有出现分母 m_1、m_2、M 都非零\",\n    \"没有外力和外势，只有两个质点之间的相互作用\",\n    \"相互作用是中心力，力/势只依赖相对位置 r=r_1-r_2，通常进一步只依赖 |r|\",\n    \"势函数 U(r) 足够光滑，可求梯度；若势在 r=0 奇异，则限定在 r>0 区域讨论\",\n    \"牛顿第三定律成立：F_21=-F_12\",\n    \"坐标系为惯性系，坐标变换 (r_1,r_2) -> (R,r) 可逆，R、r 可作为独立广义坐标\",\n    \"质量不随时间变化，也没有速度依赖的力\"\n  ],\n  \"unverified_steps\": [\n    \"动能展开中交叉项抵消及 mu=m_1*m_2/(m_1+m_2) 的代数化简是笔算给出，未用数值或符号计算软件逐项验证\",\n    \"循环坐标对应守恒量（总动量守恒）是引用经典力学标准结论，未在本推导中重新证明 Noether 定理\"\n  ],\n  \"reasoning_summary\": \"把两体坐标换成质心坐标 R 和相对坐标 r 后，动能化为 1/2 M \\\\dot R^2 + 1/2 mu \\\\dot r^2，势能只含 r，因此质心运动自由，相对运动等价于质量为 mu 的单粒子；由牛顿方程比较得 mu=m_1*m_2/(m_1+m_2)。\"\n}\n```",
+  "thinking_chars": 26231,
+  "finish_reason": "stop",
+  "turns": 1,
+  "tool_calls": 0,
+  "elapsed_s": 79.3,
+  "tokens": 9895,
+  "parse_ok": true
+}
