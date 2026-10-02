@@ -209,4 +209,4 @@ Both platforms need a working model API key.
 
 ---
 
-*Preview release. Licensing and third-party notices are being finalised before the public release.*
+*Licensed under the [Apache License 2.0](LICENSE). Third-party notices for the bundled components (Python, git, tectonic, biber, Node dependencies) are being finalised.*

@@ -210,4 +210,4 @@ $env:AFS_INSTALL_DIR="D:\Tools\ScienceMate"   # 装到哪
 
 ---
 
-*预览版。许可证与第三方声明在公开发布前定稿。*
+*本仓库以 [Apache License 2.0](LICENSE) 开源。随包第三方组件（Python、git、tectonic、biber、Node 依赖）的声明正在整理。*
