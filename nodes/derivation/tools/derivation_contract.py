@@ -785,10 +785,9 @@ def audit_derivation_log(state: Any, artifact_id: str) -> dict[str, Any]:
     # ── 推导链 ────────────────────────────────────────────────────────────
     from shared.lib import derivation_ledger as _ledger
 
+    _table, _readable = _ledger.snapshot(state)     # 一次读盘，两个答案（#985）
     step_problems, step_advisories, unverified, failed = _audit_steps(
-        _dig(metadata, "steps"),
-        ledger=_ledger.by_probe(state),
-        ledger_readable=_ledger.ledger_is_readable(state))
+        _dig(metadata, "steps"), ledger=_table, ledger_readable=_readable)
     if step_problems:
         reasons["steps_structure"] = "；".join(step_problems)
     if step_advisories:
@@ -988,10 +987,9 @@ def _derivation_log_save_gate(state, draft: dict) -> dict[str, Any]:
     failures = dict(shape["reasons"])
     advisories = dict(shape["advisories"])
 
+    _table, _readable = _ledger.snapshot(state)     # 一次读盘，两个答案（#985）
     problems, step_advisories, _unverified, _failed = _audit_steps(
-        _dig(metadata, "steps"),
-        ledger=_ledger.by_probe(state),
-        ledger_readable=_ledger.ledger_is_readable(state))
+        _dig(metadata, "steps"), ledger=_table, ledger_readable=_readable)
     if problems:
         failures["steps_structure"] = "；".join(problems)
     if step_advisories:

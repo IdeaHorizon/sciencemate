@@ -18,6 +18,16 @@ shared/tools/builtin.py 的内置工具（save_artifact / read_artifact / 等）
 """
 
 from . import diagnose  # noqa: F401
+from . import protocol_epoch  # noqa: F401  v3 纪元标记
+from . import ledger  # noqa: F401  v3 账本（B 的 provenance index）
+from . import capture  # noqa: F401  v3 capture 命名空间与 observation
+from . import obligations  # noqa: F401  v3 required obligations（A）
+from . import finish  # noqa: F401  v3 唯一收尾入口
+from . import job_settlement  # noqa: F401  v3 作业终态结算（B 的唯一 writer）
+from . import scheduler_adapters  # noqa: F401  v3 调度器 adapter 契约
+from . import remote_admission  # noqa: F401  v3 远端准入
+from . import run_bootstrap  # noqa: F401  v3 启动：框架建立 A
+from . import ledger_hooks  # noqa: F401  v3 记账兜底 hook 与事实视图 hook
 # Phase 3: resource discovery, resource recommendation, and scheduler submission
 # for local/SLURM/PBS/Kubernetes backends.
 from . import resource_manager  # noqa: F401

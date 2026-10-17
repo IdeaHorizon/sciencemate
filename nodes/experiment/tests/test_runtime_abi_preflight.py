@@ -8,16 +8,15 @@ from __future__ import annotations
 
 import asyncio
 import os
-import subprocess
 import platform
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from core import sandbox
 from core.state import State
+from shared.lib import cancellable_subprocess
 from nodes.experiment.tools import safe_bash as sb
 from nodes.experiment.tools.run_contract import _classify_experiment_scope
 from shared.lib import dangerous_commands
@@ -317,31 +316,17 @@ def test_sandbox_probe_uses_only_exact_scratch_as_writable_root(
 ):
     state, runtime = _probe_test_state(tmp_path)
     seen = {}
-    cleaned = []
 
-    def fake_prepare(argv, **kwargs):
-        seen["argv"] = argv
+    async def fake_spawn(*argv, **kwargs):
+        seen["argv"] = list(argv)
         seen.update(kwargs)
-        return SimpleNamespace(
-            argv=["attempt-request-client"],
-            cleanup=lambda: cleaned.append(True),
-        )
-
-    def fake_run(argv, **kwargs):
-        seen["request_argv"] = argv
-        seen["request_kwargs"] = kwargs
-        return SimpleNamespace(returncode=0, stdout="probe-ok\n", stderr="")
+        return "done", 0, b"probe-ok\n", b""
 
     monkeypatch.setattr(sb, "_ensure_hardened_attempt_manifest", lambda _state: object())
-    # 本测试钉的是 image 路径的 prepare 契约（roots 计算与两条路径共用）；
-    # 原生后端的真跑覆盖在 test_sandbox_probe_real_hardened_ldd_is_read_only。
-    from core import isolation
-    monkeypatch.setattr(
-        isolation, "attempt_capability",
-        lambda backend=None: {"backend": "image", "image_id": "x" * 64,
-                              "security_profile": "hardened"})
-    monkeypatch.setattr(sandbox, "prepare_attempt_command", fake_prepare)
-    monkeypatch.setattr(sb.subprocess, "run", fake_run)
+    # 本测试钉的是交给咽喉的根契约（roots 计算）；咽喉之后的真跑覆盖在
+    # test_sandbox_probe_real_hardened_ldd_is_read_only。image 分支已删（#1182），
+    # 探针只剩 spawn_and_wait 这一条路。
+    monkeypatch.setattr(cancellable_subprocess, "spawn_and_wait", fake_spawn)
 
     result = _probe_sync(state, ["ldd", "/bin/true"], str(runtime))
 
@@ -351,15 +336,14 @@ def test_sandbox_probe_uses_only_exact_scratch_as_writable_root(
     assert scratch not in seen["readonly_roots"]
     assert runtime.resolve() in seen["readonly_roots"]
     assert Path(state.root).resolve() in seen["readonly_roots"]
-    assert seen["limits"].walltime_seconds == 15
-    assert seen["request_kwargs"]["timeout"] == 20
-    assert seen["request_kwargs"]["check"] is False
-    assert seen["environment"]["TMPDIR"] == str(scratch)
+    assert seen["sandbox_limits"].walltime_seconds == 15
+    assert seen["timeout"] == 20
+    assert seen["state"] is state
+    assert seen["sandbox_environment"]["TMPDIR"] == str(scratch)
     assert "TMPDIR=" + str(scratch) in seen["argv"]
     assert "TMP=" + str(scratch) in seen["argv"]
     assert "TEMP=" + str(scratch) in seen["argv"]
     assert seen["argv"][0] == "/usr/bin/env"
-    assert cleaned == [True]
 
 
 def test_sandbox_probe_semantic_role_without_capability_cannot_expand_roots(
@@ -375,12 +359,12 @@ def test_sandbox_probe_semantic_role_without_capability_cannot_expand_roots(
     }
     prepared = []
 
-    def forbidden_prepare(*_args, **_kwargs):
+    async def forbidden_spawn(*_args, **_kwargs):
         prepared.append(True)
-        raise AssertionError("unauthorized probe must not prepare an Attempt request")
+        raise AssertionError("unauthorized probe must not reach the throat")
 
     monkeypatch.setattr(sb, "_ensure_hardened_attempt_manifest", lambda _state: object())
-    monkeypatch.setattr(sandbox, "prepare_attempt_command", forbidden_prepare)
+    monkeypatch.setattr(cancellable_subprocess, "spawn_and_wait", forbidden_spawn)
 
     result = _probe_sync(state, ["ldd", "/bin/true"], str(semantic_only))
 
@@ -404,12 +388,12 @@ def test_sandbox_probe_rejects_portable_profile_before_request(
             "hardened_sandbox_profile_required: portable keeps broad mounts writable"
         )
 
-    def forbidden_prepare(*_args, **_kwargs):
+    async def forbidden_spawn(*_args, **_kwargs):
         prepared.append(True)
-        raise AssertionError("portable profile must not prepare an Attempt request")
+        raise AssertionError("portable profile must not reach the throat")
 
     monkeypatch.setattr(sb, "_ensure_hardened_attempt_manifest", portable)
-    monkeypatch.setattr(sandbox, "prepare_attempt_command", forbidden_prepare)
+    monkeypatch.setattr(cancellable_subprocess, "spawn_and_wait", forbidden_spawn)
 
     result = _probe_sync(state, ["ldd", "/bin/true"], str(runtime))
 
@@ -427,46 +411,26 @@ def test_sandbox_probe_request_failure_is_closed_and_cleaned(
     failure,
 ):
     state, runtime = _probe_test_state(tmp_path)
-    cleaned = []
 
     monkeypatch.setattr(sb, "_ensure_hardened_attempt_manifest", lambda _state: object())
-    # 同上一测试：钉 image 路径验证失败收口契约（两条路径共用同一收口）。
-    from core import isolation
-    monkeypatch.setattr(
-        isolation, "attempt_capability",
-        lambda backend=None: {"backend": "image", "image_id": "x" * 64,
-                              "security_profile": "hardened"})
-    monkeypatch.setattr(
-        sandbox,
-        "prepare_attempt_command",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            argv=["attempt-request-client"],
-            cleanup=lambda: cleaned.append(True),
-        ),
-    )
 
-    def failed_request(_argv, **_kwargs):
+    async def failed_spawn(*_argv, **_kwargs):
+        # 咽喉的失败形态：超时不抛 TimeoutExpired，而是返回 status="timeout"。
         if failure == "timeout":
-            raise subprocess.TimeoutExpired(
-                cmd=["attempt-request-client"], timeout=20)
-        return SimpleNamespace(
-            returncode=9,
-            stdout="",
-            stderr="trusted launcher failed",
-        )
+            return "timeout", None, b"", b""
+        return "done", 9, b"", b"trusted launcher failed"
 
-    monkeypatch.setattr(sb.subprocess, "run", failed_request)
+    monkeypatch.setattr(cancellable_subprocess, "spawn_and_wait", failed_spawn)
 
     result = _probe_sync(state, ["ldd", "/bin/true"], str(runtime))
 
     assert result["status"] == "error"
     assert result["reason"] == "runtime_abi_probe_unavailable"
     assert result["blocker"]["bypass_allowed"] is False
-    assert result["blocker"]["source"] in {
-        "attempt_request_timeout",
-        "attempt_request_exit",
-    }
-    assert cleaned == [True]
+    assert result["blocker"]["source"] == {
+        "timeout": "attempt_request_timeout",
+        "nonzero": "attempt_request_exit",
+    }[failure]
 
 
 def test_runtime_abi_checker_exception_blocks_payload_even_with_bypass(

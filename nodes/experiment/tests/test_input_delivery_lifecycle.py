@@ -56,18 +56,23 @@ def _formal_spec(prereg_id: str, asset_name: str) -> str:
     })
 
 
-def _deliver(tmp_path: Path, state: State, spec_id: str, asset_name: str, name: str) -> str:
+def _dataset_package(tmp_path: Path, state: State, asset_name: str, name: str) -> str:
+    """Create real package evidence without mutating the delivery ledger."""
     package = tmp_path / f"package-{name}"
     package.mkdir()
     (package / asset_name).write_text("mesh bytes", encoding="utf-8")
     manifest = package / "manifest.json"
     manifest.write_text(json.dumps({"lineage": [{"op": "prepare_mesh"}]}), encoding="utf-8")
-    dataset_id = state.save_artifact("dataset", name, json.dumps({
+    return state.save_artifact("dataset", name, json.dumps({
         "package_dir": str(package),
         "manifest_path": str(manifest),
         "lineage": [{"op": "prepare_mesh"}],
         "downstream_contract": {"files": [asset_name]},
     }))["id"]
+
+
+def _deliver(tmp_path: Path, state: State, spec_id: str, asset_name: str, name: str) -> str:
+    dataset_id = _dataset_package(tmp_path, state, asset_name, name)
     verified = asyncio.run(_verify_dataset_consumption(state, dataset_id, spec_id))
     assert verified["status"] == "success", verified
     return dataset_id
@@ -268,6 +273,7 @@ def test_missing_ledger_with_data_transcript_fails_closed_after_reopen(tmp_path:
 
 def test_idempotent_validation_migrates_legacy_hook_state_to_durable_ledger(tmp_path: Path) -> None:
     state = State.new("experiment", tmp_path)
+    dataset_id = _dataset_package(tmp_path, state, "legacy.msh", "legacy")
     raw_spec = _service_spec("legacy.msh")
     normalized = json.loads(raw_spec)
     spec_id = "data_request__" + hashlib.sha256(
@@ -278,14 +284,14 @@ def test_idempotent_validation_migrates_legacy_hook_state_to_durable_ledger(tmp_
         spec_id: {
             "provider": "data",
             "verified": True,
-            "input_package_artifact_id": "dataset__legacy",
+            "input_package_artifact_id": dataset_id,
             "scientific_authority": False,
         },
     }
 
     migrated = asyncio.run(_validate_data_request_spec(state, raw_spec))
     reopened = State.reopen("experiment", tmp_path, state.run_id)
-    audit = audit_input_delivery_for_execution(reopened, "dataset__legacy")
+    audit = audit_input_delivery_for_execution(reopened, dataset_id)
 
     assert migrated["status"] == "success", migrated
     assert migrated["idempotent"] is True

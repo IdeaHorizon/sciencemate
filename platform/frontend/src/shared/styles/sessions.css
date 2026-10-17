@@ -51,7 +51,7 @@
   width: 26px;
   height: 26px;
   border: 1px solid transparent;
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--color-fg-subtle);
   cursor: pointer;
@@ -150,6 +150,42 @@
 .session-header-actions > button:hover,
 .session-header-actions > .session-action-conflict:hover { color: var(--color-fg); border-color: var(--color-border-strong); }
 .session-header-actions > .session-action-conflict { color: var(--color-warning); }
+
+/* ── 环境条幅：worker 起来时持久化前提没成立 / 修好了 / 连续出现（RFC_WORKER_START_IS_NOT_A_GATE §3.3）──
+   非模态、不是红字、不挡路：一句人话 + 修复 / 详情 / 收起。 */
+.session-environment-banner {
+  margin: 0 var(--space-4);
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-subtle);
+  font-size: var(--font-size-caption);
+}
+.session-environment-banner.tone-warning { border-left-color: var(--color-warning); }
+.session-environment-banner.tone-error { border-left-color: var(--color-danger); }
+.session-environment-banner.tone-info { border-left-color: var(--color-accent); }
+.session-environment-main { display: flex; align-items: flex-start; gap: 8px; }
+.session-environment-main > svg { flex: none; margin-top: 2px; }
+.session-environment-banner.tone-warning .session-environment-main > svg { color: var(--color-warning); }
+.session-environment-banner.tone-error .session-environment-main > svg { color: var(--color-danger); }
+.session-environment-text { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.session-environment-text strong { font-weight: 600; }
+.session-environment-text span { color: var(--color-fg-muted); }
+.session-environment-result { font-family: var(--font-mono); white-space: pre-wrap; }
+.session-environment-actions { display: flex; align-items: center; gap: 4px; flex: none; }
+.session-environment-actions button {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 8px; border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  background: transparent; color: inherit; cursor: pointer; font: inherit;
+}
+.session-environment-actions button:disabled { opacity: 0.6; cursor: default; }
+.session-environment-repair { border-color: var(--color-warning) !important; }
+.session-environment-details {
+  margin: 8px 0 0; padding: 8px 10px; max-height: 240px; overflow: auto;
+  font-family: var(--font-mono); font-size: var(--font-size-caption); white-space: pre-wrap;
+  border-top: 1px solid var(--color-border); color: var(--color-fg-muted);
+}
 .session-review-updates { padding: 5px 3px; color: var(--color-fg-muted); font-size: var(--font-size-meta); text-decoration: none; }
 .session-review-updates:hover { color: var(--color-fg); }
 .session-header-actions details { position: relative; }

@@ -91,6 +91,35 @@ test("completed direct payloads produce tool, artifact, message, and usage views
   assert.equal(resources.coverage, "partial");
 });
 
+test("tool.completed carries the envelope outcome so a pause is not read as an execution", () => {
+  // #947：权限 pause 与批准后的真实提交都是 tool.completed；能分开它俩的只有
+  // 后端从工具 envelope 取出的 resultStatus。摘要是截断文本，不许拿来猜。
+  const paused = readPayload(event(1, "tool.completed", {
+    stepId: "step-1",
+    toolCallId: "tool-1",
+    toolName: "submit_job",
+    resultSummary: '{"status": "pause", "pause_event": {"question": "…[truncated]',
+    resultStatus: "pause",
+  }));
+  const executed = readPayload(event(2, "tool.completed", {
+    stepId: "step-1",
+    toolCallId: "tool-2",
+    toolName: "submit_job",
+    resultSummary: "{}",
+    resultStatus: "success",
+  }));
+  const legacy = readPayload(event(3, "tool.completed", {
+    stepId: "step-1",
+    toolCallId: "tool-3",
+    toolName: "submit_job",
+    resultSummary: "done",
+  }));
+
+  assert.equal(paused.resultStatus, "pause");
+  assert.equal(executed.resultStatus, "success");
+  assert.equal(legacy.resultStatus, undefined, "没有结构化结局的老事件不许被猜成成功");
+});
+
 test("active tool.failed direct fields produce a forced-open error view", () => {
   const projection = projectExecution([
     event(1, "step.started", { stepId: "step-active", title: "Validate inputs" }),

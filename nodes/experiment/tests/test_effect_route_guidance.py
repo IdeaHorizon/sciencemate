@@ -58,6 +58,7 @@ def _effectful_decision(tool: str, **updates: object) -> dict[str, object]:
     return decision
 
 
+@pytest.mark.skip(reason="v2 模型面：路线边界指引退出模型面；v3 承接见 test_060_s1d_no_route_authority.py / test_060_s1d_natural_flows.py")
 def test_registered_execution_tool_descriptions_tell_the_actual_route_boundary():
     bash_description = get_tool("safe_run_bash").description
     python_description = get_tool("safe_execute_python").description
@@ -98,6 +99,7 @@ def test_registered_execution_tool_descriptions_tell_the_actual_route_boundary()
             assert false_claim not in description, (name, false_claim)
 
 
+@pytest.mark.skip(reason="v2 模型面：路线边界指引退出模型面；v3 承接见 test_060_s1d_no_route_authority.py / test_060_s1d_natural_flows.py")
 def test_harness_rules_tell_the_actual_route_boundary():
     rules = _rules()
     assert "工具返回需要路线时" in rules
@@ -119,6 +121,7 @@ def test_harness_rules_tell_the_actual_route_boundary():
         assert false_claim not in rules, false_claim
 
 
+@pytest.mark.skip(reason="v2 模型面：路线边界指引退出模型面；v3 承接见 test_060_s1d_no_route_authority.py / test_060_s1d_natural_flows.py")
 def test_python_unpack_rejection_guides_route_declaration_and_retry_without_completing_other_step(
     tmp_path,
     monkeypatch,
@@ -379,6 +382,7 @@ def test_bash_unpack_route_requirement_is_unchanged(tmp_path, monkeypatch):
     assert spawned is False
 
 
+@pytest.mark.skip(reason="v2 模型面：路线边界指引退出模型面；v3 承接见 test_060_s1d_no_route_authority.py / test_060_s1d_natural_flows.py")
 def test_ready_python_route_step_rejects_unbound_python_and_guidance_redirects_diagnosis(
     tmp_path,
     monkeypatch,

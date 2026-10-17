@@ -149,6 +149,28 @@ def launcher_refusal(stderr: bytes | str) -> str | None:
     return None
 
 
+SANDBOX_LIMIT_MARKER = "HARNESS_SANDBOX_LIMIT"
+"""命令撞了资源墙时 stderr 末尾那一行的开头：``HARNESS_SANDBOX_LIMIT <resource> k=v …``。
+
+词表是 Docker 年代的 supervisor 定下的（71f2e20c 随容器一起删了产出方），读的一侧一直
+还在：``run_bash`` / ``execute_python`` / experiment 的 ``safe_bash`` 都按
+「退出码 ∈ :data:`SANDBOX_LIMIT_EXIT_CODES` 且 stderr 含这个标记」翻成
+``error_code=sandbox_resource_exhausted`` + ``resource``。原生后端接回的第一条是
+``memory``（#1179）：cgroup 的 OOM 在咽喉那边本来只剩一个裸 ``rc=-9``，和「被 SIGKILL」
+「被取消」长得一模一样。
+"""
+
+SANDBOX_LIMIT_EXIT_CODES: dict[str, int] = {
+    "storage": 125,
+    "output": 126,
+    "memory": 137,
+    "pids": 138,
+}
+"""资源名 → 撞墙时交出去的退出码。与读的一侧那三份 ``{125: storage, …}`` 是同一张表；
+一致性由 tests/test_the_memory_wall_says_it_was_the_memory_wall.py 真走一次 run_bash /
+execute_python 钉住（产出方翻出来的码，读的一侧必须认得）。"""
+
+
 def enforcement_policy() -> str:
     raw = os.environ.get(POLICY_ENV, "").strip().lower()
     if not raw:
@@ -206,7 +228,9 @@ class CommandSpec:
 class Launch(Protocol):
     """后端交回来的可起进程：``argv`` 由 spawn_and_wait 起，取消走 ``terminate``。
 
-    可选属性：``cwd`` / ``env``（原生后端用，咽喉原样应用）。``terminate`` 返回 False
+    可选属性：``cwd`` / ``env``（原生后端用，咽喉原样应用）；``limit_hit(returncode)``
+    （命令跑完后答「撞了哪堵资源墙」→ ``(resource, detail)`` 或 None，见
+    :data:`SANDBOX_LIMIT_MARKER`）。``terminate`` 返回 False
     表示后端这边没有可停的东西，咽喉立刻杀进程组；返回 None / True 表示后端会把
     进程带下来，咽喉等一小段 drain。
     """
@@ -479,6 +503,8 @@ __all__ = [
     "LAUNCHER_ERROR_MARKER",
     "Launch",
     "POLICY_ENV",
+    "SANDBOX_LIMIT_EXIT_CODES",
+    "SANDBOX_LIMIT_MARKER",
     "UNATTENDED_MINIMUM",
     "UNRECOVERABLE",
     "enforcement_policy",

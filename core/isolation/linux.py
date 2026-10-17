@@ -12,8 +12,11 @@
   **ABI ≥ 4（内核 ≥ 6.7）管 TCP**：探针证明 connect 被拒才声明 NET_DENY，记账
   ``net_scope: tcp``（只管 TCP bind/connect；UDP / ICMP 不在内，bwrap 才是 ``all``）。
 * **systemd-run --user --scope**：MemoryMax / TasksMax / CPUQuota，也就是 cgroup v2。
-  探针成功才声明 MEM_CAP / PIDS_CAP；整个 scope 在 cleanup 时 ``systemctl --user stop``，
-  比 PID 快照差集更准（``setsid`` 逃逸也逃不出 cgroup）。
+  探针成功才声明 MEM_CAP / PIDS_CAP；每条命令的 scope 放进**它自己的 slice**
+  （``app-hf<id>.slice``），cleanup 时 ``systemctl --user stop`` 那个 slice（连同 scope），
+  比 PID 快照差集更准（``setsid`` 逃逸也逃不出 cgroup）。为什么要多一层 slice 见
+  :func:`_memory_wall`：OOM 记在 cgroup 的 ``memory.events`` 里，而 scope 的 cgroup
+  在命令一结束就被 systemd 收走了（#1179）。
 
 层次（外→内）：systemd-run → bwrap → landlock 启动器 → 命令。有 bwrap 时不走 landlock
 启动器，最内层换成 ``_exec.py`` 垫片 —— 最内层必须是我们的代码，载荷起不起得来才有人说
@@ -22,6 +25,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import shutil
 import sys
@@ -136,14 +140,87 @@ def _probe_landlock() -> tuple[int, bool, str]:
     return abi, True, ""
 
 
+def _systemd_run_argv(exe: str, ident: str) -> tuple[list[str], str, str]:
+    """命令进 systemd 的那一段 argv（不含限额与载荷）+ scope 名 + slice 名。探针与 prepare
+    共用这一份：探针证明的必须正是 prepare 用的形状。
+
+    * ``--slice``：scope 住进它自己的 slice。命令结束 scope 的 cgroup 立刻被收走，
+      slice 留着、它的 ``memory.events`` 是层级计数 —— OOM 记在那里读得到（:func:`_memory_wall`）。
+      名字 ``app-…`` = 嵌在 ``app.slice`` 里，与此前 scope 默认落的位置同层。
+    * ``--collect``：被 OOM 停掉的 scope 进 failed 态，不 collect 就一直挂在用户 manager 里
+      （``systemctl --user stop`` 不清 failed 态；node20 实测每次 OOM 留一个）。
+    """
+    unit = f"hf-{ident}.scope"
+    slice_unit = f"app-hf{ident}.slice"
+    argv = [exe, "--user", "--scope", "--quiet", "--collect", f"--unit={unit}",
+            f"--slice={slice_unit}"]
+    return argv, unit, slice_unit
+
+
+#: cgroup v2 的挂载点。模块级是为了测试能指到一棵假 cgroup 树。
+_CGROUP_ROOT = Path("/sys/fs/cgroup")
+
+
+def _memory_wall(systemctl: str, slice_unit: str, memory_max: int,
+                 returncode: int | None) -> tuple[str, str] | None:
+    """这条命令是不是撞了内存墙：读它那片 slice 的 ``memory.events``（#1179）。
+
+    **为什么读 slice 而不是 scope**（node20 实测，systemd 255 / 内核 6.8）：scope 的
+    cgroup 在里面最后一个进程退出时由 systemd 自己删掉。asyncio ``proc.wait()`` 一返回就去读
+    scope 的 ``memory.events``，8 次里 3 次文件已经没了（被 OOM 杀的 4 次里 2 次）—— 一个
+    一半时间答不上来的判据。systemd 自己也读这个文件、把 OOM 记成 ``Result=oom-kill``，
+    但 scope 有 OOMPolicy / 这条 Result 是 systemd 253 起的事（Debian 12 / RHEL 9 是 252、
+    Ubuntu 22.04 是 249）。slice 在命令结束后照旧活着（我们自己在 cleanup 里停它），而 cgroup v2 的
+    ``memory.events`` 是**层级**计数：子 cgroup 里的 OOM 记在每一层祖先上。slice 每条命令
+    新建一个，计数起点就是 0。实测 5/5 读到 ``oom_kill 1``、对照 5/5 是 0。
+
+    **只翻失败的命令**：退出码 0 的命令即使里面某个进程被 OOM 杀过，它也已经交了结果 ——
+    不把成功改写成失败。失败 + cgroup 记过 OOM（``oom`` / ``oom_kill`` / ``oom_group_kill``
+    任一 > 0）= 这次失败是撞了内存墙。
+
+    答不上来（systemctl 不在 / slice 已经没了 / 文件读不了 / 挂载带 ``memory_localevents``
+    让父层不计子层）一律 None —— 咽喉照旧交出原始退出码，不猜。
+    """
+    if not returncode:
+        return None
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            [systemctl, "--user", "show", "-p", "ControlGroup", "--value", slice_unit],
+            capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    cgroup = out.stdout.strip()
+    if out.returncode != 0 or not cgroup.startswith("/"):
+        return None
+    try:
+        text = (_CGROUP_ROOT / cgroup.lstrip("/") / "memory.events").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    counts: dict[str, int] = {}
+    for line in text.splitlines():
+        key, _, value = line.partition(" ")
+        if value.strip().isdigit():
+            counts[key] = int(value.strip())
+    keys = ("oom", "oom_kill", "oom_group_kill")
+    if not any(counts.get(key, 0) > 0 for key in keys):
+        return None
+    detail = " ".join(f"{key}={counts.get(key, 0)}" for key in keys)
+    return "memory", f"{detail} memory_max={memory_max}"
+
+
 def _probe_systemd() -> tuple[str | None, str]:
     exe = shutil.which("systemd-run")
     if not exe:
         return None, "systemd-run not installed"
-    unit = f"hf-probe-{uuid.uuid4().hex[:8]}.scope"
-    if not run_ok([exe, "--user", "--scope", "--quiet", f"--unit={unit}",
-                   "-p", "MemoryMax=64M", "-p", "TasksMax=16", "-p", "CPUQuota=50%",
-                   "/bin/true"]):
+    argv, _unit, slice_unit = _systemd_run_argv(exe, f"probe{uuid.uuid4().hex[:8]}")
+    ok = run_ok([*argv, "-p", "MemoryMax=64M", "-p", "TasksMax=16", "-p", "CPUQuota=50%",
+                 "/bin/true"])
+    systemctl = shutil.which("systemctl")
+    if systemctl:
+        run_ok([systemctl, "--user", "stop", slice_unit])
+    if not ok:
         return None, "systemd-run --user --scope with cgroup limits failed (no user session / no delegation?)"
     return exe, ""
 
@@ -389,9 +466,10 @@ class LinuxBackend:
             inner = [*self._bwrap_argv(layers, network=spec.network_access), "--", *inner]
         unit = None
         stop: list[str] = []
+        witness = None
         if self._systemd:
             limits = spec.limits
-            unit = f"hf-{uuid.uuid4().hex[:12]}.scope"
+            systemd_argv, unit, slice_unit = _systemd_run_argv(self._systemd, uuid.uuid4().hex[:12])
             props = []
             memory = int(getattr(limits, "memory_bytes", 0) or 0)
             pids = int(getattr(limits, "pids", 0) or 0)
@@ -402,17 +480,20 @@ class LinuxBackend:
                 props += ["-p", f"TasksMax={pids}"]
             if cpus:
                 props += ["-p", f"CPUQuota={int(cpus * 100)}%"]
-            inner = [self._systemd, "--user", "--scope", "--quiet", f"--unit={unit}", *props,
-                     "--", *inner]
+            inner = [*systemd_argv, *props, "--", *inner]
             systemctl = shutil.which("systemctl")
             if systemctl:
-                stop = [systemctl, "--user", "stop", unit]
+                # 停 slice = 连同里面的 scope 一起停；只停 scope 会把 slice 留在用户 manager 里。
+                stop = [systemctl, "--user", "stop", slice_unit]
+                if memory:
+                    witness = functools.partial(_memory_wall, systemctl, slice_unit, memory)
         return NativeLaunch(
             argv=inner,
             cwd=spec.cwd,
             env=payload_environment(spec.environment, scratch_dir=scratch_dir, home=spec.home),
             unit=unit,
             stop_argv=stop,
+            limit_witness=witness,
             scratch_dir=scratch_dir,
             unmet=tuple(unmet),
         )

@@ -903,6 +903,10 @@ register_tool(
 
 # ── request_human_input ──────────────────────────────────────────────────────
 
+#: 代答的出处标记：没有人在场，框架按调用方的推荐项作答（#1053 §3a）。
+_UNATTENDED_DEFAULT = "unattended_default"
+
+
 def _normalize_options(options: Any) -> tuple[list[dict], str]:
     """把 options 规范成 [{label, description}]；返回 (规范化结果, 错误说明)。
 
@@ -1015,11 +1019,24 @@ async def _request_human_input(state: State, question: str,
             "human_input_bypassed", question=question,
             n_options=len(normalized),
             selected_option_index=idx,
+            answered_by=_UNATTENDED_DEFAULT,
             response_preview=default_answer[:200])
+        # 代答照旧（连续档不停人，wangd 2026-08-19），但结果要**自己说出是谁答的**
+        # （#1053 §3a）。此前只有一个 `bypassed: True`，形状和真人答复（resume_loop
+        # 回填的 {status, response, asked_by}）几乎一样 —— 梅雨项目里模型据此在
+        # 终稿写「用户选择了改纯文献机制综述」，而 session_messages 里根本没有这条
+        # 用户消息。`answered_by` 只出现在代答路径上；真人答复没有这个键。
         return {
             "status": "success",
             "response": default_answer,
             "bypassed": True,
+            "answered_by": _UNATTENDED_DEFAULT,
+            "answer_note": (
+                "这不是用户的选择：本会话处于连续（无人值守）档或 --bypass-permissions，"
+                "没有人在场作答，框架按你自己给的推荐项代答"
+                + (f"（选了「{default_answer}」）" if normalized else "")
+                + "。叙述时写「无人确认，按推荐默认采用」，不要写成「用户选择了 …」"
+                "或「用户同意 …」。"),
             "asked_by": state.node_type,
             **({"pending_decisions": pending_decisions} if pending_decisions else {}),
         }

@@ -659,7 +659,7 @@ wheels = [
 
 [[package]]
 name = "harness-framework"
-version = "0.5.2"
+version = "0.5.7"
 source = { editable = "." }
 dependencies = [
     { name = "ase" },
@@ -718,7 +718,7 @@ requires-dist = [
     { name = "cclib", marker = "extra == 'visualization-advanced'", specifier = ">=1.8" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "lasso-python", marker = "extra == 'visualization-advanced'", specifier = ">=2.0.4" },
-    { name = "markdown", marker = "extra == 'docs'", specifier = ">=3.5" },
+    { name = "markdown", marker = "extra == 'docs'", specifier = "==3.10.3" },
     { name = "matplotlib", specifier = ">=3.8" },
     { name = "mdanalysis", marker = "extra == 'visualization-advanced'", specifier = ">=2.9" },
     { name = "meshio", marker = "extra == 'visualization-advanced'", specifier = ">=5.3" },

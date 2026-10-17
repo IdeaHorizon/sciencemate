@@ -64,6 +64,15 @@ def _run(control_dir: Path) -> int:
     code = proc.wait()
     record.update({"status": "exited", "exit_code": code, "ended_at": time.time()})
     write_object(record_path, record)
+    # 后端交代的收尾（linux：停掉这条作业自己的 systemd slice）。前台命令由咽喉 cleanup，
+    # 作业没人等，不收的话每个作业在用户 manager 里留一个空 slice（#1179）。
+    cleanup = launch.get("cleanup_argv") or []
+    if cleanup:
+        try:
+            subprocess.run(cleanup, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=30, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     # 命令结束后整棵进程树死：后台残留不能活过作业本身。请整组退出（含本进程 ——
     # 它本来就要返回了），不等待。
     try:

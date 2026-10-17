@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import subprocess
+import sys
 import time
 import threading
 
@@ -763,7 +765,8 @@ def test_unknown_orphan_reserves_overlapping_outputs(tmp_path):
     assert conflicts and conflicts[0]["kind"] == "unknown_orphan"
     # 隔离是阻断而不是释放：登记回执和冲突都必须指名唯一的解除通道。
     assert "resolve_unknown_orphan" in result["message"]
-    assert "resolve_unknown_orphan" in conflicts[0]["resolution"]
+    # v3（060 S1d）：解除工具退出模型面；冲突文本给的出口是换输出路径或 report_blocker，仍点名记录 id。
+    assert "report_blocker" in conflicts[0]["resolution"]
     assert conflicts[0]["artifact_id"] in conflicts[0]["resolution"]
     assert "本地作业隔离层" in conflicts[0]["resolution"]
     assert "docker inspect" not in conflicts[0]["resolution"]
@@ -873,6 +876,89 @@ def test_resolve_unknown_orphan_refuses_while_declared_process_is_alive(tmp_path
     assert "output_paths" in refused["next_action"]
     assert state.list_artifacts("unknown_orphan_resolution") == []
     assert _active_output_conflicts(state, [str(root)])
+
+
+def _proc_state(pid: int) -> str:
+    """/proc/<pid>/stat 的状态字段（comm 可能含空格和括号，取最后一个 ')' 之后）。"""
+    raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+    return raw.rsplit(")", 1)[1].split()[0]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="真僵尸 + /proc 只在 Linux 上（本机 /proc 才是被测的探活来源）")
+def test_resolve_unknown_orphan_releases_lock_when_declared_pid_is_a_zombie(tmp_path):
+    """#1184 第 2 项：进程已退出、父进程还没 waitpid —— /proc/<pid> 还在，但它不会再写。
+
+    只查 /proc/<pid> 在不在会把僵尸判成活的，这条孤儿就永远解不开。
+    """
+    from nodes.experiment.tools.resource_manager import (
+        _active_output_conflicts, _resolve_unknown_orphan,
+    )
+
+    child = subprocess.Popen(["/bin/sh", "-c", "exit 0"])
+    try:
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                if _proc_state(child.pid) == "Z":
+                    break
+            except FileNotFoundError:
+                # SIGCHLD 被继承成 SIG_IGN 的环境里内核直接收尸，造不出僵尸。
+                pytest.skip("子进程被自动收尸（SIGCHLD=SIG_IGN），本机造不出僵尸")
+            assert time.monotonic() < deadline, "子进程没有变成僵尸"
+            time.sleep(0.01)
+        # 前提成立：表项还在 —— 旧判据会据此判「活」。
+        assert os.path.exists(f"/proc/{child.pid}")
+
+        state, root, orphan_id = _isolated_orphan(
+            tmp_path, [_local_pid_reference(child.pid)])
+        released = asyncio.run(_resolve_unknown_orphan(
+            state, artifact_id=orphan_id, reason="作业进程已退出，只剩僵尸表项"))
+
+        assert released["status"] == "success", released
+        assert [probe["state"] for probe in released["process_probes"]] == ["dead"]
+        assert _active_output_conflicts(state, [str(root)]) == []
+    finally:
+        child.wait(timeout=10)
+
+
+@pytest.mark.parametrize(("status", "expected"), [
+    ("zombie", "dead"),
+    ("sleeping", "alive"),
+    ("running", "alive"),
+])
+def test_observed_pid_liveness_reads_process_state_not_proc_entry(
+    monkeypatch, status, expected,
+):
+    """替身 /proc：表项一律「存在」，结论只能来自进程状态 —— 僵尸算死，别的照常算活。"""
+    import psutil
+
+    from nodes.experiment.tools import resource_manager as rm
+    from shared.lib import process_control
+
+    pid = 424242
+    real_isdir, real_exists = os.path.isdir, os.path.exists
+    monkeypatch.setattr(os.path, "isdir",
+                        lambda path: str(path) == "/proc" or real_isdir(path))
+    monkeypatch.setattr(os.path, "exists",
+                        lambda path: str(path) == f"/proc/{pid}" or real_exists(path))
+
+    class _FakeProcess:
+        def __init__(self, asked: int) -> None:
+            assert asked == pid
+
+        def status(self) -> str:
+            return {"zombie": psutil.STATUS_ZOMBIE,
+                    "sleeping": psutil.STATUS_SLEEPING,
+                    "running": psutil.STATUS_RUNNING}[status]
+
+    monkeypatch.setattr(process_control.psutil, "Process", _FakeProcess)
+
+    probe = rm._probe_observed_process_liveness(
+        f"pid={pid}@{socket.gethostname()}")
+
+    assert probe["state"] == expected, probe
+    assert probe["pid"] == str(pid)
 
 
 def test_resolve_unknown_orphan_refuses_unprobeable_process_reference(tmp_path):
@@ -1766,7 +1852,7 @@ def test_submit_job_stops_reporting_orphan_conflict_after_resolution(
     assert blocked["status"] == "error"
     assert blocked["blocker"]["kind"] == "active_external_job_output_conflict"
     assert blocked["blocker"]["conflicts"][0]["kind"] == "unknown_orphan"
-    assert "resolve_unknown_orphan" in blocked["error"]
+    assert "report_blocker" in blocked["error"]  # v3（060 S1d）：解除工具退出模型面
 
     released = asyncio.run(rm._resolve_unknown_orphan(
         state, artifact_id=orphan_id, reason="核查过这批遗留输出，隔离期内无写入"))

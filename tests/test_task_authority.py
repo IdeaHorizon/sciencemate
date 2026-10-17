@@ -145,7 +145,7 @@ def test_an_absent_assignment_is_pending_not_none(tmp_path: Path) -> None:
 
     bound = log.append(task_instance_uuid="u2", objective="x", actor="a",
                        prereg_assignment=PreregAssignment.exact(
-                           "pre_registration__H1", version="2", content_hash="abc"))
+                           "pre_registration__H1", version="2", content_hash="c" * 64))
     assert bound.assignment_kind == ASSIGNMENT_EXACT
     assert bound.assignment.artifact_id == "pre_registration__H1"
 

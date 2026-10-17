@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -180,12 +181,9 @@ def _managed_external_artifact_save_gate(
             ),
         },
         "hint": (
-            "使用 submit_job、reconcile_external_submission、job_status/"
-            "finalize_external_job 或 cancel_job；不要用 save_artifact 伪造"
-            "外部作业事实。悬空作业按出路选择：能证明归属就走 "
-            "reconcile_external_submission/cancel_job/finalize_external_job；"
-            "证不明归属只能 record_unknown_orphan —— 它是隔离并锁死其输出根，"
-            "不是释放；解锁另走 resolve_unknown_orphan 的机械证据通道。"
+            "外部作业的事实由 submit_job / job_status / wait_for_external_job / cancel_job "
+            "按机械执行结果自动记录；不要用 save_artifact 伪造。读不出、对不上的作业先 "
+            "job_status 重读，确实处理不了就 report_blocker 交给人，然后诚实 finish。"
         ),
     }
 _ACTIVE_JOB_STATES = frozenset({"submitted", "running", "unknown"})
@@ -510,7 +508,8 @@ def _validated_submission_receipt(
             f"{artifact_type} {artifact_id}: content must be a JSON object")
     status = payload.get("status")
     if status not in {
-        "success", "accepted_identity_unresolved", "submission_outcome_unknown",
+        "success", "submitted_needs_recovery",
+        "accepted_identity_unresolved", "submission_outcome_unknown",
     }:
         raise SubmissionLedgerError(
             f"{artifact_type} {artifact_id}: receipt status is invalid")
@@ -530,6 +529,11 @@ def _validated_submission_receipt(
     ):
         raise SubmissionLedgerError(
             f"{artifact_type} {artifact_id}: successful receipt has no job_id")
+    if status == "submitted_needs_recovery" and (
+            artifact_type != _EXTERNAL_JOB_SUBMISSION_RECOVERY_TYPE
+            or not _accepted_job_payload(payload)):
+        raise SubmissionLedgerError(
+            f"{artifact_type} {artifact_id}: accepted recovery receipt is invalid")
     if status in {"accepted_identity_unresolved", "submission_outcome_unknown"} and (
             job_id not in {None, ""} or not payload.get("do_not_resubmit")):
         raise SubmissionLedgerError(
@@ -779,10 +783,7 @@ def owed_external_job_closure_records(state: Any) -> list[dict[str, Any]]:
         if (
             not is_task_obligation
             and (
-                payload.get("status") != "success"
-                or payload.get("dry_run")
-                or not payload.get("scheduler")
-                or not payload.get("job_id")
+                not _accepted_job_payload(payload)
             )
         ):
             continue
@@ -972,6 +973,25 @@ def _paths_overlap(left: str, right: str) -> bool:
     except ValueError:
         return False
 
+def _accepted_job_payload(payload: dict[str, Any]) -> bool:
+    """Recognize a physically accepted job without upgrading task outcome."""
+    status = payload.get("status")
+    if status == "success":
+        # Legacy submission payloads did not always include dry_run.
+        return bool(
+            not payload.get("dry_run")
+            and payload.get("scheduler") and payload.get("job_id")
+        )
+    if status == "submitted_needs_recovery":
+        return bool(
+            payload.get("dry_run") is False
+            and payload.get("do_not_resubmit") is True
+            and isinstance(payload.get("scheduler"), str) and payload["scheduler"].strip()
+            and isinstance(payload.get("job_id"), str) and payload["job_id"].strip()
+        )
+    return False
+
+
 def _submission_payloads(state: Any) -> list[dict[str, Any]]:
     """Load primary submission receipts and their durable recovery fallback."""
     records: list[dict[str, Any]] = []
@@ -982,8 +1002,7 @@ def _submission_payloads(state: Any) -> list[dict[str, Any]]:
             continue
         for artifact in artifacts:
             payload = _read_json_artifact(state, artifact)
-            if (payload and payload.get("status") == "success" and not payload.get("dry_run")
-                    and payload.get("scheduler") and payload.get("job_id")):
+            if payload and _accepted_job_payload(payload):
                 payload["artifact_id"] = artifact.get("id")
                 payload["submission_record_type"] = artifact_type
                 records.append(payload)
@@ -1333,10 +1352,17 @@ def _probe_observed_process_liveness(reference: str) -> dict[str, Any]:
         if not os.path.isdir("/proc"):
             return {"reference": token, "probe": "pid", "pid": pid, "state": "unavailable",
                     "detail": "本机没有 /proc，无法机械探活 pid"}
-        alive = os.path.exists(f"/proc/{pid}")
+        # 认活不能只看 /proc/<pid> 在不在：僵尸（已退出、父进程还没 waitpid 收走）
+        # 照样占着表项，于是一个早就退出的进程永远被判「还活着」，这条孤儿就永远
+        # 解不开（#1184 第 2 项）。用框架的 process_control.alive —— 僵尸算死，
+        # 与 ledger 认活同一个判据，不在这里另写一份。
+        from shared.lib.process_control import alive as process_alive
+
+        alive = process_alive(int(pid))
         return {"reference": token, "probe": "pid", "pid": pid, "host": claimed,
                 "state": "alive" if alive else "dead",
-                "detail": f"{here} 上 /proc/{pid} {'存在' if alive else '不存在'}"}
+                "detail": (f"{here} 上 pid {pid} "
+                           f"{'仍在运行' if alive else '已不在运行（不存在或只剩僵尸表项）'}")}
     if probe == "container":
         from core import sandbox
         available, availability_detail = sandbox.availability(refresh=True)
@@ -1598,7 +1624,7 @@ def _unknown_orphan_silence_next_action(
             + "silence_probe.unreadable 里是够不着的条目：只有权限一类可以安全补救 —— "
             "对这些路径 chmod u+rX（目录光有 +r 还不够，os.stat 子项要 +x；chmod 不改 mtime），"
             "恢复可读后直接重新调用 "
-            f'resolve_unknown_orphan(artifact_id="{orphan_id}", reason="...")。'
+            f'解除记录 {orphan_id}（解除工具已退出模型面：换一个不冲突的输出路径，或 report_blocker 交给人）。'
             "断链、或输出根本身被换成了符号链接，则无法在不改动 mtime 的前提下补救："
             "请人工核查它指向哪里、那个目标是否还在被写，确认后改走换目录一路。"
             + _unknown_orphan_alternative_route(roots))
@@ -1852,7 +1878,7 @@ def _active_output_conflicts(state: Any, output_roots: list[str]) -> list[dict[s
                     "这是 record_unknown_orphan 铸下的隔离锁，不是在跑的作业："
                     "job_status/cancel_job/reconcile/finalize 都对它无效。"
                     "换一组不重叠的 output_paths 即可继续；确需复用这些根，调用 "
-                    f'resolve_unknown_orphan(artifact_id="{orphan.get("artifact_id")}", '
+                    f'解除隔离记录 {orphan.get("artifact_id")}（解除工具已退出模型面：换输出路径或 report_blocker；'
                     'reason="<解除依据>")，它要求自述进程逐个机械确证已死'
                     "（pid=<数字>@<主机名> 只能在该主机上判定，container=<id> 由本地作业"
                     f'隔离层探活），且这些根自 {orphan.get("recorded_at")} 起无任何新写入。'),
@@ -2031,6 +2057,17 @@ def _local_resources() -> dict[str, Any]:
         boundary_available, boundary_detail = sandbox.availability()
     except Exception as exc:  # 探不出来就如实说探不出来，不当成可用
         boundary_available, boundary_detail = False, f"{type(exc).__name__}: {exc}"
+    # nvidia-smi 看得见的卡 ≠ 本地作业用得上。能不能受管地用上，是 Core 的
+    # gpu_capability().schedulable 回答的问题（#893 阶段 0）；这里照抄，不再写死
+    # False（#895 C）——Core 哪天接上 GPU 分配与隔离，这一项跟着变，节点一行不用改。
+    # 答不上来按「不可用」记，并说明原因。
+    try:
+        gpu_cap = sandbox.gpu_capability()
+        gpu_execution_supported = gpu_cap.schedulable is True
+        gpu_execution_detail = str(gpu_cap.reason or "")
+    except Exception as exc:
+        gpu_execution_supported = False
+        gpu_execution_detail = f"{type(exc).__name__}: {exc}"
     return {
         "scheduler": "local",
         "available": bool(boundary_available),
@@ -2039,9 +2076,8 @@ def _local_resources() -> dict[str, Any]:
         "memory_total_mb": mem_total_mb,
         "memory_available_mb": mem_available_mb,
         "gpus": gpus,
-        # nvidia-smi 看得见的卡 ≠ 本地作业用得上：原生后端不提供本地 GPU 执行
-        # （core/sandbox.prepare_launch 对 gpus>0 直接拒）。
-        "gpu_execution_supported": False,
+        "gpu_execution_supported": gpu_execution_supported,
+        "gpu_execution_detail": gpu_execution_detail,
     }
 
 
@@ -2057,7 +2093,7 @@ def _detect_slurm() -> dict[str, Any]:
     out = {
         "scheduler": "slurm",
         "available": available,
-        "commands": {k: bool(shutil.which(k)) for k in ("sinfo", "squeue", "sbatch", "scancel")},
+        "commands": {k: bool(shutil.which(k)) for k in ("sinfo", "squeue", "sbatch", "sacct", "scancel")},
     }
     if not available:
         return out
@@ -2179,18 +2215,82 @@ def _core_platform_capabilities() -> dict[str, Any]:
     }
 
 
+def _slurm_single_task_request_supported(mpi_ranks: int, gpus: int) -> bool:
+    """The first real Slurm slice is one task with either zero or one GPU."""
+    return mpi_ranks == 1 and gpus in {0, 1}
+
+
+def _submission_candidates(resources: list[dict[str, Any]], *, gpus: int = 0) -> list[str]:
+    """Project discovery through the public launch factory, not adapter presence.
+
+    A candidate still needs action-time authorization and resource admission.
+    This is advice, not a second capability registry or a submission receipt.
+    """
+    return [
+        resource["scheduler"] for resource in resources
+        if resource.get("available")
+        and _submission_launch_adapter_for(resource["scheduler"]) is not None
+        and (not gpus or resource.get("gpu_execution_supported") is True)
+    ]
+
+
 def _discover(namespace: str | None = None) -> dict[str, Any]:
     schedulers = [_local_resources(), _detect_slurm(), _detect_pbs(), _detect_k8s(namespace)]
+    for resource in schedulers:
+        scheduler = resource["scheduler"]
+        resource["availability_basis"] = (
+            "local_boundary_probe" if scheduler == "local" else "client_tools_detected")
+        slurm_cpu_cli = (
+            scheduler == "slurm"
+            and bool(resource.get("available"))
+            and all(
+                (resource.get("commands") or {}).get(name)
+                for name in ("sbatch", "squeue", "sacct", "scancel")
+            )
+        )
+        resource["submission_contract_available"] = (
+            _submission_launch_adapter_for(scheduler) is not None or slurm_cpu_cli
+        )
+        if slurm_cpu_cli:
+            resource["submission_mode"] = "explicit_single_task_cpu_or_single_gpu"
+            resource["submission_request_envelope"] = {
+                "nodes": 1,
+                "mpi_ranks": [1],
+                "gpus": [0, 1],
+            }
+            resource["action_time_requirements"] = [
+                "authorized scheduler-visible workdir and output_dir",
+                "one external job confirmation",
+                "scheduler account permission and terminal accounting",
+            ]
+            resource["remote_write_isolation"] = "missing"
+        elif not resource["submission_contract_available"]:
+            resource.setdefault(
+                "submission_blocker",
+                "slurm_lifecycle_tools_unavailable" if scheduler == "slurm"
+                else "remote_sandbox_contract_unavailable",
+            )
     available = [s["scheduler"] for s in schedulers if s.get("available")]
+    candidates = _submission_candidates(schedulers)
+    explicit = [
+        s["scheduler"] for s in schedulers
+        if s["scheduler"] == "slurm" and s.get("submission_contract_available")
+    ]
     return {
         "status": "success",
         "core_platform_capabilities": _core_platform_capabilities(),
         "available_schedulers": available,
-        "recommended_default": (
-            "slurm" if "slurm" in available
-            else "pbs" if "pbs" in available
-            else "local"
-        ),
+        "submittable_schedulers": candidates,
+        "explicit_submission_schedulers": explicit,
+        "submission_selection_basis": (
+            "Candidates have a public launch contract and a positive availability probe; "
+            "authorization, requested resources and actual launch remain action-time checks. "
+            "Remote available means client tools detected, not permission or proven submission. "
+            "A single-task Slurm CPU or one-GPU job can be submitted only with explicit "
+            "shared work/output paths, action-time admission and confirmation; GPU request "
+            "support does not prove allocation or use, and auto does not select Slurm. "
+            "PBS remains dry-run only."),
+        "recommended_default": candidates[0] if candidates else None,
         "resources": schedulers,
     }
 
@@ -2233,17 +2333,26 @@ def _recommend(
     scheduler_preference: str | None,
     namespace: str | None,
 ) -> dict[str, Any]:
+    requested_ranks = mpi_ranks or 1
+    requested_gpus = gpus or 0
     profile = _discover(namespace)
-    available = set(profile["available_schedulers"])
-    sched = scheduler_preference if scheduler_preference in available else profile["recommended_default"]
-    if gpus and gpus > 0 and "slurm" in available:
-        sched = "slurm"
-    elif sched == "local" and ((mpi_ranks or 1) > 1 or (gpus or 0) > 0):
-        # Local can still run MPI, but make the limitation explicit.  GPU is not a
-        # limitation but an absence: the native backends do not provide it (#893).
-        pass
+    candidates = _submission_candidates(profile["resources"], gpus=requested_gpus)
+    sched = (
+        scheduler_preference if scheduler_preference in candidates
+        else candidates[0] if not scheduler_preference and candidates
+        else None
+    )
+    if (
+        scheduler_preference == "slurm"
+        and _slurm_single_task_request_supported(requested_ranks, requested_gpus)
+    ):
+        slurm = next(
+            (r for r in profile["resources"] if r["scheduler"] == "slurm"), {}
+        )
+        if slurm.get("submission_contract_available"):
+            sched = "slurm"
 
-    ranks = mpi_ranks or 1
+    ranks = requested_ranks
     cpr = cpus_per_rank or 1
     cpus = max(1, ranks * cpr)
     mem = memory_gb if memory_gb is not None else _default_memory_gb(cpus)
@@ -2253,22 +2362,44 @@ def _recommend(
         cost = hourly_rate_usd * (wall / 60.0)
 
     warnings = []
+    if sched is None:
+        warnings.append(
+            "No current public submit_job backend matches the requested resources/preference. "
+            "Installed clients and scheduler adapter interfaces do not establish an executable "
+            "submission contract or authorization. Local CPU jobs require an available boundary; "
+            "explicit single-task CPU or one-GPU Slurm needs lifecycle CLI tools, shared paths "
+            "and action-time confirmation; it is never an automatic fallback. Keep the "
+            "requested resources and report remaining gaps rather than blindly retrying.")
+    if gpus and gpus > 0:
+        if sched == "slurm":
+            warnings.append(
+                "The explicit one-GPU Slurm request does not prove allocation, actual GPU "
+                "compute, or device isolation. Verify scheduler allocation and in-job "
+                "application evidence separately; never fall back to CPU silently.")
+        else:
+            warnings.append(
+                "local native backends do not provide GPU execution; visible GPUs are "
+                "discovery facts only. Keep the GPU request and select an explicitly "
+                "authorized backend rather than silently reducing it.")
+    if sched == "slurm":
+        warnings.append(
+            "Slurm CPU or one-GPU execution is an explicit submission path, not "
+            "authorization: workdir and output_dir must be scheduler-visible and writable, "
+            "the account must be permitted, and the external job requires confirmation. "
+            "Remote write/network/device isolation is not guaranteed by this node."
+        )
     local = next((r for r in profile["resources"] if r["scheduler"] == "local"), {})
     if sched == "local":
         if local.get("cpu_count") and cpus > local["cpu_count"]:
             warnings.append(f"requested {cpus} CPUs exceeds local cpu_count={local['cpu_count']}")
         if local.get("memory_available_mb") and mem * 1024 > local["memory_available_mb"]:
             warnings.append(f"requested {mem:.1f} GB exceeds local available memory")
-        if gpus and gpus > 0:
-            warnings.append(
-                "local native backends do not provide GPU execution (visible GPUs are not "
-                "usable by local jobs); submit_job(scheduler=local, gpus>0) is refused before "
-                "approval — use a GPU scheduler such as slurm, or gpus=0 if no GPU is needed")
 
     return {
         "status": "success",
         "recommendation": {
             "scheduler": sched,
+            "scheduler_preference": scheduler_preference,
             "task_type": task_type,
             "mpi_ranks": ranks,
             "cpus_per_rank": cpr,
@@ -2434,7 +2565,8 @@ async def _preflight_build_resources(
         advice = (
             "Advisory only: the declared build mode may not be runnable on this host/registration "
             "(see capability_issues). Resolve them, choose another approved resource target, or "
-            "proceed and record the deviation in experiment_log; nothing here blocks configure/compile.")
+            "proceed and include the deviation in the final finish limitations; nothing here blocks "
+            "configure/compile.")
     elif warnings and policy == "requires_user_approval":
         decision = "capacity_concerns_user_consent_declared"
         advice = (
@@ -2445,7 +2577,7 @@ async def _preflight_build_resources(
         decision = "capacity_concerns"
         advice = (
             "Capacity warnings exist (see capacity_warnings). Compile only in the declared mode and "
-            "record the warnings in experiment_log; runtime changes after compilation are limited "
+            "include the warnings in the final finish limitations; runtime changes after compilation are limited "
             "to the declared policy.")
     else:
         decision = "build_mode_feasible"
@@ -2640,7 +2772,9 @@ def _local_job_boundary_block(
 def _scheduler_role_guard(
         state: State, scheduler: str, command: str,
         workdir: str | None, output_dir: str | None,
-        output_roots: list[str], stage: str = "diagnostic") -> dict | None:
+        output_roots: list[str], stage: str = "diagnostic", *,
+        build_sandbox_roots: tuple[list[Path], list[Path]] | None = None,
+) -> dict | None:
     # stage 不再是路径能力；所有路径都必须由 path_roles 本身授权。
     del stage
     contract = validate_path_roles(state)
@@ -2657,6 +2791,18 @@ def _scheduler_role_guard(
             ("output_paths", output_roots, {"build_root", "run_root"}),
     ):
         for value in values:
+            if build_sandbox_roots is not None and (
+                label == "workdir"
+                or (label == "output_paths" and value == workdir)
+            ):
+                # The default output roots include cwd. Both views must use
+                # the boundary already accepted by the shared build guard;
+                # unrelated output-role and remote contracts stay unchanged.
+                from core.isolation._native import write_layers
+                if write_layers(*build_sandbox_roots).grants_write(
+                    Path(value).expanduser().resolve(strict=False)
+                ):
+                    continue
             matches = matching_path_roles(value, state)
             if not any(
                     role.role in allowed_roles
@@ -3116,6 +3262,31 @@ def _local_enforcement_account() -> dict[str, Any]:
         }
 
 
+def _local_cpu_limit_account(account: dict[str, Any]) -> dict[str, str]:
+    """``sandbox_contract.cpus`` 有没有被强制 —— 从能力记账里读 ``cpu_cap``（#841）。
+
+    答案只有三种：``enforced``（后端在 enforced 里报了 cpu_cap）、``not_enforced``
+    （后端答了，但没有 cpu_cap —— 作业能用的核数不受这个数限制）、``unknown``
+    （隔离层答不上来，原因在 ``_local_enforcement_account`` 的 unknown_reason 里）。
+    """
+    if "enforced_invariants" not in account:
+        return {
+            "cpu_limit_enforcement": "unknown",
+            "cpu_limit_enforcement_backend": "unknown",
+        }
+    from core.isolation import Invariant
+
+    return {
+        "cpu_limit_enforcement": (
+            "enforced"
+            if Invariant.CPU_CAP.value in account["enforced_invariants"]
+            else "not_enforced"
+        ),
+        "cpu_limit_enforcement_backend": str(
+            account.get("enforcement_backend") or "unknown"),
+    }
+
+
 def the_backend_accounts_pids_in_a_cgroup() -> bool:
     """当前执行后端是不是**用 cgroup 记 pids** —— 也就是 payload 采样得到
     ``/sys/fs/cgroup/pids.events``。
@@ -3252,6 +3423,7 @@ def _script_for(
         lines = [
             "#!/usr/bin/env bash",
             f"#SBATCH --job-name={job_name}",
+            "#SBATCH --nodes=1",
             f"#SBATCH --ntasks={mpi_ranks}",
             f"#SBATCH --cpus-per-task={cpus_per_rank}",
             f"#SBATCH --mem={_scheduler_memory_mebibytes(memory_gb)}M",
@@ -3260,15 +3432,8 @@ def _script_for(
             lines.append(f"#SBATCH --time={_hhmm(walltime_minutes)}")
         if submission_nonce:
             lines.append(f"#SBATCH --comment=ai4s:{submission_nonce}")
-        if boot_dir:
-            # 调度器自己的 stdout/stderr 只覆盖脚本内 `exec` 重定向**之前**那段
-            # （mkdir / stage-in / identity preflight）。它必须指向一个提交时就
-            # 存在的目录 —— 脚本自己就写在 job_dir 里，所以那里一定存在。
-            # 不给这两条指令的代价是：bootstrap 阶段的失败进 SLURM 默认的
-            # `slurm-<id>.out`，落在 sbatch 继承的 cwd（平台进程工作目录）里，
-            # 既没人去读也会堆积垃圾文件。
-            lines.append(f"#SBATCH --output={boot_dir}/bootstrap.out")
-            lines.append(f"#SBATCH --error={boot_dir}/bootstrap.err")
+        # Bootstrap stdout/stderr are passed as sbatch argv by _submit_command.
+        # User-influenced paths never enter #SBATCH directive text.
         if queue:
             lines.append(f"#SBATCH --partition={queue}")
         if nodelist:
@@ -3277,6 +3442,17 @@ def _script_for(
             lines.append(f"#SBATCH --gres=gpu:{gpus}")
         lines += ["set -eo pipefail", *bootstrap]
         lines += _identity_preflight_lines(workdir)
+        if gpus:
+            # In-allocation visibility context only.  It is not a claim that a
+            # GPU was isolated or that the payload executed a GPU kernel.
+            lines.append(
+                "printf 'HARNESS_GPU_CONTEXT requested_gpus=%s "
+                "slurm_job_num_nodes=%s slurm_ntasks=%s slurm_job_gpus=%s "
+                "slurm_gpus_on_node=%s cuda_visible_devices=%s\\n' "
+                f"'{gpus}' \"${{SLURM_JOB_NUM_NODES-}}\" \"${{SLURM_NTASKS-}}\" "
+                "\"${SLURM_JOB_GPUS-}\" \"${SLURM_GPUS_ON_NODE-}\" "
+                "\"${CUDA_VISIBLE_DEVICES-}\""
+            )
         lines += stage_lines
         if cd_line:
             lines.append(cd_line)
@@ -3994,7 +4170,190 @@ def _submission_launch_adapter_for(
     return None
 
 
-def _submit_sync(
+class _SkipV3Intent(Exception):
+    """不是 v3 run：跳过新账本的 intent，旧控制面原样走（Codex 25 号 P0-1）。"""
+
+
+def _submission_recording_refusal(
+    *,
+    error_code: str,
+    error: str,
+    scheduler: str,
+    job_name: str | None = None,
+    nonce: str | None = None,
+) -> dict[str, Any]:
+    """One refusal family for a submission fact that was not made durable."""
+    result: dict[str, Any] = {
+        "status": "error",
+        "error_code": error_code,
+        "error": error,
+        "scheduler": scheduler,
+        "payload_spawned": False,
+        "job_submitted": False,
+        "submission_boundary_crossed": False,
+        "do_not_resubmit": False,
+        "next_action": {
+            "owner": "experiment_runtime",
+            "action": "repair_ledger_then_retry",
+            "model_callable": False,
+        },
+    }
+    if job_name is not None:
+        result["job_name"] = job_name
+    if nonce is not None:
+        result["submission_nonce"] = nonce
+    return result
+
+
+def _submission_attempt_marker_refusal(
+    state: Any,
+    *,
+    nonce: str,
+    scheduler: str,
+) -> dict[str, Any] | None:
+    """Before the scheduler call, durably mark that its outcome may become unknown.
+
+    The intent says *what we mean to submit*.  This marker is the last durable
+    boundary before the irreversible call itself.  A v3 run must not cross that
+    boundary when the marker cannot be written.  Old-protocol runs keep their
+    existing behaviour; they do not partially opt in to the v3 ledger.
+    """
+    if state is None:
+        return None
+    try:
+        from .ledger import try_record, v3_active
+    except ImportError:  # pragma: no cover
+        from tools.ledger import try_record, v3_active  # type: ignore
+    if not v3_active(state):
+        return None
+    marker_error = ""
+    try:
+        try:
+            from .job_settlement import capture_submission_outputs
+        except ImportError:  # pragma: no cover - standalone node bootstrap
+            from tools.job_settlement import capture_submission_outputs  # type: ignore
+        marker = try_record(
+            state,
+            "submission_attempted",
+            nonce=nonce,
+            scheduler=scheduler,
+            output_baseline=capture_submission_outputs(state, nonce),
+        )
+    except Exception as exc:
+        marker = None
+        marker_error = f" ({type(exc).__name__}: {exc})"
+    if marker is not None:
+        return None
+    return _submission_recording_refusal(
+        error_code="submission_attempt_not_durably_recorded",
+        error=(
+            "未提交：进入调度器调用前的持久标记没有写入账本"
+            f"{marker_error}。"
+            "框架不会在无法区分“尚未调用”和“调用后丢失响应”时启动外部副作用。"
+        ),
+        scheduler=scheduler,
+        nonce=nonce,
+    )
+
+
+def _close_unbound_intent(state: Any, nonce: str, result: Any) -> None:
+    """intent 落盘之后、ACK 之前的任何失败都要把 intent 关掉（Codex 41 P0）。
+
+    没有 job_bound / job_unknown 的 intent 会永远 open，让 finish 与 delta view 把一个
+    从未提交的作业当成活作业。只在 v3 账本上、且该 nonce 仍是 intent 时写 job_absent。
+    """
+    if state is None or not nonce:
+        return
+    try:
+        from .ledger import open_ledger as _open, project_jobs as _project, try_record as _try
+    except ImportError:  # pragma: no cover
+        from tools.ledger import open_ledger as _open, project_jobs as _project, try_record as _try  # type: ignore
+    try:
+        led = _open(state)
+        if led.epoch != "v3":
+            return
+        records = led.records()
+        job = _project(records).get(nonce)
+        if job is None or job.get("state") != "intent":
+            return
+        res = result if isinstance(result, dict) else {}
+        if res.get("job_submitted"):
+            return
+        # A completed sbatch process with a definite rejection proves absence;
+        # timeout, lost ACK and ledger failure still stay unknown.
+        known_absent = (
+            res.get("status") == "error"
+            and res.get("intent_status") in {"aborted_before_submit", "rejected_by_scheduler"}
+        )
+        attempted = any(r.get("kind") == "submission_attempted" and str(r.get("nonce") or "") == nonce for r in records)
+        reason = str(res.get("reason") or res.get("error_code") or res.get("status") or "submit_failed_before_ack")
+        if attempted and not known_absent:
+            # ACK may have been lost: retain unknown until reconciliation.
+            row = _try(state, "job_unknown", nonce=nonce, scheduler=res.get("scheduler") or job.get("scheduler"),
+                       reason=f"failed_after_scheduler_call:{reason}", error=str(res.get("error") or "")[:300])
+            closed_as = "job_unknown"
+        else:
+            row = _try(state, "job_absent", nonce=nonce, scheduler=res.get("scheduler") or job.get("scheduler"),
+                       reason=reason, error=str(res.get("error") or "")[:300])
+            closed_as = "job_absent"
+        if isinstance(result, dict):
+            # 关闭 intent 的记账失败要披露：调用方不能以为提交失败已经收口（fail closed，intent 留 open）
+            result["intent_closure"] = ({"status": "recorded", "as": closed_as, "nonce": nonce} if row is not None
+                                        else {"status": "ledger_write_failed", "intent_left_open": True, "nonce": nonce,
+                                              "note": "intent 仍 open；重开会话时按 reconcile 处理，不要重提"})
+    except Exception as exc:
+        if isinstance(result, dict):
+            result["intent_closure"] = {"status": "error", "error": f"{type(exc).__name__}: {exc}", "intent_left_open": True}
+        return
+
+
+def _submit_sync(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """提交入口：intent 落盘后没有拿到 ACK 的每条出路都关闭 intent（含异常）。"""
+    import uuid as _uuid
+    state = kwargs.get("state")
+    nonce = str(kwargs.get("submission_nonce") or _uuid.uuid4().hex)
+    kwargs["submission_nonce"] = nonce
+    try:
+        result = _submit_sync_impl(*args, **kwargs)
+    except BaseException as exc:
+        _close_unbound_intent(state, nonce, {"reason": f"exception:{type(exc).__name__}", "error": str(exc)})
+        raise
+    _close_unbound_intent(state, nonce, result)
+    return result
+
+
+def _requested_submission_resources(
+    *,
+    scheduler: str,
+    mpi_ranks: int,
+    cpus_per_rank: int,
+    gpus: int,
+    memory_gb: float,
+    storage_gb: float,
+    walltime_minutes: int | None,
+) -> dict[str, Any]:
+    """The caller's request, not scheduler allocation or measured use."""
+    requested = {
+        "nodes": 1 if scheduler == "slurm" else None,
+        "mpi_ranks": mpi_ranks,
+        "cpus_per_rank": cpus_per_rank,
+        "total_cpus": mpi_ranks * cpus_per_rank,
+        "gpus": gpus,
+        "memory_gb": memory_gb,
+        "walltime_minutes": walltime_minutes,
+    }
+    if scheduler in {"local", "kubernetes"}:
+        requested["storage_gb"] = storage_gb
+    else:
+        requested["storage_contract"] = {
+            "input_gb": storage_gb,
+            "status": "not_applied",
+            "reason": f"{scheduler}_adapter_has_no_storage_limit_contract",
+        }
+    return requested
+
+
+def _submit_sync_impl(
     runtime_root: Path,
     scheduler: str,
     command: str,
@@ -4033,6 +4392,7 @@ def _submit_sync(
     precomputed_build_limits: BuildLimits | None = None,
     hard_deadline_s: int | None = None,
     payload_executables: list[dict[str, str]] | None = None,
+    input_observation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     job_name = _safe_job_name(job_name)
     scheduler = scheduler.lower()
@@ -4042,11 +4402,102 @@ def _submit_sync(
     queue = _safe_scheduler_directive(queue, "queue", scheduler)
     nodelist = _safe_scheduler_directive(nodelist, "nodelist", scheduler)
     submission_nonce = str(submission_nonce or uuid.uuid4().hex)
+    requested_resources = _requested_submission_resources(
+        scheduler=scheduler,
+        mpi_ranks=mpi_ranks,
+        cpus_per_rank=cpus_per_rank,
+        gpus=gpus,
+        memory_gb=memory_gb,
+        storage_gb=storage_gb,
+        walltime_minutes=walltime_minutes,
+    )
     job_dir = runtime_root / "jobs" / f"{submission_nonce}_{job_name}"
     sched_output_dir = _scheduler_output_dir(scheduler, workdir, job_dir, output_dir)
     output_patterns = _output_path_patterns(scheduler, sched_output_dir, job_name)
-    output_patterns.update(_bootstrap_log_patterns(scheduler, job_dir))
+    bootstrap_log_dir = job_dir
+    if scheduler == "slurm" and not dry_run:
+        # The ledger and script may live on the submit host; Slurm's stdout
+        # target must exist on the compute host before the script starts.
+        # Use the already-authorized output directory, with a nonce-specific
+        # child so retries never overwrite earlier bootstrap evidence.
+        # Public real Slurm submissions require output_dir. Legacy/internal
+        # callers with only a workdir retain a scheduler-visible bootstrap
+        # location there; do not create an implicit workdir/logs parent.
+        bootstrap_parent = (
+            sched_output_dir if output_dir
+            else Path(os.path.expanduser(workdir)) if workdir else job_dir
+        )
+        bootstrap_log_dir = bootstrap_parent / f".harness-bootstrap-{submission_nonce}_{job_name}"
+        try:
+            bootstrap_log_dir.mkdir(mode=0o700)
+        except OSError as exc:
+            return {
+                "status": "error",
+                "reason": "slurm_bootstrap_dir_unavailable",
+                "error": f"无法在 Slurm 输出目录创建启动日志目录：{type(exc).__name__}: {exc}",
+                "scheduler": scheduler,
+                "job_name": job_name,
+                "job_submitted": False,
+            }
+    output_patterns.update(_bootstrap_log_patterns(scheduler, bootstrap_log_dir))
     output_roots = _normalize_output_roots(output_paths, workdir, runtime_root)
+    try:
+        from .ledger import try_record as _ledger_try_record, v3_active as _v3_active
+    except ImportError:  # pragma: no cover
+        from tools.ledger import try_record as _ledger_try_record, v3_active as _v3_active  # type: ignore
+    if state is not None and not dry_run:
+        # v3 账本（governing §3 第 2 层）：先持久化提交意图与 correlation key，再提交。
+        # **durable-or-refuse**：记不下就不提交。先记 intent 的唯一目的就是 ACK 丢失或
+        # 会话重开时不必靠猜；账本写不进去还照样 sbatch，等于把这条保证扔掉
+        # （Codex 21 号 P0-A）。
+        try:
+            from .ledger import record as _ledger_record, LedgerError as _LedgerError, v3_active as _v3_active
+        except ImportError:  # pragma: no cover
+            from tools.ledger import record as _ledger_record, LedgerError as _LedgerError, v3_active as _v3_active  # type: ignore
+        try:
+            try:
+                from .ledger import bootstrap_phase as _v3_phase
+            except ImportError:  # pragma: no cover
+                from tools.ledger import bootstrap_phase as _v3_phase  # type: ignore
+            if _v3_phase(state) == "initializing":
+                return {
+                    "status": "error", "error_code": "bootstrap_incomplete",
+                    "error": "未提交：本 run 的 v3 启动只做了一半，需要 runtime 先修好启动状态。",
+                    "scheduler": scheduler, "job_name": job_name, "dry_run": dry_run,
+                    "payload_spawned": False, "job_submitted": False,
+                    "next_action": {"owner": "experiment_runtime", "action": "bootstrap_replays_next_turn",
+                                    "model_callable": False},
+                }
+            if not _v3_active(state):
+                # 非 v3 run：旧控制面照旧，不由一次提交把它带进新纪元。
+                raise _SkipV3Intent
+            from .execution_context import capture as capture_context
+            _ledger_record(
+                state, "intent", nonce=submission_nonce, scheduler=scheduler, job_name=job_name,
+                output_root=str(job_dir), output_roots=[str(r) for r in output_roots],
+                workdir=workdir, queue=queue, route_attempt_id=route_attempt_id,
+                requested_resources=requested_resources,
+                execution_context=capture_context(
+                    state, execution_params=execution_params, input_observation=input_observation),
+            )
+        except _SkipV3Intent:
+            pass
+        except Exception as exc:
+            if isinstance(exc, _LedgerError) or True:
+                return {
+                    **_submission_recording_refusal(
+                        error_code="submission_intent_not_durably_recorded",
+                        error=(
+                            "未提交：这次提交的意图与 correlation key 没能落进账本"
+                            f"（{type(exc).__name__}: {exc}）。先记再提交是为了 ACK 丢失或"
+                            "会话重开时不必猜要不要重投；记不下就提交会直接制造"
+                            "无法对账的外部作业。"
+                        ),
+                        scheduler=scheduler,
+                        job_name=job_name,
+                    ),
+                    "dry_run": dry_run,
+                }
     local_workdir: Path | None = None
     local_mount_roots: tuple[list[Path], list[Path]] | None = None
     if scheduler == "local" and not dry_run:
@@ -4135,7 +4586,7 @@ def _submit_sync(
     script = _script_for(
         scheduler, command, job_name, mpi_ranks, cpus_per_rank, gpus,
         memory_gb, walltime_minutes, queue, nodelist, image, workdir, str(sched_output_dir),
-        stage_in, str(job_dir), submission_nonce,
+        stage_in, str(bootstrap_log_dir), submission_nonce,
         hard_deadline_s=hard_deadline_s,
     )
     _write(script_path, script)
@@ -4153,15 +4604,17 @@ def _submit_sync(
         "submission_nonce": submission_nonce,
         "script_sha256": hashlib.sha256(script.encode("utf-8")).hexdigest(),
         "command": command,
+        "execution_class": execution_class,
         "workdir": os.path.expanduser(workdir) if workdir else None,
         "namespace": namespace,
         "route_attempt_id": route_attempt_id,
         "script_path": str(script_path),
         "script_preview": _script_preview(script, command),
         "scheduler_output_dir": str(sched_output_dir),
+        "requested_resources": requested_resources,
         # 框架生成的目录（脚本自己就写在这儿），从不来自模型 —— job_health 因此
         # 可以直接把它当作可读根，不必要求它落在 output_roots 里。
-        "bootstrap_log_dir": str(job_dir),
+        "bootstrap_log_dir": str(bootstrap_log_dir),
         "output_roots": output_roots,
         "stage_in": stage_in or [],
         "memory_contract": dict(memory_contract or {}),
@@ -4181,6 +4634,10 @@ def _submit_sync(
         },
         **output_patterns,
     }
+    # 本次提交只问隔离层一次：sandbox_contract 的 CPU 生效性与 resource_guard 的
+    # 能力记账出自同一个采样，不会一份说守得住、另一份说守不住（#841）。
+    local_enforcement = (
+        _local_enforcement_account() if scheduler == "local" else {})
     if scheduler == "local":
         from core.sandbox import image_name
 
@@ -4197,13 +4654,14 @@ def _submit_sync(
             "network": "none",
             "memory_gb": memory_gb,
             "storage_gb": storage_gb,
-            # cpus 是**请求值**（mpi_ranks × cpus_per_rank），不是已生效的限额：Core 的
-            # 隔离义务里没有 CPU_CAP（core/isolation 的 Invariant），只有 linux 后端在
-            # systemd --user scope 可用时才把它翻成 CPUQuota，节点看不到这一步是否发生
-            # （#841）。字段名留给旧读者，来源与生效性另行标明。
+            # cpus 是**请求值**（mpi_ranks × cpus_per_rank）。它是不是已生效的限额，
+            # 由隔离层的 Invariant.CPU_CAP 回答：linux 后端在 systemd --user scope
+            # 可用时把它翻成 CPUQuota 并在 enforced 里报 cpu_cap，darwin/win32 不报。
+            # 节点照抄这个回答，不自己猜（#841：模型把 cpus=1 读成契约，差点砍掉
+            # 一个正在多核跑的作业）。字段名留给旧读者，来源与生效性另行标明。
             "cpus": mpi_ranks * cpus_per_rank,
             "cpus_source": "requested",
-            "cpu_limit_enforcement": "backend_dependent_unverified",
+            **_local_cpu_limit_account(local_enforcement),
             "walltime_seconds": sandbox_walltime_s,
             "walltime_source": (
                 "explicit_hard_deadline"
@@ -4247,7 +4705,7 @@ def _submit_sync(
         if scheduler == "local":
             base["resource_guard"] = {
                 **build_limits.public(),
-                **_local_enforcement_account(),
+                **local_enforcement,
                 "hard_deadline_enforced": hard_deadline_s is not None,
                 "live_resource_health": "compatibility_only",
             }
@@ -4265,7 +4723,7 @@ def _submit_sync(
                     "pids", "disk_pressure_monitoring", "filesystem_quota"],
             }
     if dry_run:
-        base["submit_command"] = _submit_command(scheduler, script_path, namespace)
+        base["submit_command"] = _submit_command(scheduler, script_path, namespace, workdir, bootstrap_log_dir)
         if scheduler == "local":
             # 信号反转防线：dry_run 只渲染脚本，不跑 payload 可执行目标预检；
             # 说清楚这一点，agent 才不会把"dry_run 成功"记成"预检通过"，
@@ -4286,7 +4744,7 @@ def _submit_sync(
 
     # 判决拆除·第三波（rm:1536 删，2026-09-02）：scheduler 由 schema enum 核，
     # 同条件二次拒绝删；真到不了这里的 None 由现实（subprocess TypeError）兜住。
-    cmd = _submit_command(scheduler, script_path, namespace)
+    cmd = _submit_command(scheduler, script_path, namespace, workdir, bootstrap_log_dir)
     if scheduler == "local":
         out = job_dir / f"{job_name}.out"
         err = job_dir / f"{job_name}.err"
@@ -4346,6 +4804,11 @@ def _submit_sync(
             adapter.abandon(prepared)
             return {**base, **intent}
         base["submission_intent_artifact_id"] = intent["artifact_id"]
+        marker_refusal = _submission_attempt_marker_refusal(
+            state, nonce=submission_nonce, scheduler=scheduler)
+        if marker_refusal is not None:
+            adapter.abandon(prepared)
+            return {**base, **marker_refusal}
         submitted = adapter.launch(prepared)
         if not submitted.get("ok"):
             returncode = submitted.get("returncode")
@@ -4390,6 +4853,12 @@ def _submit_sync(
                 "do_not_resubmit": True,
                 "error": "sandbox runtime did not return an immutable container ID",
             }
+        # v3 账本：本机受管作业的绑定也要入账，否则归属只覆盖远端调度器，
+        # 取消准入会把本 run 自己的本机作业当成"别人的"拒掉。
+        _ledger_try_record(
+            state, "job_bound", nonce=submission_nonce, scheduler=scheduler,
+            external_id=str(accepted_receipt.get("job_id") or runtime_id),
+            container_runtime_id=runtime_id)
         return {
             **base,
             "stdout_path": str(out),
@@ -4412,6 +4881,11 @@ def _submit_sync(
     if intent.get("status") != "success":
         return {**base, **intent}
     base["submission_intent_artifact_id"] = intent["artifact_id"]
+    marker_refusal = _submission_attempt_marker_refusal(
+        state, nonce=submission_nonce, scheduler=scheduler)
+    if marker_refusal is not None:
+        return {**base, **marker_refusal}
+    # marker durable 之后 ACK 可能已经发生；任何异常都只能是 unknown，不能猜 absent。
     submitted = _run(cmd, timeout=20)
     if not submitted["ok"]:
         returncode = submitted.get("returncode")
@@ -4419,10 +4893,23 @@ def _submit_sync(
             returncode is None
             and str(submitted.get("stderr") or "") == "not found"
         )
-        outcome_unknown = (
-            not command_not_found
-            and (returncode is None or int(returncode) < 0)
+        stderr_text = str(submitted.get("stderr") or "").casefold()
+        # A nonzero client exit alone is not proof the controller rejected
+        # the request: transport/ACK loss can follow a real acceptance.
+        uncertainty_signal = any(
+            word in stderr_text for word in
+            ("timeout", "timed out", "connection", "socket", "transport", "unavailable")
         )
+        definite_reject = (
+            returncode is not None and int(returncode) > 0
+            and not str(submitted.get("stdout") or "").strip()
+            and not uncertainty_signal
+            and (
+                "rejected" in stderr_text
+                or (scheduler == "slurm" and stderr_text.lstrip().startswith("sbatch: error:"))
+            )
+        )
+        outcome_unknown = not command_not_found and not definite_reject
         if outcome_unknown:
             return {
                 **base,
@@ -4477,6 +4964,10 @@ def _submit_sync(
         }
     identity = _parse_submission_identity(scheduler, str(submitted.get("stdout") or ""))
     if identity is None:
+        if state is not None and not dry_run:
+            _ledger_try_record(state, "job_unknown", nonce=submission_nonce, scheduler=scheduler,
+                               reason="scheduler accepted the submission but no job identity was parsed; do not resubmit",
+                               submit_stdout=str(submitted.get("stdout") or "")[-500:])
         return {
             **base,
             "status": "accepted_identity_unresolved",
@@ -4488,6 +4979,25 @@ def _submit_sync(
         }
     job_id = str(identity["job_id"])
     resolved_namespace = base.get("namespace") or identity.get("namespace")
+    if state is not None and not dry_run:
+        bound = _ledger_try_record(
+            state, "job_bound", nonce=submission_nonce, scheduler=scheduler,
+            external_id=job_id, namespace=resolved_namespace,
+        )
+        if _v3_active(state) and bound is None:
+            return {
+                **base,
+                **identity,
+                "namespace": resolved_namespace,
+                "status": "submitted_needs_recovery",
+                "error_code": "job_bound_not_durable",
+                "error": "Slurm 已接受作业，但 job_bound 未能持久化；保留身份并对账，禁止重提。",
+                "submit_command": cmd,
+                "submit_result": submitted,
+                "job_id": job_id,
+                "do_not_resubmit": True,
+                **_resolve_output_paths(output_patterns, job_name, job_id),
+            }
     return {
         **base,
         **identity,
@@ -4499,9 +5009,22 @@ def _submit_sync(
     }
 
 
-def _submit_command(scheduler: str, script_path: Path, namespace: str | None) -> list[str] | None:
+def _submit_command(
+    scheduler: str, script_path: Path, namespace: str | None,
+    workdir: str | None = None,
+    bootstrap_log_dir: Path | None = None,
+) -> list[str] | None:
     if scheduler == "slurm":
-        return ["sbatch", "--parsable", str(script_path)]
+        # One argv item per path prevents directive injection. The submit
+        # host's cwd need not exist on the compute node.
+        args = ["sbatch", "--parsable"]
+        if workdir:
+            args.append(f"--chdir={os.path.expanduser(workdir)}")
+        if bootstrap_log_dir:
+            base = os.path.expanduser(str(bootstrap_log_dir))
+            args.extend([f"--output={base}/bootstrap.out",
+                         f"--error={base}/bootstrap.err"])
+        return [*args, str(script_path)]
     if scheduler == "pbs":
         return ["qsub", str(script_path)]
     if scheduler == "kubernetes":
@@ -4669,7 +5192,8 @@ def _execution_probe(args: list[str], timeout: int = 12) -> dict[str, Any]:
 
 _SLURM_ACCOUNTING_FIELDS = (
     "JobIDRaw", "State", "ExitCode", "Partition", "NodeList", "AllocCPUS",
-    "ReqMem", "ElapsedRaw", "MaxRSS",
+    "ReqMem", "ElapsedRaw", "MaxRSS", "ReqTRES", "AllocTRES", "ReqNodes",
+    "NNodes", "NTasks",
 )
 _SLURM_TERMINAL_STATES = frozenset({
     "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
@@ -4742,13 +5266,26 @@ def _slurm_accounting_facts(
     allocation_rows = []
     for row in allocation_source_rows:
         returncode, signal = _slurm_exit_status(row["ExitCode"])
-        allocation_rows.append({
+        allocation_row = {
             "job_id": row["JobIDRaw"],
             "state": _slurm_state_name(row["State"]),
             "returncode": returncode,
             "exit_code": returncode,
             "exit_signal": signal,
-        })
+        }
+        # Preserve scheduler text verbatim and keep request/allocation distinct.
+        # Empty fields stay absent so older Slurm versions and fixtures retain
+        # the established allocation_rows shape.
+        for source, target in (
+            ("ReqTRES", "requested_tres"),
+            ("AllocTRES", "allocated_tres"),
+            ("ReqNodes", "requested_nodes"),
+            ("NNodes", "nodes"),
+            ("NTasks", "tasks"),
+        ):
+            if row[source]:
+                allocation_row[target] = row[source]
+        allocation_rows.append(allocation_row)
     allocation_states = [row["state"] for row in allocation_rows]
     allocation_codes = [row["returncode"] for row in allocation_rows]
     first_nonzero = next(
@@ -4834,6 +5371,7 @@ def _scheduler_environment_snapshot(scheduler: str, job_id: str | None, namespac
                 if job_id else None
             ),
             "accounting_snapshot": accounting,
+            "accounting_facts": accounting_facts or None,
             "max_rss": accounting_facts.get("max_rss"),
             "max_rss_bytes": accounting_facts.get("max_rss_bytes"),
             "max_rss_source": accounting_facts.get("max_rss_source"),
@@ -4878,12 +5416,31 @@ def _persist_execution_environment_evidence(state: State, result: dict[str, Any]
     except OSError:
         pass
     container = _container_execution_evidence(command)
+    scheduler_name = str(result.get("scheduler") or "").lower()
+    if scheduler_name == "local":
+        host_gpu = _execution_probe([
+            "nvidia-smi",
+            "--query-gpu=driver_version,name,uuid",
+            "--format=csv,noheader",
+        ])
+    else:
+        host_gpu = {
+            "status": "not_applicable",
+            "reason": (
+                "submit_host_is_not_slurm_compute_allocation"
+                if scheduler_name == "slurm"
+                else "submit_host_is_not_remote_compute_allocation"
+            ),
+        }
     evidence = {"schema_version": 1, "phase": phase, "captured_at": datetime.now(timezone.utc).isoformat(),
                 "run_id": state.run_id, "job_id": result.get("job_id"), "scheduler": result.get("scheduler"),
                 "job_name": result.get("job_name"), "command_sha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
                 "script_path": script_path or None, "script_sha256": script_hash,
-                "host": {"hostname": os.uname().nodename, "kernel": os.uname().release,
-                         "gpu": _execution_probe(["nvidia-smi", "--query-gpu=driver_version,name,uuid", "--format=csv,noheader"])},
+                # platform.uname() 而不是 os.uname()：后者 Windows 上没有，AttributeError 被
+                # 两个调用方的 except 吞掉，本地作业的执行环境证据在 Windows 上从来没写过（#943）。
+                # POSIX 上 platform.uname() 就是读 os.uname()，值逐字不变。
+                "host": {"hostname": platform.uname().node, "kernel": platform.uname().release,
+                         "gpu": host_gpu},
                 "scheduler_snapshot": _scheduler_environment_snapshot(str(result.get("scheduler") or ""), result.get("job_id"), result.get("namespace")),
                 "container": container or {"status": "not_applicable", "reason": "payload is not a recognized container run/exec"}}
     state.save_artifact("execution_environment_evidence", f"execution_environment_{state.run_id}_{result.get('job_id') or time.time_ns()}_{phase}", json.dumps(evidence, ensure_ascii=False, indent=2), metadata={"phase": phase, "scheduler": str(result.get("scheduler") or ""), "job_id": str(result.get("job_id") or ""), "image_digest": (container or {}).get("image_digest")})
@@ -5074,10 +5631,26 @@ def _submission_route_action(
     return action
 
 
+
+def _v3_ready(state: Any) -> bool:
+    """S1d：v3 就绪的 run 不读不写旧路线 authority；判定来自 action_boundary。"""
+    try:
+        from .action_boundary import v3_ready
+    except ImportError:  # pragma: no cover
+        from tools.action_boundary import v3_ready  # type: ignore
+    try:
+        return v3_ready(state)
+    except Exception:
+        return False
+
 def _resolve_submission_route(
     state: State,
     action: dict[str, Any],
 ) -> dict[str, Any]:
+    if _v3_ready(state):  # S1d
+        return {"decision": "v3_boundary", "authoritative": False, "policy": "v3",
+                "effective_effects": list(action.get("observed_effects") or []),
+                "declared_workdir_role": None, "tool": str(action.get("tool") or "")}
     try:
         try:
             from .execution_route import resolve_execution_context
@@ -5098,6 +5671,8 @@ def _submission_route_workdir(
     *,
     create: bool = True,
 ) -> dict[str, Any]:
+    if _v3_ready(state):  # S1d：不问路线；调用点会落到 toolchain_build / runtime 默认目录
+        return {"status": "unresolved", "reason": "v3_no_route", "v3": True}
     try:
         try:
             from .execution_route import route_default_workdir
@@ -5113,6 +5688,8 @@ def _record_submission_route(
     action: dict[str, Any],
     decision: dict[str, Any],
 ) -> None:
+    if _v3_ready(state):
+        return None
     try:
         try:
             from .execution_route import record_execution_route_shadow
@@ -5130,6 +5707,8 @@ def _enforce_submission_route(
     *,
     phase: str = "pre_spawn",
 ) -> dict[str, Any] | None:
+    if _v3_ready(state):  # S1d：v3 不走路线门
+        return None
     try:
         try:
             from .execution_route import enforce_execution_route
@@ -5172,6 +5751,8 @@ def _begin_submission_route_attempt(
     decision: dict[str, Any],
     action: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if _v3_ready(state):
+        return None, None
     try:
         try:
             from .execution_route import begin_route_step_attempt, route_binding_block
@@ -5204,6 +5785,8 @@ def _finish_submission_route_attempt(
     result: dict[str, Any] | None = None,
     error: BaseException | None = None,
 ) -> dict[str, Any] | None:
+    if _v3_ready(state):
+        return None
     try:
         try:
             from .execution_route import (
@@ -5256,6 +5839,8 @@ def _begin_submission_action_census(
     route_binding: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Persist the action admission immediately before `_submit_sync`."""
+    if _v3_ready(state):  # S1d：census 是 v2 authority；v3 由 _submit_sync 的 intent/job_bound 承接
+        return {"status": "success", "v3": True, "action_id": None}
     try:
         from .execution_action_census import begin_execution_action
     except ImportError:
@@ -5303,6 +5888,8 @@ def _finish_submission_action_census(
     error: BaseException | None = None,
 ) -> dict[str, Any]:
     """Record spawn and terminal phases without hiding physical outcomes."""
+    if _v3_ready(state):
+        return {"passed": True, "status": "v3_boundary"}
     try:
         from .execution_action_census import settle_execution_action
     except ImportError:
@@ -6054,6 +6641,20 @@ async def _submit_job(
     static_block = _submission_static_validity_block(state, command)
     if static_block is not None:
         return static_block
+    input_observation: dict[str, Any] = {}
+    if not dry_run:
+        try:
+            from .input_admission import check_consumed_input
+        except ImportError:
+            from tools.input_admission import check_consumed_input
+        input_block = check_consumed_input(
+            state, runner="submit_job",
+            input_package_artifact_id=input_package_artifact_id,
+            input_package_bindings=input_package_bindings,
+            observation=input_observation,
+        )
+        if input_block is not None:
+            return input_block
     if isinstance(workdir, str) and not workdir.strip():
         workdir = None
     if isinstance(output_dir, str) and not output_dir.strip():
@@ -6100,11 +6701,22 @@ async def _submit_job(
     scheduler = str(scheduler or "").strip().lower()
     if scheduler == "auto":
         try:
-            scheduler = str(_discover(namespace)["recommended_default"]).lower()
+            candidate = _discover(namespace)["recommended_default"]
         except Exception as exc:
             return {"status": "error", "error": (
                 "无法解析 scheduler=auto；拒绝真实提交： "
                 f"{type(exc).__name__}: {exc}")}
+        if candidate is None:
+            return {
+                "status": "error", "reason": "no_submission_candidate",
+                "error": (
+                    "scheduler=auto 没有当前可用的公开提交后端；不能将已安装的调度器客户端"
+                    "或 adapter 接口当作真实提交能力。auto 只选择已验证的本地边界，"
+                    "不猜测远端站点；单任务 CPU 或单 GPU Slurm 需显式选择并提供共享路径。"),
+                "side_effects": "none",
+                "next_actions": ["查看 discover_resources 的边界探测与平台声明；修复能力缺口后重试，或诚实报告受阻。"],
+            }
+        scheduler = str(candidate).lower()
     if hard_deadline_s is not None and scheduler not in {"local", "kubernetes"}:
         return {
             "status": "error",
@@ -6139,7 +6751,9 @@ async def _submit_job(
             "retryable": True,
             "next_actions": [
                 "作业确实不需要 GPU：把 gpus 改为 0 后重新调用",
-                "需要 GPU：改用有 GPU 的调度器（如 scheduler=\"slurm\"，先 dry_run 渲染）",
+                "需要 GPU：保留资源要求；若站点和账号已获授权，显式选择 scheduler=slurm "
+                "提交单任务、单 GPU 作业。auto 不会转远端；PBS dry_run 只渲染脚本，"
+                "不能代替 Slurm 的真实提交、分配与实算证据。",
             ],
         }
     normalized_expected_termination, termination_refusal = _anchored_expected_termination(
@@ -6183,16 +6797,45 @@ async def _submit_job(
                 "suggested_owner": "framework_or_platform",
             },
         }
-    if not dry_run and scheduler != "local":
+    if not dry_run and scheduler not in {"local", "slurm"}:
         return {
             "status": "error",
             "error": (
-                f"scheduler={scheduler} 尚未提供与本地同等级的受信沙盒执行器，"
-                "因此只允许 dry_run 渲染，不允许真实提交。必须先建设调度器侧的"
-                "只读根文件系统、显式卷、断网、cgroup/ephemeral-storage 和 PID 1 监督契约。"
+                f"scheduler={scheduler} 尚无真实提交契约；当前只支持 dry_run 渲染。"
             ),
             "blocker": {"kind": "remote_sandbox_contract_unavailable", "scheduler": scheduler},
         }
+    if not dry_run and scheduler == "slurm":
+        # 首个远端路径只覆盖单节点、单任务、CPU 或一张 GPU。共享路径是现有字段，
+        # 不增加模型必须填写的新流程；缺省的本机 runtime 不能发往计算节点。
+        if not _slurm_single_task_request_supported(mpi_ranks, gpus):
+            return {
+                "status": "error",
+                "reason": "slurm_single_task_cpu_or_gpu_only",
+                "error": (
+                    "当前 Slurm 真实提交仅支持单节点、单任务、0 或 1 张 GPU；"
+                    "MPI、多任务和多 GPU 请求尚未验收。"
+                ),
+                "blocker": {"kind": "slurm_single_task_cpu_or_gpu_only"},
+            }
+        if not workdir or not output_dir:
+            return {
+                "status": "error", "reason": "slurm_shared_paths_required",
+                "error": (
+                    "Slurm 真实提交需要显式 workdir 和 output_dir；两者必须是"
+                    "计算节点可访问的已授权路径。未提交作业。"
+                ),
+                "blocker": {"kind": "slurm_shared_paths_required"},
+            }
+        if walltime_minutes is None:
+            return {
+                "status": "error", "reason": "slurm_walltime_required",
+                "error": (
+                    "受控 Slurm CPU 或单 GPU 作业必须有显式 walltime_minutes "
+                    "上限，未提交作业。"
+                ),
+                "blocker": {"kind": "slurm_walltime_required"},
+            }
     # An omitted path receives the framework-owned, run-local location. An
     # explicitly supplied invalid path is never rewritten and remains rejected.
     for label, values in (
@@ -6230,6 +6873,10 @@ async def _submit_job(
         state, route_action, route_decision, phase="pre_materialization")
     if pre_materialization_block is not None:
         return pre_materialization_block
+    local_v3_build = bool(
+        scheduler == "local" and _v3_ready(state)
+        and route_action.get("mechanical_major_build")
+    )
     if scheduler == "local" and explicit_workdir:
         # Authorization is more fundamental than existence: reject an
         # undeclared path without probing or materializing it.  This also
@@ -6239,7 +6886,7 @@ async def _submit_job(
         allowed_workdir_roles = {
             "build_root", "run_root", "source_worktree_root",
         }
-        if not any(
+        if not local_v3_build and not any(
                 role.role in allowed_workdir_roles
                 and role.writable and not role.container_only
                 for role in workdir_roles):
@@ -6360,13 +7007,18 @@ async def _submit_job(
         separators=(",", ":"),
         default=str,
     ).encode("utf-8")).hexdigest()
+    build_sandbox_roots = None
     try:
         try:
             from .safe_bash import (
-                _activity_path_role_guard, _bash_path_effects_guard)
+                REMOTE_SCRATCH, UNRESOLVED, _activity_path_role_guard,
+                _analyze_shell_path_effects, _bash_path_effects_guard,
+                _sandbox_roots_for_payload)
         except ImportError:
             from tools.safe_bash import (
-                _activity_path_role_guard, _bash_path_effects_guard)
+                REMOTE_SCRATCH, UNRESOLVED, _activity_path_role_guard,
+                _analyze_shell_path_effects, _bash_path_effects_guard,
+                _sandbox_roots_for_payload)
         if scheduler != "kubernetes":
             path_effect_block = _bash_path_effects_guard(
                 state, command, cwd=workdir,
@@ -6375,8 +7027,18 @@ async def _submit_job(
             )
             if path_effect_block is not None:
                 return path_effect_block
+        if local_v3_build:
+            authorized_targets = [
+                target for op, target in _analyze_shell_path_effects(command, workdir)
+                if op != "remote_visible_path" and target not in {UNRESOLVED, REMOTE_SCRATCH}
+            ]
+            build_sandbox_roots = _sandbox_roots_for_payload(
+                state, str(workdir), sandbox_profile="bash",
+                authorized_targets=authorized_targets,
+            )
         activity_block = _activity_path_role_guard(
-            state, command, cwd=workdir, route_decision=route_decision)
+            state, command, cwd=workdir, route_decision=route_decision,
+            sandbox_roots=build_sandbox_roots, local_write_boundary=scheduler == "local")
         if activity_block is not None:
             return activity_block
     except Exception as exc:
@@ -6419,9 +7081,21 @@ async def _submit_job(
     # path-role guard as safe_run_bash. This is a validity gate, never a bypass
     # permission.
     role_block = _scheduler_role_guard(
-        state, scheduler, command, workdir, output_dir, output_roots)
+        state, scheduler, command, workdir, output_dir, output_roots,
+        build_sandbox_roots=build_sandbox_roots)
     if role_block is not None:
         return role_block
+    if scheduler == "slurm" and not dry_run:
+        # Slurm opens stdout/stderr before the script body runs.  A nonexistent
+        # output directory cannot be created by that same script.
+        for label, path in (("workdir", workdir), ("output_dir", output_dir)):
+            if not path or not Path(path).expanduser().is_absolute() or not Path(path).expanduser().is_dir():
+                return {
+                    "status": "error",
+                    "reason": "slurm_path_not_ready",
+                    "error": f"Slurm {label} 必须已存在并可由提交机访问：{path}",
+                    "blocker": {"kind": "slurm_path_not_ready", "field": label},
+                }
     # 角色契约之后再问本机写边界：角色层的诊断更具体（哪个字段、该声明什么），
     # 先让它说话；这里只负责 local 特有的那条「写发生在提交机上」的限制。
     local_block = _local_job_boundary_block(state, scheduler, workdir, output_dir)
@@ -6548,20 +7222,21 @@ async def _submit_job(
             from tools.preflight import audit_execution_contract
             from tools.contract_audit import audit_input_delivery_for_execution
             from tools.run_contract import record_execution_precondition_witness, record_prereg_deviation
-        input_delivery = audit_input_delivery_for_execution(
-            state,
-            input_package_artifact_id,
-            input_package_bindings,
-        )
-        state.append_transcript("input_delivery_preflight", **input_delivery)
-        if not input_delivery.get("passed"):
-            # 判决拆除 O2（rm:1946 降格，2026-08-31）：正式输入包未验收照跑；
-            # input_delivery:unverified 如实进提交记录，且机械降
-            # 执行前提见证（效应而非许可，run 内不可撤销）。
-            record_execution_precondition_witness(
-                state, "submit_job",
-                "formal input package unverified at real submission")
-            submission_witness["input_delivery_unverified"] = input_delivery
+        # v3 already audited this action's selected inputs before any
+        # materialization or approval.  Legacy callers retain their old audit;
+        # do not poison a v3 run with unrelated pending input requests.
+        if not _v3_ready(state):
+            input_delivery = audit_input_delivery_for_execution(
+                state,
+                input_package_artifact_id,
+                input_package_bindings,
+            )
+            state.append_transcript("input_delivery_preflight", **input_delivery)
+            if not input_delivery.get("passed"):
+                record_execution_precondition_witness(
+                    state, "submit_job",
+                    "formal input package unverified at real submission")
+                submission_witness["input_delivery_unverified"] = input_delivery
         execution_contract = audit_execution_contract(
             state, execution_params, stage=stage, runner="submit_job")
         state.append_transcript("execution_contract_preflight", **execution_contract)
@@ -6592,8 +7267,8 @@ async def _submit_job(
                 "error": ("存在仍在运行或未对账的 external job，其输出路径与本次提交重叠；"
                           "先用 job_status/continue 对账，或以 cancel_job 受管取消后再提交。"
                           "其中 kind=unknown_orphan 的是隔离锁而非活作业，对账/取消对它无效："
-                          "换一组不重叠的 output_paths，或按该条 conflicts[].resolution 用 "
-                          "resolve_unknown_orphan 出具机械解除证据。"),
+                          "换一组不重叠的 output_paths；确实要复用该路径就 report_blocker 交给人，"
+                          "然后 finish(outcome=\"blocked\", blocker=...)。"),
                 "blocker": {"kind": "active_external_job_output_conflict",
                             "output_roots": output_roots, "conflicts": conflicts},
             }
@@ -6680,16 +7355,24 @@ async def _submit_job(
         from shared.lib import dangerous_commands as _danger
         from .execution_guard import classify_high_risk
         highrisk_category = classify_high_risk(command, mode="shell")
-        from core.sandbox import image_name as sandbox_image_name, trusted_image_id
+        if scheduler == "local":
+            from core.sandbox import image_name as sandbox_image_name, trusted_image_id
 
-        try:
+            try:
+                sandbox_identity = {
+                    "image": sandbox_image_name(),
+                    "image_id": trusted_image_id(),
+                    "network": "none",
+                }
+            except Exception as exc:
+                return {"status": "error", "error": f"mandatory sandbox unavailable: {exc}"}
+        else:
+            # Do not borrow local sandbox claims for a scheduler-side job.
             sandbox_identity = {
-                "image": sandbox_image_name(),
-                "image_id": trusted_image_id(),
-                "network": "none",
+                "remote_write_isolation": "missing",
+                "network_isolation": "unverified",
+                "resource_limits": "scheduler_requested_not_independently_verified",
             }
-        except Exception as exc:
-            return {"status": "error", "error": f"mandatory sandbox unavailable: {exc}"}
         category = _managed_job_confirmation_category(
             action="submit", scheduler=scheduler,
             highrisk_category=highrisk_category,
@@ -6789,6 +7472,17 @@ async def _submit_job(
                     preview=(
                         f"scheduler={scheduler}\njob_name={job_name}\n"
                         f"workdir={workdir or ''}\noutput_dir={output_dir or ''}\n"
+                        "requested_resources="
+                        + json.dumps(
+                            _requested_submission_resources(
+                                scheduler=scheduler, mpi_ranks=mpi_ranks,
+                                cpus_per_rank=cpus_per_rank, gpus=gpus,
+                                memory_gb=memory_gb, storage_gb=storage_gb,
+                                walltime_minutes=walltime_minutes,
+                            ),
+                            ensure_ascii=False,
+                        )
+                        + "\n"
                         f"stage_in={json.dumps(validated_stage_in, ensure_ascii=False)}\n"
                         f"memory_contract={json.dumps(memory_contract, ensure_ascii=False)}\n"
                         # 「它最多能跑多久」是批准这件事时第二重要的数（第一是命令
@@ -6850,6 +7544,7 @@ async def _submit_job(
             precomputed_build_limits=precomputed_build_limits,
             hard_deadline_s=hard_deadline_s,
             payload_executables=payload_executables,
+            input_observation=input_observation,
         )
         result["formal_input_gate"] = formal_input_gate
         try:
@@ -6877,6 +7572,34 @@ async def _submit_job(
                 or result.get("container_runtime_id")
             ):
                 result["do_not_resubmit"] = True
+        if result.get("status") == "submitted_needs_recovery":
+            recovery = _persist_submission_recovery(
+                state, result, RuntimeError(str(result.get("error") or "job binding missing")))
+            # The workflow writer's success gate means scheduler acceptance,
+            # not final task success. The job ID is real, while this tool
+            # response stays submitted_needs_recovery until the binding heals.
+            task_id = _persist_external_job_workflow(
+                state, {**result, "status": "success"}
+            )
+            _record_submission_persistence_blocker(state, result, recovery)
+            response = {
+                **result,
+                "external_workflow_task_id": task_id,
+                "submission_persistence": recovery,
+                "blocker": {
+                    "kind": "external_job_submission_persistence_failed",
+                    "recovery_artifact_id": recovery.get("artifact_id"),
+                    "scheduler": result.get("scheduler"),
+                    "job_id": result.get("job_id"),
+                    "namespace": result.get("namespace"),
+                },
+            }
+            route_receipt_block = _finish_submission_route_attempt(
+                state, route_binding, result=response)
+            route_attempt_finished = True
+            if route_receipt_block is not None:
+                response["route_receipt"] = route_receipt_block
+            return response
         if result.get("status") in {
             "accepted_identity_unresolved", "submission_outcome_unknown",
         }:
@@ -6968,9 +7691,10 @@ async def _submit_job(
                 except Exception:
                     log.warning("unable to persist container execution evidence", exc_info=True)
                 result["external_workflow_task_id"] = _persist_external_job_workflow(state, result)
-            # 只有真实提交才算"实际运行参数"；dry_run 没跑过任何东西。
-            # 这些值是工具入参，不是 LLM 自述，可以直接作为审计证据。
-            if not dry_run:
+            # Remote scheduler acceptance records a request and identity, not
+            # allocation or actual resource use.  Only the synchronous local
+            # launch may keep the legacy mechanically observed launch settings.
+            if not dry_run and scheduler == "local":
                 record_actual_run_params(state, "submit_job", {
                     "scheduler": result.get("scheduler") or scheduler,
                     "mpi_ranks": int(mpi_ranks),
@@ -7768,10 +8492,15 @@ async def _job_status(
                     "error": ("未找到唯一受管 external job 记录；同 scheduler/job_id "
                               "跨 scope 时必须提供 namespace")}
         namespace = namespace or record.get("namespace")
-        return _job_status_sync(
+        result = _job_status_sync(
             scheduler, job_id, namespace, remote_host=record.get("launch_host"),
             container_runtime_id=record.get("container_runtime_id"),
         )
+        if _scheduler_phase(scheduler, result) == "terminal":
+            settled = _settle_if_terminal(state, record, scheduler_result=result, evidence=None, observed_by="job_status")
+            if settled is not None:
+                result["terminal_settlement"] = {k: v for k, v in settled.items() if k != "record"}
+        return result
     except Exception as e:
         return {"status": "error", "error": f"{type(e).__name__}: {e}"}
 
@@ -7940,6 +8669,11 @@ def freeze_first_terminal_output_observation(
         "not_after_ns": not_after_ns,
         "not_after_source": not_after_source,
     }
+    # This helper owns only the immutable completion-path snapshot.  Scheduler
+    # phase alone is not positive terminal evidence, and writing job_terminal
+    # here would bypass (or overwrite) the canonical settlement and its output
+    # observation.  Public status/health/wait/cancel use _settle_if_terminal;
+    # job_settlement remains the sole writer of that physical lifecycle fact.
     try:
         state.append_transcript(_TERMINAL_OUTPUT_OBSERVATION_EVENT, **payload)
     except Exception as exc:
@@ -8117,8 +8851,52 @@ def _joint_job_resource_decision(
     return "continue", reasons
 
 
+def _settle_if_terminal(state: Any, record: dict[str, Any] | None, *, scheduler_result: dict[str, Any] | None,
+                        evidence: dict[str, Any] | None, observed_by: str) -> dict[str, Any] | None:
+    """status / health / wait / cancel 共用的终态结算入口（Codex 45 P0-D）；只在正向证据下写 B。"""
+    if not isinstance(record, dict):
+        return None
+    try:
+        try:
+            from .job_settlement import settle_terminal
+            from .ledger import bootstrap_phase as _phase
+        except ImportError:  # pragma: no cover
+            from tools.job_settlement import settle_terminal  # type: ignore
+            from tools.ledger import bootstrap_phase as _phase  # type: ignore
+        if _phase(state) == "none":
+            return None  # 旧协议 run：不结算、不改返回形状
+        scheduler = str(record.get("scheduler") or "").lower()
+        if evidence is None and isinstance(scheduler_result, dict):
+            raw = scheduler_result.get("raw") or {}
+            if scheduler == "local":
+                sandbox_state = raw.get("sandbox_state") or {}
+                if _local_job_ended_on_its_own(sandbox_state):
+                    evidence = {"source": "native_job_record", "sandbox_status": sandbox_state.get("status"),
+                                "exit_code": sandbox_state.get("exit_code")}
+            elif _scheduler_phase(scheduler, scheduler_result) == "terminal":
+                evidence = _remote_job_ended_on_its_own(scheduler, raw, str(record.get("job_id") or ""))
+        if evidence is None:
+            return None
+        return settle_terminal(state, record, evidence=evidence, scheduler_result=scheduler_result, observed_by=observed_by)
+    except Exception as exc:  # 结算失败不能把读状态弄死，但要能看见
+        return {"settled": False, "reason": f"settlement_error:{type(exc).__name__}: {exc}"}
+
+
 def probe_external_job_health(state: Any, scheduler: str, job_id: str,
                               namespace: str | None = None) -> dict[str, Any]:
+    """Read one managed job health snapshot; a trustworthy terminal observation is settled into the ledger once."""
+    result = _probe_external_job_health_impl(state, scheduler, job_id, namespace)
+    if isinstance(result, dict) and result.get("scheduler_phase") == "terminal":
+        record, _err = _authoritative_record_for_read(state, scheduler, job_id, namespace)
+        settled = _settle_if_terminal(state, record, scheduler_result=result.get("scheduler_result"),
+                                      evidence=result.get("terminal_evidence"), observed_by="probe_external_job_health")
+        if settled is not None:
+            result["terminal_settlement"] = {k: v for k, v in settled.items() if k != "record"}
+    return result
+
+
+def _probe_external_job_health_impl(state: Any, scheduler: str, job_id: str,
+                                    namespace: str | None = None) -> dict[str, Any]:
     """Read one managed job health snapshot without executing model-supplied shell."""
     record, identity_error = _authoritative_record_for_read(
         state, scheduler, job_id, namespace)
@@ -9913,7 +10691,7 @@ def _operation_outcome_evidence_error(
     scheduler = str(record.get("scheduler") or "")
     job_id = str(record.get("job_id") or "")
     call_prefix = (
-        f'finalize_external_job(scheduler="{scheduler}", job_id="{job_id}"'
+        f'按调度器终态收尾（scheduler="{scheduler}", job_id="{job_id}"'
     )
     blocked_sequence = (
         "1) report_blocker(summary=\"<阻塞事实>\", requested_action=\"<需要谁做什么>\")；"
@@ -11852,6 +12630,30 @@ def _cancel_success_response(
     cleanup: dict[str, Any], idempotent: bool, planned_stop: bool = False,
 ) -> dict[str, Any]:
     """Build a success receipt after every closure ledger is durable."""
+    try:
+        from .ledger import v3_active as _v3_active
+    except ImportError:  # pragma: no cover
+        from tools.ledger import v3_active as _v3_active  # type: ignore
+    if _v3_active(state):
+        return {
+            "status": "success",
+            "scheduler": record.get("scheduler"),
+            "job_id": record.get("job_id"),
+            "namespace": record.get("namespace"),
+            "cancel": cancel_result,
+            "lifecycle": lifecycle,
+            "idempotent": idempotent,
+            "cancellation_intent_artifact_id": evidence_artifact_id,
+            "cleanup": cleanup,
+            "stopped_as_planned": planned_stop,
+            "message": (
+                "取消已确认，并按任务预先声明的计划内停止记录。检查实际输出后，"
+                '用 finish 选择与任务事实相符的 outcome。'
+                if planned_stop else
+                "取消已确认，作业事实记为 cancelled。"
+                '用 finish(outcome="cancelled") 如实结束本 run。'
+            ),
+        }
     return {
         "status": "success",
         "scheduler": record.get("scheduler"),
@@ -11868,10 +12670,10 @@ def _cancel_success_response(
         "message": (
             "取消已确认，按提交时声明的计划内停止记账：路线这一步按 expected_outputs 核对产物"
             "（缺产物记 expected_outputs_missing）；不需要再 finalize。收尾用 "
-            'record_operation_completion(outcome="success")，会附 external_job_stopped_as_planned 检查。'
+            'finish(outcome="success")，如实写明作业按计划停止。'
             if planned_stop else
             "取消已确认，作业记为 cancelled；提交时没有声明计划内停止，路线这一步不算完成（不追认）。"
-            '如实收尾：record_operation_completion(outcome="blocked")，写明作业被取消。任务本身要求'
+            '如实收尾：finish(outcome="cancelled")，写明作业被取消。任务本身要求'
             "中途停下（常驻服务、按判据停、重启测试）时，提交时声明 expected_termination.planned_stop。"
         ),
     }
@@ -11919,20 +12721,18 @@ def _cancellation_reconciliation_response(
 
 #: 作业终态读不出时的诚实出口（取消对账、收尾读不出共用）：不宣称结束，也不宣称取消。
 _JOB_STATE_UNKNOWN_NEXT_ACTIONS = (
-    "先用 check_external_job_health / job_status 读一次实况：读得出终态，就用 "
-    "finalize_external_job 按实际终态收尾",
+    "先用 check_external_job_health / job_status 读一次实况：读得出终态，就按实际终态 finish",
     'report_blocker(summary="<作业精确身份，以及为什么读不出它的状态>", '
     'requested_action="<需要谁核实什么>")，然后 '
-    'record_operation_completion(outcome="blocked")——诚实收尾，会永久封口本 run；'
+    'finish(outcome="blocked", blocker=...)——诚实收尾，会永久封口本 run；'
     "不要重复取消，也不要重提作业",
 )
 #: 只是这次没读出来（身份不符、后端出错、调度器连不上）：先重读，收尾排最后。
 _JOB_STATE_UNREADABLE_NEXT_ACTIONS = (
-    "稍后用 check_external_job_health / job_status 重读；读得出终态就用 "
-    "finalize_external_job 按实际终态收尾，仍在运行就等它结束或 cancel_job",
+    "稍后用 check_external_job_health / job_status 重读；读得出终态就按实际终态 finish，仍在运行就等它结束或 cancel_job",
     "报身份不符（容器名被复用、命名空间不符）时，先按 scheduler/job_id/namespace 核对作业身份",
     '反复读不出、确实要结束本 run 时，才 report_blocker(summary="<作业精确身份与读不出的原话>", '
-    'requested_action="<需要谁核实什么>")，然后 record_operation_completion(outcome="blocked")'
+    'requested_action="<需要谁核实什么>")，然后 finish(outcome="blocked", blocker=...)'
     "——会永久封口本 run；不要重复取消，也不要重提作业",
 )
 
@@ -11942,15 +12742,22 @@ def _cancel_already_ended_response(
     message: str | None = None, idempotent: bool = False,
 ) -> dict[str, Any]:
     """作业已自行结束、没有可取消的对象：不记 cancelled，指回按实际终态收尾（不变量 6）。"""
-    finalize_args = {"scheduler": record.get("scheduler"), "job_id": record.get("job_id")}
-    if record.get("namespace"):
-        finalize_args["namespace"] = record.get("namespace")
+    # v3：下一动作是 finish，outcome 按已读到的实际终态定（Codex 36 P0-C）。
+    # B 只结算事实，不替 C 选 outcome（Codex 45 P0-E）：把终态事实原样交给模型，outcome 由它按任务判断。
+    end_state = str((observed or {}).get("state") or (observed or {}).get("sandbox_status") or "").upper()
+    exit_code = (observed or {}).get("exit_code")
+    finish_args = {
+        "outcome": "<按任务判断：看输出与日志后选 success / partial / failed>",
+        "summary": (f"作业 {record.get('scheduler')}/{record.get('job_id')} 已自行结束"
+                    f"（state={end_state or 'unknown'}, exit_code={exit_code}）；未取消。"),
+        "terminal_facts": {"state": end_state or None, "exit_code": exit_code, "observed": observed},
+    }
     response = {
         "status": "already_ended",
         "reason": "external_job_already_ended",
         "message": message or (
             "作业已自行结束，没有可取消的对象：未调用调度器，未写取消账本，"
-            "lifecycle 仍开放。用 finalize_external_job 按实际终态收尾"
+            "lifecycle 仍开放。按实际终态 finish"
             "（outcome 按该作业的 execution_class 选）；"
             "不要把读得出终态的作业记成 cancelled。"),
         "scheduler": record.get("scheduler"),
@@ -11959,7 +12766,7 @@ def _cancel_already_ended_response(
         "cancelled": False,
         "lifecycle_status": lifecycle_status,
         "observed_end": observed,
-        "next_tool": {"name": "finalize_external_job", "arguments": finalize_args},
+        "next_tool": {"name": "finish", "arguments": finish_args},
         "do_not_repeat_cancel": True,
     }
     if idempotent:
@@ -12061,7 +12868,7 @@ def _external_job_state_unknown_exit(
     - 本地账本确实没有记录：进程可能仍在运行，物理进程事实归 Core；
     - 调度器报告查不到：自身终态不可知（可能已清除，也可能不可见）；
     - 读不出（身份不符、后端出错、调度器连不上）：先稍后重读、核对身份，不引向收尾。
-    report_blocker 后 record_operation_completion(outcome="blocked") 是最后一步，而且会
+    report_blocker 后 finish(outcome="blocked") 是最后一步，而且会
     永久封口本 run，所以文案里写明，读不出时排在重读之后。
     """
     scheduler = str(record.get("scheduler") or "")
@@ -12096,10 +12903,10 @@ def _external_job_state_unknown_exit(
     if retry_first:
         guidance = ("先稍后用 check_external_job_health 重读；报身份不符就先核对作业身份。"
                     "反复读不出、确实要结束本 run 时，才 report_blocker 后 "
-                    "record_operation_completion(outcome=\"blocked\")——它会永久封口本 run。")
+                    "finish(outcome=\"blocked\", blocker=...)——它会永久封口本 run。")
     else:
         guidance = ("诚实收尾：先 report_blocker 记下下面的作业身份与需要谁核实什么，再 "
-                    "record_operation_completion(outcome=\"blocked\")——它会永久封口本 run。")
+                    "finish(outcome=\"blocked\", blocker=...)——它会永久封口本 run。")
     return {
         "status": "error",
         "error_code": "external_job_state_unknown",
@@ -12120,7 +12927,7 @@ def _external_job_state_unknown_exit(
             "suggested_owner": "core" if local else "run_owner",
             "orphan_risk": orphan_risk,
             "requested_action": requested,
-            "node_action": "report_blocker_then_record_operation_completion_blocked",
+            "node_action": "report_blocker_then_finish_blocked",
         },
         "next_actions": list(
             _JOB_STATE_UNREADABLE_NEXT_ACTIONS if retry_first
@@ -12449,7 +13256,7 @@ async def _cancel_job(
                 record, lifecycle_status=lifecycle_status,
                 observed=_last_read_observed_end(prior_outcome.get("cancel_result")),
                 message=("上一次取消在发信号前的最后一读就看到作业已自行结束，没有发出信号；"
-                         "没有可取消的对象。用 finalize_external_job 按实际终态收尾。"),
+                         "没有可取消的对象。按实际终态 finish。"),
                 idempotent=True)
         if prior_outcome.get("outcome") == "rejected":
             # 被拒之后作业可能已自行结束（例如 PBS 对 E 状态的作业拒绝 qdel）：只读地看一次
@@ -12491,8 +13298,14 @@ async def _cancel_job(
     if ended is not None:
         state.append_transcript("job_cancel_skipped_already_ended",
                                 scheduler=scheduler, job_id=job_id, observed=ended)
-        return _cancel_already_ended_response(
+        settled = _settle_if_terminal(state, record, scheduler_result=None,
+                                      evidence=ended if ended.get("source") != "operation_closure_receipt" else None,
+                                      observed_by="cancel_job")
+        response = _cancel_already_ended_response(
             record, lifecycle_status=lifecycle_status, observed=ended)
+        if settled is not None:
+            response["terminal_settlement"] = {k: v for k, v in settled.items() if k != "record"}
+        return response
 
     from shared.lib import dangerous_commands as _danger
     identity = _cancellation_identity(record)
@@ -12559,7 +13372,7 @@ async def _cancel_job(
             record, lifecycle_status=lifecycle_status,
             observed=_last_read_observed_end(result),
             message=("作业在取消确认之后、发信号之前已自行结束：没有发出信号，取消账本记为 "
-                     "not_sent，作业账本原样保留。用 finalize_external_job 按实际终态收尾。"))
+                     "not_sent，作业账本原样保留。按实际终态 finish。"))
         response["cancellation_intent_artifact_id"] = intent.get("intent_artifact_id")
         if persisted_outcome:
             response["cancellation_outcome_artifact_id"] = persisted_outcome.get(
@@ -12630,7 +13443,8 @@ register_tool(
     ToolDefinition(
         name="discover_resources",
         description=(
-            "Discover local CPU/memory/GPU resources and available schedulers (SLURM, PBS, Kubernetes).\n\n"
+            "Discover local CPU/memory/GPU resources and scheduler clients (SLURM, PBS, Kubernetes). "
+            "Discovery, public submission support and Core authorization are separate facts.\n\n"
             "**Use when**:\n"
             "  - Before choosing local vs scheduler execution for an HPC experiment.\n"
             "  - When experiment_log needs objective resource availability evidence.\n\n"
@@ -12640,7 +13454,12 @@ register_tool(
             "**关键参数**:\n"
             "  - namespace: optional Kubernetes namespace for kubectl queries.\n"
             "  - save_artifact: default true; stores a resource_profile artifact.\n\n"
-            "**返回**: available_schedulers, recommended_default, and per-scheduler details."
+            "**返回**: available_schedulers (remote: installed clients, not submit permission), "
+            "submittable_schedulers (public launch candidates, not an authorization guarantee), "
+            "recommended_default (null if none), and per-scheduler details. Auto selects only "
+            "local CPU. Explicit single-task CPU or one-GPU Slurm submission needs lifecycle "
+            "CLI tools, scheduler-visible work/output paths and confirmation; request support "
+            "does not prove allocation, device use, or isolation. PBS remains dry-run only."
         ),
         parameters_schema={
             "type": "object",
@@ -12669,7 +13488,12 @@ register_tool(
             "  - mpi_ranks/cpus_per_rank/gpus/memory_gb/walltime_minutes: requested resources.\n"
             "  - hourly_rate_usd: optional real rate for cost estimation; no default guessing.\n"
             "  - scheduler_preference: local/slurm/pbs/kubernetes when prereg requires one.\n\n"
-            "**返回**: resource recommendation, warnings, optional estimated_resource_cost_usd, and resource profile. The recommendation is transient run state; a successful submit_job records the actual allocation in job_submission."
+            "**返回**: resource recommendation, warnings, optional estimated_resource_cost_usd, and resource profile. "
+            "scheduler=null means no current public backend matches the request; requested GPU/resources "
+            "are retained, not silently reduced. Installed clients do not enable remote real submission. "
+            "The recommendation is transient run state, not authorization; submit_job records "
+            "the requested resources and job identity, while scheduler terminal evidence records "
+            "request/allocation facts separately."
         ),
         parameters_schema={
             "type": "object",
@@ -12700,7 +13524,7 @@ register_tool(
         description=(
             "Advisory read before CMake/configure/compile: compares the chosen serial/MPI/GPU/hybrid build mode with Core host declarations and a fresh live resource snapshot, "
             "records a build_resource_plan, and returns capability_issues / capacity_warnings / recommendation. It never blocks or pauses: whether to compile stays with you; "
-            "record its concerns and your decision in experiment_log."
+            "include material concerns and your decision in finish(summary/limitations)."
         ),
         parameters_schema={
             "type": "object",
@@ -12730,31 +13554,14 @@ register_tool(
     ToolDefinition(
         name="submit_job",
         description=(
-            "通过统一入口渲染或提交 local/SLURM/PBS 作业；Kubernetes 目前仅可发现，缺少显式 PVC/volume 合同时连 dry-run 也会拒绝。默认 dry_run=true。\n\n"
-            "**先决条件（dry_run=false 时）**: 冻结的 v2 路线里必须已有一个与本次提交对应的可执行步骤 —— "
-            "先调 declare_execution_route 声明它，再把该 step 的 id 传进 route_step_id。没有它，真实提交会被拒。\n\n"
-            "**Use when**:\n"
-            "  - Canonical build, simulation, or another process-tree action needs a durable local/scheduler lifecycle.\n"
-            "  - You need a reproducible submission script artifact for experiment_log.\n\n"
-            "**Do NOT use when**:\n"
-            "  - The command is a short interactive check -> use safe_run_bash.\n"
-            "  - You want to bypass review of a destructive/high-risk payload: high-risk local submissions and every remote submission retain the structured one-shot confirmation path.\n\n"
-            "**确认策略**: 普通本地受管提交在通过既有路线、路径、能力、沙箱与资源门禁且未命中高危命令时直接继续；不会伪造 bypass 或消费批准。\n\n"
-            "**关键参数**:\n"
-            "  - scheduler: auto/local/slurm/pbs/kubernetes。auto 只会依次选择 SLURM、PBS、local，绝不会自动选择 Kubernetes。\n"
-            "  - dry_run: default true; writes the script and submit command but does not submit.\n"
-            "  - command: shell payload to run inside the job script.\n"
-            "  - workdir: optional directory where the payload should run; when omitted it defaults to this run's declared run_root.\n"
-            "  - foreground_wait_s: optional synchronous wait only; expiry returns the still-running submitted job and never kills it.\n"
-            "  - expected_duration_s: advisory duration for overdue reporting only; it never kills.\n"
-            "  - hard_deadline_s: explicit local/Kubernetes hard deadline; only this installs a wall-clock kill.\n"
-            "  - walltime_minutes: 硬性墙钟上限，**本地作业也算**。省略时本地按 "
-            f"{_LOCAL_WALLTIME_SAFETY_DEFAULT_MINUTES} 分钟的平台安全上限执行、到点杀进程；"
-            "长作业请显式给足（省略在 SLURM/PBS 上则不落指令、站点默认记 unknown）。\n"
-            "  - every scheduler script first verifies its executing UID resolves through NSS and can access the declared workdir; a failed check exits before the payload starts.\n"
-            "  - image: 仅是 Kubernetes 镜像字段；当前仍必须先补齐平台 PVC/volume 挂载合同，不能据此绕过拒绝。\n\n"
-            "  - nodelist: optional SLURM node list, e.g. spr-cu04, when a run must target a specific node.\n\n"
-            "**返回**: script_path and script_preview. If dry_run=false, also returns job_id or submit error."
+            '把会活过本次调用的工作交给调度器：真正的构建、simulation、并行启动器、长任务。默认 dry_run=true 只渲染脚本；dry_run=false 才提交。\n'
+            '\n'
+            '**Use when**：需要作业身份（活过调用、能查状态、能取消、终态由调度器说了算）。\n'
+            '**Do NOT use when**：一条几秒钟的检查 → safe_run_bash。auto 绝不会自动选择 Kubernetes。\n'
+            '\n'
+            f'**关键参数**：scheduler=auto/local/slurm/pbs（auto 只选择可用的本地 CPU；显式 Slurm 真实提交目前限单节点、单任务、0 或 1 张 GPU，单任务不承诺任意 payload 的 OS 进程树；须提供计算节点可见的 workdir 和 output_dir 并经一次外部作业确认；GPU 请求不证明分配、实算或设备隔离，远端写入/网络/设备隔离不保证；PBS 只支持 dry_run；Kubernetes 缺 PVC/volume 契约时拒绝）；command；workdir（本地省略=本 run 的 run_root）；output_paths（作业会写到哪，省略=workdir）；mpi_ranks/cpus_per_rank/gpus/memory_gb；walltime_minutes 是硬性墙钟上限，**本地作业也算**：省略时本地按 {_LOCAL_WALLTIME_SAFETY_DEFAULT_MINUTES} 分钟的平台安全上限执行、到点杀进程，长作业请显式给足；expected_termination（可选：成功时的退出码或 stdout 标记，让终态判定不只看 exit 0）。\n'
+            '\n'
+            '提交前框架先记下意图与 correlation key 再提交，ACK 丢了也不会重复提交；提交后用 job_status / wait_for_external_job 看它，cancel_job 停它。普通本地受管提交通过路径、能力、沙箱与资源门禁且未命中高危命令时直接继续；高危 payload 或越出预授权包络按现有风险策略确认。资源建议本身不授予权限，也不证明实际启动成功。'
         ),
         parameters_schema={
             "type": "object",
@@ -12803,10 +13610,6 @@ register_tool(
                     "type": "array", "items": {"type": "string"},
                     "description": "Application output roots reserved by this job. Every root must be under declared build_root or run_root; if omitted, workdir is conservatively reserved.",
                 },
-                "route_step_id": {
-                    "type": "string",
-                    "description": "可选：显式绑定当前冻结 declared_route v2 中的步骤 id；用于消歧和审计。",
-                },
                 "expected_duration_s": {
                     "type": "integer", "minimum": 1,
                     "description": (
@@ -12818,7 +13621,7 @@ register_tool(
                     "type": "integer", "minimum": 1, "maximum": 900,
                     "description": (
                         "How long this tool call waits after the durable submission and "
-                        "route receipt exist. Expiry returns submitted/running and never kills."
+                        "scheduler identity are recorded. Expiry returns submitted/running and never kills."
                     ),
                 },
                 "hard_deadline_s": {
@@ -12835,14 +13638,24 @@ register_tool(
                 },
                 "input_package_artifact_id": {
                     "type": "string",
-                    "description": "Verified dataset or experiment_fallback_inputs artifact consumed by this real simulation.",
+                    "description": (
+                        "Dataset actually consumed by this job. Ordinary existing datasets are "
+                        "structurally inspected automatically; no new Data request is needed. "
+                        "Active formal requests and experiment_fallback_inputs still require their "
+                        "existing verification. Omit only when no package is consumed. "
+                        "Use this or input_package_bindings, not both."
+                    ),
                 },
                 "input_package_bindings": {
                     "type": "object",
                     "additionalProperties": {"type": "string"},
                     "description": (
-                        "Complete spec_id -> verified dataset/experiment_fallback_inputs artifact id "
-                        "mapping when this simulation consumes multiple formal input packages."
+                        "Map only packages this job consumes. With active Data requests, keys are "
+                        "spec_id and values are verified dataset/experiment_fallback_inputs ids. "
+                        "With no active request or required fallback, keys are labels for ordinary "
+                        "dataset ids, checked structurally without registering a new request. "
+                        "This does not establish formal provenance or scientific task fitness. "
+                        "Use this or input_package_artifact_id, not both."
                     ),
                 },
                 "health_check": {
@@ -12859,12 +13672,12 @@ register_tool(
                 },
                 "expected_termination": {
                     "type": "object",
-                    "description": "Only when the task itself says how this job is expected to end: a non-zero exit (exit_codes, e.g. a job meant to fail) or a planned stop (planned_stop: true, e.g. a service shut down after use, a run stopped once a criterion is met, a checkpoint/restart test killed mid-run; stop it with cancel_job). exit_codes are 1..123; task_quote must be copied verbatim from the task text and contain each code as a standalone number, otherwise the submission is refused before the confirmation card. The job's outcome is still recorded as it physically happened (non-zero exit -> operation_failed); termination_matched records whether it met this declaration, and route steps / operation success read that.",
+                    "description": "Only when the task itself says how this job is expected to end: a non-zero exit (exit_codes, e.g. a job meant to fail) or a planned stop (planned_stop: true, e.g. a service shut down after use, a run stopped once a criterion is met, a checkpoint/restart test killed mid-run; stop it with cancel_job). exit_codes are 1..123; task_quote must be copied verbatim from the task text and contain each code as a standalone number, otherwise the submission is refused before the confirmation card. The job's outcome is still recorded as it physically happened; termination_matched tells finish whether the observed end matched the task's declaration.",
                     "additionalProperties": False,
                     "properties": {
                         "exit_codes": {"type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": True, "items": {"type": "integer", "minimum": 1, "maximum": 123}},
                         "task_quote": {"type": "string", "minLength": 1, "maxLength": 400},
-                        "planned_stop": {"type": "boolean", "description": "true when the task asks for this job to be stopped mid-run with cancel_job. A confirmed cancel of a local job then counts as a planned stop: the route step is checked against expected_outputs and operation success records external_job_stopped_as_planned. Omit exit_codes if only this applies."},
+                        "planned_stop": {"type": "boolean", "description": "true when the task asks for this job to be stopped mid-run with cancel_job. A confirmed cancel of a local job is recorded as the requested stop; finish still checks the actual outputs and task obligations. Omit exit_codes if only this applies."},
                     },
                     "required": ["task_quote"],
                 },
@@ -13081,11 +13894,7 @@ register_tool(
     ToolDefinition(
         name="cancel_job",
         description=(
-            "Cancel a still-running job previously submitted by experiment through the scheduler-aware managed path. "
-            "For local jobs it stops the exact immutable-ID-matched native job, records lifecycle state, and closes matching handoff tasks. "
-            "A job that already ended on its own is not cancelled: the call returns status=already_ended with the observed end state, "
-            "records nothing, and names finalize_external_job as the way to close it. "
-            "Real cancellation asks for confirmation unless bypass is enabled."
+            '停掉本 run 之前提交、还在跑的作业。本机作业按不可变 id 精确停；已经自己结束的作业不会被记成 cancelled，返回 status=already_ended 与观察到的终态。真实取消会问一次确认（bypass 时不问）。'
         ),
         parameters_schema={
             "type": "object",
@@ -13109,3 +13918,7 @@ for _managed_artifact_type in sorted(_MANAGED_EXTERNAL_ARTIFACT_TYPES):
         _managed_artifact_type,
         _managed_external_artifact_save_gate,
     )
+
+
+# inspect.signature 要看实现体的签名（stage_in / state 为 keyword-only 必填）；包装器只负责关闭未绑定的 intent。
+_submit_sync.__wrapped__ = _submit_sync_impl  # type: ignore[attr-defined]

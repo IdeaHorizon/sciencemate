@@ -198,14 +198,21 @@ def _read_tail(path: Path, size: int, cap: int) -> bytes:
     return data
 
 
-def _run_files(runs_root: Path) -> list[Path]:
-    """runs 根下的每个普通文件。调度器目录与每个 run 的顶层记录排在前面。
+def _run_files(runs_root: Path) -> tuple[list[Path], list[tuple[Path, OSError]]]:
+    """runs 根下的每个普通文件，以及进不去的目录。调度器目录与每个 run 的顶层记录排在前面。
 
     到整包上限时先丢的是 `event_blobs/`、`scratch/` 这些深处的大件，而不是
     `events.jsonl` / `transcript.jsonl`。
     """
     found: list[Path] = []
-    for directory, subdirectories, names in os.walk(runs_root, followlinks=False):
+    unreadable: list[tuple[Path, OSError]] = []
+
+    def _note(exc: OSError) -> None:
+        # `os.walk` 默认把进不去的目录静默跳过 —— 于是「读不到」和「本来就没有」在包里
+        # 长得一样（lujy 10-15 的包：runs/ 零文件、skipped 空）。记下来，让 manifest 说话。
+        unreadable.append((Path(exc.filename or runs_root), exc))
+
+    for directory, subdirectories, names in os.walk(runs_root, followlinks=False, onerror=_note):
         subdirectories.sort()
         found.extend(Path(directory) / name for name in sorted(names))
 
@@ -215,7 +222,7 @@ def _run_files(runs_root: Path) -> list[Path]:
         orchestrator = relative.parts[0].startswith("orchestrator__")
         return (int(nested), int(not orchestrator), relative.as_posix())
 
-    return sorted(found, key=priority)
+    return sorted(found, key=priority), unreadable
 
 
 def _collect_runs(
@@ -224,7 +231,18 @@ def _collect_runs(
     if runs_root is None or not runs_root.is_dir():
         ledger.skipped.append({"path": "runs/", "reason": "这个会话在这台机器上没有运行记录目录"})
         return
-    for path in _run_files(runs_root):
+    files, unreadable = _run_files(runs_root)
+    for directory, exc in unreadable:
+        try:
+            relative = directory.relative_to(runs_root).as_posix()
+        except ValueError:
+            relative = str(directory)
+        ledger.skipped.append({"path": f"runs/{relative}".rstrip("/") + "/", "reason": f"读不到：{exc}"})
+    if not files and not unreadable:
+        # README 承诺「runs/ 这个会话的全部运行记录」；一个都没有时要说清是目录空着，
+        # 不是没收 —— worker 在建 run 目录之前就死掉的会话（lujy 10-15）就是这样。
+        ledger.skipped.append({"path": "runs/", "reason": "运行记录目录存在但是空的：这个会话没有任何 run 起来过"})
+    for path in files:
         arcname = "runs/" + path.relative_to(runs_root).as_posix()
         try:
             info = os.lstat(path)

@@ -111,6 +111,7 @@ def test_a_run_without_prereg_trouble_gets_no_briefing(tmp_path):
     assert _briefing(State.new("experiment", tmp_path)) is None
 
 
+@pytest.mark.skip(reason="v2 模型面：turn_one_briefing 退役，turn 1 由 experiment_v3_bootstrap 出一页事实；v3 承接见 test_turn_one_briefing.py（v3 形状）")
 def test_the_prereg_briefing_hook_is_wired_into_the_harness():
     # K11 起经 turn_one_briefing 合并注入（与其他开局提示拼成一条）。
     config = yaml.safe_load((_NODE / "harness.yaml").read_text(encoding="utf-8"))
@@ -122,6 +123,7 @@ def test_the_prereg_briefing_hook_is_wired_into_the_harness():
 # ── K3 不再要求模型手动声明 envelope；不改判 scope；探索性科学写法 ───────────
 
 
+@pytest.mark.skip(reason="v2 模型面：无 classify/改判 scope；v3 承接见 test_060_run_bootstrap.py（scope 由 bootstrap 派生）")
 def test_the_rules_no_longer_ask_for_a_manual_envelope_declaration():
     rules = _rules()
     assert "declare_execution_envelope(assurance_class" not in rules
@@ -189,5 +191,5 @@ def test_the_rules_cover_the_three_behaviours_seen_in_live_runs():
     （test_data_source_reachability 钉住 16 条）。"""
     rules = _rules()
     assert "被拒的调用不原样重发" in rules
-    assert "先冻结三件套、再修记账" in rules
-    assert "只写工具返回的实测值" in rules
+    # v3（060 S1d）：三件套由 finish 一次冻结，不再要求模型手工冻结；实测值要求并进"不得伪造输出"。
+    assert "不得伪造输出" in rules

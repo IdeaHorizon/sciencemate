@@ -81,13 +81,15 @@ rules:
   - "输入摘要、检索证据、scratchpad 和 planning 状态只能作为中间证据，不得保存为最终 dataset。只有真实 package 与 manifest 已落盘、通用契约完整且专业审核通过后，才能保存正式 dataset 交付。"
   - "最终 dataset 必须指向真实 data/package 和 manifest；不能只给自然语言说明，也不能宣称仿真、训练或科学结论已完成。"
   - "最终回复禁止包含内部推理、工具调用过程或模型自述。"
-  # ── issue #166 第 1 条：接单义务（与 experiment 的"必须打回"硬门禁对称）──
-  # 背景：experiment 侧有硬门禁 + QC 明令"初始结构/网格/输入包生成 = 前处理，
-  # 必须 redirect_upstream: data"，且它 callable_nodes: [] 无法自己做。若 data
-  # 这侧可以自由地以"这是计算任务不是数据前处理"退回，两边就无限踢皮球
-  # （e2e 实测：POSCAR 生成任务在 experiment↔data 之间来回弹，任务卡死）。
-  # 单边硬门禁必须配对称的接单义务，否则死锁。
-  - "**下游 redirect 过来的前处理请求属于本节点职责，不得以「这是计算任务/不属于数据前处理」为由退回**。求解器正式输入的构造——初始结构（POSCAR/超胞/插原子）、网格、KPOINTS/INCAR/POTCAR 等输入包、格式转换、训练集清洗切分——都在本节点范围内，无论任务看起来多简单。"
+  # ── issue #166 第 1 条：接单义务（与 experiment 的"缺正式输入交给 data"对称）──
+  # 背景：experiment 缺初始结构/网格/输入包时不自造，而是经 dispatch_data_request
+  # **同步调用**本节点（experiment.callable_nodes: [data]）。若 data 这侧可以自由地
+  # 以"这是计算任务不是数据前处理"退回，两边就无限踢皮球（e2e 实测：POSCAR 生成
+  # 任务在 experiment↔data 之间来回弹，任务卡死）。单边要求必须配对称的接单义务。
+  # 注（#1063）：本节点是**服务**（post_run_flow: none），交接走同步调用而不是
+  # redirect —— 服务节点不进 post-node flow 账本，redirect 给它的义务永远关不掉
+  # （见 core/loader.node_owes_post_node_flow）。
+  - "**下游同步调用转过来的前处理请求属于本节点职责，不得以「这是计算任务/不属于数据前处理」为由退回**。求解器正式输入的构造——初始结构（POSCAR/超胞/插原子）、网格、KPOINTS/INCAR/POTCAR 等输入包、格式转换、训练集清洗切分——都在本节点范围内，无论任务看起来多简单。"
   - "**任务简单不是拒绝的理由**：planning gate 与 Universal Data Workflow 是流程下限不是任务门槛。任务只需一两步就能完成时，产出一份最小但完整的 package（manifest 可薄，但 quality_gates/lineage 不得为空），不要因为「任务太简单、不值得走这套流程」而不执行。"
   - "**确实做不了必须留下结构化出口**：缺用户可补参数时返回 needs_input；缺授权资产、外部服务或工具时返回 externally_blocked；不可恢复内部错误才 fatal。只有 pipeline controller 写 blocked report，reviewer/executor 不得自行决定终态。"
 

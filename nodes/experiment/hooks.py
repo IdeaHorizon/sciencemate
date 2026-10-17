@@ -3103,7 +3103,7 @@ _SCHEDULER_FACTS_ASSETS: dict[str, str] = {
     "pbs": "references/pbs-torque-terminal-facts.md",
 }
 _SCHEDULER_FACTS_TOOLS = frozenset({
-    "check_external_job_health", "wait_for_external_job", "finalize_external_job",
+    "job_status", "check_external_job_health", "wait_for_external_job",
 })
 _SCHEDULER_FACTS_ROUTED_KEY = "_scheduler_facts_routed"
 
@@ -4087,8 +4087,15 @@ def _repro_snapshot_on_end(ctx: HookContext, loop_result: Any) -> None:
     snapshot_error = None
     if not bench_disabled:
         try:
-            repo_paths = discover_repo_paths(state, transcript_text=transcript_text)
+            path_probe_diagnostics: list[dict[str, Any]] = []
+            repo_paths = discover_repo_paths(
+                state,
+                transcript_text=transcript_text,
+                diagnostics=path_probe_diagnostics,
+            )
             snap = collect_snapshot(repo_paths=repo_paths, extra_libs=_REPRO_LIBS)
+            if path_probe_diagnostics:
+                snap["path_probe_diagnostics"] = path_probe_diagnostics
             md = render_markdown(snap)
         except Exception as e:
             snapshot_error = f"{type(e).__name__}: {e}"

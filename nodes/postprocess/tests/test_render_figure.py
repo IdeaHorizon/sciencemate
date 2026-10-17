@@ -333,6 +333,44 @@ def test_pre_existing_file_cannot_be_bound_as_this_render(tmp_path):
     assert "old.png" in result["error"]
 
 
+def test_a_fresh_render_is_fresh_whatever_the_wall_clock_says(tmp_path, monkeypatch):
+    """#975：「是不是这次写的」不许拿墙钟比文件戳。
+
+    CI runner 的墙钟会往回跳（#1146 实测），文件戳又来自写它的内核 —— 原判据
+    `st_mtime < time.time() - 2.0` 把刚写出来的图判成「挂旧文件充数」，这个文件
+    的用例在 CI 上随机红、每次换一条。这里把进程的墙钟拨快 10 s（等价于渲染
+    开始后墙钟回跳 10 s）：文件是这次执行写的，就必须照常绑定。
+    """
+    real_time = time.time
+    monkeypatch.setattr(time, "time", lambda: real_time() + 10.0)
+
+    state = _state(tmp_path)
+    result = _render(state)
+    assert result["status"] == "success", result.get("error")
+    assert [item["path"].split("/")[-1] for item in result["files"]] == ["demo.png"]
+
+
+def test_rerendering_over_an_existing_output_counts_as_this_render(tmp_path):
+    """对照：判据不能退化成「执行前就存在 = 充数」。
+
+    同一条请求的第二次渲染（预算内重画）写的就是上一次的同名文件 —— 被代码
+    重写过的旧文件是这次的产物，只有「原样没动」的才算充数。
+    """
+    state = _state(tmp_path)
+    from core.project_workspace import validate_tool_cwd
+
+    workspace = validate_tool_cwd(state, None)
+    workspace.mkdir(parents=True, exist_ok=True)
+    previous = workspace / "demo.png"
+    previous.write_bytes(b"\x89PNG\r\n\x1a\nprevious attempt")
+    old = time.time() - 3600
+    os.utime(previous, (old, old))
+
+    result = _render(state)  # _CLEAN_CODE 重写 demo.png
+    assert result["status"] == "success", result.get("error")
+    assert previous.read_bytes() != b"\x89PNG\r\n\x1a\nprevious attempt"
+
+
 def test_zero_source_figures_disclose_the_absence(tmp_path):
     state = _state(tmp_path)
     result = _render(state, source_artifact_ids=[])

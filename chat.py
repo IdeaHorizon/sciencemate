@@ -2540,6 +2540,7 @@ async def _handle_interrupt(state: State, harness, llm: LLMClient,
     runtime_control_def = get_tool("runtime_control")
     if runtime_control_def is not None:
         tool_schemas.append(to_openai_schema(runtime_control_def))
+    offered_tools = {sch["function"]["name"] for sch in tool_schemas}
 
     # 待命轮是 fork 出来的旁路对话，不该抢主轮的流式显示 —— 临时摘掉回调。
     _saved_display = getattr(llm, "stream_display", None)
@@ -2567,14 +2568,34 @@ async def _handle_interrupt(state: State, harness, llm: LLMClient,
             for call in response.tool_calls:
                 name = call["function"]["name"]
                 call_id = call.get("id") or ""
-                try:
-                    args = json.loads(call["function"].get("arguments") or "{}")
-                except json.JSONDecodeError:
+                # 执行端核对工具面（#1164）：上面只把只读工具 + runtime_control
+                # **展示**给模型，但模型返回什么名字这里就执行什么 —— 2026-09-28
+                # 现场待命旁路照样调起了 run_node，把一个还在跑的 child 当成被打断
+                # 续了第二个 loop。展示不是授权，授权要在执行这一侧落实。
+                # 坏参数同理：解析不了不能当成"没给参数"去执行。
+                result = None
+                if name not in offered_tools:
+                    result = {
+                        "status": "error",
+                        "error_code": "tool_not_offered_in_standby",
+                        "error": (f"{name} 不在待命期的工具面里（子节点此刻持有工作区）。"
+                                  "这类改动等子节点跑完、回到主轮再做。"),
+                    }
                     args = {}
-                try:
-                    result = await execute_tool(name, state, **args)
-                except Exception as e:  # noqa: BLE001 —— 工具炸了不该带走这次对话
-                    result = {"status": "error", "error": f"{type(e).__name__}: {e}"}
+                else:
+                    try:
+                        args = json.loads(call["function"].get("arguments") or "{}")
+                        if not isinstance(args, dict):
+                            raise ValueError(f"参数必须是对象，收到 {type(args).__name__}")
+                    except ValueError as e:
+                        result = {"status": "error", "error_code": "invalid_arguments",
+                                  "error": f"工具参数解析不了，没有执行：{e}"}
+                        args = {}
+                if result is None:
+                    try:
+                        result = await execute_tool(name, state, **args)
+                    except Exception as e:  # noqa: BLE001 —— 工具炸了不该带走这次对话
+                        result = {"status": "error", "error": f"{type(e).__name__}: {e}"}
                 # runtime_control 是**对子节点的动作**，用户必须看见它发生了。
                 # 只读工具的原始结果不刷屏 —— 模型下一轮会把它讲成人话。
                 if name == "runtime_control":

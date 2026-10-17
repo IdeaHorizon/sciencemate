@@ -65,6 +65,35 @@ def test_detached_job_runs_to_completion_and_is_inspectable(tmp_path: Path) -> N
     assert "started" in out.read_text()
 
 
+def test_detached_bash_script_job_runs_like_submit_job_local(tmp_path: Path) -> None:
+    """submit_job scheduler=local 的形状：``[bash_shell(), <job script>]`` 起 detached 作业。
+
+    #943：Windows 上它提交成功、作业退 64，stderr 只有 win32 启动器的 usage 一行 —— 启动器
+    的 argv 先过了一跳 MSYS bash，JSON spec 被折坏，脚本一行没跑。判据落在脚本真跑了：
+    退出码 0、它写的文件在 cwd 里、它的 stdout 进了 out。
+    """
+    from shared.lib.shell import bash_shell
+
+    work = tmp_path / "work"
+    work.mkdir()
+    script = work / "experiment_job.sh"
+    script.write_text("echo job-ran\necho payload > marker.txt\n", encoding="utf-8", newline="\n")
+    out, err = tmp_path / "job.out", tmp_path / "job.err"
+    launch = sandbox.prepare_launch(
+        [bash_shell(), str(script)], cwd=work, writable_roots=[work], detached=True,
+        stdout_path=out, stderr_path=err,
+    )
+    started = subprocess.run(launch.argv, capture_output=True, text=True, timeout=30)
+    assert started.returncode == 0, started.stderr
+    assert _wait(lambda: sandbox.inspect_container(launch.container_name)["status"] == "exited",
+                 timeout=30)
+
+    final = sandbox.inspect_container(launch.container_name)
+    assert final["exit_code"] == 0, err.read_text(encoding="utf-8", errors="replace")
+    assert (work / "marker.txt").read_text().strip() == "payload"
+    assert "job-ran" in out.read_text(encoding="utf-8", errors="replace")
+
+
 def test_detached_job_cannot_write_outside_its_roots(tmp_path: Path) -> None:
     work = tmp_path / "work"
     work.mkdir()

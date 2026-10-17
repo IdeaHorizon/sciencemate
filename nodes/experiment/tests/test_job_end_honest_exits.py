@@ -146,7 +146,7 @@ def test_a_rejected_cancellation_points_to_finalize_once_the_job_is_seen_to_have
     second = asyncio.run(manager._cancel_job(state, "slurm", "4242", reason="stop"))
 
     assert second["status"] == "already_ended", second
-    assert second["next_tool"]["name"] == "finalize_external_job"
+    assert second["next_tool"]["name"] == "finish"  # v3（060 S1d）：下一动作是 finish
     assert second["previous_cancel_result"]["action"] == "scheduler_cancel"
 
 

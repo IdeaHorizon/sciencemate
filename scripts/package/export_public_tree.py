@@ -64,6 +64,7 @@ INTERNAL = (
     "tests/test_deploy_hands_the_service_to_the_unit.py",
     "tests/test_deploy_survives_a_free_port.py",
     "tests/test_the_debt_and_the_write_permission_must_match.py",
+    "tests/test_ci_red_reaches_a_readable_place.py",  # 读 .gitea/
 )
 
 #: 被排除的目录里仍然要带上的：不是过程文档，是代码和闸读的登记表。

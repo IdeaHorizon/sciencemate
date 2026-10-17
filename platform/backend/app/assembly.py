@@ -221,6 +221,16 @@ def the_credential_key_is_operator_managed() -> bool:
     return settings.profile != "personal"
 
 
+def the_worker_home_has_one_tenant() -> bool:
+    """worker 的家（`harness-state/users/<uid>`）里只会有这一个人吗。
+
+    是 → 家的身份 marker 读不到时 worker 留在这个家、坏了留底重建（RFC_WORKER_START_IS_NOT_A_GATE §3.5）；
+    不是 → 这个家可能是别人的，读不到就换私有临时家。个人版只有一个本地用户；组织服务器上
+    一人一家、但同一台机器上别人的家挨着，核不了就不认。
+    """
+    return settings.profile == "personal"
+
+
 def weak_resource_walls_are_acceptable() -> bool:
     """跑飞的时候没有自动刹车 —— 这台机器上能不能接受。
 

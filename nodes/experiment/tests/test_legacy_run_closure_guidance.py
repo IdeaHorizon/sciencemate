@@ -108,7 +108,9 @@ def test_legacy_classified_run_names_authority_failure_first_at_end(
     assert "already classified" in reason
     assert "does not reconstruct" in reason
     assert "start a fresh run" in reason
-    assert "declare_inconclusive_verdict" in reason
+    # 诚实收尾的出口要是本工具面上有的：declare_inconclusive_verdict 已退出白名单。
+    assert 'finish(outcome="blocked"' in reason
+    assert "declare_inconclusive_verdict" not in reason
     assert "do not fabricate" in reason
 
     loop_result = SimpleNamespace(status="completed", final_text="done")

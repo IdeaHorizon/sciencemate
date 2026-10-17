@@ -406,6 +406,26 @@ async def _record_what_this_machine_enforces() -> None:
         logger.warning("No execution boundary on this host: %s", reason)
 
 
+async def _snapshot_data_root_permissions() -> None:
+    """数据根权限快照：每次启动记一份，版本号变了就和上一份比（RFC_WORKER_START_IS_NOT_A_GATE §3.9）。
+
+    lujy 10-15 现场的病因三选一（显式 ACL / 换了账号 / 僵尸句柄），日志分不出 —— 因为没有任何一层
+    记过「升级前后谁动了什么」。有了这张表和沙箱的 icacls 账本，下一次发生时不需要再猜。
+    跑不动不拦启动：它是观察，不是服务的前提。
+    """
+    from app.config import the_data_root
+    from app.services.permissions_snapshot import record_startup
+    from app.version import installed_version
+
+    try:
+        change = await asyncio.to_thread(record_startup, the_data_root(), app_version=installed_version())
+    except Exception as exc:  # noqa: BLE001 - 观察失败不该挡住服务
+        logger.warning("数据根权限快照没记成（不影响使用）：%s", exc)
+        return
+    if change:
+        logger.warning("数据根权限在升级前后变了：%s", change.get("consequences"))
+
+
 async def _rekey_credentials_that_used_the_published_constant() -> None:
     """把还用出厂密钥加密的凭据换成这份安装自己的密钥。
 
@@ -475,6 +495,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await _one_home_per_project()
     await _refuse_to_serve_with_a_broken_runtime()
     await _record_what_this_machine_enforces()
+    await _snapshot_data_root_permissions()
     # 发行的启动钩子（专业版：零用户的组织服务器发一次认领码）。个人版这里是空的。
     for hook in assembly.EDITION_HOOKS.after_startup:
         await hook()

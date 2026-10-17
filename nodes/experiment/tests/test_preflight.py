@@ -2,16 +2,22 @@
 from __future__ import annotations
 
 import asyncio
+
 from core.state import State
-from nodes.experiment.tools.preflight import audit_execution_contract, audit_experiment_preflight
-from nodes.experiment.tools.contract_audit import audit_input_delivery_for_execution
-from nodes.experiment.tools.resource_manager import _submit_job
+from nodes.experiment.tests.test_input_delivery_lifecycle import _deliver, _service_spec
+from nodes.experiment.tools import execution_route
+from nodes.experiment.tools.contract_audit import (
+    _validate_data_request_spec,
+    audit_input_delivery_for_execution,
+)
 from nodes.experiment.tools.path_roles import experiment_output_dir
+from nodes.experiment.tools.preflight import audit_execution_contract, audit_experiment_preflight
+from nodes.experiment.tools.resource_manager import _submit_job
 from nodes.experiment.tools.run_contract import (
-    _classify_experiment_scope, PREREG_DEVIATIONS_KEY,
+    PREREG_DEVIATIONS_KEY,
+    _classify_experiment_scope,
     audit_prereg_assignment,
 )
-from nodes.experiment.tools import execution_route
 
 
 def _fixture_node_inputs() -> dict[str, str]:
@@ -507,42 +513,38 @@ def test_verified_fallback_input_makes_secondary_simulation_enforce_frozen_param
 
 
 def test_multiple_input_specs_require_an_explicit_verified_package_mapping(tmp_path):
-    state = _state(tmp_path, role="secondary", eligible=False)
-    state.hook_state["input_delivery_state"] = {
-        "spec-a": {
-            "provider": "data", "verified": True,
-            "input_package_artifact_id": "dataset__a",
-        },
-        "spec-b": {
-            "provider": "data", "verified": True,
-            "input_package_artifact_id": "dataset__b",
-        },
-    }
+    state = State.new("experiment", tmp_path)
+    request_a = asyncio.run(_validate_data_request_spec(state, _service_spec("a.msh")))
+    request_b = asyncio.run(_validate_data_request_spec(state, _service_spec("b.msh")))
+    assert request_a["status"] == request_b["status"] == "success"
+    spec_a, spec_b = request_a["spec_id"], request_b["spec_id"]
+    dataset_a = _deliver(tmp_path, state, spec_a, "a.msh", "a")
+    dataset_b = _deliver(tmp_path, state, spec_b, "b.msh", "b")
 
-    ambiguous = audit_input_delivery_for_execution(state, "dataset__a")
+    ambiguous = audit_input_delivery_for_execution(state, dataset_a)
     matched = audit_input_delivery_for_execution(
         state,
         input_package_bindings={
-            "spec-a": "dataset__a",
-            "spec-b": "dataset__b",
+            spec_a: dataset_a,
+            spec_b: dataset_b,
         },
     )
     swapped = audit_input_delivery_for_execution(
         state,
         input_package_bindings={
-            "spec-a": "dataset__b",
-            "spec-b": "dataset__a",
+            spec_a: dataset_b,
+            spec_b: dataset_a,
         },
     )
     missing = audit_input_delivery_for_execution(
         state,
-        input_package_bindings={"spec-a": "dataset__a"},
+        input_package_bindings={spec_a: dataset_a},
     )
 
     assert ambiguous["passed"] is False
     assert ambiguous["blocking_reasons"] == ["input_package_binding_ambiguous"]
     assert matched["passed"] is True
-    assert matched["spec_ids"] == ["spec-a", "spec-b"]
+    assert matched["spec_ids"] == sorted([spec_a, spec_b])
     assert swapped["passed"] is False
     assert swapped["blocking_reasons"] == ["input_package_artifact_mismatch"]
     assert missing["passed"] is False
@@ -550,18 +552,15 @@ def test_multiple_input_specs_require_an_explicit_verified_package_mapping(tmp_p
 
 
 def test_single_input_spec_keeps_the_legacy_package_id_compatibility(tmp_path):
-    state = _state(tmp_path, role="secondary", eligible=False)
-    state.hook_state["input_delivery_state"] = {
-        "spec": {
-            "provider": "data", "verified": True,
-            "input_package_artifact_id": "dataset__only",
-        },
-    }
+    state = State.new("experiment", tmp_path)
+    request = asyncio.run(_validate_data_request_spec(state, _service_spec("only.msh")))
+    assert request["status"] == "success", request
+    dataset_id = _deliver(tmp_path, state, request["spec_id"], "only.msh", "only")
 
-    result = audit_input_delivery_for_execution(state, "dataset__only")
+    result = audit_input_delivery_for_execution(state, dataset_id)
 
     assert result["passed"] is True
-    assert result["spec_ids"] == ["spec"]
+    assert result["spec_ids"] == [request["spec_id"]]
 
 
 def test_unverified_formal_input_is_witnessed_not_blocked_before_submit(

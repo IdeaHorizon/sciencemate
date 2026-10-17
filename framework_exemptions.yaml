@@ -158,14 +158,10 @@ subprocess_call_sites:
     sites: [enclosing_git_paths, run_ok]
     argv_source: framework
     reason: "run_ok：原生后端的行为探针（sandbox-exec / bwrap / landlock / systemd-run 真跑一次）；enclosing_git_paths：GIT_UNWRITABLE 的结构判据，对每个可写根起一次只读的 git rev-parse 问 gitdir 在哪（#797 WP-01）。argv 全是框架拼的"
-  - file: core/sandbox.py
-    sites: [_visible_gpus]
-    argv_source: framework
-    reason: "gpu_capability 的可见性那一轴：nvidia-smi --query-gpu=uuid,name 只读枚举，argv 全由框架拼、无模型输入。可见 ≠ 可调度 ≠ 受管可执行，这里只答第一轴（#893 阶段 0）"
   - file: core/isolation/linux.py
-    sites: [_probe_landlock, _probe_landlock, _probe_landlock]
+    sites: [_memory_wall, _probe_landlock, _probe_landlock, _probe_landlock]
     argv_source: framework
-    reason: "三次都在探针里：问内核 Landlock ABI（起 _landlock_exec.py abi）；ABI ≥ 4 时再起两次同一条 connect 探针做对照——--network allow 必须连得上、deny 必须 EACCES，只测 deny 会把监听器没起来当成被拒（#797 WP-01）"
+    reason: "_probe_landlock 三次都在探针里：问内核 Landlock ABI（起 _landlock_exec.py abi）；ABI ≥ 4 时再起两次同一条 connect 探针做对照——--network allow 必须连得上、deny 必须 EACCES，只测 deny 会把监听器没起来当成被拒（#797 WP-01）。_memory_wall：命令失败后问 systemd 这条命令那片 slice 的 cgroup 路径（systemctl --user show -p ControlGroup），读它的 memory.events 判是不是撞了内存墙（#1179）；argv 是 which 出来的 systemctl + 后端自己起的 slice 名"
   - file: core/isolation/_landlock_exec.py
     sites: [main]
     argv_source: framework
@@ -179,13 +175,13 @@ subprocess_call_sites:
     argv_source: framework
     reason: "问 win32 后端能力（起 _win32_exec.py probe，真降令牌/打标签/装 job 各一次），argv 全是框架拼的"
   - file: core/isolation/_win32_exec.py
-    sites: [_icacls]
+    sites: [_icacls, _icacls_text]
     argv_source: framework
-    reason: "win32 启动器给可写根 / .git 打强制完整性标签（icacls /setintegritylevel），argv 是 win32 后端拼的路径；载荷本身走 CreateProcessAsUser（ctypes，不经 subprocess），本文件是墙的一部分"
+    reason: "win32 启动器给可写根 / .git 打强制完整性标签（icacls /setintegritylevel），argv 是 win32 后端拼的路径；_icacls_text 在打之前/之后读一次 `icacls <路径>` 原文记账（RFC_WORKER_START_IS_NOT_A_GATE §3.9）；载荷本身走 CreateProcessAsUser（ctypes，不经 subprocess），本文件是墙的一部分"
   - file: core/isolation/_native_job.py
-    sites: [_run]
+    sites: [_run, _run]
     argv_source: framework
-    reason: "原生 detached 作业的监护进程：Popen 的 argv 来自 core.sandbox.prepare_launch 写好的 launch.json（已经是原生后端包过的命令），替代 Docker Job 容器"
+    reason: "原生 detached 作业的监护进程：Popen 的 argv 来自 core.sandbox.prepare_launch 写好的 launch.json（已经是原生后端包过的命令），替代 Docker Job 容器；作业退出后再跑一次 launch.json 里的 cleanup_argv（后端的 stop_argv：linux 停这条作业自己的 systemd slice，#1179）"
   - file: shared/lib/process_control.py
     sites: [daemonize]
     argv_source: framework
@@ -222,6 +218,21 @@ subprocess_call_sites:
     sites: [_record_what_this_machine_enforces]
     argv_source: framework
     reason: "启动探针起 harness 解释器问这台机器守得住什么；它只记账，不决定服务起不起得来"
+  - file: platform/backend/app/services/environment_facts.py
+    sites: [_posix_acl_text, _windows_acl_text]
+    argv_source: framework
+    reason: "机械探针读一条路径的 ACL 原文（getfacl -p / icacls <路径>），只读、argv 只有框架手里的路径；给会话条幅与诊断包的事实（RFC_WORKER_START_IS_NOT_A_GATE §3.2）"
+  - file: platform/backend/app/services/permissions_snapshot.py
+    sites: [_icacls_text]
+    argv_source: framework
+    reason: "数据根权限快照：启动时读 icacls <路径> 原文算哈希与标签，只读、argv 是数据根下的固定目录（RFC §3.9）"
+  - file: platform/backend/app/services/session_environment.py
+    sites: [_run_argv]
+    argv_source: framework
+    reason: >-
+      经人点头的环境修复（RFC §3.4）：argv 由 environment_facts.repair_proposal 的表按 code 与数据根算出
+      （icacls <数据根> /reset /T /C 或 chmod -R u+rwX <数据根>），前端只回传 code 与路径、不回传命令，
+      没有任何模型给的字节；后端以用户自己的身份执行、故意不进沙箱 —— 它修的正是沙箱外的数据目录权限。
   - file: platform/backend/app/services/compute_inventory.py
     sites: [_gpu_inventory]
     argv_source: framework
@@ -293,7 +304,7 @@ subprocess_call_sites:
   - file: nodes/experiment/tools/repro_snapshot.py
     sites: [_run]
     argv_source: framework
-    reason: "shell=True 但命令全是本文件 f-string 拼的 git 查询，路径经 shlex.quote"
+    reason: "shell 串只有本文件 f-string 拼的工具探针（command -v / --version 等），路径经 shlex.quote；git 查询走 argv 不经 shell（#943）"
   - file: nodes/experiment/tools/resource_fetch.py
     sites: [_git_head]
     argv_source: framework
@@ -307,9 +318,9 @@ subprocess_call_sites:
     argv_source: framework
     reason: "人手跑的续跑 CLI（__main__），起 run_node.py"
   - file: nodes/experiment/tools/safe_bash.py
-    sites: [_git_text, _sandbox_probe]
+    sites: [_git_text]
     argv_source: framework
-    reason: "git 只读查询；_sandbox_probe 跑的是 prepare_attempt_command 兼容垫片交回的原生后端命令（已在墙内，绕开咽喉）"
+    reason: "git 只读查询"
   - file: nodes/experiment/tools/source_recon.py
     sites: [g]
     argv_source: framework

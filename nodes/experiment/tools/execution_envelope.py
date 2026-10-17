@@ -1000,10 +1000,4 @@ register_save_gate(EXECUTION_ENVELOPE_TYPE, _execution_envelope_save_gate)
 register_freeze_gate(
     EXECUTION_ENVELOPE_TYPE,
     _execution_envelope_freeze_gate,
-    content_contract={
-        "route_binding": (
-            "必须由 declare_execution_envelope 内容寻址并冻结；不可手工 save_artifact。"
-        ),
-        "storage": "v1 只允许 shared_filesystem，不得把未建设的数据交付模式宣称为可用。",
-    },
 )

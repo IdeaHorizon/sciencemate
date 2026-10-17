@@ -703,6 +703,12 @@ def _native_launch(
         network_access=bool(network_access),
     )
     launch = backend.prepare(spec, state=state)
+    if launch.cwd_in_argv:
+        # 启动器自己进 cwd（win32）。不能再套下面那层 shell：Windows 上 posix_shell() 是
+        # MSYS bash，原生程序起它时命令行按 Cygwin 规则重新解析（引号里的 `\\` 折成 `\`、
+        # 不带引号的 `{a}` 丢了括号），win32 启动器的 JSON spec 过这一跳必坏 —— 作业退 64、
+        # stderr 只有启动器的 usage 一行（#943，真机复现）。
+        return launch
     # 老调用方拿 argv 自己 subprocess.run，不会应用 launch.cwd —— 把 cd 编进 argv。
     from shared.lib.shell import posix_shell
 
@@ -726,89 +732,6 @@ def prepare_attempt_command(
         readonly_roots=readonly_roots, limits=limits, network_access=False,
         environment=environment,
     )
-
-
-# ── GPU：可见 / 可调度 / 可受管执行是三件不同的事 ─────────────────────────────
-
-
-GPU_ISOLATION_NONE = "none"
-"""整卡都没有独占契约 —— 不是 MIG，也不是 vGPU，更不是"显存分区"。"""
-
-
-def _visible_gpus() -> tuple[list[dict[str, str]], str]:
-    """宿主上**看得见**几张卡。看得见只证明 ``visible``，不证明任何别的。
-
-    用稳定的 device UUID 而不是可变的 index：index 会随 ``CUDA_VISIBLE_DEVICES`` 与
-    驱动枚举顺序变，拿它做身份对账迟早对错人。
-    """
-    import shutil
-    import subprocess
-
-    exe = shutil.which("nvidia-smi")
-    if not exe:
-        return [], "nvidia-smi not installed"
-    try:
-        out = subprocess.run(
-            [exe, "--query-gpu=uuid,name", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=20, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return [], f"nvidia-smi failed: {exc}"
-    if out.returncode != 0:
-        return [], (out.stderr or "nvidia-smi returned non-zero").strip()[:200]
-    devices: list[dict[str, str]] = []
-    for line in (out.stdout or "").splitlines():
-        parts = [piece.strip() for piece in line.split(",", 1)]
-        if len(parts) == 2 and parts[0]:
-            devices.append({"uuid": parts[0], "name": parts[1]})
-    return devices, ""
-
-
-def gpu_capability() -> dict[str, Any]:
-    """受管 GPU 执行能力的**结构化事实** —— 给规划者读，不用它去猜。
-
-    #893 实测：``discover_resources`` 列出 4×A100 且 local scheduler
-    ``available=true``，Slurm 分区 ``GRES=(null)``；agent 花了多轮探测 Python /
-    Torch / CUDA，进入高风险人工审批，人点了"批准执行"，然后
-    ``submit_job(scheduler=local, gpus=1)`` 在 Core admission 被稳定拒绝：
-    ``local GPU execution is not provided by the native backends``。
-
-    没有 job id、没有 runtime id、没有 workload exit code —— 一个**在启动前就能确定**
-    的结论，被推到了不可逆审批之后。这不是模型选错参数，是能力面与执行面互相矛盾：
-    API 收 ``gpus``、资源发现显示 4 卡、执行层永久拒绝。
-
-    所以这里把三条轴分开答，谁都不必从设备枚举推executability：
-
-    * ``visible_gpus`` —— 宿主探测到了什么（``nvidia-smi``）；
-    * ``schedulable_gpus`` —— 当前调度域能分配几张；
-    * ``managed_local_gpu_execution`` —— 受管执行契约能否安全兑现；
-    * ``gpu_isolation`` —— ``none`` / ``whole_device`` / ``mig`` / ``vgpu`` / ``gres``。
-
-    当前原生后端的答案是 **False**，而且原因是结构性的：``core.isolation.CommandSpec``
-    只有 argv / cwd / roots / limits / environment / network，**没有** GPU 数量、device
-    identity、租约、``CUDA_VISIBLE_DEVICES``、MIG identity 或释放/对账字段。native data
-    plane 确实没有办法兑现 ``gpus=1``（PR C 删 Docker 时只改了错误文案，没有补 contract）。
-
-    这个函数是 #893 阶段 0 的全部：**先让能力声明诚实**，与开不开放 local GPU 无关。
-    阶段 1（strict/shared 还是 attended 整卡租约）需要拍板，落地后这里的
-    ``managed_local_gpu_execution`` 变 True、``gpu_isolation`` 说出到底是哪种隔离，
-    调用方逻辑一行不用改 —— 这正是把它做成结构化事实而不是一句错误文案的理由。
-    """
-    devices, why = _visible_gpus()
-    return {
-        "visible_gpus": len(devices),
-        "visible_devices": devices,
-        "schedulable_gpus": 0,
-        "managed_local_gpu_execution": False,
-        "gpu_isolation": GPU_ISOLATION_NONE,
-        "reason": (
-            "the native executor has no GPU allocation contract: core.isolation."
-            "CommandSpec carries no device identity, lease, or release/reconcile "
-            "fields, so a managed local GPU job cannot be granted or accounted for"
-        ),
-        "visibility_note": why or f"nvidia-smi reports {len(devices)} device(s)",
-        "tracking_issue": "#893",
-    }
 
 
 def sandbox_namespace() -> str:
@@ -931,6 +854,10 @@ class GpuCapability:
 def gpu_capability() -> GpuCapability:
     """这台机器的 GPU 现状。**可见性与可用性分开回答。**
 
+    全仓只有这一个定义（#893 / #895）。本文件曾在上面另有一份返回 dict 的同名
+    函数（#893 阶段 0，带 `_visible_gpus` 与 `GPU_ISOLATION_NONE`），被这里的定义
+    遮住、一个调用方都没有 —— 两份答案并存，读源码的人分不清哪份在生效。
+
     今天所有原生后端（darwin / linux / win32）都还没有 GPU 分配与隔离的实现：
     Docker 年代那条路随执行器分档一起拆掉了，原生这边没接上（#793 的尾巴）。
     所以 ``schedulable`` 恒为 False —— 但 ``visible`` 说真话，
@@ -1020,6 +947,9 @@ def prepare_launch(
         "env": dict(getattr(inner, "env", None) or os.environ),
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
+        # 后端那一侧作业结束后要收的东西（linux：这条命令自己的 systemd slice，#1179）。
+        # 前台命令由咽喉在 finally 里 cleanup；detached 作业没人等它，交给监护进程收。
+        "cleanup_argv": list(getattr(inner, "stop_argv", None) or []),
     }), encoding="utf-8")
     write_object(control_dir / "record.json", {
         "name": name,
@@ -1196,8 +1126,8 @@ def _reset_probe_cache_for_tests() -> None:
 __all__ = [
     "DEFAULT_EGRESS_ALLOWLIST",
     "EGRESS_ALLOWLIST_ENV",
-    "GPU_ISOLATION_NONE",
     "effective_egress_policy",
+    "GpuCapability",
     "gpu_capability",
     "SandboxCeiling",
     "SandboxContractError",

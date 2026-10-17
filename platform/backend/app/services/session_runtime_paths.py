@@ -59,9 +59,21 @@ def resolve_existing(worktree: Path | str, *suffix: str) -> Path:
     两处都不存在时返回**现行位置** —— 调用方拿它去创建，新数据因此只落新处。
     """
     current = session_runtime_root(worktree).joinpath(*suffix)
-    if current.exists():
+    if _exists_or_unreadable_is_absent(current):
         return current
     legacy = legacy_session_runtime_root(worktree).joinpath(*suffix)
-    if legacy.exists():
+    if _exists_or_unreadable_is_absent(legacy):
         return legacy
     return current
+
+
+def _exists_or_unreadable_is_absent(path: Path) -> bool:
+    """`exists()` 在 stat 被拒（Windows 上整个 run 目录 `[WinError 5]`，lujy 10-15 现场）时抛 PermissionError。
+    这个函数的三个调用方 —— 接回活 worker、回收孤儿、转录摄取 —— 此前都被它一路炸到顶：接回那条让整轮
+    在起 worker 之前就死，摄取那条把控制通道的读者炸掉（于是看起来像「worker 把连接关了」）。
+    「读不到」在这里按「不在」处理：调用方拿着现行位置继续，worker 自己会在同一个目录上探测、降级、报进 ready
+    （RFC_WORKER_START_IS_NOT_A_GATE §G2）。"""
+    try:
+        return path.exists()
+    except OSError:
+        return False

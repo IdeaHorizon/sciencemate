@@ -69,6 +69,10 @@ CONTRACT_EXCEPTIONS = frozenset({
     "InstallError",
     "SandboxContractError",
     "PublicationFigureError",
+    # PublicationFigureError 的子类（#439）：铸 figure 时经 render_figure 的 error
+    # 信封到模型眼前。没列进来时 PR#1007 那处 raise 绕过了棘轮（模块 docstring
+    # 「局限」第一条的实例）。
+    "FigureContradictsItsSource",
     "VisualTruncationError",
     "ProjectWorkspaceError",
     "OfferContractError",

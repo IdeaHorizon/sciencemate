@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import pytest
+
 import asyncio
 from pathlib import Path
 
@@ -83,11 +85,13 @@ def _unclassified(tool: str) -> dict[str, object]:
     }
 
 
+@pytest.mark.skip(reason="v2 模型面：路线措辞逐字钉死；v3 承接见 test_060_s1d_natural_flows 的 loader surface 测试（描述里不得出现路线术语）")
 def test_registered_route_descriptions_are_pinned_verbatim():
     assert get_tool("safe_run_bash").description == _BASH_DESCRIPTION
     assert get_tool("safe_execute_python").description == _PYTHON_DESCRIPTION
 
 
+@pytest.mark.skip(reason="v2 模型面：路线规则逐字钉死；v3 承接见 test_060_s1d_natural_flows 的 loader surface 测试")
 def test_harness_route_rule_is_pinned_verbatim():
     rules = yaml.safe_load((_NODE / "harness.yaml").read_text(encoding="utf-8"))["rules"]
     assert len(rules) == _HARNESS_RULE_COUNT

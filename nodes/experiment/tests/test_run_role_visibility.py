@@ -542,4 +542,5 @@ def test_harness_does_not_advertise_run_role_as_node_input() -> None:
     )[0]
     assert "\n  run_role:" not in expected_inputs
     assert "node_inputs/frozen prereg" not in harness
-    assert "node_inputs" in harness and "不能直接指定 run_role" in harness
+    # v3（060 S1d）：rules 不再解释 run_role；只钉"不把 run_role 当节点输入"这一条。
+    assert "run_role" not in harness.split("rules:", 1)[1].split("loop_hooks:", 1)[0]

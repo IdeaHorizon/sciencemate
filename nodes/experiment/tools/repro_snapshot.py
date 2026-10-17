@@ -60,6 +60,8 @@ _PROBE_ENV_VARS = [
 
 _REPRO_MAX_COPY_BYTES = 10 * 1024 * 1024
 _REPRO_MAX_CANDIDATES = 200
+_PATH_PROBE_PREVIEW_CHARS = 160
+_PATH_PROBE_DIAGNOSTICS_MAX = 64
 _PATH_RE = re.compile(r"(?:~|/)[^\s\"'`;,)]+")
 _CONFIG_NAMES = {
     "input.nml", "namelist.input",
@@ -78,10 +80,19 @@ _BUILD_RUN_RE = re.compile(
     r"autogen|git\s+clone|git\s+submodule)\b", re.I)
 
 
-def _run(cmd: str, timeout: int = 10) -> str:
-    """跑一条只读探测命令，返回首要输出（失败返回空串，不抛）。"""
+def _run(cmd: str | list[str], timeout: int = 10) -> str:
+    """跑一条只读探测命令，返回它的 stdout（失败返回空串，不抛）。
+
+    「失败」按返回码判，stderr 一律不当输出（#943）。旧版不看返回码、stdout 为空就
+    退回 stderr —— Windows 上 cmd.exe 对 ``2>/dev/null`` 的回答（打不开重定向目标，
+    整条命令没跑）「The system cannot find the path specified.」于是被当成了
+    git root，一路拼进 rerun.sh 的 ``cd``。要 stderr 的调用方自己写 ``2>&1``。
+
+    ``cmd`` 是 list 时按 argv 直接起、不经 shell（git 探针走这条，见 ``_git``）。
+    """
+    shell = isinstance(cmd, str)
     env_path = os.environ.get("EXPERIMENT_ACTIVE_BUILD_ENV")
-    if env_path:
+    if shell and env_path:
         try:
             from tools.env_provision import wrap_command
         except Exception:
@@ -92,12 +103,22 @@ def _run(cmd: str, timeout: int = 10) -> str:
         if wrap_command is not None:
             cmd = wrap_command(cmd, env_path)
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True,
+        r = subprocess.run(cmd, shell=shell, capture_output=True,
                            text=True, timeout=timeout)
-        out = (r.stdout or "").strip() or (r.stderr or "").strip()
-        return out
     except Exception:
         return ""
+    if r.returncode != 0:
+        return ""
+    return (r.stdout or "").strip()
+
+
+def _git(repo: str | Path, *args: str, timeout: int = 10) -> str:
+    """``git -C <repo> <args>`` 的 stdout；不在仓库里 / 没装 git / 任何失败 → 空串。
+
+    argv 直接起、不经 shell：没有 ``2>/dev/null`` 这种只有 POSIX shell 认的重定向
+    （#943），路径也不必再过 ``_q`` 引号。
+    """
+    return _run(["git", "-C", str(repo), *args], timeout=timeout)
 
 
 def _q(path: str | Path) -> str:
@@ -116,6 +137,70 @@ def _clean_path_token(token: str) -> str:
     return os.path.abspath(os.path.expandvars(os.path.expanduser(token)))
 
 
+def _record_path_probe_error(
+    diagnostics: list[dict[str, Any]] | None,
+    *,
+    source: str,
+    candidate: str | Path,
+    error: OSError | ValueError,
+) -> None:
+    """Retain a bounded fact when one optional path candidate is unprobeable."""
+    if diagnostics is None:
+        return
+    raw = str(candidate)
+    record = {
+        "source": source,
+        "path_preview": raw[:_PATH_PROBE_PREVIEW_CHARS],
+        "path_length": len(raw),
+        "path_sha256": hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest(),
+        "error_type": type(error).__name__,
+        "errno": getattr(error, "errno", None),
+    }
+    if record in diagnostics or len(diagnostics) >= _PATH_PROBE_DIAGNOSTICS_MAX:
+        return
+    diagnostics.append(record)
+
+
+def _probe_path_candidate(
+    candidate: str | Path,
+    *,
+    source: str,
+    diagnostics: list[dict[str, Any]] | None,
+    probe: Any,
+) -> Any:
+    """Run one filesystem probe without letting a bad optional candidate abort peers."""
+    try:
+        return probe()
+    except (OSError, ValueError) as error:
+        _record_path_probe_error(
+            diagnostics,
+            source=source,
+            candidate=candidate,
+            error=error,
+        )
+        return None
+
+
+def _existing_file_candidate(
+    candidate: str | Path,
+    *,
+    source: str,
+    diagnostics: list[dict[str, Any]] | None,
+) -> tuple[Path, str] | None:
+    def _probe() -> tuple[Path, str] | None:
+        path = Path(candidate).expanduser()
+        if not path.is_file():
+            return None
+        return path, str(path.resolve())
+
+    return _probe_path_candidate(
+        candidate,
+        source=source,
+        diagnostics=diagnostics,
+        probe=_probe,
+    )
+
+
 def _is_harness_path(path: str | Path) -> bool:
     p = os.path.abspath(os.path.expanduser(str(path)))
     return p.endswith("/harness-framework") or "/node4-experiment/harness-framework" in p
@@ -127,7 +212,7 @@ def _git_root(path: str | Path) -> str | None:
         p = p.parent
     if not p.exists():
         return None
-    root = _run(f"git -C {_q(p)} rev-parse --show-toplevel 2>/dev/null")
+    root = _git(p, "rev-parse", "--show-toplevel")
     if not root:
         return None
     root = _clean_path_token(root.splitlines()[0])
@@ -308,7 +393,12 @@ def _declared_route_paths(state: Any) -> tuple[list[str], list[str], list[str]]:
     return candidates, inputs, outputs
 
 
-def discover_repo_paths(state: Any, transcript_text: str = "") -> list[str]:
+def discover_repo_paths(
+    state: Any,
+    transcript_text: str = "",
+    *,
+    diagnostics: list[dict[str, Any]] | None = None,
+) -> list[str]:
     """从可靠来源识别真实源码 git root；禁止 cwd/harness fallback。
 
     优先级：min-run 输出/工作目录 → declared_route target/source/run path →
@@ -317,7 +407,7 @@ def discover_repo_paths(state: Any, transcript_text: str = "") -> list[str]:
     min_ev = _read_min_run_evidence(state)
     commands = _transcript_commands_from_text(transcript_text)
 
-    tiers: list[list[str]] = []
+    tiers: list[tuple[str, list[str]]] = []
     min_paths: list[str] = []
     for ev in min_ev:
         for key in ("cwd", "inferred_cwd"):
@@ -326,17 +416,17 @@ def discover_repo_paths(state: Any, transcript_text: str = "") -> list[str]:
         for item in ev.get("outputs") or []:
             if item.get("path"):
                 min_paths.append(str(item["path"]))
-    tiers.append(min_paths)
+    tiers.append(("min_run", min_paths))
 
     declared_paths, _decl_inputs, _decl_outputs = _declared_route_paths(state)
-    tiers.append(declared_paths)
+    tiers.append(("declared_route", declared_paths))
 
     cmd_paths: list[str] = []
     for c in commands:
         cmd = c.get("cmd") or ""
         if _BUILD_RUN_RE.search(cmd):
             cmd_paths.extend(_command_path_candidates(cmd, c.get("cwd")))
-    tiers.append(cmd_paths)
+    tiers.append(("command", cmd_paths))
 
     artifact_paths: list[str] = []
     try:
@@ -348,16 +438,21 @@ def discover_repo_paths(state: Any, transcript_text: str = "") -> list[str]:
                     artifact_paths.append(str(sp))
     except Exception:
         pass
-    tiers.append(artifact_paths)
+    tiers.append(("artifact_metadata", artifact_paths))
 
     text = _artifact_content_text(state) + "\n" + (transcript_text or "")
-    tiers.append(_path_tokens(text))
+    tiers.append(("text_fallback", _path_tokens(text)))
 
     roots: list[str] = []
     seen: set[str] = set()
-    for tier in tiers:
+    for source, tier in tiers:
         for c in tier:
-            root_path = _git_root_near(c)
+            root_path = _probe_path_candidate(
+                c,
+                source=source,
+                diagnostics=diagnostics,
+                probe=lambda candidate=c: _git_root_near(candidate),
+            )
             if root_path and root_path not in seen:
                 seen.add(root_path)
                 roots.append(root_path)
@@ -480,27 +575,27 @@ def _read_min_run_evidence(state: Any) -> list[dict[str, Any]]:
 
 def _git_source_state(repo: str, dest: Path) -> dict[str, Any]:
     dest.mkdir(parents=True, exist_ok=True)
-    status_porcelain = _run(f"git -C {_q(repo)} status --porcelain 2>/dev/null", timeout=30)
-    untracked = _run(f"git -C {_q(repo)} ls-files --others --exclude-standard 2>/dev/null", timeout=30)
+    status_porcelain = _git(repo, "status", "--porcelain", timeout=30)
+    untracked = _git(repo, "ls-files", "--others", "--exclude-standard", timeout=30)
     info = {
         "path": repo,
-        "commit": _run(f"git -C {_q(repo)} rev-parse HEAD 2>/dev/null"),
-        "branch": _run(f"git -C {_q(repo)} rev-parse --abbrev-ref HEAD 2>/dev/null"),
+        "commit": _git(repo, "rev-parse", "HEAD"),
+        "branch": _git(repo, "rev-parse", "--abbrev-ref", "HEAD"),
         "dirty": bool(status_porcelain),
         "changed_entries": len(status_porcelain.splitlines()) if status_porcelain else 0,
         "untracked_entries": len(untracked.splitlines()) if untracked else 0,
     }
     files = {
-        "status.txt": f"git -C {_q(repo)} status --short --branch 2>/dev/null",
-        "diff_stat.txt": f"git -C {_q(repo)} diff --stat 2>/dev/null",
-        "diff.patch": f"git -C {_q(repo)} diff --submodule=log -- 2>/dev/null",
-        "submodule_status.txt": f"git -C {_q(repo)} submodule status --recursive 2>/dev/null",
-        "remote.txt": f"git -C {_q(repo)} remote -v 2>/dev/null",
-        "sparse_checkout.txt": f"git -C {_q(repo)} sparse-checkout list 2>/dev/null",
+        "status.txt": ("status", "--short", "--branch"),
+        "diff_stat.txt": ("diff", "--stat"),
+        "diff.patch": ("diff", "--submodule=log", "--"),
+        "submodule_status.txt": ("submodule", "status", "--recursive"),
+        "remote.txt": ("remote", "-v"),
+        "sparse_checkout.txt": ("sparse-checkout", "list"),
     }
-    for name, cmd in files.items():
+    for name, args in files.items():
         try:
-            (dest / name).write_text(_run(cmd, timeout=30), encoding="utf-8")
+            (dest / name).write_text(_git(repo, *args, timeout=30), encoding="utf-8")
         except Exception:
             pass
     try:
@@ -509,7 +604,7 @@ def _git_source_state(repo: str, dest: Path) -> dict[str, Any]:
         pass
 
     submodules: list[dict[str, Any]] = []
-    sub_status = _run(f"git -C {_q(repo)} submodule status --recursive 2>/dev/null", timeout=30)
+    sub_status = _git(repo, "submodule", "status", "--recursive", timeout=30)
     for line in sub_status.splitlines():
         parts = line.strip().split()
         if len(parts) < 2:
@@ -521,28 +616,28 @@ def _git_source_state(repo: str, dest: Path) -> dict[str, Any]:
             continue
         sdest = dest / "submodules" / _safe_slug(rel)
         sdest.mkdir(parents=True, exist_ok=True)
-        sporcelain = _run(f"git -C {_q(sp)} status --porcelain 2>/dev/null", timeout=30)
-        suntracked = _run(f"git -C {_q(sp)} ls-files --others --exclude-standard 2>/dev/null", timeout=30)
+        sporcelain = _git(sp, "status", "--porcelain", timeout=30)
+        suntracked = _git(sp, "ls-files", "--others", "--exclude-standard", timeout=30)
         sinfo = {
             "path": str(sp),
             "relative_path": rel,
             "status": parts[0],
-            "commit": _run(f"git -C {_q(sp)} rev-parse HEAD 2>/dev/null", timeout=30),
-            "branch": _run(f"git -C {_q(sp)} rev-parse --abbrev-ref HEAD 2>/dev/null", timeout=30),
+            "commit": _git(sp, "rev-parse", "HEAD", timeout=30),
+            "branch": _git(sp, "rev-parse", "--abbrev-ref", "HEAD", timeout=30),
             "dirty": bool(sporcelain),
             "changed_entries": len(sporcelain.splitlines()) if sporcelain else 0,
             "untracked_entries": len(suntracked.splitlines()) if suntracked else 0,
             "present": True,
         }
-        for name, cmd in {
-            "status.txt": f"git -C {_q(sp)} status --short --branch 2>/dev/null",
-            "diff_stat.txt": f"git -C {_q(sp)} diff --stat 2>/dev/null",
-            "diff.patch": f"git -C {_q(sp)} diff --submodule=log -- 2>/dev/null",
-            "untracked_files.txt": f"git -C {_q(sp)} ls-files --others --exclude-standard 2>/dev/null",
-            "remote.txt": f"git -C {_q(sp)} remote -v 2>/dev/null",
+        for name, args in {
+            "status.txt": ("status", "--short", "--branch"),
+            "diff_stat.txt": ("diff", "--stat"),
+            "diff.patch": ("diff", "--submodule=log", "--"),
+            "untracked_files.txt": ("ls-files", "--others", "--exclude-standard"),
+            "remote.txt": ("remote", "-v"),
         }.items():
             try:
-                (sdest / name).write_text(_run(cmd, timeout=30), encoding="utf-8")
+                (sdest / name).write_text(_git(sp, *args, timeout=30), encoding="utf-8")
             except Exception:
                 pass
         (sdest / "git_info.json").write_text(json.dumps(sinfo, ensure_ascii=False, indent=2),
@@ -606,11 +701,11 @@ def collect_snapshot(repo_paths: list[str] | None = None,
         p = Path(os.path.expanduser(rp))
         if not p.exists():
             continue
-        commit = _run(f"git -C {_q(p)} rev-parse HEAD 2>/dev/null")
+        commit = _git(p, "rev-parse", "HEAD")
         if not commit:
             continue
-        porcelain = _run(f"git -C {_q(p)} status --porcelain 2>/dev/null")
-        branch = _run(f"git -C {_q(p)} rev-parse --abbrev-ref HEAD 2>/dev/null")
+        porcelain = _git(p, "status", "--porcelain")
+        branch = _git(p, "rev-parse", "--abbrev-ref", "HEAD")
         repos[str(p)] = {
             "commit": commit[:40],
             "branch": branch,
@@ -1031,21 +1126,34 @@ def select_experiment_log_result(state: Any) -> tuple[Path | None, dict[str, Any
             best_info = info
 
     return best_path, best_info
-def _candidate_files_from_text(text: str, predicate) -> list[Path]:
+def _candidate_files_from_text(
+    text: str,
+    predicate,
+    *,
+    source: str = "text_fallback",
+    diagnostics: list[dict[str, Any]] | None = None,
+) -> list[Path]:
     out: list[Path] = []
     seen: set[str] = set()
     for tok in _path_tokens(text):
-        p = Path(tok)
-        if p.is_file() and predicate(p):
-            rp = str(p.resolve())
-            if rp not in seen:
-                seen.add(rp)
-                out.append(p)
+        probed = _existing_file_candidate(
+            tok,
+            source=source,
+            diagnostics=diagnostics,
+        )
+        if probed is None:
+            continue
+        p, rp = probed
+        if not predicate(p):
+            continue
+        if rp not in seen:
+            seen.add(rp)
+            out.append(p)
     return out[:_REPRO_MAX_CANDIDATES]
 
 
 def _changed_config_files(repo: str) -> list[Path]:
-    rows = _run(f"git -C {_q(repo)} status --porcelain 2>/dev/null", timeout=20).splitlines()
+    rows = _git(repo, "status", "--porcelain", timeout=20).splitlines()
     out: list[Path] = []
     for row in rows:
         if not row.strip():
@@ -1061,7 +1169,11 @@ def _changed_config_files(repo: str) -> list[Path]:
     return out
 
 
-def _min_run_output_candidates(evidence: list[dict[str, Any]]) -> list[Path]:
+def _min_run_output_candidates(
+    evidence: list[dict[str, Any]],
+    *,
+    diagnostics: list[dict[str, Any]] | None = None,
+) -> list[Path]:
     out: list[Path] = []
     seen: set[str] = set()
     patterns = [
@@ -1070,26 +1182,55 @@ def _min_run_output_candidates(evidence: list[dict[str, Any]]) -> list[Path]:
     ]
     for ev in evidence:
         for item in ev.get("outputs") or []:
-            p = Path(os.path.expanduser(str(item.get("path") or "")))
-            if p.is_file():
-                rp = str(p.resolve())
+            candidate = str(item.get("path") or "")
+            probed = _existing_file_candidate(
+                candidate,
+                source="min_run_output",
+                diagnostics=diagnostics,
+            )
+            if probed is not None:
+                p, rp = probed
                 if rp not in seen:
                     seen.add(rp)
                     out.append(p)
         cwd = ev.get("cwd") or ev.get("inferred_cwd")
-        if cwd and Path(os.path.expanduser(str(cwd))).is_dir():
+        if not cwd:
+            continue
+
+        def _scan_cwd() -> list[tuple[Path, str]]:
             base = Path(os.path.expanduser(str(cwd)))
+            if not base.is_dir():
+                return []
+            found: list[tuple[Path, str]] = []
             for pat in patterns:
                 for p in base.glob(pat):
-                    if p.is_file():
-                        rp = str(p.resolve())
-                        if rp not in seen:
-                            seen.add(rp)
-                            out.append(p)
+                    probed = _existing_file_candidate(
+                        p,
+                        source="min_run_cwd_output",
+                        diagnostics=diagnostics,
+                    )
+                    if probed is not None:
+                        found.append(probed)
+            return found
+
+        scanned = _probe_path_candidate(
+            cwd,
+            source="min_run_cwd",
+            diagnostics=diagnostics,
+            probe=_scan_cwd,
+        ) or []
+        for p, rp in scanned:
+            if rp not in seen:
+                seen.add(rp)
+                out.append(p)
     return out[:_REPRO_MAX_CANDIDATES]
 
 
-def _runtime_cwd_output_candidates(runtime_configs: list[dict[str, Any]]) -> list[Path]:
+def _runtime_cwd_output_candidates(
+    runtime_configs: list[dict[str, Any]],
+    *,
+    diagnostics: list[dict[str, Any]] | None = None,
+) -> list[Path]:
     out: list[Path] = []
     seen: set[str] = set()
     patterns = [
@@ -1101,17 +1242,33 @@ def _runtime_cwd_output_candidates(runtime_configs: list[dict[str, Any]]) -> lis
         cwd = cfg.get("cwd")
         if not cwd:
             continue
-        base = Path(os.path.expanduser(str(cwd)))
-        if not base.is_dir():
-            continue
-        for pat in patterns:
-            for p in base.glob(pat):
-                if not p.is_file():
-                    continue
-                rp = str(p.resolve())
-                if rp not in seen:
-                    seen.add(rp)
-                    out.append(p)
+
+        def _scan_cwd() -> list[tuple[Path, str]]:
+            base = Path(os.path.expanduser(str(cwd)))
+            if not base.is_dir():
+                return []
+            found: list[tuple[Path, str]] = []
+            for pat in patterns:
+                for p in base.glob(pat):
+                    probed = _existing_file_candidate(
+                        p,
+                        source="runtime_cwd_output",
+                        diagnostics=diagnostics,
+                    )
+                    if probed is not None:
+                        found.append(probed)
+            return found
+
+        scanned = _probe_path_candidate(
+            cwd,
+            source="runtime_cwd",
+            diagnostics=diagnostics,
+            probe=_scan_cwd,
+        ) or []
+        for p, rp in scanned:
+            if rp not in seen:
+                seen.add(rp)
+                out.append(p)
     return out[:_REPRO_MAX_CANDIDATES]
 
 
@@ -1232,7 +1389,7 @@ def _external_dependencies_from_commands(commands: list[dict[str, Any]]) -> list
                 root = _git_root_near(dpath)
                 if root:
                     dep["resolved_path"] = root
-                    dep["commit"] = _run(f"git -C {_q(root)} rev-parse HEAD 2>/dev/null", timeout=30)
+                    dep["commit"] = _git(root, "rev-parse", "HEAD", timeout=30)
             deps.append(dep)
         for url in re.findall(r"https?://[^\s\"'<>]+", cmd):
             key = ("url", url)
@@ -1264,6 +1421,15 @@ def _write_rerun_script(path: Path, source_paths: list[str], commands: list[dict
     ]
     if source_paths:
         lines += [f"cd {_q(source_paths[0])}", ""]
+    else:
+        # 没认出源码 git root 就如实说没有，不猜一个目录去 cd（#943：Windows 上曾把
+        # cmd.exe 的报错文本当成 root 拼进了这一行）。每条命令原来在哪跑的，
+        # commands.jsonl 的 cwd 字段里有。
+        lines += [
+            "# No source repository (git root) was identified for this run, so there is no cd here.",
+            "# Each command's original working directory is the `cwd` field in commands.jsonl.",
+            "",
+        ]
     lines += [
         "# The complete tool command log is in commands.jsonl.",
         "# Candidate build/run/edit commands observed during the original run:",
@@ -1308,6 +1474,11 @@ def _bundle_summary_md(manifest: dict[str, Any]) -> str:
                   "```json",
                   json.dumps(manifest.get("runtime_config"), ensure_ascii=False, indent=2),
                   "```"]
+    diagnostics = manifest.get("path_probe_diagnostics") or []
+    if diagnostics:
+        lines += ["", "## Path probe diagnostics", "```json"]
+        lines.append(json.dumps(diagnostics, ensure_ascii=False, indent=2))
+        lines.append("```")
     lines += ["", "## Entry Points", "- `manifest.json` is the machine-readable index.",
               "- `rerun.sh` is a replay skeleton; inspect before running.",
               "- `commands.jsonl` contains the full captured command stream."]
@@ -1335,10 +1506,19 @@ def create_repro_bundle(state: Any, snap: dict[str, Any], result_info: dict,
     if not force and not min_success and result_info.get("credibility") != "reliable":
         return None
 
+    path_diagnostics = snap.get("path_probe_diagnostics")
+    if not isinstance(path_diagnostics, list):
+        path_diagnostics = []
+        snap["path_probe_diagnostics"] = path_diagnostics
+
     transcript_path = Path(getattr(state, "transcript_path", root / "transcript.jsonl"))
     commands = _read_transcript_commands(transcript_path)
     runtime_configs = _runtime_configs(commands, min_evidence)
-    discovered_sources = discover_repo_paths(state, transcript_text=transcript_text)
+    discovered_sources = discover_repo_paths(
+        state,
+        transcript_text=transcript_text,
+        diagnostics=path_diagnostics,
+    )
     source_paths = discovered_sources or [
         p for p in snap.get("source_versions", {}).keys() if not _is_harness_path(p)
     ]
@@ -1382,11 +1562,38 @@ def create_repro_bundle(state: Any, snap: dict[str, Any], result_info: dict,
     text = transcript_text + "\n" + _artifact_content_text(state)
     _declared_paths, declared_inputs, declared_outputs = _declared_route_paths(state)
 
-    output_candidates: list[tuple[str, Path]] = [
-        ("declared_output", Path(p)) for p in declared_outputs if Path(p).expanduser().is_file()
+    output_candidates: list[tuple[str, str | Path]] = [
+        ("declared_output", p) for p in declared_outputs
     ]
-    output_candidates.extend(("min_run_output", p) for p in _min_run_output_candidates(min_evidence))
-    output_candidates.extend(("runtime_cwd_output", p) for p in _runtime_cwd_output_candidates(runtime_configs))
+    output_candidates.extend(
+        ("min_run_output", p)
+        for p in _min_run_output_candidates(
+            min_evidence,
+            diagnostics=path_diagnostics,
+        )
+    )
+    output_candidates.extend(
+        ("runtime_cwd_output", p)
+        for p in _runtime_cwd_output_candidates(
+            runtime_configs,
+            diagnostics=path_diagnostics,
+        )
+    )
+    normalized_outputs: list[tuple[str, Path]] = []
+    known_output_paths: set[str] = set()
+    for label, candidate in output_candidates:
+        probed = _existing_file_candidate(
+                candidate,
+                source=label,
+                diagnostics=path_diagnostics,
+        )
+        if probed is None:
+            continue
+        path, identity = probed
+        if identity not in known_output_paths:
+            normalized_outputs.append((label, path))
+            known_output_paths.add(identity)
+    output_candidates = normalized_outputs
     if not output_candidates:
         output_candidates.extend(
             ("heuristic_output", p) for p in _candidate_files_from_text(
@@ -1396,29 +1603,58 @@ def create_repro_bundle(state: Any, snap: dict[str, Any], result_info: dict,
                     and not _is_framework_internal_path(p, root)
                     and not _is_source_build_metadata(p)
                 ),
+                source="heuristic_output",
+                diagnostics=path_diagnostics,
             )
         )
+        normalized_outputs = []
+        known_output_paths = set()
+        for label, candidate in output_candidates:
+            probed = _existing_file_candidate(
+                candidate,
+                source=label,
+                diagnostics=path_diagnostics,
+            )
+            if probed is None:
+                continue
+            path, identity = probed
+            if identity not in known_output_paths:
+                normalized_outputs.append((label, path))
+                known_output_paths.add(identity)
+        output_candidates = normalized_outputs
 
-    known_output_paths = {
-        str(Path(p).expanduser().resolve())
-        for _label, p in output_candidates
-        if Path(p).expanduser().is_file()
-    }
-
-    input_candidates: list[tuple[str, Path]] = [
-        ("declared_input", Path(p)) for p in declared_inputs
-        if Path(p).expanduser().is_file()
-        and str(Path(p).expanduser().resolve()) not in known_output_paths
+    input_candidates: list[tuple[str, str | Path]] = [
+        ("declared_input", p) for p in declared_inputs
     ]
     for repo in source_paths:
         input_candidates.extend(
             ("git_changed_config", p) for p in _changed_config_files(repo)
-            if str(Path(p).expanduser().resolve()) not in known_output_paths
         )
+    normalized_inputs: list[tuple[str, Path]] = []
+    known_input_paths: set[str] = set()
+    for label, candidate in input_candidates:
+        probed = _existing_file_candidate(
+            candidate,
+            source=label,
+            diagnostics=path_diagnostics,
+        )
+        if probed is None:
+            continue
+        path, identity = probed
+        if identity in known_output_paths or identity in known_input_paths:
+            continue
+        normalized_inputs.append((label, path))
+        known_input_paths.add(identity)
+    input_candidates = normalized_inputs
     if not input_candidates:
         input_candidates.extend(
-            ("heuristic_input", p) for p in _candidate_files_from_text(text, _is_config_like)
-            if str(Path(p).expanduser().resolve()) not in known_output_paths
+            ("heuristic_input", p) for p in _candidate_files_from_text(
+                text,
+                _is_config_like,
+                source="heuristic_input",
+                diagnostics=path_diagnostics,
+            )
+            if str(p.resolve()) not in known_output_paths
         )
 
     inputs: list[dict[str, Any]] = []
@@ -1473,6 +1709,7 @@ def create_repro_bundle(state: Any, snap: dict[str, Any], result_info: dict,
         "runtime_config": primary_runtime_config,
         "runtime_configs": runtime_configs,
         "external_dependencies": external_dependencies,
+        "path_probe_diagnostics": list(path_diagnostics),
         "repro_notes": [
             "rerun.sh is a replay skeleton, not a guaranteed one-command reproduction.",
             "External dependencies are recorded from command logs and are not copied into the bundle.",
@@ -1559,5 +1796,11 @@ def render_markdown(snap: dict[str, Any]) -> str:
         for k, v in libs.items():
             lines.append(f"- {k}: {v}")
         lines.append("")
+
+    diagnostics = snap.get("path_probe_diagnostics") or []
+    if diagnostics:
+        lines += ["## Path probe diagnostics", "```json"]
+        lines.append(json.dumps(diagnostics, ensure_ascii=False, indent=2))
+        lines += ["```", ""]
 
     return "\n".join(lines)

@@ -98,7 +98,8 @@ async def _task(
             # 它和 status 是**两本账**：status 说"做到哪了"（可改写），合同说
             # "被安排去做什么"（不可改写）。这里只写合同，一个字都不碰 status。
             from core.task_contract import (
-                PreregAssignment, TaskContractError, TaskContractLog,
+                PreregAssignment, PreregAssignmentUnresolved, TaskContractError,
+                TaskContractLog, resolve_exact_prereg,
             )
 
             t = tl.get(task_id) if task_id else None
@@ -121,10 +122,14 @@ async def _task(
                               "没做决定。"),
                 }
             assignment = None
+            filled_from = ""
             try:
                 if prereg_artifact_id:
-                    assignment = PreregAssignment.exact(
-                        prereg_artifact_id, version=prereg_version,
+                    # exact 绑定三件齐全才写得进合同（#1099）：只给 id 时从冻结 head
+                    # 补 version + content_hash，补不齐 / 对不上账就在这一步拒 ——
+                    # 不留给子 run 起步时以 prereg_assignment_invalid 才暴露。
+                    assignment, filled_from = resolve_exact_prereg(
+                        state, prereg_artifact_id, version=prereg_version,
                         content_hash=prereg_content_hash)
                 elif no_prereg_reason:
                     assignment = PreregAssignment.none(no_prereg_reason)
@@ -138,6 +143,9 @@ async def _task(
                     reason=reason,
                     parent_revision_digest=parent_revision_digest,
                 )
+            except PreregAssignmentUnresolved as exc:
+                return {"status": "error", "error_code": "prereg_assignment_unresolved",
+                        "error": str(exc), **exc.detail}
             except TaskContractError as exc:
                 return {"status": "error", "error": str(exc)}
             return {
@@ -146,6 +154,8 @@ async def _task(
                 "task_contract_revision": rev.revision,
                 "task_contract_digest": rev.digest,
                 "prereg_assignment": rev.assignment_kind,
+                **({"prereg_binding": {**assignment.as_dict(), "filled_from": filled_from}}
+                   if filled_from else {}),
                 "hint": (
                     "派发时带上 task_instance_uuid + task_contract_digest。"
                     + ("⚠️ 这份合同**没有**安排预注册绑定（pending_assignment）："
@@ -203,7 +213,9 @@ register_tool(
             "返回里的 **task_instance_uuid 才是身份**，Txx 只是给人读的别名\n"
             "  - `contract`：给这个 task 写一条**不可改写**的合同 revision —— 这一趟要做什么"
             "（objective / intended_use / target_node），以及**绑哪份预注册**：\n"
-            "      · `prereg_artifact_id`(+`prereg_version`/`prereg_content_hash`) = 确切绑这一份；\n"
+            "      · `prereg_artifact_id`(+`prereg_version`/`prereg_content_hash`) = 确切绑这一份。"
+            "只给 id 时从它的**冻结 head** 补齐版本与哈希（返回的 `prereg_binding` 写明绑了哪一版）；"
+            "head 未冻结、或草稿压在旧冻结版上，会被拒并列出冻结版让你点名 `prereg_version`；\n"
             "      · `no_prereg_reason` = 明说这一趟不绑（这是一个决定，所以要理由）；\n"
             "      · 两个都不给 = **pending_assignment（还没安排）**，不等于「明确不绑」。\n"
             "    改主意就带 `parent_revision_digest` 再写一条，旧的留着 —— 这本账只追加。\n"
@@ -249,8 +261,10 @@ register_tool(
                                   "description": "contract：安排给哪个节点"},
                 "prereg_artifact_id": {"type": "string",
                                          "description": "contract：确切绑这一份预注册。与 no_prereg_reason 互斥"},
-                "prereg_version": {"type": "string", "description": "contract 可选"},
-                "prereg_content_hash": {"type": "string", "description": "contract 可选"},
+                "prereg_version": {"type": "string",
+                                     "description": "contract 可选：省略则从冻结 head 补；给了就必须是冻结版"},
+                "prereg_content_hash": {"type": "string",
+                                          "description": "contract 可选：省略则按所选版本从账本补；给了就必须对得上"},
                 "no_prereg_reason": {"type": "string",
                                        "description": "contract：明说这一趟不绑预注册，并给理由。与 prereg_artifact_id 互斥"},
                 "parent_revision_digest": {"type": "string",

@@ -23,7 +23,6 @@ _ACTION = re.compile(
 # Exact non-tool concepts that intentionally use tool-like spelling in skill
 # prose. Keep this list narrow: every entry needs to identify what it really is.
 _NON_TOOL_REFERENCES = {
-    "build_graph": "run-contract data field",
 }
 
 
@@ -85,3 +84,39 @@ def _skill_tool_references_without_allowlist(path: Path) -> set[str]:
     references.update(match.group("name") for match in _CALL.finditer(body))
     references.update(match.group("name") for match in _ACTION.finditer(body))
     return references
+
+
+def test_s2_scientific_skill_is_indexed_and_old_primary_skill_is_retired() -> None:
+    bootstrap(force=True)
+    harness = load_harness("experiment")
+    indexed = set(harness.skills or [])
+    assert "scientific-results" in indexed
+    assert "primary-scientific-closure" not in indexed
+    metadata, body = _frontmatter_and_body(_SKILLS_ROOT / "scientific-results" / "SKILL.md")
+    assert metadata.get("status") == "proposed"
+    assert "exploratory, no prereg" in body
+    assert not (_SKILLS_ROOT / "primary-scientific-closure" / "SKILL.md").exists()
+
+
+_RETIRED = re.compile(
+    r"declared_route|route_step_id|route_type|\breceipt\b|\battempt\b|finalize_external_job|verify_external_job_execution"
+    r"|record_operation_completion|classify_experiment_scope|declare_execution_(route|envelope)|reconcile_external_submission"
+    r"|resolve_unknown_orphan|supersede_closure_draft|preview_experiment_contract|recovery_basis|analysis_eligible",
+    re.I)
+
+
+def test_indexed_skills_render_without_retired_procedural_vocabulary() -> None:
+    """Codex 40：正确加载 skill 不能把刚从工具面删掉的旧行政协议重新注入模型。
+    检查的是模型实际看到的东西：索引渲染文本 + 每个索引内 skill 显式加载后的正文。"""
+    from core.skill_registry import render_skills
+    bootstrap(force=True)
+    harness = load_harness("experiment")
+    index = render_skills(list(harness.skills or []), node_type="experiment", mode="index")
+    assert not _RETIRED.search(index), _RETIRED.search(index).group(0)
+    for name in harness.skills or []:
+        path = _SKILLS_ROOT / name / "SKILL.md"
+        if not path.exists():
+            continue  # shared skill（claim_evidence_link 等）不归本节点
+        _, body = _frontmatter_and_body(path)
+        hit = _RETIRED.search(body)
+        assert hit is None, f"{name}: {hit.group(0)!r}"

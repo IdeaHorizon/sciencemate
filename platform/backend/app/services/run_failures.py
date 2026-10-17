@@ -86,6 +86,63 @@ class _Copy:
 #: 前端就会各自演化出一套判据。
 _GENERIC = "execution_failed"
 
+#: **故意**走兜底的 code（RFC_WORKER_START_IS_NOT_A_GATE §3.7 的文案闸）。
+#:
+#: 每个运行时会声明的 code 必须有去处：要么在 `_COPY` 里有自己的文案，要么登记在这里并说明
+#: 为什么兜底就够。两张表都没有的 code，`tests/test_every_failure_code_has_a_home.py` 红。
+#: 登记的判据和加文案的判据是同一条：**这类故障用户能做的事和别的不一样吗？** 下面这些
+#: 全是调用方（前端 / 后端 / 协议）的 bug 或协议误用 —— 用户除了「再发一次 + 报 reference」
+#: 没有第二种动作，单独一句文案不会让任何人多做对一件事。
+#:
+#: 这里**只许登记已经存在的 code**：闸同时反向查，表里登记了、代码里却没人声明的，一样红。
+_FALLS_TO_GENERIC: dict[str, str] = {
+    # ── worker 协议层：请求本身不合法（后端拼错了）──
+    "invalid_request": "请求不是对象 / 缺字段：后端拼错了，用户改不了",
+    "invalid_request_id": "后端拼错了",
+    "invalid_tenant_id": "后端拼错了",
+    "invalid_session_id": "后端拼错了",
+    "invalid_project_id": "后端拼错了",
+    "invalid_message": "空消息：前端已经挡了，这里只是第二道",
+    "invalid_operation": "op 不在词表里：后端版本错配",
+    "invalid_json": "协议行不是 JSON：后端版本错配",
+    "empty_request": "协议空行：后端版本错配",
+    "duplicate_request_id": "RPC 重放被拒：后端 bug",
+    "already_initialized": "重复 init：后端 bug",
+    "not_initialized": "没 init 就发 op：后端 bug",
+    "already_rejoined": "重复接回：后端 bug",
+    "control_socket_unavailable": "命令面地址起不来：部署问题，兜底文案 + 日志够查",
+    "runtime_error": "worker 兜底：类型与原文在 detail 里，分不出更细的类",
+    # ── 对话面：参数不合法（前端拼错了）──
+    "invalid_answer": "前端拼错了",
+    "invalid_choice": "前端拼错了",
+    "invalid_pause_id": "前端拼错了",
+    "invalid_max_turns": "前端拼错了",
+    "invalid_text": "前端拼错了",
+    "invalid_action": "前端拼错了",
+    "invalid_autonomy_mode": "前端拼错了",
+    "invalid_authorized_risk_classes": "前端拼错了",
+    "invalid_sandbox_manifest": "后端拼错了",
+    "sandbox_authorization_mismatch": "后端与 worker 对不上：部署问题",
+    "no_pause_pending": "没有待答的 pause：前端状态过期，重发即可",
+    "pause_conflict": "pause 版本冲突：前端状态过期，重发即可",
+    "pause_not_addressable": "pause 不可寻址：前端状态过期，重发即可",
+    # ── 知识 / 组织面：参数不合法（后端拼错了）──
+    "invalid_entity": "后端拼错了",
+    "invalid_query": "后端拼错了",
+    "invalid_items": "后端拼错了",
+    "invalid_projects": "后端拼错了",
+    "invalid_candidates": "后端拼错了",
+    "invalid_proposal_id": "后端拼错了",
+    "invalid_decision": "后端拼错了",
+    "invalid_reasoning": "后端拼错了",
+    "invalid_by": "后端拼错了",
+    "invalid_org_home": "后端拼错了",
+    "invalid_org_id": "后端拼错了",
+    "invalid_grants": "后端拼错了",
+    "invalid_machines": "后端拼错了",
+    "resolve_failed": "组织层解析失败：detail 里有原文",
+}
+
 #: 文案表 —— **用户看到的每一个字都出自这里**。
 #:
 #: 加新条目的判据：这类故障用户能做的事和别的不一样。如果 recovery 和
@@ -108,15 +165,18 @@ _COPY: dict[str, _Copy] = {
             "zh": "这一轮中途停下了，已经记录下来的工作都在。",
             "en": "This turn stopped partway; everything already recorded is still here.",
         },
+        # 「如果连着几次都停在这里，把 reference 报出来」那句删了（RFC_WORKER_START_IS_NOT_A_GATE §5）：
+        # 「连着几次」现在是机械判据 —— 同一会话同一 code 连续第二次，后端自动跑 doctor，结果在会话
+        # 顶部的条幅里。把人当重试循环的那半句没有读者了。
         recovery={
             "zh": (
-                "发下一条消息就从断点接着跑。如果连着几次都停在这里，把下面那个 "
-                "reference 报出来 —— 完整技术细节挂在它上面。"
+                "发下一条消息就从断点接着跑。完整技术细节挂在下面那个 reference 上；"
+                "同一个问题连着出现时，会话顶部会出现平台的自动诊断。"
             ),
             "en": (
-                "Send another message and it continues from where it stopped. If it "
-                "keeps stopping here, quote the reference below — the full technical "
-                "detail hangs off it."
+                "Send another message and it continues from where it stopped. The full "
+                "technical detail hangs off the reference below; if the same problem keeps "
+                "recurring, the platform's own diagnosis appears at the top of the session."
             ),
         },
     ),
@@ -283,6 +343,59 @@ _COPY: dict[str, _Copy] = {
             ),
         },
         retryable=True,
+    ),
+    # ── worker 启动的三种硬失败（RFC_WORKER_START_IS_NOT_A_GATE §3.1）──────────────
+    # 调模型之前只剩这几件事能把一轮杀掉；其余持久化前提都降级跑。文案各说各的：
+    # 模型不可达说模型，身份冲突说"这个家是别人的"，不说"读不到"。
+    "provider_not_configured": _Copy(
+        title={"zh": "模型没有配好", "en": "The model is not configured"},
+        body={
+            "zh": "这一轮没有起跑：当前选的模型后端缺少可用的接入地址或模型名。",
+            "en": "This turn did not start: the selected model backend has no usable endpoint or model name.",
+        },
+        recovery={
+            "zh": "到「设置 → 模型」把这个后端的接入地址和模型名补全，再发一次。",
+            "en": "Fill in the endpoint and model name under Settings → Models, then send again.",
+        },
+        retryable=False,
+    ),
+    "tenant_home_conflict": _Copy(
+        title={"zh": "这个家是别人的", "en": "This home belongs to someone else"},
+        body={
+            "zh": (
+                "平台给这个会话的数据目录里写着另一个租户的身份。继续用会把两个人的"
+                "知识和记忆写到一起，所以这一轮没有起跑。"
+            ),
+            "en": (
+                "The data directory handed to this session is bound to a different tenant. "
+                "Continuing would mix two people's knowledge and memory, so this turn did not start."
+            ),
+        },
+        recovery={
+            "zh": "这是部署问题，把下面的 reference 交给管理员；目录和身份的对应在后端日志里。",
+            "en": "This is a deployment problem: hand the reference below to an administrator; the "
+                  "directory and the identity it is bound to are in the backend log.",
+        },
+        retryable=False,
+    ),
+    "runtime_identity_conflict": _Copy(
+        title={"zh": "这个运行目录是别的会话的", "en": "This state directory belongs to another session"},
+        body={
+            "zh": (
+                "这个会话的运行目录里写着另一个会话的身份。继续用会串两个会话的对话"
+                "与记录，所以这一轮没有起跑。"
+            ),
+            "en": (
+                "This session's state directory is bound to a different session. Continuing would "
+                "mix two sessions' conversations and records, so this turn did not start."
+            ),
+        },
+        recovery={
+            "zh": "新开一个会话继续；把下面的 reference 交给管理员，目录与身份的对应在后端日志里。",
+            "en": "Continue in a new session; hand the reference below to an administrator — the "
+                  "directory and the identity it is bound to are in the backend log.",
+        },
+        retryable=False,
     ),
     "runtime_environment_broken": _Copy(
         # 与 harness_process_exited 分开的理由：那条是"进程中途死了（原因
@@ -723,7 +836,8 @@ def _classify(exc: BaseException, raw: str) -> str:
     for accepted, code in _BY_UPSTREAM_STATUS:
         if any(status in accepted for status in statuses):
             return code
-    if isinstance(declared, str) and declared:
+    # 登记过「故意走兜底」的不吵；两张表都没有的才是漏网 —— 吵，而且闸会红。
+    if isinstance(declared, str) and declared and declared not in _FALLS_TO_GENERIC:
         # 运行时**说得出**这是什么，而我们一句对应的话都没有 —— 于是用户读到
         # 「平台内部错误」，而平台其实被明确告知了原因。这不是判决（兜底文案
         # 照发，用户该看到什么不变），是**留证据**：漏掉的名字必须在日志里

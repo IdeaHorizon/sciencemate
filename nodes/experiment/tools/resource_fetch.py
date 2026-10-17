@@ -88,6 +88,7 @@ class NetworkAccessRequired(AcquisitionError):
         what_for: str,
         redirect_of: str = "",
         already_requested: bool = False,
+        grant_lapsed: bool = False,
     ) -> None:
         host = str(decision.get("host") or "")
         policy = decision.get("policy") or {}
@@ -103,7 +104,18 @@ class NetworkAccessRequired(AcquisitionError):
         )
         via = f"（由 {redirect_of} 重定向而来）" if redirect_of else ""
         allowlist = _deployment_allowlist_with(policy, host)
-        if already_requested:
+        if grant_lapsed:
+            # #1069：Core 的出网授权只挂在活的 State 上、按设计不落盘；同一 run
+            # State.reopen 之后它就没了。这不是被拒绝——再申请一次就是出口，
+            # 叫模型 report_blocker 是把一条走得通的路说成死路。
+            message = (
+                f"本 run 之前已为精确主机 {host} 获批出网授权，但这份授权只在进程内有效，"
+                "已随本 run 的重启/恢复失效（不是被拒绝）。本次在联网之前拒绝，没有发出这个请求。"
+                f"请重新调用 request_network_access({rendered})；用户再次允许后原样重试 fetch_resource。"
+                "若需长期放行，由部署方使用下面这行配置并重启服务：\n"
+                f"HARNESS_SANDBOX_EGRESS_ALLOWLIST={allowlist}"
+            )
+        elif already_requested:
             message = (
                 f"本 run 已经为精确主机 {host} 调用过 request_network_access，"
                 "但授权当前仍未生效（可能被拒绝、未答复，或答复没有形成授权）。"
@@ -128,6 +140,7 @@ class NetworkAccessRequired(AcquisitionError):
         self.call = f"request_network_access({rendered})"
         self.decision = decision
         self.requestable = not already_requested
+        self.grant_lapsed = bool(grant_lapsed)
 
     def as_result(self, *, kind: str) -> dict[str, Any]:
         result = {
@@ -144,6 +157,8 @@ class NetworkAccessRequired(AcquisitionError):
             },
             "egress_decision": dict(self.decision),
         }
+        if self.grant_lapsed:
+            result["previous_grant_lapsed"] = True
         if not self.requestable:
             result["error_code"] = "network_access_request_unresolved"
             result.pop("request_network_access", None)
@@ -290,8 +305,9 @@ def _resolve_destination(
     url: str,
     kind: str,
 ) -> tuple[Path, Path]:
-    default_root = experiment_output_dir(state, "runtime", create=True) / "acquired"
-    default_root.mkdir(parents=True, exist_ok=True)
+    # Pure path resolution: even directory materialization belongs after the
+    # durable action boundary below, not in admission or an error path.
+    default_root = experiment_output_dir(state, "runtime") / "acquired"
     raw = str(destination or "").strip()
     if not raw:
         candidate = default_root / _default_name(url, kind)
@@ -477,28 +493,66 @@ def _deployment_allowlist_with(policy: dict[str, Any], host: str) -> str:
     return ",".join(entries)
 
 
-def _network_access_was_requested(state: State, host: str) -> bool:
-    """Whether this run already invoked the grant tool for this exact host."""
+def _network_access_history(state: State, host: str) -> tuple[str, int]:
+    """本 run 对这个精确主机最近一次申请/答复的结果，以及至今批准过几次。
+
+    结果是 ``none`` / ``pending``（申请了、还没有答复）/ ``denied``（拒绝或答复
+    读不出）/ ``approved``。只用来挑恢复指引，从不当授权来源：transcript 节点
+    自己也能写，授权只认 Core 的 ``is_granted``（#1069）。此前这里只问「申请过
+    没有」，把「批过但已随重启失效」也说成「不要再申请、去 report_blocker」。
+    """
+    outcome, approvals = "none", 0
     path = getattr(state, "transcript_path", None)
     if not isinstance(path, Path) or not path.is_file():
-        return False
+        return outcome, approvals
     try:
         with path.open("r", encoding="utf-8") as stream:
             for line in stream:
-                if '"request_network_access"' not in line:
+                if ('"request_network_access"' not in line
+                        and '"capability_grant_answered"' not in line):
                     continue
                 try:
                     event = json.loads(line)
                 except (TypeError, ValueError):
                     continue
-                if event.get("event") != "tool_call" or event.get("name") != "request_network_access":
-                    continue
-                args = event.get("args")
-                if isinstance(args, dict) and _normalized_egress_host(args.get("host", "")) == host:
-                    return True
+                if event.get("event") == "tool_call" and event.get("name") == "request_network_access":
+                    args = event.get("args")
+                    if isinstance(args, dict) and _normalized_egress_host(args.get("host", "")) == host:
+                        outcome = "pending"
+                elif (event.get("event") == "capability_grant_answered"
+                        and _normalized_egress_host(str(event.get("host") or "")) == host):
+                    if event.get("granted") is True:
+                        outcome, approvals = "approved", approvals + 1
+                    else:
+                        outcome = "denied"
     except OSError:
+        return outcome, approvals
+    return outcome, approvals
+
+
+#: 活 State 上记「已因授权失效叫过重新申请」时看到的批准次数（只在内存里，随
+#: State 一起消失——正好对应「重启一次，补一次申请」）。
+_REAUTH_ADVISED_ATTR = "_experiment_egress_reauthorization_advised"
+
+
+def _grant_lapsed_with_restart(state: State, host: str, approvals: int) -> bool:
+    """批准过、现在却不生效：随重启失效的才叫重新申请，否则不能每轮弹卡空转。
+
+    同一个活 State 上已经因失效叫过一次重新申请、之后又批了一次仍不生效——那不是
+    重启，是答复没有落成授权；再叫重新申请就是「人每点一次、卡再弹一次」。
+    """
+    advised = getattr(state, _REAUTH_ADVISED_ATTR, None)
+    if not isinstance(advised, dict):
+        advised = {}
+        try:
+            setattr(state, _REAUTH_ADVISED_ATTR, advised)
+        except Exception:
+            return False
+    previous = advised.get(host)
+    if previous is not None and previous != approvals:
         return False
-    return False
+    advised[host] = approvals
+    return True
 
 
 def _egress_access_decision(state: State, host_or_url: str = "") -> dict[str, Any]:
@@ -582,19 +636,16 @@ def _require_egress_access(
     """
     decision = _egress_access_decision(state, url)
     if not decision["allowed"]:
-        if _network_access_was_requested(state, decision["host"]):
-            raise NetworkAccessRequired(
-                decision,
-                reason=reason,
-                what_for=_url_for_human(what_for),
-                redirect_of=_normalized_egress_host(redirect_of) if redirect_of else "",
-                already_requested=True,
-            )
+        outcome, approvals = _network_access_history(state, decision["host"])
+        lapsed = outcome == "approved" and _grant_lapsed_with_restart(
+            state, decision["host"], approvals)
         raise NetworkAccessRequired(
             decision,
             reason=reason,
             what_for=_url_for_human(what_for),
             redirect_of=_normalized_egress_host(redirect_of) if redirect_of else "",
+            already_requested=outcome != "none" and not lapsed,
+            grant_lapsed=lapsed,
         )
     return decision
 
@@ -756,12 +807,28 @@ async def _fetch_resource(
     **_: Any,
 ) -> dict[str, Any]:
     """Fetch one file or public Git repository through the controlled adapter."""
+    # v3 统一 action 边界的名字在函数开头就绑好：异常可能在任何一步抛出，
+    # 失败出口要能结算（局部 import 放在中途会让早抛的异常撞 UnboundLocalError）。
+    try:
+        from .action_boundary import (begin as _v3_begin, settle as _v3_settle_action,
+                                      SUPPORT as _v3_SUPPORT, BoundaryRefusal as _V3Refusal)
+    except ImportError:  # pragma: no cover
+        from tools.action_boundary import (begin as _v3_begin, settle as _v3_settle_action,  # type: ignore
+                                           SUPPORT as _v3_SUPPORT, BoundaryRefusal as _V3Refusal)
+    _v3_handle = None
+    try:
+        from .action_boundary import v3_ready as _v3_ready
+    except ImportError:  # pragma: no cover
+        from tools.action_boundary import v3_ready as _v3_ready  # type: ignore
     try:
         try:
             from .execution_action_census import pending_operation_action_block
         except ImportError:  # pragma: no cover - standalone node bootstrap.
             from tools.execution_action_census import pending_operation_action_block
-        pending_block = pending_operation_action_block(
+        # S1d（Codex 35/36 P0-A）：pending-operation census 门是 v2 的 route/census authority；
+        # v3 run 只走 URL / egress / destination / 大小 / selected A / action boundary。
+        v3 = _v3_ready(state)
+        pending_block = None if v3 else pending_operation_action_block(
             state,
             {
                 "tool": "fetch_resource",
@@ -786,11 +853,22 @@ async def _fetch_resource(
         # fetch_resource schema 在派发口核，这里不再手写。
         source_url = _validated_https_url(url)
         try:
-            from .run_contract import audit_execution_intent_binding
-        except ImportError:  # pragma: no cover - standalone node bootstrap.
-            from tools.run_contract import audit_execution_intent_binding
-        try:
-            intent_binding = audit_execution_intent_binding(state, require=True)
+            if v3:
+                # Downloading acquires inputs; it does not consume a scientific
+                # package or establish scope. The v2 receipt/classify audit
+                # rejects legitimate unknown/pending preparation and points at
+                # a retired tool. Only the exact selected A must stay the same.
+                try:
+                    from .task_input_view import audit_selected_task_binding
+                except ImportError:  # pragma: no cover - standalone node bootstrap.
+                    from tools.task_input_view import audit_selected_task_binding
+                intent_binding = audit_selected_task_binding(state)
+            else:
+                try:
+                    from .run_contract import audit_execution_intent_binding
+                except ImportError:  # pragma: no cover - standalone node bootstrap.
+                    from tools.run_contract import audit_execution_intent_binding
+                intent_binding = audit_execution_intent_binding(state, require=True)
         except Exception as exc:
             return {
                 "status": "error",
@@ -807,7 +885,11 @@ async def _fetch_resource(
             return {
                 "status": "error",
                 "error_code": "execution_intent_binding_required",
-                "error": "上游任务输入或冻结 prereg 已漂移/不可核验；未创建目录、未联网。",
+                "error": (
+                    "当前正式任务身份不可核验或与本 run 已记录的任务不一致；未创建目录、未联网。"
+                    if v3 else
+                    "上游任务输入或冻结 prereg 已漂移/不可核验；未创建目录、未联网。"
+                ),
                 "kind": kind,
                 "execution_intent_binding": intent_binding,
             }
@@ -835,8 +917,18 @@ async def _fetch_resource(
         # 判决拆除·第三波（rf:325 删，2026-09-02）：destination 已存在的判决只有
         # 一处——原子导入 `_copy_into_destination`（永不覆盖）；这里的预检是同条件
         # 三写之一，删。
-        target.parent.mkdir(parents=True, exist_ok=True)
         public_source_url = _url_for_human(source_url)
+        # v3 统一 action 边界（Codex 25 号 P0-2）：授权、目的路径与输入都解析完了，
+        # 下面第一条 spawn 就会发网络请求。durable-or-refuse 必须卡在这里——事后补记
+        # 挡不住"下完就崩"：那时既没有 start 也没有 nonce，重试安不安全无从判断。
+        _v3_handle = _v3_begin(
+            state, tool="fetch_resource", effect_class=_v3_SUPPORT,
+            command=f"fetch {kind} {public_source_url}"[:400],
+            output_candidates=[target])
+        if isinstance(_v3_handle, _V3Refusal):
+            return _v3_handle.as_result("fetch_resource")
+        # 目录物化也是本 action 的副作用：放在 begin 之后（Codex 27 号 P0-2）。
+        target.parent.mkdir(parents=True, exist_ok=True)
         state.append_transcript(
             "resource_acquisition_started",
             kind=kind,
@@ -1042,9 +1134,13 @@ async def _fetch_resource(
                     "recursive": recursive,
                 }
 
+        _v3_recorded = _v3_settle_action(state, _v3_handle, outcome="settled", exit_code=0)
         state.append_transcript("resource_acquisition_completed", **result)
+        if _v3_recorded.get("status") == "effect_recording_uncertain":
+            return {**result, **_v3_recorded}
         return result
     except MaxBytesExceeded as exc:
+        _v3_settle_action(state, _v3_handle, outcome="failed", stderr_text=str(exc)[:400])
         result = exc.as_result(kind=kind)
         try:
             state.append_transcript(
@@ -1062,6 +1158,7 @@ async def _fetch_resource(
             pass
         return result
     except NetworkAccessRequired as exc:
+        _v3_settle_action(state, _v3_handle, outcome="failed", stderr_text=str(exc)[:400])
         result = exc.as_result(kind=kind)
         try:
             event = {
@@ -1081,6 +1178,7 @@ async def _fetch_resource(
             pass
         return result
     except AcquisitionError as exc:
+        _v3_settle_action(state, _v3_handle, outcome="failed", stderr_text=str(exc)[:400])
         try:
             state.append_transcript(
                 "resource_acquisition_failed",
@@ -1093,6 +1191,7 @@ async def _fetch_resource(
             pass
         return {"status": "error", "error": str(exc), "kind": kind}
     except Exception as exc:
+        _v3_settle_action(state, _v3_handle, outcome="failed", stderr_text=str(exc)[:400])
         try:
             state.append_transcript(
                 "resource_acquisition_failed",
@@ -1114,23 +1213,13 @@ register_tool(
     ToolDefinition(
         name="fetch_resource",
         description=(
-            "把外部 HTTPS 文件或公开 Git 仓库安全落盘到 Experiment 获准的写入根。"
-            "联网之前逐一核对源地址、每一跳重定向和每个 Git 子模块的域名是否在生效 egress "
-            "部署白名单或本 run 精确主机授权内；缺授权时返回可直接调用的 "
-            "request_network_access，下载进程唯一可写的是空 staging，"
-            "下载完成后返回 SHA-256 或 Git commit/tree hash 供复现审计。\n\n"
-            "**Use when**：需要下载源码 tarball、公开数据文件，或 clone 公开 HTTPS "
-            "Git 仓库用于 toolchain_build/diagnostic。Git 子模块用 recursive=true。"
-            "安装 Python wheel/sdist 时，把主包、全部依赖和构建后端都分别用 "
-            "fetch_resource(kind='file') 取到同一目录；先 declare_execution_route 并按提示完成 "
-            "preflight，再用 safe_run_bash 执行 pip install --no-index --find-links <取回目录> "
-            "--target <获准可写目录> <包名>（也可按契约改用 --prefix）；耗时长则用 submit_job "
-            "执行同一离线命令。\n\n"
-            "**Do NOT use when**：读网页正文用 web_fetch；私有仓库/带凭据 URL 不支持；不要再用 "
-            "safe_run_bash 的 curl/wget/git clone，它所在的 Attempt 刻意无网。\n\n"
-            "destination 省略时落到本 run 的 runtime/acquired；相对路径以该目录为根；"
-            "绝对路径必须位于 run_root/build_root 或显式授权的 managed_source_root、"
-            "可写 dependency_root、approved_write_root。永不覆盖已有路径。"
+            '把外部 HTTPS 文件或公开 Git 仓库安全落盘到本 run 获准的写入根。联网前逐一核对源地址、每一跳重定向和每个 Git 子模块的域名是否在 egress 白名单或本 run 精确授权内；缺授权时返回可直接调用的 request_network_access。下载进程唯一可写的是空 staging，完成后返回 SHA-256 或 Git commit/tree hash。\n'
+            '\n'
+            "**Use when**：下载源码 tarball、公开数据文件，或 clone 公开 HTTPS Git 仓库。Git 子模块用 recursive=true。安装 Python 包：主包、依赖和构建后端各自 fetch_resource(kind='file') 到同一目录，再用 safe_run_bash 跑 pip install --no-index --find-links <取回目录> --target <可写目录> <包名>（也可按契约改用 --prefix）；耗时长就用 submit_job 执行同一离线命令。\n"
+            '\n'
+            '**Do NOT use when**：读网页正文用 web_fetch；私有仓库/带凭据 URL 不支持；不要用 safe_run_bash 的 curl/wget/git clone，那里刻意无网。\n'
+            '\n'
+            'destination 省略时落到 runtime/acquired；绝对路径必须位于 run_root/build_root 或显式授权的 managed_source_root、可写 dependency_root、approved_write_root。永不覆盖已有路径。框架自己记录它取回了什么。'
         ),
         parameters_schema={
             "type": "object",

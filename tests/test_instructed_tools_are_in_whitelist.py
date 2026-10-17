@@ -48,6 +48,24 @@ simulation 作业 finalize 不了，路线锁死，连修订重跑都做不了�
 - 跨节点提及（"postprocess 会调 stage_writing_assets(...)"）由 callable_nodes
   那套管；这里只在名字属于注册工具集时开火，天然把 `np.array(` 之类挡在外面。
 
+### 送不到模型的文字不算（2026-09-30，#1175）
+
+experiment 把 21 个工具撤出白名单、把 4 个 hook 撤出 `loop_hooks`，但这些工具的
+实现和 hook 的回调还在源码里，里面的文字照样点名彼此。上一版把节点目录下**所有**
+字符串字面量都当成递给模型的文字，于是 8 个名字全红 —— 其中 6 处长在模型永远
+碰不到的地方：
+
+- 工具：模型只看得见白名单上的工具（`agent_loop` 按 `harness.tools` 列工具面，调别的
+  直接拒）。一个函数若**只**作为某个未上白名单工具的执行者被引用，它的文字送不到模型。
+- hook：跑不跑由 `resolve_enabled_hook_names` 决定（始终启用 + `harness.loop_hooks` −
+  `loop_hooks_disable`）；`register_loop_hook` 只是登记。一个函数若**只**作为某个
+  未启用 `LoopHook` 的回调被引用，同理。
+
+这两条都是 core 自己的机制，不是名单。任何别的引用 —— 被别的函数调用、被别的模块
+import、同时还是某个已上白名单工具的执行者 —— 都算活的；零引用也算活的（模块内
+证明不了它死）。宁可多扫，不可漏扫。退役工具的尸体本身仍该删，但那是「死代码」
+的问题，不是「模型被指去调调不到的工具」的问题；这条闸只管后者。
+
 ## 两种改法都对
 
 闸红了，说明「文字许诺的」和「工具面给的」对不上。哪边错要看事实：
@@ -66,6 +84,7 @@ from pathlib import Path
 
 import pytest
 
+from core.agent_loop import resolve_enabled_hook_names
 from core.loader import load_harness
 from core.tool_registry import all_tool_names
 
@@ -119,6 +138,99 @@ def _docstring_literals(tree: ast.AST) -> set[int]:
     return found
 
 
+#: `LoopHook(...)` 上挂回调的关键字 —— 见 core/loop_hooks.py 的 LoopHook 字段。
+_HOOK_CALLBACK_KEYS = ("on_turn_start", "on_llm_response", "on_turn_end",
+                       "on_end", "on_before_finish")
+
+
+def _call_name(call: ast.Call) -> str:
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
+def _constant_keyword(call: ast.Call, key: str) -> str | None:
+    for keyword in call.keywords:
+        if (keyword.arg == key and isinstance(keyword.value, ast.Constant)
+                and isinstance(keyword.value.value, str)):
+            return keyword.value.value
+    return None
+
+
+def unreachable_functions(
+    tree: ast.Module, *, whitelist: set[str], enabled_hooks: set[str],
+    referenced_elsewhere: set[str] = frozenset(),
+) -> set[str]:
+    """模块里**这个节点的模型永远碰不到**的顶层函数。见模块文档「送不到模型的文字不算」。
+
+    只认两种死引用：`register_tool(ToolDefinition(name=<未上白名单>, …), fn)` 里的执行者
+    fn，和 `LoopHook(name=<未启用>, on_*=fn)` 里的回调 fn。一个顶层函数的**全部**引用
+    都是死引用，它才死；有任何一处活引用（被调用、被别的模块引用、也是活工具的执行者）
+    或者根本没有引用，都算活。工具名 / hook 名不是字面量常量时判不了，按活处理。
+    """
+    top_level = {n.name for n in tree.body
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    if not top_level:
+        return set()
+    dead_reference_nodes: set[int] = set()
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
+            continue
+        kind = _call_name(call)
+        if (kind == "register_tool" and call.args and isinstance(call.args[0], ast.Call)
+                and _call_name(call.args[0]) == "ToolDefinition"):
+            tool = _constant_keyword(call.args[0], "name")
+            executor = call.args[1] if len(call.args) > 1 else next(
+                (kw.value for kw in call.keywords if kw.arg == "executor"), None)
+            if tool is not None and tool not in whitelist and isinstance(executor, ast.Name):
+                dead_reference_nodes.add(id(executor))
+        elif kind == "LoopHook":
+            hook = _constant_keyword(call, "name")
+            if hook is not None and hook not in enabled_hooks:
+                for keyword in call.keywords:
+                    if keyword.arg in _HOOK_CALLBACK_KEYS and isinstance(keyword.value, ast.Name):
+                        dead_reference_nodes.add(id(keyword.value))
+    if not dead_reference_nodes:
+        return set()
+    references: dict[str, list[ast.Name]] = {name: [] for name in top_level}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in references:
+            references[node.id].append(node)
+    return {
+        name for name, nodes in references.items()
+        if nodes and name not in referenced_elsewhere
+        and all(id(n) in dead_reference_nodes for n in nodes)
+    }
+
+
+def _literals_inside(tree: ast.Module, function_names: set[str]) -> set[int]:
+    """这些顶层函数（含其中嵌套的函数）里的全部字符串字面量。"""
+    found: set[int] = set()
+    for definition in tree.body:
+        if (isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and definition.name in function_names):
+            for node in ast.walk(definition):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    found.add(id(node))
+    return found
+
+
+def _identifiers(tree: ast.AST) -> set[str]:
+    """一个文件里出现过的全部名字 —— 用来判「别的模块有没有引用这个函数」。"""
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            out.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            out.add(node.attr)
+        elif isinstance(node, ast.ImportFrom):
+            out.update(alias.name for alias in node.names)
+    return out
+
+
 def model_facing_text(node: str) -> list[tuple[str, str]]:
     """这个节点会递给模型的文字，每条带一个出处。"""
     pieces: list[tuple[str, str]] = []
@@ -131,20 +243,33 @@ def model_facing_text(node: str) -> list[tuple[str, str]]:
     for index, rule in enumerate(rules):
         pieces.append((f"nodes/{node}/harness.yaml:rules[{index}]", str(rule)))
 
+    whitelist = set(getattr(harness, "tools", []) or [])
+    enabled_hooks = set(resolve_enabled_hook_names(harness))
+
+    trees: dict[Path, ast.Module] = {}
     for path in sorted(_node_directory(node).rglob("*.py")):
         if _is_a_test_file(path):
             continue
-        source = path.read_text(encoding="utf-8", errors="replace")
         try:
-            tree = ast.parse(source)
+            trees[path] = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
         except SyntaxError:  # pragma: no cover - 语法错另有闸管
             continue
-        docstrings = _docstring_literals(tree)
+    identifiers = {path: _identifiers(tree) for path, tree in trees.items()}
+
+    for path, tree in trees.items():
+        referenced_elsewhere: set[str] = set()
+        for other, names in identifiers.items():
+            if other != path:
+                referenced_elsewhere |= names
+        unreachable = unreachable_functions(
+            tree, whitelist=whitelist, enabled_hooks=enabled_hooks,
+            referenced_elsewhere=referenced_elsewhere)
+        skipped = _docstring_literals(tree) | _literals_inside(tree, unreachable)
         where = path.relative_to(REPO_ROOT)
         for literal in ast.walk(tree):
             if not isinstance(literal, ast.Constant) or not isinstance(literal.value, str):
                 continue
-            if id(literal) in docstrings:
+            if id(literal) in skipped:
                 continue
             pieces.append((f"{where}:{literal.lineno}", literal.value))
     return pieces
@@ -261,6 +386,64 @@ def test_the_scan_reads_more_than_the_prompt() -> None:
     assert audit_lines, (
         "experiment 的闸文案（contract_audit.py）不在语料里 —— #832 那条正是从这里出的"
     )
+
+
+_PROBE_MODULE = '''
+from core.tool_registry import ToolDefinition, register_tool
+from core.loop_hooks import LoopHook, register_loop_hook
+
+def _retired(**kw):
+    return {"error": "先 ghost_one(artifact_id=<x>)"}
+
+def _shared_helper():
+    return "再 ghost_two(reason=...)"
+
+def _old_hook_cb(ctx):
+    _shared_helper()
+    return "用 ghost_three(step=<n>)"
+
+def _live_tool(**kw):
+    _shared_helper()
+    return {"hint": "调 ghost_four(x=1)"}
+
+register_tool(ToolDefinition(name="retired_tool", description="d"), _retired)
+register_tool(ToolDefinition(name="live_tool", description="d"), _live_tool)
+old_hook = LoopHook(name="old_hook", on_turn_end=_old_hook_cb)
+register_loop_hook(old_hook)
+'''
+
+
+def test_text_the_model_cannot_reach_is_not_counted() -> None:
+    """只作为未上白名单工具的执行者 / 未启用 hook 的回调被引用的函数，文字不算。
+
+    把工具加回白名单、把 hook 启用、或者别的模块引用了它，文字就又算了；
+    被活函数调用的共用 helper 一直算。
+    """
+    tree = ast.parse(_PROBE_MODULE)
+    dead = unreachable_functions(tree, whitelist={"live_tool"}, enabled_hooks=set())
+    assert dead == {"_retired", "_old_hook_cb"}
+    assert "_shared_helper" not in dead and "_live_tool" not in dead
+
+    assert unreachable_functions(
+        tree, whitelist={"live_tool", "retired_tool"}, enabled_hooks=set()) == {"_old_hook_cb"}
+    assert unreachable_functions(
+        tree, whitelist={"live_tool"}, enabled_hooks={"old_hook"}) == {"_retired"}
+    assert unreachable_functions(
+        tree, whitelist={"live_tool"}, enabled_hooks=set(),
+        referenced_elsewhere={"_retired"}) == {"_old_hook_cb"}
+
+    skipped = _literals_inside(tree, dead)
+    kept = [n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in skipped]
+    assert any("ghost_two" in t for t in kept) and any("ghost_four" in t for t in kept)
+    assert not any("ghost_one" in t or "ghost_three" in t for t in kept)
+
+
+def test_harness_yaml_text_is_never_narrowed() -> None:
+    """可达性只作用在 .py 字面量上；prompt / rules 永远全量进语料（第一个病例的出处）。"""
+    pieces = dict(model_facing_text("experiment"))
+    assert "nodes/experiment/harness.yaml:system_prompt" in pieces
+    assert any(k.startswith("nodes/experiment/harness.yaml:rules[") for k in pieces)
 
 
 def test_english_plurals_do_not_count_as_calls() -> None:

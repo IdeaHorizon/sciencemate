@@ -32,7 +32,7 @@ status: validated
    `source_prereg_artifact_id`、`scientific_parameters: frozen_prereg_only`，以及
    file_exists/schema/units/manifest_lineage 均为 true 的 `acceptance`）。随后调用
    `dispatch_data_request(spec_id=..., user_note=...)`；它复用既有 Data child 路径并
-   持久化 spec、payload 与 child receipt。Data 是同步服务，必须等待数据返回并验收，
+   持久化 spec、payload 与 child 回执。Data 是同步服务，必须等待数据返回并验收，
    不能把这项工作退回调用方。若 Data 因权限 pause，保留同一请求；恢复后先调用
    `reconcile_data_dispatch()`，由它从直属 child 的完整终态 artifact 清单机械回填回执：
    唯一 dataset 继续验收，唯一 blocker 才可记录；不得重派或手选历史报告。

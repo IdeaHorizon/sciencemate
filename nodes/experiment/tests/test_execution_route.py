@@ -1192,12 +1192,15 @@ def test_reserved_artifact_types_cannot_unlock_route_recovery(
             "operation_closure_reconciliation_required"
         )
         assert rejected["closure"]["sealed"] is True
-        # 分治：这一档往往还有救——未冻结的草稿可以否定掉再原样重试，所以它不是
-        # 终态。原来两档共用一句「开新 run」并标 retryable_after_change=False，
-        # 把这一档说成了假终态。
+        # 分治：这一档往往还有救——未冻结的草稿还能被一次 finish 的原子交付取代，所以它
+        # 不是终态。原来两档共用一句「开新 run」并标 retryable_after_change=False，
+        # 把这一档说成了假终态。出口必须是本工具面上有的工具：v3 是 finish，非 v3 是
+        # report_blocker 交人；supersede_closure_draft 已退出白名单，不许再点它的名。
         assert rejected["blocker"]["retryable_after_change"] is True
-        assert "supersede_closure_draft" in rejected["error"] or (
-            "continuation run" in rejected["error"])
+        assert ("finish(" in rejected["error"]
+                or "report_blocker(" in rejected["error"]
+                or "continuation run" in rejected["error"])
+        assert "supersede_closure_draft" not in rejected["error"]
         assert "supersedable_artifact_ids" in rejected["closure"]
     else:
         assert rejected["error_code"] == (

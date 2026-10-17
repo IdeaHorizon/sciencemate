@@ -33,6 +33,9 @@ export const qk = {
     ["sessions", projectId, sessionId, "change-set"] as const,
   sessionConflicts: (projectId: string, sessionId: string) =>
     ["sessions", projectId, sessionId, "conflicts"] as const,
+  /** worker 起来时哪些持久化前提没成立 + 修复提案（会话顶部的环境条幅）。 */
+  sessionEnvironment: (projectId: string, sessionId: string) =>
+    ["sessions", projectId, sessionId, "environment"] as const,
   /** 冻结交付物。会话只决定"能不能点开"，所以它是键的一部分。 */
   projectMemory: (projectId: string) => ["projects", projectId, "memory-md"] as const,
   projectFileTree: (projectId: string) => ["projects", projectId, "file-tree"] as const,

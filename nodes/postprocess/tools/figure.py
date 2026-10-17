@@ -202,6 +202,16 @@ def _resolve_output_declarations(
     return resolved
 
 
+def _output_fingerprint(path: Path) -> tuple[int, int, int, int]:
+    """「这次执行碰没碰过这个文件」的指纹 —— 只比文件自己，不看墙钟（#975）。
+
+    任何写入（截断重写、换 inode 的 rename、改内容）都会改掉其中至少一项；
+    执行前后指纹一字不差，才说明这个文件是执行前就躺在那儿、代码没碰过的。
+    """
+    st = path.stat()
+    return (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
 def _missing_from_page(expected: list[str], page_text: str) -> list[str]:
     """``expected`` 里哪几段在纸上找不到。**丢字是少了一个字符，不是换了一个码位。**
 
@@ -1165,7 +1175,17 @@ async def _render_figure(
         # 登记在真的要花钱那一刻（沙箱执行之前）；参数写错被拒的不算。
         if request_id:
             attempt = _begin_attempt(state, request_id, contract_id)
-        started_at = time.time()
+        # 像素诚信的「是不是这次写的」原来拿 time.time() 比文件 mtime（公差 2 s）：
+        # 两个时钟比先后。CI runner 的墙钟会往回跳（#1146 在同一台 runner 上实测
+        # 到秒级回跳），文件戳又来自写它的那个内核 —— 刚写出的图被判「不是本次
+        # 写入」，test_render_figure 在 CI 上随机红、每次换一条（#975）。改成执行
+        # 前给已存在的声明输出记指纹，执行后只有「原来就在、且指纹一字不差」才算
+        # 挂旧文件充数；执行前不存在、执行后存在的，就是这次执行写出来的。
+        before_execution = {
+            rel: _output_fingerprint(path)
+            for rel, path in declared_outputs
+            if path.is_file()
+        }
         execution = await python_exec._execute_python(
             state,
             code=audit_preamble(str(sidecar)) + "\n" + code_text,
@@ -1209,7 +1229,7 @@ async def _render_figure(
         stale = [
             rel
             for rel, path in declared_outputs
-            if path.stat().st_mtime < started_at - 2.0
+            if before_execution.get(rel) == _output_fingerprint(path)
         ]
         if stale:
             raise VisualContractError(

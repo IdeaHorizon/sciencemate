@@ -311,6 +311,32 @@ async def spawn_and_wait(
 
             if _isolation.launcher_refusal(_err_b) is not None:
                 status, returncode = "spawn_failed", None
+            else:
+                # 撞了资源墙就说是哪堵（#1179）。cgroup 把 OOM 杀掉的命令在这里本来只剩一个
+                # 裸 rc=-9 —— 和「被 SIGKILL」「被取消」一模一样，模型只能猜。墙记在哪只有
+                # 后端知道（linux：这条命令那片 cgroup 的 memory.events），这里只负责翻成
+                # HARNESS_SANDBOX_LIMIT 词表：stderr 末尾补一行标记、退出码换成词表的码，
+                # run_bash / execute_python / safe_bash 据此报 sandbox_resource_exhausted。
+                # 必须在 finally 的 cleanup 之前问 —— cleanup 会把记着这件事的 cgroup 收走。
+                # 记账层，永不杀轮：问不出来就照旧交原始退出码。
+                hit = None
+                witness = getattr(sandbox_launch, "limit_hit", None)
+                if callable(witness):
+                    try:
+                        hit = await asyncio.to_thread(witness, returncode)
+                    except Exception as exc:
+                        log.warning("isolation limit witness failed: %s", exc)
+                if hit is not None:
+                    resource, detail = hit
+                    line = (f"{_isolation.SANDBOX_LIMIT_MARKER} {resource} {detail} "
+                            f"returncode={returncode}\n")
+                    if _err_b and not _err_b.endswith(b"\n"):
+                        line = "\n" + line          # 标记独占一行，别粘在载荷最后半行上
+                    # 写进文件而不只是拼到尾巴上：大输出落盘保留时，完整 stderr 里也得有这一行。
+                    with open(err_path, "ab") as _ef:
+                        _ef.write(line.encode("utf-8"))
+                    _err_b = _read_tail(err_path)
+                    returncode = _isolation.SANDBOX_LIMIT_EXIT_CODES[resource]
         if spill is not None and spill_dir is not None:
             _op = _preserve_large_output(out_path, spill_dir, "stdout")
             _ep = _preserve_large_output(err_path, spill_dir, "stderr")

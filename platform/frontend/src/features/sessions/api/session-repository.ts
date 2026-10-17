@@ -23,6 +23,7 @@ import type {
 } from "../types";
 import { say, type Language } from "@/shared/i18n";
 import { diagnosticsFailureMessage, diagnosticsFilename } from "../lib/diagnostics";
+import type { EnvironmentRepairResult, SessionEnvironment } from "../lib/environment";
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
@@ -357,6 +358,23 @@ export async function publishSessionChanges(
   return requestJson<{ commitSha: string; projectId: string; sessionId: string }>(
     `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/publish`,
     { method: "POST", body: JSON.stringify(message ? { message } : {}) },
+  );
+}
+
+/** worker 起来时哪些持久化前提没成立、修好了什么、是不是连续出现（会话顶部的环境条幅）。 */
+export async function getSessionEnvironment(projectId: string, sessionId: string) {
+  return requestJson<SessionEnvironment>(
+    `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/environment`,
+  );
+}
+
+/** 经人点头的修复：只回传 code 与路径，命令由服务端按表重算、以用户自己的身份执行。 */
+export async function repairSessionEnvironment(
+  projectId: string, sessionId: string, input: { code: string; path: string | null },
+) {
+  return requestJson<EnvironmentRepairResult>(
+    `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/environment/repair`,
+    { method: "POST", body: JSON.stringify(input) },
   );
 }
 

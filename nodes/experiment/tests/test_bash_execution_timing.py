@@ -63,4 +63,10 @@ def test_a_real_command_reports_when_it_ran_and_for_how_long(runattempt_state): 
     started = datetime.fromisoformat(result["started_at"])
     finished = datetime.fromisoformat(result["finished_at"])
     assert result["elapsed_seconds"] >= 0.3
-    assert before <= started <= finished <= after + timedelta(seconds=1)
+    # 自洽：finished 就是 started + 单调钟量出的时长 —— 这才是产品的承诺。
+    assert abs((finished - started).total_seconds() - result["elapsed_seconds"]) < 1e-3
+    # 落在本测试读到的墙钟窗口里，但两端都留回跳余量：CI runner 的墙钟实测会往回
+    # 跳 0.6–2 s（#1146 / #1073：这条曾红在 finished 比 after 晚 1.84 s）。产品用
+    # 单调钟算时长、不受影响；拿墙钟卡死 1 s 的是测试自己。
+    slack = timedelta(seconds=5)
+    assert before - slack <= started <= finished <= after + slack

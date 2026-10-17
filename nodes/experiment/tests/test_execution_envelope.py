@@ -448,9 +448,15 @@ def test_declare_route_warn_mode_succeeds_with_warnings_and_fact(tmp_path, monke
     assert missing_facts and missing_facts[0]["step_ids"] == ["simulate"]
 
 
-def test_declare_route_enforce_mode_rejects_with_correction_sequence(
+def test_declare_route_enforce_mode_rejects_and_names_an_exit_on_the_tool_surface(
     tmp_path, monkeypatch
 ):
+    """enforce 档缺 envelope：拒绝要点名一个本工具面上**存在**的出口。
+
+    原来这里断言一段「① declare_execution_envelope(...) ② … ③ …」纠偏序列；那个工具
+    已退出 experiment 的白名单，模型照着调只会撞墙（tests/test_instructed_tools_are_in_whitelist.py）。
+    现在的出口是 report_blocker 登记 / finish(outcome="blocked") 收尾。
+    """
     monkeypatch.setenv(_GATE_ENV, "enforce")
     state = _state(tmp_path)
     _assign_no_prereg(state)
@@ -461,12 +467,12 @@ def test_declare_route_enforce_mode_rejects_with_correction_sequence(
     assert rejected["error_code"] == "execution_envelope_required"
     assert rejected["step_ids"] == ["simulate"]
     for fragment in (
-        "declare_execution_envelope",
-        "evidence_bearing",
-        "evidence_refs",
-        "amendment_reason",
+        "envelope",
+        "report_blocker(",
+        'finish(outcome="blocked"',
     ):
         assert fragment in rejected["error"], fragment
+    assert "declare_execution_envelope" not in rejected["error"]
     events = _events(state)
     assert any(
         e.get("event") == "declared_route_rejected"

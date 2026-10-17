@@ -35,6 +35,7 @@ dict key 读过**的标识符（`.get("x")` / `["x"]`）—— 否则护栏自�
 """
 from __future__ import annotations
 
+import ast
 import importlib
 import pathlib
 import re
@@ -88,14 +89,8 @@ def _import_all_node_tools() -> None:
             continue
 
 
-def _executing_tools(module_path: pathlib.Path, source: str) -> list[str]:
-    """模型要调**哪个**工具，才会撞上本模块的拒绝。
-
-    通常是本模块自己注册的工具（按源文件归属判定）。但拒绝逻辑不一定长在工具上：
-    冻结门（2026-08-17 起）是**类型**的性质，用 `register_freeze_gate` 声明，
-    由唯一的 `freeze_artifact` 执行 —— 模型调的是 freeze_artifact，契约就得在
-    freeze_artifact 的说明里能读到。判据跟着执行者走，不跟着文件走。
-    """
+def _own_executors(module_path: pathlib.Path, source: str) -> list[str]:
+    """本模块自己的执行者：按源文件归属注册的工具，加上它声明的冻结门的执行者。"""
     tools = [
         name
         for name, src in _REGISTRY.tool_source_files.items()
@@ -104,6 +99,67 @@ def _executing_tools(module_path: pathlib.Path, source: str) -> list[str]:
     ]
     if "register_freeze_gate" in source:
         tools.append("freeze_artifact")
+    return tools
+
+
+def _imported_module_stems(path: pathlib.Path) -> set[str]:
+    """这个文件 import 了同节点 tools/ 里的哪些模块（按末段名）。
+
+    节点里三种写法都认：`from .ledger import …`、`from tools.ledger import …`
+    （standalone 兜底）、`from . import delivery_transaction as _dt`。按 AST 取，
+    不猜字符串。
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except SyntaxError:
+        return set()
+    stems: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module:
+                stems.add(node.module.rsplit(".", 1)[-1])
+            if not node.module or node.module.rsplit(".", 1)[-1] == "tools":
+                stems.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Import):
+            stems.update(alias.name.rsplit(".", 1)[-1] for alias in node.names)
+    return stems
+
+
+def _executing_tools(module_path: pathlib.Path, source: str) -> list[str]:
+    """模型要调**哪个**工具，才会撞上本模块的拒绝。
+
+    通常是本模块自己注册的工具（按源文件归属判定）。但拒绝逻辑不一定长在工具上：
+
+    · 冻结门（2026-08-17 起）是**类型**的性质，用 `register_freeze_gate` 声明，
+      由唯一的 `freeze_artifact` 执行 —— 模型调的是 freeze_artifact，契约就得在
+      freeze_artifact 的说明里能读到。
+    · **库模块**（2026-09-30，#1175 的 experiment/delivery_transaction.py 等）自己
+      不注册任何工具，它的校验器由别的模块的工具调用。上一版对这种模块的执行者
+      集合是空的，于是只拿 harness.yaml 当可见面 —— 这不是判据，是没写判据时的
+      兜底：finish 的 schema 里明明声明了 `revision` / `formal_input`，却因为校验
+      器长在被 import 的库里而被判成"模型看不见"。
+
+    判据跟着执行者走，不跟着文件走：库模块的执行者 = 同节点里 import 了它的模块
+    的执行者；中间再隔一层库就再往外找一层，直到碰到真有工具的模块为止。
+    """
+    tools = _own_executors(module_path, source)
+    if tools:
+        return tools
+    node_tools_dir = module_path.parent
+    seen = {module_path}
+    frontier = [module_path]
+    while frontier:
+        current = frontier.pop()
+        for candidate in sorted(node_tools_dir.glob("*.py")):
+            if candidate in seen or current.stem not in _imported_module_stems(candidate):
+                continue
+            seen.add(candidate)
+            found = _own_executors(
+                candidate, candidate.read_text(encoding="utf-8", errors="replace"))
+            if found:
+                tools.extend(found)
+            else:
+                frontier.append(candidate)
     return tools
 
 
@@ -199,6 +255,26 @@ class TestNoToolRejectsOnSomethingItNeverDeclared:
                 if not isinstance(declared, dict) or field not in declared:
                     broken.append(f"{module_path.name}: {contract_name} 里没有 {field!r}")
         assert not broken, "校验器引用了声明里不存在的字段：\n  " + "\n  ".join(broken)
+
+    def test_a_library_module_is_attributed_to_the_tools_that_import_it(self, tmp_path):
+        """库模块自己没有工具；它的执行者是 import 了它的模块的执行者。
+
+        三种 import 写法都得认出来，否则库模块又退回"只有 harness.yaml 可见"的兜底。
+        """
+        lib = tmp_path / "envelope.py"
+        lib.write_text("def validate(x):\n    pass\n", encoding="utf-8")
+        for style in (
+            "from .envelope import validate\n",
+            "from tools.envelope import validate\n",
+            "from . import envelope as _envelope\n",
+            "import nodes.experiment.tools.envelope\n",
+        ):
+            user = tmp_path / "finish.py"
+            user.write_text(style, encoding="utf-8")
+            assert "envelope" in _imported_module_stems(user), style
+        unrelated = tmp_path / "other.py"
+        unrelated.write_text("import json\nfrom .ledger import open_ledger\n", encoding="utf-8")
+        assert "envelope" not in _imported_module_stems(unrelated)
 
     def test_the_scan_ignores_prose_that_merely_starts_with_a_word(self):
         """护栏不能自己造噪音。

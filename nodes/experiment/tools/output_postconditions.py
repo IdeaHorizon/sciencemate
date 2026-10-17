@@ -322,6 +322,26 @@ def _freshness(
     return True, "created_during_attempt"
 
 
+def attempt_window_freshness(
+    *, mtime_ns: int, ctime_ns: int, nlink: int,
+    not_before_ns: int, not_after_ns: int,
+) -> tuple[bool, str]:
+    """一个不在绑定基线里的文件是否落在 attempt 时间窗 —— 就是上面 ``_freshness`` 那把尺。
+
+    execution_route 的本地 exact-output 纠正见证在**创建**与**复核**两处都调它
+    （#1146）。那里原来自己写了一份零公差、``min(mtime, ctime) >= bound`` 的判据：
+    文件戳来自内核粗时钟（runner 实测比 time.time_ns() 落后最多 8 ms），墙钟本身还
+    会往回拨，CI 随机红过两次；wget / tar x / cp -p 合法地保留旧 mtime，又让真新鲜
+    的产物必拒。下界只看 ctime（用户态设不了）、两侧留 STALE_TOLERANCE_NS，与
+    route 验证 / health / ROC 同一把尺，不再各写一份。
+    """
+    return _freshness(
+        "",
+        {"mtime_ns": int(mtime_ns), "ctime_ns": int(ctime_ns), "st_nlink": int(nlink)},
+        None, not_before_ns, not_after_ns,
+    )
+
+
 def _evaluate_file(
     key: str, root: str | None, baseline_members: dict[str, Any] | None,
     not_before_ns: int | None, allow_empty: set[str], not_after_ns: int | None = None,

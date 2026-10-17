@@ -44,10 +44,15 @@ from typing import Any
 #: transcript 里的事件名。工具写它，冻结门与白板读它。
 EVENT = "derivation_check"
 
-#: 只扫本 run transcript 的末尾若干行 —— 长推导的 transcript 可以很长，
-#: 而账本查询在每次冻结与每轮渲染时都会跑。上限比"一次推导可能验多少步"
-#: 宽一个量级。
-_SCAN_LIMIT = 20000
+#: 逐行过滤用的子串（先粗筛再 json.loads）。
+_NEEDLE = f'"{EVENT}"'
+
+# 这里曾有 `_SCAN_LIMIT = 20000`：只看 transcript 末尾两万行（#985）。理由是
+# "长推导的 transcript 可以很长"—— 但那份实现先 `read_text().splitlines()` 把
+# **整份**读进内存，再丢掉前面的部分：省下的只有 json.loads，内存一分没省，代价
+# 却是长 run 早期的验证从账本里消失，冻结门把它们判成"查无此项"（伪造），而
+# 那几步是真调过工具的。现在逐行流式读全文件、只留本事件的行：内存上界是
+# 验证记录的条数，不是 transcript 的长度。
 
 
 def probe_id(lhs: str, rhs: str, relation: str = "eq") -> str:
@@ -69,6 +74,8 @@ def record(state: Any, *, probe: str, tool: str, status: str,
     if append is None:
         return
     try:
+        # lhs/rhs 截 400 字只影响**展示**（白板再截到 60–70 字）：身份是 probe，
+        # 它在调用方按完整式子算好了，账本里的式子文本不参与任何判据（#985）。
         append(
             EVENT, probe=probe, tool=tool, status=status,
             lhs=(lhs or "")[:400], rhs=(rhs or "")[:400], relation=relation,
@@ -80,32 +87,49 @@ def record(state: Any, *, probe: str, tool: str, status: str,
         pass
 
 
+def _scan(state: Any) -> list[dict] | None:
+    """读一遍本 run 的账本。**None = 读不到；[] = 读到了、一条也没有。**
+
+    两者必须分开（见 `entries`）：此前读盘失败返回 `[]`，而 `ledger_is_readable`
+    只看文件在不在 —— 文件在、读失败时两边合起来说"账本可读且是空的"，冻结门
+    就把每一个真章都判成伪造。
+    """
+    path = getattr(state, "transcript_path", None)
+    if path is None or not getattr(path, "exists", lambda: False)():
+        return None
+    out: list[dict] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if _NEEDLE not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue      # 写到一半的末行 / 坏行：跳过这一行，不是整本读不到
+                if isinstance(rec, dict) and rec.get("event") == EVENT and rec.get("probe"):
+                    out.append(rec)
+    except OSError:
+        return None
+    return out
+
+
 def entries(state: Any) -> list[dict]:
     """本 run 账本里的全部验证记录（旧→新）。读不到就返回空表。
 
     读不到 ≠ 没验过：非 Project 独立运行、transcript 还没落盘时都可能读不到。
     **调用方必须把"账本读不到"与"账本里没有这一条"区别对待** ——
     前者不该拦（拦了就是把一次读盘失败变成"这个节点交不了差"），
-    后者才是伪造。
+    后者才是伪造。两件事都要的调用方用 `snapshot`（一次读出两个答案）。
     """
-    path = getattr(state, "transcript_path", None)
-    if path is None or not getattr(path, "exists", lambda: False)():
-        return []
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return []
-    out: list[dict] = []
-    for line in lines[-_SCAN_LIMIT:]:
-        if f'"{EVENT}"' not in line:
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if rec.get("event") == EVENT and rec.get("probe"):
-            out.append(rec)
-    return out
+    return _scan(state) or []
+
+
+def _table(records: list[dict]) -> dict[str, dict]:
+    table: dict[str, dict] = {}
+    for rec in records:
+        table[str(rec["probe"])] = rec
+    return table
 
 
 def by_probe(state: Any) -> dict[str, dict]:
@@ -115,17 +139,23 @@ def by_probe(state: Any) -> dict[str, dict]:
     （`sqrt(x**2) = x` 加上 x>0 就从 failed 变 verified），
     后一次才是当前结论。
     """
-    table: dict[str, dict] = {}
-    for rec in entries(state):
-        table[str(rec["probe"])] = rec
-    return table
+    return _table(entries(state))
+
+
+def snapshot(state: Any) -> tuple[dict[str, dict], bool]:
+    """`(by_probe 表, 账本可读)` —— **同一次读盘**给出的两个答案。
+
+    冻结门两样都要。分两次调（`by_probe` + `ledger_is_readable`）就是同一个事实
+    两个采样时刻：中间文件状态一变，两个答案就各说各的。
+    """
+    records = _scan(state)
+    return _table(records or []), records is not None
 
 
 def ledger_is_readable(state: Any) -> bool:
-    """账本这个事实来源本身在不在。
+    """账本这个事实来源本身在不在、读不读得出来。
 
     区分"账本空"与"账本读不到"：前者是真的一次没验过（该拦），
-    后者是取证手段失灵（不该拦）。
+    后者是取证手段失灵（不该拦）。文件在但读失败也算读不到（#985）。
     """
-    path = getattr(state, "transcript_path", None)
-    return bool(path is not None and getattr(path, "exists", lambda: False)())
+    return _scan(state) is not None

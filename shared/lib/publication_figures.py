@@ -21,13 +21,17 @@ reject_verdict_fields）与测试上，不在消费端运行时因一个键名�
 充分性事实（findings、审计结果、「视觉检查未运行」这类缺席事实）一律进
 ``_adequacy_findings`` 随 payload 返回，由消费端披露进稿件局限节、referee
 终审 —— 证据可持久化，判决不可以。
+
+图文数值对账（#439）另有一个**铸造侧**入口 :func:`value_check_at_mint`，由
+``core.state.State.save_artifact`` 在落账前调 —— 那是每张图都走的唯一一条路
+（理由见该函数）。两个入口共用 :func:`_check_annotated_values`，判据只有一份。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -158,8 +162,8 @@ def annotated_value_conflicts(
 
     这道闸要求图记录声明 ``annotated_values``：图上印了哪些数、每个数声称来自
     哪份产物的哪个字段路径、容差是多少。声明了就逐条比对；**没声明就跳过**
-    —— 见 :func:`validate_figure_record`，缺席本身会作为一条充分性事实被披露，
-    而不是悄悄放行。
+    —— 见 :func:`value_check_at_mint` / :func:`validate_figure_record`，缺席本身
+    会被落账、被披露，而不是悄悄放行。
 
     ``sources`` 是 ``{artifact_id: 已解析的产物内容}``。拿不到某份出处**不算
     通过**，记一条"够不到出处"；够不到和对得上必须分开
@@ -214,6 +218,97 @@ def annotated_value_conflicts(
     return conflicts
 
 
+#: 「没声明 annotated_values」的缺席事实 —— 铸造侧落账与消费端披露用同一句。
+VALUE_CHECK_NOT_RUN = (
+    "图文数值对账未运行（记录没有声明 annotated_values —— "
+    "图上印了哪些数只以像素存在，下游无法与正文比对）")
+
+
+def _check_annotated_values(
+    metadata: dict[str, Any], sources: Mapping[str, Any] | None,
+) -> str | None:
+    """图文对账的唯一判据：对不上就抛；没声明返回缺席事实；对上了返回 None。
+
+    对不上不是充分性问题：图上印的数和它自己声称的出处不一致，是**自相矛盾**
+    （记录完整性，B），所以抛而不是披露。没有声明的按缺席处理 —— postprocess
+    还没开始填这个字段，闸不该因此拦住所有图；但它的缺席必须**看得见**，
+    否则和"查过了、没问题"长得一模一样。
+    """
+    conflicts = annotated_value_conflicts(metadata, sources)
+    if conflicts:
+        raise FigureContradictsItsSource(
+            "图上印的数值与它声称的出处对不上：" + "；".join(conflicts))
+    declared = metadata.get("annotated_values")
+    # 与 annotated_value_conflicts 同一个「声明了」口径：非空数组。不是数组的
+    # 真值（比如一个 dict）那边不比，这边就不许当成「比过了」。
+    if not (isinstance(declared, list) and declared):
+        return VALUE_CHECK_NOT_RUN
+    return None
+
+
+def _field_path_view(record: dict[str, Any]) -> Any:
+    """一份出处产物里「字段路径」指向的那个结构：正文是 JSON 就按 JSON 解析。
+
+    v26 那份 clean_results 的正文就是 JSON（``fss_extrapolation/T_c_est`` 在正文里，
+    metadata 里只有一个四舍五入过的 ``T_c_est``）。正文不是 JSON 时原样返回 ——
+    字段路径解析不到，会被如实报成「出处 X 里没有字段 Y」，不会被当成对上了。
+    """
+    content = record.get("content")
+    if isinstance(content, (dict, list)):
+        return content
+    try:
+        return json.loads(str(content or ""))
+    except ValueError:
+        return content
+
+
+def value_check_at_mint(
+    metadata: dict[str, Any],
+    read_artifact: Callable[[str], dict[str, Any] | None],
+) -> dict[str, Any]:
+    """铸 figure 记录那一刻做图文对账；返回要落进记录的对账账（``ran`` …）。
+
+    ## 为什么挂在铸造侧（#439 第二次落地）
+
+    PR#1007 把对账挂在 :func:`validate_figure_record` 上，而它唯一的生产调用方是
+    旧 writing 的 stage 图工具 —— writing 重建（6ba051b14，2026-09-18）把它整个删了，
+    此后对账与「未运行」的披露**哪儿都不发生**。那个调用方还不传 ``sources``，
+    任何一条声明都会被判成「够不到出处」。
+
+    重挂之前量过两条候选路：research_runs/ 下 16 个真跑工作区（yuankk 夹具循环 10 轮 +
+    node20 快照 6 个）共 195 份 figure 记录，**0 份冻结过**
+    —— 冻结门挂上去仍是一道没人走的闸；writing 重建后只扫盘上的图文件、读
+    ``figure__*.md`` 里的 Caption 行，不读记录。每张图都走、又归框架的只有这一处：
+    ``core.state.State.save_artifact``（render_figure 在那里落账）。
+
+    出处读的是这张图声称的那几份：``source_artifact_ids`` ∪ 各条声明的
+    ``source_artifact_id``，按 ``read_artifact`` 读当前版本 —— 铸造那一刻它就是
+    render_figure 刚算完 ``source_hashes`` 的那一版。读不到的不放进来，由
+    :func:`annotated_value_conflicts` 记成「够不到出处」。
+
+    返回 ``{"ran": False, "note": …}``（没声明：缺席落账，不拦）或
+    ``{"ran": True, "checked": [label…]}``；对不上抛 :class:`FigureContradictsItsSource`。
+    """
+    declared = metadata.get("annotated_values")
+    wanted = [str(item) for item in metadata.get("source_artifact_ids") or []]
+    if isinstance(declared, list):
+        wanted += [str(item.get("source_artifact_id") or "").strip()
+                   for item in declared if isinstance(item, dict)]
+    sources: dict[str, Any] = {}
+    for artifact_id in dict.fromkeys(a for a in wanted if a):
+        record = read_artifact(artifact_id)
+        if isinstance(record, dict):
+            sources[artifact_id] = _field_path_view(record)
+    absent = _check_annotated_values(metadata, sources)
+    if absent:
+        return {"ran": False, "note": absent}
+    return {
+        "ran": True,
+        "checked": [str(item.get("label") or f"#{index}")
+                    for index, item in enumerate(declared)],
+    }
+
+
 def validate_figure_record(
     record: dict[str, Any],
     sources: Mapping[str, Any] | None = None,
@@ -266,20 +361,11 @@ def validate_figure_record(
                 adequacy.append(f"[{collector or 'finding'}] {message}")
         elif isinstance(finding, str) and finding.strip():
             adequacy.append(finding.strip())
-    # ── 图文对账（#439）：声明了就比，没声明就让缺席可见 ────────────────────
-    #
-    # 不是充分性问题：图上印的数和它自己声称的出处对不上，是**自相矛盾**，
-    # 所以这一条抛而不是披露。没有声明的按缺席披露 —— postprocess 还没开始
-    # 填这个字段，闸不该因此拦住所有图；但它的缺席必须**看得见**，
-    # 否则和"查过了、没问题"长得一模一样。
-    conflicts = annotated_value_conflicts(metadata, sources)
-    if conflicts:
-        raise FigureContradictsItsSource(
-            "图上印的数值与它声称的出处对不上：" + "；".join(conflicts))
-    if not metadata.get("annotated_values"):
-        adequacy.append(
-            "图文数值对账未运行（记录没有声明 annotated_values —— "
-            "图上印了哪些数只以像素存在，下游无法与正文比对）")
+    # ── 图文对账（#439）：声明了就比，没声明就让缺席可见（判据见
+    # _check_annotated_values；铸造侧同一份判据在 value_check_at_mint）────
+    absent = _check_annotated_values(metadata, sources)
+    if absent:
+        adequacy.append(absent)
 
     vlm_review = metadata.get("vlm_review")
     if not isinstance(vlm_review, dict):

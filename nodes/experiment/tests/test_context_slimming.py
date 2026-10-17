@@ -24,15 +24,17 @@ def test_experiment_first_prompt_has_a_bounded_core_instruction_budget(tmp_path)
     messages = build_messages(harness, _state(tmp_path), {})
     system = next(message.content for message in messages if message.role == "system")
 
-    # 16 = 原 15 条 + 2026-08-30 新增的"问人判据"（只有 owner 能解且不问即停车才问）
-    assert len(harness.rules) == 16
+    # v3（060 S1d）：9 条——自然循环 + 六条硬保证的指针；仪式规则已退出。
+    assert len(harness.rules) == 9
     assert harness.guidelines == []
     # 049-0：节点 skill 进 L1 索引（只有名字 + 适用 + 取法，正文仍按需 load_skill）；
     # gpu-hpc-porting 仍走条件注入。索引行不是常驻正文，不改变本测试守的"瘦身"。
+    # S2-min：scientific-results 进入按需索引，正文仍不常驻。
     assert set(harness.skills) == {
         "claim_evidence_link", "feasibility-ladder", "formal-input-recovery", "hpc-build",
-        "primary-scientific-closure", "scheduler-longrun", "scientific-results"}
+        "scheduler-longrun", "scientific-results", "ai-workloads"}
     assert "### Skill: hpc-build" not in system            # index line only, never the body
+    assert "### Skill: ai-workloads" not in system
     # 这里曾有 `estimate_text_tokens(system) <= 1400`（3f2d8f9f，2026-08-18）。
     # 已删除，理由三条：
     #  1. 那个数没有依据 —— 它是瘦身当天的读数（1219）+15% 余量，不是从任何
@@ -57,20 +59,22 @@ def test_experiment_first_prompt_has_a_bounded_core_instruction_budget(tmp_path)
     assert "# HPC Source Build" not in system
     assert "# NVIDIA CUDA HPC Build and Verification" not in system
     assert "# Primary Scientific Closure" not in system
+    assert "# Scientific Results" not in system
 
 
 def test_experiment_conditional_sops_are_registered_without_global_injection():
     bootstrap(force=True)
     for name in (
         "hpc-build",
+        "ai-workloads",
         "gpu-hpc-porting",
         "scheduler-longrun",
         "scientific-results",
-        "primary-scientific-closure",
         "formal-input-recovery",
         "feasibility-ladder",
     ):
         assert get_skill(name) is not None, name
+    assert get_skill("primary-scientific-closure") is None
 
 
 def test_scientific_scope_router_points_primary_run_to_results_and_closure(tmp_path):

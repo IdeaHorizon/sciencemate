@@ -414,8 +414,10 @@ def test_scientific_enforce_refusal_withholds_draft_and_names_the_envelope_exit(
     preflight = block["route_declare_preflight"]
     assert preflight["error_code"] == "execution_envelope_required", block
     assert preflight["step_ids"] == ["solver"]
-    for fragment in ("declare_execution_envelope", "evidence_bearing", "evidence_refs"):
+    # 出口必须是本工具面上有的工具（declare_execution_envelope 已退出白名单）。
+    for fragment in ("envelope", "report_blocker(", 'finish(outcome="blocked"'):
         assert fragment in block["error"], fragment
+    assert "declare_execution_envelope" not in block["error"]
 
     declared = asyncio.run(execution_route._declare_execution_route(state, route=_solver_route()))
     assert declared["error_code"] == "execution_envelope_required", declared

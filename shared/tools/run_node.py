@@ -349,12 +349,33 @@ def recover_interrupted_decision_actions(state: State) -> int:
     return recovered
 
 
-def scan_interrupted_child_runs(state: State, *, scope: str = "lineage") -> list[dict]:
-    """扫出本会话血缘内**被打断**的子 run（有 run_start、没 run_end）。
+def run_has_live_executor(run_id: str) -> bool:
+    """这条 run 此刻在本进程里还有没有执行者（#1164）。
 
-    判据全机械，来源全是盘上的 transcript。`brief_interrupted_child_runs`
-    （告知调度器）与 `_resumable_run_for` （派发时自动转续跑）共用这一份 ——
-    两处各写一遍判据，迟早分叉。
+    "有 run_start、没 run_end" 只说明它**没写完**，不说明它**没人在跑**：
+    暂停后被框架自动作答续上的 child、正在等人答复的 child，transcript 都是这个
+    形状。拿它当"被打断"去续，就是在同一个 run_id 上再起一个 loop —— 2026-09-28
+    SGD 现场两个 loop 重叠了两分半，两次 finish、两个 run_end。
+
+    答案用 Core 已有的登记，不另造一把锁：execute_node 起跑时 ``register_active``、
+    终态才 ``unregister``（暂停期间保留）；暂停的 run 在 ``_PAUSED_RUNS``；有人
+    在等答复的登记为 driver。三处任一在场 = 有执行者。进程死了这些登记一起消失，
+    真被打断的 run 仍然判得出来、续得上。
+    """
+    from core.pause import find_child_state, has_driver
+
+    return find_child_state(run_id) is not None or has_driver(run_id)
+
+
+def scan_interrupted_child_runs(state: State, *, scope: str = "lineage") -> list[dict]:
+    """扫出本会话血缘内**被打断**的子 run（有 run_start、没 run_end、且没人在跑）。
+
+    判据全机械，来源是盘上的 transcript 加本进程的执行者登记。
+    `brief_interrupted_child_runs`（告知调度器）与 `_resumable_run_for`
+    （派发时自动转续跑）共用这一份 —— 两处各写一遍判据，迟早分叉。
+
+    "没人在跑"那一条见 :func:`run_has_live_executor`：还有执行者的 run 不是
+    被打断，是还在干活（#1164）。
     """
     runs_root = state.root.parent
     if not runs_root.is_dir():
@@ -434,6 +455,7 @@ def scan_interrupted_child_runs(state: State, *, scope: str = "lineage") -> list
         info for run_id, info in sorted(scanned.items())
         if not info["has_end"]
         and (scope == "all" or _descends_from_me(run_id))
+        and not run_has_live_executor(run_id)
     ]
 
 
@@ -1424,6 +1446,51 @@ def _data_stage_debt(state, node_type: str, node_inputs: dict) -> dict | None:
     }
 
 
+def _node_inputs_as_object(raw: Any) -> tuple[dict | None, dict | None]:
+    """把调用方给的 node_inputs 收成对象；收不成就拒，不当成"没给"（#1165）。
+
+    合法形状只有三种：缺省（None）、对象、能解析成**对象**的 JSON 字符串（部分
+    模型把对象序列化成字符串传，这条兼容一直在）。返回 ``(值, None)`` 或
+    ``(None, 拒绝信封)``。
+
+    曾经的写法是解析失败就 ``node_inputs = None``，往下 ``if node_inputs and …``
+    的契约检查整段跳过，派发时 ``None`` 再变 ``{}`` —— 一份**坏掉的输入**被
+    冒充成**没有输入**，子节点照常起。实测（FVCOM，09-28）：父节点被 background
+    拒了一次，重试时整包重写参数，丢了 experiment_spec、末尾少一个 ``}``；子节点
+    拿着空输入去编了一个没人指定的版本，最后 finish 因为"没有原始任务文本"被拒
+    五次，只能 blocked 收尾。
+
+    拒在**任何副作用之前**：偏离记账、委派登记、子 run 都还没发生，重发是干净的。
+    """
+    if raw is None or isinstance(raw, dict):
+        return raw, None
+    value: Any = raw
+    code = problem = ""
+    if isinstance(raw, str):
+        try:
+            value = json.loads(raw)
+        except ValueError as e:
+            code = "node_inputs_invalid_json"
+            problem = (f"node_inputs 是一个解析不了的 JSON 字符串（{e}；"
+                       f"共 {len(raw)} 个字符）")
+    if not code and not isinstance(value, dict):
+        code = "node_inputs_not_object"
+        problem = (f"node_inputs 必须是对象（键 → 值），收到的是 "
+                   f"{type(value).__name__}")
+    if not code:
+        return value, None
+    return None, {
+        "status": "error",
+        "error_code": code,
+        "error": (
+            f"{problem}。**没有启动子节点**，这次调用什么都没记。\n"
+            "按对象重发 node_inputs（不要序列化成字符串）。如果这是被拒之后的重试，"
+            "上一次调用里的业务字段（任务说明、spec、参数）要**原样带上**，只改报错"
+            "点名的那一处 —— 整包重写最容易丢东西，丢了的字段子节点看不见。"
+        ),
+    }
+
+
 async def _run_node_tool(
     state: State,
     node_type: str,
@@ -1462,6 +1529,16 @@ async def _run_node_tool(
     # 工具体内不再手写第二份（判决拆除刀 1：契约声明一次、核一次）。
     _note = (user_note or "").strip()
     # 宣告**不在这里**发 —— 见下方真正派发点前的那处。
+
+    # ── node_inputs 先收成对象，收不成就拒（#1165）──────────────────────────
+    # 必须是第一步：下面的偏离记账、委派登记都读它、也都有副作用。坏输入要在
+    # 这些发生之前被说出来，而不是被当成"没给"一路放到子节点。
+    node_inputs, _inputs_refusal = _node_inputs_as_object(node_inputs)
+    if _inputs_refusal is not None:
+        state.append_transcript(
+            "run_node_inputs_rejected", node_type=node_type,
+            error_code=_inputs_refusal["error_code"])
+        return _inputs_refusal
 
     # ── 派发前范畴检查（2026-08-18）──────────────────────────────────────
     #
@@ -1565,15 +1642,6 @@ async def _run_node_tool(
                 f"多半仍是同样结果 —— 优先考虑退回上游补齐，或改产降级产物。"
                 f"连续 {_REPEAT_DISPATCH_BLOCK} 次将被拒绝派发。"
             )
-
-    # 防御：部分 LLM 把 node_inputs 当 JSON 字符串传（应该是 dict）—— 自动解析
-    if isinstance(node_inputs, str):
-        try:
-            import json as _json
-
-            node_inputs = _json.loads(node_inputs)
-        except (ValueError, TypeError):
-            node_inputs = None
 
     # ── #524 / #395-9：报过阻塞、局面没变，就不该再派一次 ────────────────────
     # 上面那道重复失败熔断数的是**失败**。而 writing 判定"上游材料不足"时会如实
@@ -1780,6 +1848,8 @@ async def _run_node_tool(
                 "Project v2 的一个 Session worktree 只有一条 Git mutation lane；"
                 "后台 child 会与父节点/Platform checkpoint 并发改同一工作树。"
                 "请去掉 background 同步运行；真正需要并行研究时应创建独立 Session worktree。"
+                "重发时**只去掉 background**，其余参数（node_inputs、task_instance_uuid、"
+                "task_contract_digest、user_note）原样带上 —— 这次被拒与它们无关。"
             ),
         }
 
@@ -2114,6 +2184,20 @@ async def _run_node_tool(
         state.append_transcript(
             "run_node_fresh_requested", node_type=node_type)
     elif resume_run_id:
+        # 指名的 run 还有执行者 = 它没被打断，续它就是同一个 run 上两个 loop（#1164）。
+        # 自动续跑那条路由扫描排除；显式指名这条在这里说清。
+        if run_has_live_executor(resume_run_id):
+            return {
+                "status": "error",
+                "error_code": "resume_target_still_running",
+                "error": (
+                    f"run {resume_run_id} 还在跑（或正停在等人答复），不是被打断 —— "
+                    "续它会在同一个 run 上再起一个 loop。\n"
+                    "要看它到哪了用 runtime_control(action='progress')；要改方向用 "
+                    "runtime_control(action='inject')；要停用 runtime_control(action='cancel')。"
+                    "确实要另起一个，用 resume_run_id='fresh'。"),
+                "requested_resume_run_id": resume_run_id,
+            }
         _resume_run_id = resume_run_id
         # 显式指名续跑：身份对不上**报错**，既不静默新开也不静默续上
         # （#1080 验收 5）。挑出那条 run 的记录来比 —— 比不到就是另一回事，
@@ -2279,6 +2363,9 @@ async def _run_node_tool(
             child_node_type=node_type,
             child_run_id=summary["run_id"],
             pause_question=(summary.get("pause_event") or {}).get("question", "")[:200],
+            # 与 `subagent_call_start` 同一个派发身份（#1052）：平台按它把这次 pause
+            # 链回**这一次**派发，而不是「同类型的某一次」。
+            dispatch_id=_dispatch_id,
         )
         return {
             "status": "pause",
@@ -2289,7 +2376,8 @@ async def _run_node_tool(
         }
 
     out = _finish_child(
-        state, node_type, node_inputs, summary, child_harness, autoresolved_note, task_id=task_id
+        state, node_type, node_inputs, summary, child_harness, autoresolved_note, task_id=task_id,
+        dispatch_id=_dispatch_id,
     )
 
     # ── post-producing flow 归运行时（Move 1d，2026-08-19）────────────────
@@ -2375,6 +2463,7 @@ async def _run_child_background(
         child_harness,
         autoresolved_note,
         task_id=task_id,
+        dispatch_id=exec_kwargs.get("parent_dispatch_id"),
     )
     _report_background_done(parent_state, node_type, summary, out)
 
@@ -2468,6 +2557,7 @@ async def resume_background_paused(ctx, answer: str) -> None:
             cont["child_harness"],
             cont["autoresolved_note"],
             task_id=cont.get("task_id"),
+            dispatch_id=ctx.state.parent_dispatch_id,
         )
         _report_background_done(cont["parent_state"], cont["node_type"], summary, out)
     else:
@@ -2647,10 +2737,14 @@ def _finish_child(
     child_harness,
     autoresolved_note: dict | None,
     task_id: str | None = None,
+    dispatch_id: str | None = None,
 ) -> dict:
     """子 run 结束后的共享 bookkeeping（前台 run_node 与后台包装共用）：
     回填 required outputs、登记 post-producing flow、reviewer/curator 状态推进、
-    transcript 记账，返回给 LLM 看的精简结果。"""
+    transcript 记账，返回给 LLM 看的精简结果。
+
+    `dispatch_id`：这个子 run 是哪一次 run_node 调用派出去的（= 子 State 的
+    `parent_dispatch_id`），写进 `subagent_call_end`（#1052）。"""
     # ── 回填 required_output_artifact_types：从子 run dir 复制到父 ──────────
     imported = (
         []
@@ -2879,6 +2973,9 @@ def _finish_child(
         "subagent_call_end",
         child_node_type=node_type,
         child_run_id=summary.get("run_id"),
+        # 与 `subagent_call_start` 同一个派发身份（#1052）。按类型配对的话，后台
+        # 跑完的同类型子节点会把前台那一次的记账结掉。
+        dispatch_id=dispatch_id,
         child_status=summary.get("status"),
         child_turns=summary.get("turns"),
         imported_artifacts=[a["id"] for a in imported],

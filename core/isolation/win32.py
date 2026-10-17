@@ -12,10 +12,17 @@ Windows 上没有 seatbelt、没有 Landlock、没有 cgroup。守同一批不�
 * **Job Object**：JOB_MEMORY / PROCESS_MEMORY（MEM_CAP）、ACTIVE_PROCESS（PIDS_CAP）、
   KILL_ON_JOB_CLOSE（启动器持 job 句柄，被杀即整树亡 —— GROUP_KILL 的第二重保险）。
 
-墙钟与整组清扫由咽喉给（和 darwin / linux 一样）。**守不到**：NET_DENY —— Windows 上没有
-免管理员、不改系统状态的断网原语（防火墙规则要管理员，WFP/网络命名空间同理），Low-IL 仍能
-连 localhost / 外网。守不到就**记在账上**（``isolation_enforcement`` 事件），由自主档按
+墙钟与整组清扫由咽喉给（和 darwin / linux 一样）。**守不到**：NET_DENY —— Low-IL 仍能连
+localhost / 外网。守不到就**记在账上**（``isolation_enforcement`` 事件），由自主档按
 ``HARNESS_ENFORCEMENT_POLICY`` 决定够不够进无人值守，不假装（[[feedback_absent_check_looks_like_passed_check]]）。
+
+守不到的原因**不是**"Windows 没有免管理员的断网原语"—— RFC #848 记的这条前提已被
+真机实测推翻（#931，2026-09-10，非管理员 Win11）：零能力的 AppContainer（不给
+``internetClient``）免管理员、真断得掉网，随包原生 python / tectonic 在里面照常跑。
+拦路的是**模型的 shell**：随包 MSYS2 bash 在 AppContainer 里起不来（``0xC0000142``
+STATUS_DLL_INIT_FAILED —— cygwin 运行时要在全局命名对象空间建共享内存做 fork 模拟，
+AppContainer 只有私有命名空间）。换 shell / 原生载荷与 MSYS 载荷分两档 / 接受现状，
+三条路都还没拍板，见 #931；在那之前本后端不给 NET_DENY。
 
 与 darwin / linux 不同：seatbelt / bwrap / landlock 是"把 argv[0] 换成沙箱工具再 exec"；
 Windows 不能给自己降 IL 再 exec（要用**新令牌**起进程），所以走一个独立启动器
@@ -37,6 +44,7 @@ job，把实测结果按 JSON 报回来 —— 不是按功能名猜的承诺。
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -122,8 +130,9 @@ class Win32Backend:
 
     @property
     def unix_socket_reachable(self) -> bool:
-        """Windows 上没有免管理员的断网原语（NET_DENY 本来就守不到，记在账上），
-        AF_UNIX socket 同理够得到。缺口默认可见（#845 的同族）。"""
+        """本后端不给 NET_DENY（记在账上；原因是 MSYS bash 进不了 AppContainer，不是
+        Windows 没有断网原语，见模块 docstring 与 #931），AF_UNIX socket 同理够得到。
+        缺口默认可见（#845 的同族）。"""
         return True
 
     @property
@@ -143,18 +152,36 @@ class Win32Backend:
         # 只读洞不必靠补集覆盖：Windows 的 deny 原语已经存在（重打 Medium 标签，git
         # 那条就是这么做的），所以这里把 carve-out 原样交给启动器按深度序打标签。
         carve_outs = sorted(layers.carve_outs(), key=lambda item: len(item.parts))
+        # 载荷是 MSYS 程序（模型的 bash、本地作业脚本的 bash）时，原生进程起它要替它做两件
+        # login shell 才做的事：它的 /usr/bin 上 PATH（#1203），命令行按 Cygwin 规则加引号
+        # （#1204，启动器据 "msys" 照办）。判据只有一处：shared.lib.shell.msys_runtime_bin。
+        from shared.lib.shell import msys_runtime_bin
+
+        msys_bin = msys_runtime_bin(spec.argv[0]) if spec.argv else None
         payload_spec = {
             "writable": [str(p) for p in layers.writable],
             "readonly": [str(p) for p in carve_outs],
             "git": [str(p) for p in layers.git],
             "memory_bytes": int(getattr(limits, "memory_bytes", 0) or 0),
             "pids": int(getattr(limits, "pids", 0) or 0),
+            "msys": msys_bin is not None,
+            # 启动器自己进 cwd（#943）。不进的话，不传 cwd 的老调用方只能靠
+            # core.sandbox._native_launch 拿 POSIX shell 包一层 `cd` —— 而 Windows 上那是
+            # MSYS bash：原生 python 起它时 MSYS 运行时按 Cygwin 规则重新解析命令行
+            # （引号里的 `\\` 折成 `\`），本行这份 JSON 里的每个 Windows 路径都被折坏，
+            # 启动器 json.loads 失败、打 usage、退 64，载荷一行没跑。
+            "cwd": spec.cwd,
+            # 权限账本（RFC_WORKER_START_IS_NOT_A_GATE §3.9）：启动器每打一个标签记一行。平台经
+            # HARNESS_PERMISSIONS_JOURNAL 告知；没说（CLI 用法）→ 不记。启动器的环境是裁过的，所以走 spec。
+            "journal": os.environ.get("HARNESS_PERMISSIONS_JOURNAL") or "",
         }
         argv = [sys.executable, "-I", "-B", str(_WIN32_EXEC), "run", json.dumps(payload_spec),
                 "--", *spec.argv]
         return NativeLaunch(
             argv=argv,
             cwd=spec.cwd,
-            env=payload_environment(spec.environment, scratch_dir=scratch_dir, home=spec.home),
+            env=payload_environment(spec.environment, scratch_dir=scratch_dir, home=spec.home,
+                                    msys_bin=msys_bin),
             scratch_dir=scratch_dir,
+            cwd_in_argv=True,
         )

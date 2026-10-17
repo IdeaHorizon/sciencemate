@@ -618,6 +618,57 @@ def test_job_that_ended_on_its_own_is_not_scheduler_terminated(
     assert facts["scheduler_terminated"] is False, facts
 
 
+def test_slurm_accounting_keeps_request_and_allocation_resources_distinct():
+    fields = manager._SLURM_ACCOUNTING_FIELDS
+    values = {
+        "JobIDRaw": "735", "State": "COMPLETED", "ExitCode": "0:0",
+        "ReqTRES": "billing=2,cpu=2,gres/gpu=1,mem=2G,node=1",
+        "AllocTRES": "billing=4,cpu=4,gres/gpu=1,mem=4G,node=1",
+        "ReqNodes": "1",
+        "NNodes": "1", "NTasks": "1",
+    }
+    result = {
+        "ok": True, "returncode": 0, "stderr": "",
+        "stdout": "|".join(values.get(name, "") for name in fields),
+    }
+
+    facts = manager._slurm_accounting_facts("735", result)
+
+    assert facts["allocation_rows"] == [{
+        "job_id": "735", "state": "COMPLETED", "returncode": 0,
+        "exit_code": 0, "exit_signal": 0,
+        "requested_tres": values["ReqTRES"],
+        "allocated_tres": values["AllocTRES"],
+        "requested_nodes": "1", "nodes": "1", "tasks": "1",
+    }]
+    assert facts["succeeded"] is True
+
+
+def test_pending_slurm_job_does_not_claim_an_allocation():
+    fields = manager._SLURM_ACCOUNTING_FIELDS
+    values = {
+        "JobIDRaw": "736", "State": "PENDING", "ExitCode": "",
+        "ReqTRES": "cpu=2,gres/gpu=1,mem=2G,node=1",
+        "AllocTRES": "", "ReqNodes": "1", "NNodes": "1", "NTasks": "1",
+    }
+    result = {
+        "ok": True, "returncode": 0, "stderr": "",
+        "stdout": "|".join(values.get(name, "") for name in fields),
+    }
+
+    facts = manager._slurm_accounting_facts("736", result)
+
+    assert facts["allocation_rows"] == [{
+        "job_id": "736", "state": "PENDING", "returncode": None,
+        "exit_code": None, "exit_signal": None,
+        "requested_tres": values["ReqTRES"],
+        "requested_nodes": "1", "nodes": "1", "tasks": "1",
+    }]
+    assert "allocated_tres" not in facts["allocation_rows"][0]
+    assert facts["terminal"] is False
+    assert facts["succeeded"] is False
+
+
 def test_step_level_oom_still_does_not_deny_allocation_success():
     """已有决定不翻：step 行的 OOM 是诊断证据，不否定 allocation 的成功。"""
     facts = manager._slurm_accounting_facts(

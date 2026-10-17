@@ -4,7 +4,7 @@
 
 **性质**：只有事实与判据，没有操作步骤，不含任何站点路径、队列名或 module 名。
 **谁叫模型读它**：节点 hook `experiment_scheduler_facts_router`（on_turn_end）在
-`check_external_job_health` / `wait_for_external_job` / `finalize_external_job` 返回
+`job_status` / `check_external_job_health` / `wait_for_external_job` 返回
 `scheduler_phase = terminal` 且 `scheduler = pbs` 时，对每个作业点名一次
 `load_skill(name='scheduler-longrun', asset='references/pbs-torque-terminal-facts.md')`。
 **来源口径**：PBS Professional 取 Altair 2024.1 的 Reference Guide（RG）/ User's Guide（UG）/

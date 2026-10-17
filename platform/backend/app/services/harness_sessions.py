@@ -21,7 +21,8 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import HARNESS_HOME_VARIABLE, data_root, settings, the_org_home, the_projects_home
+from app.config import HARNESS_HOME_VARIABLE, data_root, settings, the_data_root, the_org_home, the_projects_home
+from app.assembly import the_worker_home_has_one_tenant
 from app.services.instructions import harness_home_for
 from app.models.execution import (
     PARKED_WAITING_FOR_HUMAN,
@@ -283,15 +284,24 @@ def _paths(
     # 运行时记录的落点 —— 只有 session_runtime_paths 说了算（那里也解释了
     # 为什么它不再叫 cache：git clean -xdf 会连科研过程记录一起清掉）。
     session_state = session_runs_root(worktree)
+    # 这几步是持久化前提，不是调模型的前提（RFC_WORKER_START_IS_NOT_A_GATE §G2）：
+    # 建不出、改不了权限、身份文件写不进，记一行、继续 —— worker 自己会对同一批路径
+    # 逐项探测、降级并报进 ready，这里不抢先把这一轮杀掉。
     for directory in (state_root, home_dir, session_state):
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        directory.chmod(0o700)
+        try:
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            directory.chmod(0o700)
+        except OSError as exc:
+            logger.warning("cannot prepare %s for %s/%s: %s", directory, project_id, session_id, exc)
     # 「我是谁」由平台说（KB 记录的署名、按人写的算力授权都靠它）。
     from app.services.instructions import publish_identity
 
     # `_paths` 此前只要 `user.id`；名字和邮箱是锦上添花，不让起 worker 这件事依赖它们。
-    publish_identity(str(user.id), display_name=getattr(user, "display_name", "") or "",
-                     email=getattr(user, "email", "") or "")
+    try:
+        publish_identity(str(user.id), display_name=getattr(user, "display_name", "") or "",
+                         email=getattr(user, "email", "") or "")
+    except OSError as exc:
+        logger.warning("cannot publish identity into %s: %s", home_dir, exc)
     return root, home_dir, session_state, worktree, python
 
 
@@ -334,6 +344,27 @@ def _role_delivery_payload(role_bindings: RoleBindings) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _private_runtime_root_from(ready: dict, report: dict[str, Any]) -> Path | None:
+    """ready 说 state 不持久（退到了私有临时目录）→ 它报的 runtime_root；否则 None。
+    只认系统临时目录下的路径：这是 worker 自己的声明，不许把任意路径变成「可信的 state 根」。"""
+    import tempfile
+
+    capabilities = report.get("capabilities") or {}
+    if capabilities.get("state_persistent") is not False:
+        return None
+    reported = str(ready.get("runtime_root") or "")
+    if not reported:
+        return None
+    root = Path(reported).resolve()
+    try:
+        if root.is_relative_to(Path(tempfile.gettempdir()).resolve()):
+            return root
+    except (OSError, ValueError):
+        return None
+    logger.warning("worker reported a private runtime root outside the temp dir; not trusting it: %s", root)
+    return None
+
+
 def _child_environment(
     root: Path,
     role_bindings: RoleBindings,
@@ -372,6 +403,8 @@ def _child_environment(
     ))
     child_env.update(
         {
+            # 权限账本在哪（RFC §3.9）：worker → 沙箱启动器，每次 icacls 记一行。诊断包收 logs/ 下的一切。
+            "HARNESS_PERMISSIONS_JOURNAL": str(the_data_root() / "logs" / "permissions.jsonl"),
             "HARNESS_MODEL_ROLES": _role_delivery_payload(role_bindings),
             # LLM_* 仍然发：harness 里还有直读它们的老路径（CLI 入口的合成
             # 来源就是它们）。真相源是上面那条通道 —— 这三个是它对 reasoning
@@ -1219,6 +1252,12 @@ class _ProjectHarnessSession:
         #: 一轮几小时的对话后面，三个补偿机制都是为这件事存在的。
         self._reader: asyncio.Task | None = None
         self._pending: dict[str, asyncio.Queue] = {}
+        #: worker 起来时每项持久化前提成立与否 + 降级的事实（ready 的 capabilities / warnings）。
+        #: None = 还没 init 或老 worker 没报。
+        self.start_report: dict[str, Any] | None = None
+        #: worker 退到私有临时目录跑时它报的 runtime 根（只认系统临时目录下的）；None = 在会话的正常位置。
+        #: 转录摄取与结果核对按它放行（`harness_transcript_ingest._approved_runtime_root`）。
+        self.private_runtime_root: Path | None = None
         #: 当前会话面 RPC 的观众。worker 的事件是**会话级**的（transcript、
         #: token 流都不带请求归属），所以它们全部交给这一位 —— 管理面的回执
         #: 只走 `_pending` 那条路，不进摄取。
@@ -1401,6 +1440,16 @@ class _ProjectHarnessSession:
                 queue = self._pending.get(str(event.get("request_id") or ""))
                 if queue is not None:
                     queue.put_nowait(event)
+        except Exception:
+            # 读者自己炸了（多半是 on_protocol_event 里的摄取抛了）和「worker 把连接关了」在等待方
+            # 眼里长得一模一样：都是 EOF → 「控制连接在它回话之前关了」。前者此前**一个字不留**
+            # （task 的异常没人 await）。2026-10-17 PC 上一轮 worker 明明把 result 写进了 events.jsonl，
+            # 后端却报 harness_worker_unreachable —— 查了一小时才想到读者可能先死了。吵，然后再 EOF。
+            logger.exception(
+                "Harness session reader for %s/%s crashed; every pending RPC will now see EOF",
+                self.project_id, self.session_id,
+            )
+            raise
         finally:
             # 通道没了：把还在等的全部叫醒，别让它们等一个不会来的回答。
             for queue in list(self._pending.values()):
@@ -1618,6 +1667,10 @@ class _ProjectHarnessSession:
                 "projects_home": str(projects_home),
                 "state_dir": str(state_dir),
                 "workspace_dir": str(workspace_dir),
+                # 这个家是不是只有一个租户（装配层答，业务代码不读档位名）：是 → 家的身份
+                # marker 读不到时 worker 留在这个家、坏了留底重建；不是 → 换私有临时家
+                # （RFC_WORKER_START_IS_NOT_A_GATE §3.1 / §3.5）。
+                "home_is_single_tenant": the_worker_home_has_one_tenant(),
             }
             if platform_context_snapshot:
                 payload["platform_context"] = platform_context_snapshot
@@ -1632,6 +1685,35 @@ class _ProjectHarnessSession:
                 await self._kill()
                 raise HarnessSessionError(
                     "Harness worker does not implement the required RunAttempt sandbox protocol"
+                )
+            # worker 起来了，但哪些持久化前提没成立、为什么 —— 原样留在会话上（界面与诊断包
+            # 的读者在后面的窄单接）。**缺席的键读作「未报告」**：老 worker 不发这两个字段。
+            capabilities = ready.get("capabilities")
+            warnings = ready.get("warnings")
+            report: dict[str, Any] = {
+                "capabilities": dict(capabilities) if isinstance(capabilities, dict) else None,
+                "warnings": list(warnings) if isinstance(warnings, list) else None,
+            }
+            if report["warnings"]:
+                # 补事实：所有者 / 权限原文 / reparse / 自己派出的持有者 / 令牌，以及按表算的修复提案
+                # （RFC §3.2）。探针跑子进程（icacls / getfacl），放到线程里。
+                from app.config import the_data_root
+                from app.services.environment_facts import enrich_report
+
+                report = await asyncio.to_thread(
+                    enrich_report, report, project_id=self.project_id,
+                    session_id=self.session_id, data_root=the_data_root(),
+                ) or report
+            self.start_report = report
+            self.private_runtime_root = _private_runtime_root_from(ready, report)
+            for warning in self.start_report["warnings"] or []:
+                if not isinstance(warning, dict):
+                    continue
+                logger.warning(
+                    "Harness worker for %s/%s started degraded: %s (%s) at %s: %s",
+                    self.project_id, self.session_id,
+                    warning.get("code"), warning.get("capability"),
+                    warning.get("path"), warning.get("error"),
                 )
 
     async def turn(
@@ -1995,6 +2077,21 @@ class HarnessSessionManager:
     def _key(project_id: str, session_id: str) -> str:
         return f"{settings.runtime_tenant_id}:{project_id}:{session_id}"
 
+    def private_runtime_root(self, project_id: str, session_id: str) -> Path | None:
+        """活着的 worker 退到私有临时目录跑时报的 runtime 根；没有活 worker 或它在正常位置 → None。"""
+        session = self._sessions.get(self._key(project_id, session_id))
+        if session is None or not session.alive:
+            return None
+        return session.private_runtime_root
+
+    def environment_report(self, project_id: str, session_id: str) -> dict[str, Any] | None:
+        """活着的 worker 起来时报的能力位与降级事实（已补事实与提案）。没有活 worker → None。
+        读者：会话条幅、run 摘要、诊断包（`app.services.session_environment`）。"""
+        session = self._sessions.get(self._key(project_id, session_id))
+        if session is None or not session.alive:
+            return None
+        return session.start_report
+
     async def _new_session(
         self,
         *,
@@ -2234,9 +2331,20 @@ class HarnessSessionManager:
         existing = self._sessions.get(key)
         if existing is not None:
             return existing
-        session = await reattach_session(
-            project_id, session_id, owner_user_id=owner_user_id
-        )
+        try:
+            session = await reattach_session(
+                project_id, session_id, owner_user_id=owner_user_id
+            )
+        except OSError as exc:
+            # 盘上那行读不到（run 目录 stat 拒绝访问 —— lujy 10-15 的现场、PC 判据 1 复现）：
+            # 这是持久化前提，不是调模型的前提（RFC_WORKER_START_IS_NOT_A_GATE §G2）。按「没有活的
+            # worker」处理，照常 spawn；新 worker 自己会在同一个目录上探测、降级、报进 ready。
+            # 此前这个 PermissionError 一路冒到 turn，整轮在起 worker 之前就死，code 退到 execution_failed。
+            logger.warning(
+                "cannot read the on-disk worker record for %s/%s (%s: %s); treating as no live worker",
+                project_id, session_id, type(exc).__name__, exc,
+            )
+            return None
         if session is None:
             return None
         if session.binding is not None and session.binding.user_id:
@@ -3175,7 +3283,20 @@ async def mark_orphaned_harness_runs(
         # 2026-08-12 实测：`assert_conversation_runtime_available` 调它时不带
         # 任何过滤、扫全表，把**正在干活**的 curator 子进程杀了。记账错了还能
         # 改回来，杀进程改不回来 —— 这两件事该有不同的门槛。
-        reaped = reap_orphaned_session_worker(run.project_id, run.session_id) if reap_workers else None
+        # 一条回收不了（锁文件所在目录 stat 都拒绝访问 —— lujy 10-15 现场）不许拦住其余
+        # 孤儿：那一条记在自己的 summary 上，循环继续（RFC_WORKER_START_IS_NOT_A_GATE §3.5）。
+        # 此前第一条 PermissionError 就让整个函数 abort，六次启动六次「Could not reconcile」，
+        # 别的孤儿一个都没标。
+        reaped = None
+        if reap_workers:
+            try:
+                reaped = reap_orphaned_session_worker(run.project_id, run.session_id)
+            except Exception as exc:  # noqa: BLE001 — 环境故障是观察，不是退出
+                logger.warning(
+                    "cannot reap the worker of orphaned run %s (%s/%s): %s",
+                    run.id, run.project_id, run.session_id, exc,
+                )
+                run.summary = {**run.summary, "staleReapError": f"{type(exc).__name__}: {exc}"[:500]}
         if reaped:
             run.summary = {**run.summary, "staleReapedWorker": reaped}
         changed += 1
@@ -3334,6 +3455,9 @@ def reap_orphaned_session_worker(project_id: str, session_id: str) -> str | None
     import signal
     import time
 
+    # 锁在哪都算不出来（run 目录 stat 拒绝访问，lujy 10-15 现场）：这里**让它抛** ——
+    # 调用方 `mark_orphaned_harness_runs` 逐条接住、记进那条 run 的 `staleReapError`、继续。
+    # 返回值的契约是「回收了就返回一句说明」，把「读不到」塞进返回值会被记成「已回收」。
     lock_path = _session_lock_path(project_id, session_id)
     if lock_path is None or not lock_path.is_file():
         return None

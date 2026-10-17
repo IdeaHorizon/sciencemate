@@ -201,3 +201,46 @@ def test_probe_identifies_the_expression_not_the_math_fact():
     b = ledger.probe_id("(b+a)**2", "a**2+2*a*b+b**2")
     assert a != b
     assert a == ledger.probe_id(" (a+b)**2 ", " a**2+2*a*b+b**2 "), "只做 strip 规范化"
+
+
+# ── 长 run 与读盘失败（#985）──────────────────────────────────────────────────
+
+def test_an_early_verification_survives_a_long_transcript(tmp_path):
+    """开头真验过的一步，在两万多行之后冻结时仍然算数。
+
+    账本曾只看 transcript 末尾 20000 行：长推导里早期那几次真调用从账本里消失，
+    冻结门把它们的章判成"查无此项"（伪造）。
+    """
+    state = _StateWithLedger(tmp_path, _record([]))
+    early = asyncio.run(D._check_step(state, "(a+b)**2", "a**2+2*a*b+b**2"))
+    assert early["verification"]["status"] == "verified"
+    with state.transcript_path.open("a", encoding="utf-8") as fh:
+        for i in range(25_000):
+            fh.write(json.dumps({"event": "llm_call", "turn": i}) + "\n")
+
+    table, readable = ledger.snapshot(state)
+    assert readable is True
+    assert early["verification"]["probe"] in table, "早期验证从账本里丢了"
+
+    state._record = _record([_step(early["verification"])])
+    audit = audit_derivation_log(state, "a1")
+    assert audit["passed"] is True, audit["reasons"]
+
+
+def test_a_transcript_that_fails_to_read_is_unreadable_not_empty(tmp_path):
+    """文件在、但读失败（这里用同名目录模拟 OSError）—— 是"读不到"，不是"一条没有"。
+
+    此前读失败返回空表，而可读性只看文件在不在：两边合起来说"账本可读且是空的"，
+    于是每一个真章都被判成伪造。
+    """
+    forged = {"method": "symbolic", "status": "verified", "tool": "check_step",
+              "probe": "deadbeefdeadbeef"}
+    state = _StateWithoutLedger(_record([_step(forged)]))
+    state.transcript_path = tmp_path / "transcript.jsonl"
+    state.transcript_path.mkdir()
+
+    assert ledger.snapshot(state) == ({}, False)
+    assert ledger.ledger_is_readable(state) is False
+    audit = audit_derivation_log(state, "a1")
+    assert audit["passed"] is True, (
+        "读盘失败时这道闸必须让路，与账本文件不存在同一个答案")

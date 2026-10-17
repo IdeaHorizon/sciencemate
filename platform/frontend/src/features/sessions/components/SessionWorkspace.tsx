@@ -80,6 +80,7 @@ import {
 } from "@/features/chat/lib/long-paste";
 import type { SendDispatch } from "@/features/chat/hooks/useChat";
 import { useT, useLanguage } from "@/shared/i18n";
+import { SessionEnvironmentBanner } from "./SessionEnvironmentBanner";
 
 /**
  * 一次提交在这个页面上的结果。`dispatch` 的每条分支都必须交出其中一种 ——
@@ -941,6 +942,15 @@ export function SessionWorkspace({
           </details>
         </div>
       </header>
+
+      {/* worker 起来时持久化前提没成立 / 修好了 / 同一个问题连续出现：挂在会话上的一条非模态条幅
+          （RFC_WORKER_START_IS_NOT_A_GATE §3.3）。修复按钮只给能驱动会话的人 —— 和后端同一个条件。 */}
+      <SessionEnvironmentBanner
+        projectId={projectId}
+        sessionId={sessionId}
+        enabled={mode === "api" && session.source === "canonical"}
+        canDrive={canDrive}
+      />
 
       <SessionAboutDrawer
         projectId={projectId}

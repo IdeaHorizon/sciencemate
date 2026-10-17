@@ -372,6 +372,21 @@ class State:
             provenance=provenance,
         )
 
+        # 图上印的数必须等于它声称的出处（#439）。挂在这里而不是冻结门或
+        # writing：research_runs/ 下真跑的 figure 记录 195 份、冻结过 0 份；
+        # 重建后的 writing 只读盘上的图文件。每张图都走、又归框架的只有落账
+        # 这一步（理由全文见 value_check_at_mint）。对不上 → 抛
+        # FigureContradictsItsSource，记录不落账，render_figure 把两个数原样
+        # 交回作者；没声明 → 缺席落进记录（annotated_values_check），不拦。
+        # 只核**本 run 新铸**的（provenance=None）：转发/导入是在搬一份既有记录，
+        # 接收方 run 里未必读得到出处，那不是这份记录的矛盾。
+        if (artifact_type == "figure" and provenance is None
+                and metadata.get("record") == "rendered_figure"):
+            from shared.lib.publication_figures import value_check_at_mint
+
+            metadata = {**metadata, "annotated_values_check":
+                        value_check_at_mint(metadata, self.read_artifact)}
+
         from core import ledger as _ledger
 
         artifact_id = f"{artifact_type}__{_slug(name)}"

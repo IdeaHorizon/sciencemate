@@ -446,11 +446,31 @@ def test_the_readback_retries_the_public_entrance_then_says_it_fell_back(release
 WIN_SUMS = "abc  x.dmg\nbeef  ScienceMate-Setup.exe\n"
 
 
-def _with_windows(release_dir, receipt: dict | None):
+def _with_windows(release_dir, receipt: dict | None, *, rehearsed: bool = True):
     (release_dir / "SHA256SUMS").write_text(WIN_SUMS, encoding="utf-8")
     if receipt is not None:
         (release_dir / pr.WINDOWS_ACCEPTANCE).write_text(json.dumps(receipt), encoding="utf-8")
+        if rehearsed:
+            # 第二张收据（RFC_WORKER_START_IS_NOT_A_GATE §3.10）：同一份字节在上一版的数据根上彩排过。
+            # 这里的测试验的是验收收据那道闸，所以彩排收据按「全过」给；它自己的闸在
+            # tests/test_the_upgrade_rehearsal_gate.py。
+            (release_dir / pr.WINDOWS_REHEARSAL).write_text(json.dumps({
+                "result": "REHEARSAL OK", "against": receipt.get("against"), "previous_version": "0.5.6",
+                "checks": {"model_called": True, "environment_clean": True, "previous_runs_visible": True,
+                           "kb_readable": True, "permissions_unchanged": None},
+                "host": "pc", "ran_at": "2026-10-16T00:00:00+00:00", "sha256": receipt.get("sha256"),
+            }), encoding="utf-8")
     return _FakeForgejo(sums=WIN_SUMS.encode())
+
+
+def test_a_windows_installer_that_never_rehearsed_an_upgrade_is_refused(release_dir) -> None:
+    fake = _with_windows(release_dir, {"against": "http://127.0.0.1:1", "sha256": "BEEF",
+                                       "host": "pc", "ran_at": "2026-09-22T10:00:00+00:00"}, rehearsed=False)
+    api = pr.Forgejo("https://h", "o/r", "u:t", request=fake)
+    with pytest.raises(SystemExit) as exc:
+        pr.publish(release_dir, api, "https://h", "o/r")
+    assert "彩排" in str(exc.value)
+    assert fake.uploaded == [], "拒绝之前就不该传任何东西上去"
 
 
 def test_a_windows_installer_without_a_receipt_is_refused(release_dir) -> None:
@@ -496,6 +516,7 @@ def test_a_matching_receipt_lets_the_release_through(release_dir) -> None:
     result = pr.publish(release_dir, api, "https://h", "o/r")
 
     assert result["tag"] == "v1.2.3"
+    assert pr.WINDOWS_REHEARSAL not in dict(fake.uploaded), "彩排收据同样不上传：它是过程证据，不是产物"
     assert pr.WINDOWS_ACCEPTANCE not in dict(fake.uploaded), (
         "收据是凭据不是发布件 —— 它不在 SHA256SUMS 里，传上去就多出一个没人核对的资产"
     )

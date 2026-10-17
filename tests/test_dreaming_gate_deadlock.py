@@ -35,9 +35,19 @@ def test_maybe_check_stale_returns_true_without_any_stamp(tmp_path, monkeypatch)
     assert maybe_check_stale_from_audit("proj_never_dreamed") is True
 
 
-def _seed_completed_curator_run(home, pid, run_id="1790000000-cccccc"):
-    """在 run 账本里种一次**真的跑完的** curator run（run_node 的产物形状）。"""
+def _seed_completed_curator_run(home, pid, run_id=None):
+    """在 run 账本里种一次**真的跑完的** curator run（run_node 的产物形状）。
+
+    run_id 前缀是 epoch 秒，而 `last_dreaming_at` 正是拿它当这次 dreaming 的
+    时间、再和**现在**比 14 天。这里曾写死 `1790000000`（2026-09-21）——
+    写下时是"刚跑过"，14 天后自己变成 stale，两条测试在没人改代码的情况下
+    同时转红。种子的时间必须跟着测试运行的那一刻走。
+    """
     import json as _json
+    import time as _time
+
+    if run_id is None:
+        run_id = f"{int(_time.time())}-cccccc"
 
     d = home / "projects" / pid / "runs" / run_id
     d.mkdir(parents=True, exist_ok=True)

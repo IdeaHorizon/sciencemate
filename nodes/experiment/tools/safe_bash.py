@@ -1469,6 +1469,10 @@ async def _exec_and_log(
     execution_action: dict[str, Any] | None = None,
     execution_decision: dict[str, Any] | None = None,
     execution_route_binding: dict[str, Any] | None = None,
+    tool_name: str = "safe_run_bash",
+    execution_params: Any = None,
+    input_observation: dict[str, Any] | None = None,
+    _read_only_check: bool = False,
 ) -> dict:
     """在强制 RunAttempt 容器内执行命令，并落盘可用的 stdout/stderr。
 
@@ -1488,6 +1492,22 @@ async def _exec_and_log(
     observed_payload_spawned: bool | None = None
     observed_spawn_proof_source: str | None = None
     action_token: dict[str, Any] | None = None
+    _v3_handle: Any = None
+    _v3_uncertain: dict | None = None
+
+    def _v3_settle(*, state_name: str, exit_code=None, stderr_text: str = "") -> None:
+        """统一边界结算：拍后置快照、冻结身份、写结算。失败不返回普通 success。"""
+        nonlocal _v3_uncertain
+        if _v3_handle is None:
+            return
+        try:
+            from . import action_boundary as _ab
+        except ImportError:  # pragma: no cover
+            from tools import action_boundary as _ab  # type: ignore
+        outcome = _ab.settle(state, _v3_handle, outcome=state_name, exit_code=exit_code,
+                             stderr_text=stderr_text)
+        if outcome.get("status") == "effect_recording_uncertain":
+            _v3_uncertain = outcome
 
     def _observe_spawn(
         payload_spawned: bool | None,
@@ -1583,11 +1603,15 @@ async def _exec_and_log(
         )
         return _census_block(terminal_error, result) if terminal_error else result
 
-    declared_workdir, workdir_error = resolve_required_workdir(state, cwd)
+    if _read_only_check:
+        from .obligations import resolve_path
+        declared_workdir, workdir_error = str(resolve_path(state, cwd or ".")), None
+    else:
+        declared_workdir, workdir_error = resolve_required_workdir(state, cwd)
     if workdir_error is not None:
         try:
             state.append_transcript(
-                "required_workdir_unavailable", tool="safe_run_bash",
+                "required_workdir_unavailable", tool=tool_name,
                 cwd=str(cwd), cmd_preview=cmd[:200])
         except Exception:
             pass
@@ -1666,6 +1690,20 @@ async def _exec_and_log(
             )
             if admission_error is not None:
                 return admission_error
+        # v3 统一 action 边界（governing §5）：开始必须 durable，写不进账本就不执行。
+        if execution_action is not None or sandbox_write_targets:
+            try:
+                from . import action_boundary as _v3_ab
+            except ImportError:  # pragma: no cover
+                from tools import action_boundary as _v3_ab  # type: ignore
+            _v3_handle = _v3_ab.begin(
+                state, tool=tool_name, effect_class=_v3_ab.EXPERIMENT, command=cmd,
+                work_root=effective_cwd,
+                execution_params=execution_params, input_observation=input_observation,
+                observation_boundary=_v3_ab.observation_boundary(state, writable, readonly),
+                output_roots=None)
+            if isinstance(_v3_handle, _v3_ab.BoundaryRefusal):
+                return _v3_handle.as_result(tool_name)
         spawn_boundary_entered = True
         try:
             status, returncode, stdout, stderr = await spawn_and_wait(
@@ -1723,16 +1761,19 @@ async def _exec_and_log(
                 "status": "error",
                 "error": f"启动 shell 失败：{type(exc).__name__}: {exc}",
             }
+        _v3_settle(state_name="spawn_failed", stderr_text=str(result.get("error") or ""))
         return _census_block(terminal_error, result) if terminal_error else result
 
     if status == "spawn_failed":
         error = stderr.decode("utf-8", errors="replace")
+        _v3_settle(state_name="spawn_failed", stderr_text=error)
         return _terminalize({
             "status": "error", "error": f"启动 shell 失败：{error[:500]}"})
     timing = _execution_timing(started_wall, started_monotonic)
     if status == "timeout":
+        _v3_settle(state_name="timed_out", stderr_text=stderr.decode("utf-8", errors="replace"))
         result = _te.build_timeout_payload(
-            state, tool="safe_run_bash", cmd=cmd, timeout_s=timeout,
+            state, tool=tool_name, cmd=cmd, timeout_s=timeout,
             stdout=stdout, stderr=stderr)
         result.update({
             **timing,
@@ -1761,6 +1802,11 @@ async def _exec_and_log(
         "workdir_authority": "cwd_param" if declared_workdir else "inherited",
         **timing,
     }
+    _v3_settle(state_name=("timed_out" if status == "timeout" else
+                           "cancelled" if status == "cancelled" else "settled"),
+               exit_code=returncode, stderr_text=err)
+    if _v3_uncertain is not None:
+        return {**res, **_v3_uncertain}
     if returncode in {125, 126, 137, 138} and "HARNESS_SANDBOX_LIMIT" in err:
         resource = {
             125: "storage",
@@ -1787,7 +1833,7 @@ async def _exec_and_log(
             res["exec_diagnosis"] = diagnosis
             try:
                 state.append_transcript(
-                    "exec_target_diagnosis", tool="safe_run_bash",
+                    "exec_target_diagnosis", tool=tool_name,
                     returncode=returncode, cmd_preview=cmd[:200], **diagnosis)
             except Exception:
                 pass
@@ -1803,7 +1849,7 @@ async def _exec_and_log(
             "命令内改用相对路径；目录尚不存在时先单独 `mkdir -p`。")
         try:
             state.append_transcript(
-                "required_workdir_unavailable", tool="safe_run_bash",
+                "required_workdir_unavailable", tool=tool_name,
                 target=hardened_cd[0], source="inline_cd",
                 cmd_preview=cmd[:200])
         except Exception:
@@ -2451,8 +2497,8 @@ def _classify_remote_visible_path(
 
 
 
-def _classify_write_path(path: str, state: Any, *, remote: bool = False) -> tuple[str, str]:
-    """Classify by an explicit role, never by a directory name or file suffix."""
+def _classify_write_path(path: str | Path, state: Any, *, remote: bool = False) -> tuple[str, str]:
+    """Classify roles; a Core-resolved Path is literal, not shell syntax."""
     # A target the parser could not pin down is unknown, not absent.  Callers
     # must ask about it; this is the whole point of UNRESOLVED existing.
     if path == UNRESOLVED:
@@ -2474,7 +2520,8 @@ def _classify_write_path(path: str, state: Any, *, remote: bool = False) -> tupl
             "调度器 scratch 变量只在远端作业体内可判定；本机执行时它指向哪里"
             "无法静态证明")
 
-    p = os.path.abspath(os.path.expanduser(os.path.expandvars(path)))
+    p = str(path) if isinstance(path, Path) else os.path.abspath(
+        os.path.expanduser(os.path.expandvars(path)))
 
     # A broken contract poisons only the trees it names.  Blocking the entire
     # run — including an unrelated run-local log write — left the agent with no
@@ -3086,18 +3133,24 @@ def _scope_guard_error(cmd_or_path: str, scope: str, reason: str, target: str,
                     f"⚠️ 命令要写入未声明的路径。是否把 {grant_root} "
                     "登记为本次实验的可写目录？")
                 grant_note = (
-                    f"批准后果（仅本 run 有效）：\n"
-                    f"  ✅ {grant_root} 及其子路径可写，后续不再逐条询问\n"
+                    f"批准后果（目录登记仅本 run 有效）：\n"
+                    f"  ✅ 为子进程登记 {grant_root} 及其子路径的写入许可\n"
                     f"  ✅ 允许清空该目录的**内容**（构建缓存重配等）\n"
                     f"  ❌ 删除 {grant_root} 目录本身仍会再次询问\n"
                     f"  ❌ 不授予父目录、兄弟目录或任何子树之外的权限\n"
-                    f"  ❌ 不获得 build_root/run_root 的活动语义\n")
+                    f"  ❌ 不获得 build_root/run_root 的活动语义\n"
+                    "仍受 Core 的实际能力、独立只读边界与 ownership 检查约束；"
+                    "此登记不扩大 Core 文件工具的写权限，其他风险仍可能需要确认。\n")
             else:
                 question = (
-                    f"⚠️ 命令要写入受保护路径（{scope}），是否只允许这条命令执行一次？")
+                    "⚠️ 无法静态确定这条命令的写入目标，是否批准执行下述命令？"
+                    if scope == "unresolved_target" else
+                    f"⚠️ 命令涉及受限写入（{scope}），是否批准执行下述命令？")
                 grant_note = (
-                    "批准只会绑定本条命令、当前 cwd 和该目标路径，使用一次后失效；"
-                    "拒绝或修改命令后不会放行。\n")
+                    "批准由框架共享确认机制保存和消费；不会扩大执行器的实际写权限。\n"
+                    + ("高风险命令按命令内容匹配授权，不额外承诺 cwd/目标的精确绑定。\n"
+                       if approval_text == str(cmd_or_path) else
+                       "本请求的授权内容包含命令、cwd 和目标；不能据此跳过其他权限检查。\n"))
             return {
                 "status": "pause",
                 "pause_event": {
@@ -3106,19 +3159,16 @@ def _scope_guard_error(cmd_or_path: str, scope: str, reason: str, target: str,
                         f"工具：{_scope_guard_tool_name(kind)}\n"
                         f"目标路径：{target}\n作用域：{scope}\n原因：{reason}\n"
                         f"操作：{op or 'write'}\n"
-                        f"完整内容（前 500 字符）：\n"
+                        f"内容预览（前 500 字符）：\n"
                         f"{(preview if preview is not None else str(cmd_or_path))[:500]}\n\n"
                         + grant_note +
                         "回复“批准”/“同意”即可。"
                     ),
-                    "options": [
-                        "批准并登记该目录" if grant_root else "批准执行一次",
-                        "拒绝",
-                    ],
+                    "options": list(_danger.HIGHRISK_OPTIONS),
                     "asking_node_type": state.node_type,
                     "asking_run_id": state.run_id,
                     "metadata": {
-                        "type": "scope_guard_confirm",
+                        "type": "highrisk_confirm",
                         "tool": _scope_guard_tool_name(kind),
                         "scope": scope, "target": target,
                         "registers_root": grant_root,
@@ -3312,7 +3362,29 @@ def _has_unresolved_var(token: str) -> bool:
     return "$" in token
 
 
+# bash 层自己的设备名（#939）：必须在按宿主 os.path 解析**之前**认原始 token。
+# Windows 上命令跑在随包 MSYS bash 里，`/dev/null` 是 bash 认的设备；宿主
+# os.path.abspath 却把它解析成 `C:\dev\null`，之后再和 "/dev/null" 比永远对不上，
+# 于是 `> /dev/null` 被判成「未声明可写的绝对路径」事前拦截。
+# `nul`/`NUL` 故意不在表里：MSYS/Cygwin 走 NT 原生 API，不吃 Win32 的 DOS 设备名
+# 映射，`> nul` 会在 cwd 里真建一个叫 nul 的文件（还删不掉）——按 bash 的语义它
+# 就是一次普通写，守卫照常按 cwd 下的路径判。
+_SHELL_DEVICE_TARGETS = frozenset({
+    "/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin",
+})
+_SHELL_FD_DEVICE_RE = re.compile(r"/dev/fd/\d+")
+
+
+def _shell_device_token(token: str) -> bool:
+    """原始 shell token 是否是 bash 层的设备（不是文件系统写入）。"""
+    text = str(token).strip()
+    return (text in _SHELL_DEVICE_TARGETS
+            or _SHELL_FD_DEVICE_RE.fullmatch(text) is not None)
+
+
 def _ignore_write_target(path: str) -> bool:
+    if _shell_device_token(path):
+        return True
     p = os.path.abspath(os.path.expanduser(os.path.expandvars(path)))
     return p in {"/dev/null"} or p.startswith("/dev/std") or p.startswith("/proc/self/fd")
 
@@ -4436,8 +4508,9 @@ def _redirection_write_targets(segment: str, base: str) -> list[str]:
             targets.append(UNRESOLVED)
             continue
         destination = tokens[index + 1]
-        # 文件描述符复制/关闭不是文件写目标。
-        if destination.isdigit() or destination in {"-", "&"}:
+        # 文件描述符复制/关闭不是文件写目标；bash 层设备要在解析前认（#939）。
+        if (destination.isdigit() or destination in {"-", "&"}
+                or _shell_device_token(destination)):
             continue
         targets.append(_containment_target(destination, base))
     return targets
@@ -4486,6 +4559,13 @@ def _tar_write_targets(
     archive: str | None = None
     directory: str | None = None
     unresolved = False
+    stdout_create_options_safe = True
+
+    def static_word(value: str | None) -> bool:
+        return value not in {None, "", UNRESOLVED, REMOTE_SCRATCH} and not any(
+            marker in value for marker in ("$", "__hf_dynamic__", "*", "?", "[")
+        )
+
     index = 1
 
     # POSIX/GNU 旧式 tar cf archive：首个无短横线 token 是选项字。
@@ -4497,6 +4577,8 @@ def _tar_write_targets(
             and any(char in "cruxt" for char in old_style)
             and all(char.isalpha() for char in old_style)
         ):
+            if any(char not in "cfCv" for char in old_style):
+                stdout_create_options_safe = False
             value_index = index + 1
             for char in old_style:
                 if char in "cruxt":
@@ -4508,6 +4590,8 @@ def _tar_write_targets(
                     else:
                         value = str(tokens[value_index])
                         value_index += 1
+                    if not static_word(value):
+                        stdout_create_options_safe = False
                     if char == "f":
                         archive = value
                     else:
@@ -4526,6 +4610,8 @@ def _tar_write_targets(
         token = str(tokens[index])
         if token in long_modes:
             modes.add(long_modes[token])
+            if token != "--create":
+                stdout_create_options_safe = False
             index += 1
             continue
         if token in {"-f", "--file", "-C", "--directory"}:
@@ -4534,6 +4620,8 @@ def _tar_write_targets(
                 value = None
             else:
                 value = str(tokens[index + 1])
+            if not static_word(value):
+                stdout_create_options_safe = False
             if token in {"-f", "--file"}:
                 archive = value
             else:
@@ -4541,15 +4629,33 @@ def _tar_write_targets(
             index += 2
             continue
         if token.startswith("--file="):
-            archive = token.split("=", 1)[1] or UNRESOLVED
+            value = token.split("=", 1)[1] or UNRESOLVED
+            archive = value
+            if not static_word(value):
+                stdout_create_options_safe = False
             index += 1
             continue
         if token.startswith("--directory="):
-            directory = token.split("=", 1)[1] or UNRESOLVED
+            value = token.split("=", 1)[1] or UNRESOLVED
+            directory = value
+            if not static_word(value):
+                stdout_create_options_safe = False
+            index += 1
+            continue
+        if token == "--exclude":
+            if index + 1 >= len(tokens) or not static_word(str(tokens[index + 1])):
+                stdout_create_options_safe = False
+            index += 2
+            continue
+        if token.startswith("--exclude=") or token == "--verbose":
+            if not static_word(token):
+                stdout_create_options_safe = False
             index += 1
             continue
         if token.startswith("-") and not token.startswith("--"):
             body = token[1:]
+            if any(char not in "cfCv" for char in body):
+                stdout_create_options_safe = False
             position = 0
             while position < len(body):
                 char = body[position]
@@ -4565,12 +4671,17 @@ def _tar_write_targets(
                     else:
                         value = None
                         unresolved = True
+                    if not static_word(value):
+                        stdout_create_options_safe = False
                     if char == "f":
                         archive = value
                     else:
                         directory = value
                     break
                 position += 1
+        elif token.startswith("--") or not static_word(token):
+            # Unmodelled controls may write the source or run another program.
+            stdout_create_options_safe = False
         index += 1
 
     targets: list[str] = []
@@ -4578,6 +4689,8 @@ def _tar_write_targets(
     if modes.intersection({"c", "r", "u"}):
         if archive == "-":
             pass
+        elif archive == UNRESOLVED:
+            targets.append(UNRESOLVED)
         elif archive:
             targets.append(_containment_target(archive, base))
         else:
@@ -4590,6 +4703,10 @@ def _tar_write_targets(
         )
     if unresolved:
         targets.append(UNRESOLVED)
+    if modes == {"c"} and archive == "-" and not unresolved and stdout_create_options_safe:
+        # Pure creation to stdout has no filesystem write target. Keep the
+        # caller's destructive/no-target fallback for every unmodelled option.
+        mutating = False
     return targets, mutating
 
 
@@ -5266,13 +5383,11 @@ async def _sandbox_probe(
     """Run a trusted ABI probe inside the execution boundary, never on the host.
 
     ldd 会驱动目标二进制的动态加载器 —— 对模型指定的二进制裸跑 ldd 就是在宿主
-    上执行不可信代码，所以探针必须在墙内。执行器分档后按后端走两条路：image
-    后端经 prepare_attempt_command 的容器请求（原样保留，其 subprocess.run 调用
-    点在 framework_exemptions 登记）；原生后端（linux/darwin）经咽喉
-    spawn_and_wait（Landlock/seatbelt 逐命令根）。两条路共用同一套根收窄：
-    输入/能力根一律降为只读，只授予框架自有的临时 scratch 为可写。
+    上执行不可信代码，所以探针必须在墙内：经咽喉 spawn_and_wait 起
+    （Landlock/seatbelt 逐命令根）。根收窄：输入/能力根一律降为只读，只授予
+    框架自有的临时 scratch 为可写。
     """
-    from core.sandbox import SandboxLimits, prepare_attempt_command
+    from core.sandbox import SandboxLimits
     try:
         try:
             from .subprocess_policy import path_has_local_write_capability
@@ -5390,10 +5505,8 @@ async def _sandbox_probe(
             source="bash_sandbox_roots",
         )
 
-    launch = None
     output: str | None = None
     probe_failure: dict[str, Any] | None = None
-    cleanup_failure: dict[str, Any] | None = None
     try:
         probe_limits = SandboxLimits(
             memory_bytes=1024**3,
@@ -5405,85 +5518,47 @@ async def _sandbox_probe(
         )
         # 执行器分档：探针经咽喉 spawn_and_wait 在墙内执行（#793 owner 迁移，
         # select_backend/prepare 只许咽喉碰 —— test_..._one_throat 唯一性闸）。
-        # image 分支自 PR C 删除 image 后端起不可达（attempt_capability 不再返回
-        # "image"），保留仅为对齐 framework_exemptions 里 _sandbox_probe 的
-        # subprocess.run 登记（wangd 属地）；豁免登记清理后本分支应删。
-        from core import isolation
+        # 原先还留着一条 image 分支（prepare_attempt_command + 自己
+        # subprocess.run），PR C 删 image 后端后 attempt_capability 只会返回
+        # linux/darwin/win32，那条分支走不到，留着只为对上 framework_exemptions
+        # 的登记 —— 一并删掉（#1182 第 2 项），本函数只剩咽喉这一条路。
+        from shared.lib.cancellable_subprocess import spawn_and_wait
 
-        if isolation.attempt_capability()["backend"] == "image":
-            launch = prepare_attempt_command(
-                probe_argv,
-                state=state,
-                cwd=probe_cwd,
-                writable_roots=[probe_scratch],
-                readonly_roots=readonly,
-                limits=probe_limits,
-                environment=probe_environment,
-            )
-            result = subprocess.run(
-                launch.argv,
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
-            if result.returncode != 0:
-                diagnostic = (result.stderr or result.stdout or "")[-400:]
-                probe_failure = _framework_guard_failure(
-                    "runtime_abi_probe",
-                    RuntimeError(
-                        f"trusted probe exited {result.returncode}: {diagnostic}"
-                    ),
-                    reason="runtime_abi_probe_unavailable",
-                    source="attempt_request_exit",
-                )
-            else:
-                output = (result.stdout or "") + (result.stderr or "")
-        else:
-            from shared.lib.cancellable_subprocess import spawn_and_wait
-
-            status, returncode, stdout_bytes, stderr_bytes = await spawn_and_wait(
-                *probe_argv,
-                state=state,
-                timeout=20,
-                cwd=str(probe_cwd),
-                writable_roots=[probe_scratch],
-                readonly_roots=list(readonly),
-                sandbox_limits=probe_limits,
-                sandbox_environment=probe_environment,
-            )
-            if status == "timeout":
-                probe_failure = _framework_guard_failure(
-                    "runtime_abi_probe",
-                    subprocess.TimeoutExpired(cmd=list(probe_argv), timeout=20),
-                    reason="runtime_abi_probe_unavailable",
-                    source="attempt_request_timeout",
-                )
-            elif status != "done" or returncode != 0:
-                diagnostic = (
-                    (stderr_bytes or stdout_bytes or b"")
-                    .decode("utf-8", errors="replace")[-400:]
-                )
-                probe_failure = _framework_guard_failure(
-                    "runtime_abi_probe",
-                    RuntimeError(
-                        f"trusted probe {status} rc={returncode}: {diagnostic}"
-                    ),
-                    reason="runtime_abi_probe_unavailable",
-                    source="attempt_request_exit",
-                )
-            else:
-                output = (
-                    stdout_bytes.decode("utf-8", errors="replace")
-                    + stderr_bytes.decode("utf-8", errors="replace")
-                )
-    except subprocess.TimeoutExpired as exc:
-        probe_failure = _framework_guard_failure(
-            "runtime_abi_probe",
-            exc,
-            reason="runtime_abi_probe_unavailable",
-            source="attempt_request_timeout",
+        status, returncode, stdout_bytes, stderr_bytes = await spawn_and_wait(
+            *probe_argv,
+            state=state,
+            timeout=20,
+            cwd=str(probe_cwd),
+            writable_roots=[probe_scratch],
+            readonly_roots=list(readonly),
+            sandbox_limits=probe_limits,
+            sandbox_environment=probe_environment,
         )
+        if status == "timeout":
+            probe_failure = _framework_guard_failure(
+                "runtime_abi_probe",
+                subprocess.TimeoutExpired(cmd=list(probe_argv), timeout=20),
+                reason="runtime_abi_probe_unavailable",
+                source="attempt_request_timeout",
+            )
+        elif status != "done" or returncode != 0:
+            diagnostic = (
+                (stderr_bytes or stdout_bytes or b"")
+                .decode("utf-8", errors="replace")[-400:]
+            )
+            probe_failure = _framework_guard_failure(
+                "runtime_abi_probe",
+                RuntimeError(
+                    f"trusted probe {status} rc={returncode}: {diagnostic}"
+                ),
+                reason="runtime_abi_probe_unavailable",
+                source="attempt_request_exit",
+            )
+        else:
+            output = (
+                stdout_bytes.decode("utf-8", errors="replace")
+                + stderr_bytes.decode("utf-8", errors="replace")
+            )
     except Exception as exc:
         probe_failure = _framework_guard_failure(
             "runtime_abi_probe",
@@ -5491,19 +5566,6 @@ async def _sandbox_probe(
             reason="runtime_abi_probe_unavailable",
             source="prepare_or_request_client",
         )
-    finally:
-        if launch is not None:
-            try:
-                launch.cleanup()
-            except Exception as exc:
-                cleanup_failure = _framework_guard_failure(
-                    "runtime_abi_probe",
-                    exc,
-                    reason="runtime_abi_probe_unavailable",
-                    source="attempt_request_cleanup",
-                )
-    if cleanup_failure is not None:
-        return cleanup_failure
     if probe_failure is not None:
         return probe_failure
     if output is None:
@@ -5863,6 +5925,9 @@ def _analyze_shell_path_effects(
             return [UNRESOLVED]
         targets: list[str] = []
         for value in event.target_values:
+            # 原始 token 先按 bash 词表认设备，再按宿主 os.path 解析（#939）。
+            if _shell_device_token(value):
+                continue
             scratch_target = _scheduler_scratch_target(value)
             if scratch_target is not None:
                 targets.append(scratch_target)
@@ -6443,10 +6508,39 @@ def _activity_path_role_guard(
         state: Any, cmd: str, cwd: str | None = None,
         route_decision: dict[str, Any] | None = None, *,
         declared_build: bool = False,
+        sandbox_roots: tuple[list[Path], list[Path]] | None = None,
+        local_write_boundary: bool = True,
 ) -> dict | None:
     """Require only the roles implied by the activity being attempted."""
     roles = collect_path_roles(state)
-    if declared_build or _is_major_build(cmd):
+    build = declared_build or _is_major_build(cmd)
+    if build and local_write_boundary and _v3_ready(state):
+        # A build directory's name is not permission. Consume the same roots
+        # as the payload; Core owns their precedence, carve-outs and Git deny.
+        # The fallback is deliberately target-free: this guard cannot grant a
+        # source-worktree rebind which the preceding path-effect gate did not
+        # authorize. Normal tool callers pass their already-approved roots.
+        from core.isolation._native import write_layers
+        try:
+            roots = sandbox_roots if sandbox_roots is not None else _sandbox_roots_for_payload(
+                state, str(cwd or _default_run_workdir(state)), sandbox_profile="bash",
+                authorized_targets=[],
+            )
+            boundary = write_layers(*roots)
+            base = _command_base_dir(_expand_cmd_vars(cmd), cwd)
+            destinations = _explicit_build_output_dirs(cmd, base) or [base]
+            for destination in destinations:
+                target = Path(destination).expanduser().resolve(strict=False)
+                if not boundary.grants_write(target):
+                    return _scope_guard_error(
+                        cmd, "invalid_build_root",
+                        "build destination is outside this command's approved writable "
+                        "boundary (including read-only overrides); choose an owned "
+                        "writable directory, normally the default build_root",
+                        str(target), state=state)
+        except Exception as exc:
+            return _sandbox_roots_error(exc)
+    elif build:
         if not any(role.role == "build_root" for role in roles):
             return _scope_guard_error(
                 cmd, "missing_path_role",
@@ -8823,6 +8917,8 @@ def _python_route_action(
 
 
 def _resolve_route_context(state: Any, action: dict[str, Any]) -> dict[str, Any]:
+    if _v3_ready(state):
+        return _v3_stub_decision(action)
     try:
         try:
             from .execution_route import resolve_execution_context
@@ -8837,12 +8933,39 @@ def _resolve_route_context(state: Any, action: dict[str, Any]) -> dict[str, Any]
         }
 
 
+
+def _v3_ready(state: Any) -> bool:
+    """S1d：v3 就绪的 run 不读不写旧路线 authority；判定来自 action_boundary。"""
+    try:
+        from .action_boundary import v3_ready
+    except ImportError:  # pragma: no cover
+        from tools.action_boundary import v3_ready  # type: ignore
+    try:
+        return v3_ready(state)
+    except Exception:
+        return False
+
+
+def _v3_stub_decision(action: dict[str, Any]) -> dict[str, Any]:
+    """v3 下代替路线决策的描述性占位：只带命令观察到的 effects，没有任何 authority。
+
+    旧调用点读它的 policy / authoritative / declared_workdir_role 时全都拿到"无"，
+    于是一律落到非科学、非路线的默认分支。它不写盘、不被任何门读取（governing I5）。
+    """
+    return {
+        "decision": "v3_boundary", "authoritative": False, "policy": "v3",
+        "effective_effects": list(action.get("observed_effects") or []),
+        "declared_workdir_role": None, "tool": str(action.get("tool") or ""),
+    }
+
 def _route_workdir_choice(
     state: Any,
     decision: dict[str, Any],
     *,
     create: bool = True,
 ) -> dict[str, Any]:
+    if _v3_ready(state):  # S1d：默认工作目录 = run_root，不问路线
+        return {"status": "resolved", "path": _default_run_workdir(state), "role": "run_root", "v3": True}
     try:
         try:
             from .execution_route import route_default_workdir
@@ -8858,6 +8981,8 @@ def _record_route_context(
     action: dict[str, Any],
     decision: dict[str, Any],
 ) -> None:
+    if _v3_ready(state):  # S1d：路线影子记录是旧 authority，v3 不写
+        return None
     try:
         try:
             from .execution_route import record_execution_route_shadow
@@ -8876,6 +9001,8 @@ def _enforce_route_context(
     phase: str = "pre_spawn",
 ) -> dict[str, Any] | None:
     """调用两阶段统一路线门；真实执行时门异常一律 fail-closed。"""
+    if _v3_ready(state):  # S1d：路线门不再是 v3 的门；边界、沙箱、授权各自仍在
+        return None
     try:
         try:
             from .execution_route import enforce_execution_route
@@ -8920,6 +9047,8 @@ def _begin_route_attempt(
     tool: str,
     action: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if _v3_ready(state):  # S1d：v3 没有路线 attempt；action boundary 记事实
+        return None, None
     try:
         try:
             from .execution_route import (
@@ -8956,6 +9085,8 @@ def _finish_route_attempt(
     result: dict[str, Any] | None = None,
     error: BaseException | None = None,
 ) -> dict[str, Any] | None:
+    if _v3_ready(state):
+        return None
     try:
         try:
             from .execution_route import (
@@ -9038,6 +9169,8 @@ def _begin_execution_action_census(
     route_binding: dict[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Persist census admission after the route attempt, before payload spawn."""
+    if _v3_ready(state):  # S1d：census 是 v2 的 attempt authority；v3 由 action_boundary 承接
+        return None, None
     try:
         try:
             from .execution_action_census import begin_execution_action
@@ -9240,15 +9373,19 @@ def _simulation_contract_block(
                     })
             except Exception:
                 pass
-        input_delivery = audit_input_delivery_for_execution(
-            state,
-            input_package_artifact_id,
-            input_package_bindings,
-        )
-        state.append_transcript("input_delivery_preflight", **input_delivery)
-        if not input_delivery.get("passed"):
-            record_execution_precondition_witness(
-                state, runner, "formal input package unverified at simulation execution")
+        # v3 audits only the inputs selected by this action, once at the tool
+        # entry.  Do not recreate the old all-active-spec audit or its global
+        # unverified witness here based on a stage/command classification.
+        if not _v3_ready(state):
+            input_delivery = audit_input_delivery_for_execution(
+                state,
+                input_package_artifact_id,
+                input_package_bindings,
+            )
+            state.append_transcript("input_delivery_preflight", **input_delivery)
+            if not input_delivery.get("passed"):
+                record_execution_precondition_witness(
+                    state, runner, "formal input package unverified at simulation execution")
         execution_contract = audit_execution_contract(state, execution_params, stage="simulation", runner=runner)
         state.append_transcript("execution_contract_preflight", **execution_contract)
         if not execution_contract.get("passed"):
@@ -9454,6 +9591,7 @@ async def _safe_run_bash(state: Any, cmd: str, timeout: int = 600,
         execution_stage = "diagnostic"
     execution_params = kw.get("execution_params")
     bash_write_targets: list[str] = []
+    bash_sandbox_roots: tuple[list[Path], list[Path]] | None = None
     explicit_cwd = cwd is not None and bool(str(cwd).strip())
     if cmd and cmd.strip():
         static_block = _bash_static_validity_block(
@@ -9464,6 +9602,19 @@ async def _safe_run_bash(state: Any, cmd: str, timeout: int = 600,
         )
         if static_block is not None:
             return static_block
+    try:
+        from .input_admission import check_consumed_input
+    except ImportError:
+        from tools.input_admission import check_consumed_input
+    input_observation: dict[str, Any] = {}
+    input_block = check_consumed_input(
+        state, runner="safe_run_bash",
+        input_package_artifact_id=kw.get("input_package_artifact_id"),
+        input_package_bindings=kw.get("input_package_bindings"),
+        observation=input_observation,
+    )
+    if input_block is not None:
+        return input_block
     route_action = _bash_route_action(
         cmd or "",
         execution_stage=execution_stage,
@@ -9590,11 +9741,20 @@ async def _safe_run_bash(state: Any, cmd: str, timeout: int = 600,
             if op != "remote_visible_path"
             and target not in {UNRESOLVED, REMOTE_SCRATCH}
         ]
+        if _v3_ready(state):
+            try:
+                bash_sandbox_roots = _sandbox_roots_for_payload(
+                    state, str(cwd), sandbox_profile="bash",
+                    authorized_targets=bash_write_targets,
+                )
+            except Exception as exc:
+                return _sandbox_roots_error(exc)
         activity_block = _activity_path_role_guard(
             state,
             cmd,
             cwd=cwd,
             route_decision=route_decision,
+            sandbox_roots=bash_sandbox_roots,
         )
         if activity_block is not None:
             return activity_block
@@ -9723,7 +9883,8 @@ async def _safe_run_bash(state: Any, cmd: str, timeout: int = 600,
 
     # build gate（第3步）：首次主要 build 前客观侦察 gate（事前拦）
     try:
-        gate = _build_gate(
+        # S1d：build gate（侦察 / declared_route 回退）是 v2 的准入仪式；v3 只有边界、沙箱、授权。
+        gate = None if _v3_ready(state) else _build_gate(
             state, cmd, cwd=cwd, route_decision=route_decision)
     except Exception as exc:
         return _framework_guard_failure(
@@ -9757,10 +9918,11 @@ async def _safe_run_bash(state: Any, cmd: str, timeout: int = 600,
             pass
 
     try:
-        bash_sandbox_roots = _sandbox_roots_for_payload(
-            state, str(cwd), sandbox_profile="bash",
-            authorized_targets=bash_write_targets,
-        )
+        if bash_sandbox_roots is None:
+            bash_sandbox_roots = _sandbox_roots_for_payload(
+                state, str(cwd), sandbox_profile="bash",
+                authorized_targets=bash_write_targets,
+            )
     except Exception as exc:
         return _sandbox_roots_error(exc)
 
@@ -9780,6 +9942,8 @@ async def _safe_run_bash(state: Any, cmd: str, timeout: int = 600,
         "execution_action": route_action,
         "execution_decision": route_decision,
         "execution_route_binding": route_binding,
+        "execution_params": execution_params,
+        "input_observation": input_observation,
     }
     if kw.get("resource_profile") is not None:
         exec_kwargs["resource_profile"] = kw["resource_profile"]
@@ -9838,8 +10002,20 @@ _INPUT_PACKAGE_BINDINGS_SCHEMA = {
     "type": "object",
     "additionalProperties": {"type": "string"},
     "description": (
-        "Complete spec_id -> verified dataset/experiment_fallback_inputs artifact id "
-        "mapping when this simulation consumes more than one formal input package."
+        "Map only packages this action consumes. With active Data requests, keys are spec_id "
+        "and values must be verified dataset/experiment_fallback_inputs ids. With no active "
+        "request or required fallback, keys are labels for ordinary dataset ids: structural "
+        "inspection is automatic, without registering a new request. This does not establish "
+        "formal provenance or scientific task fitness. Use this or input_package_artifact_id, not both."
+    ),
+}
+_INPUT_PACKAGE_ARTIFACT_SCHEMA = {
+    "type": "string",
+    "description": (
+        "Dataset actually consumed by this action. Ordinary existing datasets are structurally "
+        "inspected automatically; no new Data request is needed. Active formal requests and "
+        "experiment_fallback_inputs still require their existing verification. Omit only when "
+        "no package is consumed. Use this or input_package_bindings, not both."
     ),
 }
 
@@ -9870,29 +10046,14 @@ if _orig_def is not None:
     # 不把它作为模型可填参数登记 —— 认不出的取值按兼容默认归一并留痕，不拒。
     _safe_props.pop("stage", None)
     _safe_props["execution_params"] = {"type": "object", "description": "Must exactly match frozen prereg scientific parameters when a formal input package is consumed."}
-    _safe_props["route_step_id"] = {
-        "type": "string",
-        "description": (
-            "Identifier of the frozen execution-route step this action fulfils. "
-            "Provide it when route matching is ambiguous or the route requires explicit binding."
-        ),
-    }
-    _safe_props["input_package_artifact_id"] = {"type": "string", "description": "Verified dataset or experiment_fallback_inputs artifact consumed by this simulation."}
+    _safe_props["input_package_artifact_id"] = _INPUT_PACKAGE_ARTIFACT_SCHEMA
     _safe_props["input_package_bindings"] = _INPUT_PACKAGE_BINDINGS_SCHEMA
     _safe_schema["properties"] = _safe_props
     register_tool(_dc.replace(
         _orig_def,
         name="safe_run_bash",
         description=(
-            "执行有界、同步的 shell 诊断或只读探针。timeout 是该诊断调用的显式"
-            "硬边界，到期会终止整棵进程树；真正的构建、simulation 与启动器必须从启动时"
-            "使用 submit_job(scheduler=local/SLURM/PBS) —— 它们需要活过本次调用的作业"
-            "身份，不要把 expected_duration 当作 safe_run_bash 的续时依据。"
-            "有界的本地动作留在本工具即可。是否需要路线以本次调用返回的机械判定和 "
-            "next_action 为准，不要靠命令名称清单猜测。当前冻结路线已有与本次命令入口"
-            "对应的就绪步骤时，必须按解析结果绑定该步骤；解析结果要求显式绑定时传 "
-            "route_step_id。有界且被机械判定为 low_risk_effectful 的 run-local 写入"
-            "通常无需新建路线。"
+            '执行一条有界、同步的 shell 命令：探查、配置、小构建、跑一次、读日志。timeout 是硬边界，到期终止整棵进程树。写只落在框架给你的可写根里（一页纸列了），baseline 只读。会活过本次调用的东西（真正的构建、simulation、并行启动器、长任务）用 submit_job 交给调度器，它们需要作业身份。你不需要为一条命令做任何登记：框架自己记它做了什么、写了什么。'
         ),
         parameters_schema=_safe_schema,
     ), _safe_run_bash)
@@ -9917,9 +10078,8 @@ else:  # pragma: no cover —— 框架未先注册时的兜底（理论不该�
                         "default": "standard",
                     },
                     "expected_duration_s": {"type": "integer", "minimum": 1},
-                    "route_step_id": {"type": "string"},
                     "execution_params": {"type": "object"},
-                    "input_package_artifact_id": {"type": "string"},
+                    "input_package_artifact_id": _INPUT_PACKAGE_ARTIFACT_SCHEMA,
                     "input_package_bindings": _INPUT_PACKAGE_BINDINGS_SCHEMA,
                 },
                 "required": ["cmd"],
@@ -9936,8 +10096,17 @@ else:  # pragma: no cover —— 框架未先注册时的兜底（理论不该�
 
 async def _safe_write_file(state: Any, path: str, content: str,
                            create_dirs: bool = True, **kw: Any) -> dict:
-    base = str(getattr(state, "root", None) or os.getcwd())
-    target = _norm_path(path, base)
+    from core.project_workspace import ProjectWorkspaceError, resolve_tool_path, working_directory
+
+    # The file tool owns its coordinates and permissions in Core. Resolve
+    # before recording a write; a subprocess grant cannot grant Core writer
+    # ownership. Pass this exact target to the guard, capture and writer.
+    try:
+        resolved_target = resolve_tool_path(state, path, write=True)
+    except ProjectWorkspaceError as exc:
+        return {"status": "error", "error": str(exc)}
+    base = str(working_directory(state))
+    target = str(resolved_target)
     # write_file 不属于可执行路线步骤，但它是持久副作用：必须在任何
     # create_dirs/原始 writer 之前冻结 run scope。低风险文件写不生成
     # route attempt，也不被迫声明完整路线。
@@ -9960,7 +10129,7 @@ async def _safe_write_file(state: Any, path: str, content: str,
         scope, reason = (
             "invalid_path_role_contract", "; ".join(contract["errors"]))
     else:
-        scope, reason = _classify_write_path(target, state)
+        scope, reason = _classify_write_path(resolved_target, state)
     if scope == "safe":
         vc_error = _worktree_requires_version_control(target, state)
         if vc_error:
@@ -10013,31 +10182,47 @@ async def _safe_write_file(state: Any, path: str, content: str,
         )
     census_action = {**route_action, "write_target": target}
     census_decision = {**route_decision, "tool": "safe_write_file"}
-    pending_block = pending_operation_action_block(
-        state, census_action, census_decision)
-    if pending_block is not None:
-        return pending_block
-    token = begin_execution_action(state, census_action, census_decision)
-    if token.get("status") != "success":
-        return token
+    _v3 = _v3_ready(state)
+    token: dict = {"status": "success", "v3": True}
+    if not _v3:
+        pending_block = pending_operation_action_block(
+            state, census_action, census_decision)
+        if pending_block is not None:
+            return pending_block
+        token = begin_execution_action(state, census_action, census_decision)
+        if token.get("status") != "success":
+            return token
+    # v3 统一 action 边界：写文件也是 producer——不经过边界就没有 output identity，
+    # finish 会把"直接写出一个要求交付的文件"判成无归属（Codex 21 号 P0-B）。
+    try:
+        from . import action_boundary as _v3_ab
+    except ImportError:  # pragma: no cover
+        from tools import action_boundary as _v3_ab  # type: ignore
+    _v3_handle = _v3_ab.begin(state, tool="safe_write_file", effect_class=_v3_ab.SUPPORT,
+                              command=f"write {target}", output_candidates=[target])
+    if isinstance(_v3_handle, _v3_ab.BoundaryRefusal):
+        return _v3_handle.as_result("safe_write_file")
     result: dict | None = None
     error: BaseException | None = None
     settled: dict | None = None
     try:
         result = await _orig_write_file(
-            state, path=path, content=content, create_dirs=create_dirs, **kw)
+            state, path=target, content=content, create_dirs=create_dirs, **kw)
     except BaseException as exc:
         error = exc
         raise
     finally:
-        try:
-            settled = settle_execution_action(
-                state, token, payload_spawned=False, job_submitted=False,
-                proof_source="safe_write_file",
-                result=result if error is None else None, error=error)
-        except Exception as exc:  # 记账本身抛错也不能伪装成普通 success
-            settled = {"passed": False, "error_code": "settle_raised",
-                       "error": f"{type(exc).__name__}: {exc}"}
+        if _v3:
+            settled = {"passed": True, "v3": True}
+        else:
+            try:
+                settled = settle_execution_action(
+                    state, token, payload_spawned=False, job_submitted=False,
+                    proof_source="safe_write_file",
+                    result=result if error is None else None, error=error)
+            except Exception as exc:  # 记账本身抛错也不能伪装成普通 success
+                settled = {"passed": False, "error_code": "settle_raised",
+                           "error": f"{type(exc).__name__}: {exc}"}
     try:
         _record_source_worktree_diffs(
             state, f"safe_write_file {target}")
@@ -10081,6 +10266,13 @@ async def _safe_write_file(state: Any, path: str, content: str,
                 "reason": "runtime reconciliation is not a model tool",
             },
         }
+    _v3_settled = _v3_ab.settle(
+        state, _v3_handle,
+        outcome="settled" if (isinstance(result, dict) and result.get("status") == "success") else "failed",
+        exit_code=0 if (isinstance(result, dict) and result.get("status") == "success") else None,
+        stderr_text=str((result or {}).get("error") or ""))
+    if _v3_settled.get("status") == "effect_recording_uncertain":
+        return {**(result if isinstance(result, dict) else {}), **_v3_settled, "written_path": target}
     return result
 
 
@@ -10091,8 +10283,9 @@ if _orig_wf_def is not None:
             _orig_wf_def,
             name="safe_write_file",
             description=(
-                "把完整内容写入文件（创建新的或整体覆盖现有的）。路径相对 state.root "
-                "解释；可传绝对路径。create_dirs=True（默认）会自动建父目录。⚠️ 对已存在"
+                "把完整内容写入文件（创建新的或整体覆盖现有的）。路径按框架文件工具坐标"
+                "解析，相对路径基于本节点工作目录；可传绝对路径，仍受节点写权限约束。"
+                "create_dirs=True（默认）会自动建父目录。⚠️ 对已存在"
                 "的文件：本次 run 必须先 read_file 一次，否则 write 被拒。（新建文件不要求 "
                 "read。）这是防止盲写覆盖的安全约束；局部修改也应先读取，再提交包含完整"
                 "目标内容的写入。"
@@ -10982,6 +11175,19 @@ async def _safe_execute_python(state: Any, code: str, timeout: int = 300,
         }
     if requirements:
         return _managed_python_workload_block()
+    try:
+        from .input_admission import check_consumed_input
+    except ImportError:
+        from tools.input_admission import check_consumed_input
+    input_observation: dict[str, Any] = {}
+    input_block = check_consumed_input(
+        state, runner="safe_execute_python",
+        input_package_artifact_id=kw.get("input_package_artifact_id"),
+        input_package_bindings=kw.get("input_package_bindings"),
+        observation=input_observation,
+    )
+    if input_block is not None:
+        return input_block
     explicit_cwd = cwd is not None and bool(str(cwd).strip())
     route_action = _python_route_action(
         code=code,
@@ -11225,6 +11431,7 @@ async def _safe_execute_python(state: Any, code: str, timeout: int = 300,
             python_cmd,
             timeout=timeout,
             cwd=cwd,
+            tool_name="safe_execute_python",
             sandbox_profile="python",
             sandbox_write_targets=python_sandbox_targets,
             child_env=child_env,
@@ -11232,6 +11439,8 @@ async def _safe_execute_python(state: Any, code: str, timeout: int = 300,
             execution_action=route_action,
             execution_decision=route_decision,
             execution_route_binding=route_binding,
+            execution_params=execution_params,
+            input_observation=input_observation,
         )
         result = _python_resource_envelope(
             result,
@@ -11289,17 +11498,7 @@ if _orig_py_def is not None:
     _safe_py_props.pop("requirements", None)
     _safe_py_props.pop("resource_profile", None)
     _safe_py_props["execution_params"] = {"type": "object", "description": "Must exactly match frozen pre_registration.metadata.expected_params for a primary simulation."}
-    _safe_py_props["route_step_id"] = {
-        "type": "string",
-        "description": (
-            "Identifier of the frozen execution-route step this action fulfils. "
-            "Provide it when route matching is ambiguous or the route requires explicit binding."
-        ),
-    }
-    _safe_py_props["input_package_artifact_id"] = {
-        "type": "string",
-        "description": "Verified dataset or experiment_fallback_inputs artifact consumed by this simulation.",
-    }
+    _safe_py_props["input_package_artifact_id"] = _INPUT_PACKAGE_ARTIFACT_SCHEMA
     _safe_py_props["input_package_bindings"] = _INPUT_PACKAGE_BINDINGS_SCHEMA
     _safe_py_schema["properties"] = _safe_py_props
     # ⚠️ allowed_node_types 必须显式改写：`dataclasses.replace` 会把没点名的字段
@@ -11310,18 +11509,8 @@ if _orig_py_def is not None:
     register_tool(_dc.replace(
         _orig_py_def, name="safe_execute_python", internal_only=False,
         description=(
-            "在受管隔离沙箱中执行有界、同步的轻量单进程 Python 诊断或机械计算；限制 PID、"
-            "内存与时间，日志有界记录。不得安装依赖或派生外部进程。本工具不把任何文件写入"
-            "一概升级为新路线步骤；是否需要新路线以本次调用返回的 reason 与提示为准。当前"
-            "冻结路线已有与 safe_execute_python 对应的就绪步骤时，真实计算必须传该步骤的 "
-            "route_step_id；只读诊断改用 safe_run_bash，不会消耗该步骤。不要把诊断绑定到"
-            "该步骤上，否则会把步骤记成已完成。直接写出的 tarfile/zipfile extractall 或 "
-            "extract，以及 shutil.unpack_archive，会被识别为 environment_change，必须先"
-            "声明对应 Python 路线步骤；动态调用、别名和其他未识别的 Python 效果不因此自动"
-            "获得路线保护。真正需要受管生命周期的计算使用 submit_job；"
-            "需要 shell 效果分析的动作使用 "
-            "safe_run_bash，以便获得可审计的机械判定。不得根据这段描述推定未识别的 Python "
-            "效果已经受路线保护。"
+            "在受管隔离沙箱里执行一段有界、同步的 Python：轻量诊断、数据检查、小计算。"
+            "构建、simulation 与长任务用 submit_job。写只落在可写根里；框架自己记录它写了什么。"
         ),
         allowed_node_types=["experiment"],
         parameters_schema=_safe_py_schema), _safe_execute_python)
@@ -11331,15 +11520,14 @@ else:  # pragma: no cover —— 框架未先注册时的兜底
         ToolDefinition(
             name="safe_execute_python",
             description=(
-                "在受管隔离沙箱中执行有界同步的轻量 Python 诊断；构建、simulation "
-                "与长任务使用 submit_job。"),
+            '在受管隔离沙箱里执行一段有界、同步的 Python：轻量诊断、数据检查、小计算。构建、simulation 与长任务用 submit_job。写只落在可写根里；框架自己记录它写了什么。'
+        ),
             parameters_schema={
                 "type": "object",
                 "properties": {
                     "code": {"type": "string"},
                     "timeout": {"type": "integer", "default": 300},
                     "cwd": {"type": "string"},
-                    "route_step_id": {"type": "string"},
                     "resource_profile": {
                         "type": "string",
                         "enum": ["small", "standard", "large", "xlarge"],
@@ -11347,7 +11535,7 @@ else:  # pragma: no cover —— 框架未先注册时的兜底
                     },
                     "requirements": {"type": "array", "items": {"type": "string"}},
                     "execution_params": {"type": "object"},
-                    "input_package_artifact_id": {"type": "string"},
+                    "input_package_artifact_id": _INPUT_PACKAGE_ARTIFACT_SCHEMA,
                     "input_package_bindings": _INPUT_PACKAGE_BINDINGS_SCHEMA,
                 },
                 "required": ["code"],

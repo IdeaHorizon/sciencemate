@@ -57,6 +57,14 @@ def _approved_runtime_root(path: Path, project_id: str, session_id: str) -> Path
     arbitrary path is never accepted.
     """
     roots = [_session_runtime_root(project_id, session_id)]
+    # worker 在会话的 runtime 目录建不出 / 读不到时退到**进程私有的临时目录**跑（RFC_WORKER_START_IS_NOT_A_GATE
+    # §3.1 第 6 步），它在 ready 里如实报了 runtime_root。那是它自己的声明，和 transcript_path 同一信任级别；
+    # 只认**活着的、我们自己 spawn 的** worker 报的、且落在系统临时目录下的那一个 —— 任意路径照旧不认。
+    from app.services.harness_sessions import harness_session_manager
+
+    private = harness_session_manager.private_runtime_root(project_id, session_id)
+    if private is not None:
+        roots.append(private)
     try:
         roots.append(data_root("state").resolve())
     except DataRootError:

@@ -89,8 +89,8 @@ def test_plain_sequence_keeps_both_cd_outcomes():
 
 def test_complex_loop_cwd_is_explicitly_unknown():
     analysis, touches = _heads(
-        'for item in a b; do touch "$item"; done', "touch")
-    assert analysis.path_unverifiable is False
+        'for item in $ITEMS; do touch "$item"; done', "touch")
+    assert analysis.path_unverifiable is True
     assert touches[0].cwd.unknown is True
     assert touches[0].dynamic_args is True
 

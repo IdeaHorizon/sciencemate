@@ -332,3 +332,78 @@ async def test_crossref_title_mode_uses_query_title() -> None:
     ) == []
     assert client.params["query.title"].startswith("Constraints on the Cosmic Expansion")
     assert "query" not in client.params
+
+
+# ── Crossref 发表日期：issued → published → published-print → published-online，
+# 永远不取 created（DOI 登记日）。#1185 第 1 项；日期表沿用 #981 回退前那张。──
+@pytest.mark.parametrize("dates, expected", [
+    # 1984 年的论文 2002 年补登 DOI：created 不是发表年。
+    ({"issued": {"date-parts": [[1984, 10, 29]]},
+      "published-online": {"date-parts": [[1984, 10, 29]]},
+      "created": {"date-parts": [[2002, 7, 27]]}}, (1984, "1984-10-29")),
+    # 只有 created：宁可没有年份，也不把登记日当发表日。
+    ({"created": {"date-parts": [[2002, 7, 27]]}}, (None, "")),
+    # 部分日期保持部分，不补成 1 月 1 日；按零填充（与 PubMed 一致，ISO 可读）。
+    ({"issued": {"date-parts": [[2024]]}}, (2024, "2024")),
+    ({"issued": {"date-parts": [[2024, 2]]}}, (2024, "2024-02")),
+    # issued 是假日期（2 月 30 日）→ 换下一个字段，年与日仍出自同一个字段。
+    ({"issued": {"date-parts": [[2024, 2, 30]]},
+      "published-print": {"date-parts": [[2024, 3, 1]]}}, (2024, "2024-03-01")),
+    # issued 早于纸本：取最早已知发表日，年与日不分叉。
+    ({"issued": {"date-parts": [[2023, 12, 5]]},
+      "published-print": {"date-parts": [[2024, 2, 1]]}}, (2023, "2023-12-05")),
+    # Crossref 真会给 [[null]] / 空列表。
+    ({"issued": {"date-parts": [[None]]},
+      "published": {"date-parts": [[2021, 6]]}}, (2021, "2021-06")),
+    ({"issued": {"date-parts": [[]]}, "published": None}, (None, "")),
+])
+def test_crossref_year_and_date_share_publication_evidence(dates, expected):
+    paper = CrossrefSearch(None)._parse({"message": {"items": [{
+        "title": ["Publication date regression"], **dates,
+    }]}})[0]
+    assert (paper.year, paper.pub_date) == expected
+
+
+@pytest.mark.asyncio
+async def test_crossref_doi_enrichment_fills_year_from_the_same_date_source(monkeypatch):
+    """按 DOI 补齐年份走的是另一段代码：它必须和检索结果用同一个出处。"""
+    import nodes.literature.tools.search_engines as se
+    from nodes.literature.tools.search_engines import Paper, SearchManager
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {"message": {
+                "issued": {"date-parts": [[1984, 10, 29]]},
+                "published-print": {"date-parts": [[1985, 1]]},
+                "created": {"date-parts": [[2002, 7, 27]]},
+            }}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, *args, **kwargs):
+            assert url == "https://api.crossref.org/works/10.1000/classic"
+            return Response()
+
+    monkeypatch.setattr(se.httpx, "AsyncClient", lambda *args, **kwargs: Client())
+    manager = object.__new__(SearchManager)
+    manager._progress_callback = None
+    paper = Paper(
+        title="Classic paper missing its year",
+        doi="10.1000/classic",
+        source="openalex",
+        authors=["Existing Author"],
+        venue="Existing Journal",
+        abstract="Existing abstract",
+        url="https://doi.org/10.1000/classic",
+    )
+
+    await manager._enrich_metadata_cross_source([paper], {"crossref"})
+
+    assert paper.year == 1984

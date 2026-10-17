@@ -182,7 +182,8 @@ def test_bootstrap_output_goes_to_a_directory_that_exists_at_submit_time(tmp_pat
     assert result["status"] == "success", result.get("error")
     boot = result["bootstrap_stdout_path_pattern"]
     assert Path(boot).parent.is_dir(), "bootstrap 日志目录必须在提交时已存在"
-    assert f"#SBATCH --output={boot}" in result["script_preview"]
+    assert f"--output={boot}" in result["submit_command"]
+    assert f"--error={result['bootstrap_stderr_path_pattern']}" in result["submit_command"]
 
 
 # ── 2. local 调度器：路径角色不能自行铸造宿主写能力 ───────────────────────

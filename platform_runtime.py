@@ -44,10 +44,11 @@ import re
 import sqlite3
 from urllib.parse import quote
 import sys
+import tempfile
 import time
 import threading
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
@@ -150,6 +151,105 @@ class RequestError(ValueError):
 
 class ProjectBusyError(RuntimeError):
     """Another bridge/chat process currently owns this project session."""
+
+
+# ── 启动不是闸（docs/RFC_WORKER_START_IS_NOT_A_GATE_20261016.md）──────────────
+#
+# worker 从起来到第一次调模型之间做十几件事，只有「模型可达」是调模型真正需要的，
+# 其余全在保护持久状态。它们从前每一条都是闸：一个本地文件读不到，整轮在调模型之前
+# 就死，而且死法和「这个家是别人的」一模一样（lujy 10-15 现场六次同一句）。
+#
+# 现在 `PlatformSession.start()` 只有一种写法：`_require_provider_environment()` 是唯一的
+# require；其余每一步经 `_probe()`，失败就**降级、报进 ready、继续**。允许把这一轮
+# 杀掉的失败只有 `_HARD_START_FAILURES` 这几种，按类名登记，`tests/test_start_is_not_a_gate.py`
+# 用 AST 守着：在 `start()` 里加一个 raise、或者在这张表外再造一种硬失败，CI 红。
+
+
+class HardStartFailure(RequestError):
+    """`start()` 里唯一允许把这一轮杀掉的失败。子类按名字登记在测试里，加一个就红。"""
+
+
+class ProviderNotConfigured(HardStartFailure):
+    """模型不可达。调模型的唯一前提，没有它就没有这一轮。"""
+
+
+class IdentityConflict(HardStartFailure):
+    """这个家 / 这个 state 目录**读得到**，而且写着别的身份。继续用会串数据。
+
+    「读不到」不是这个：那是环境坏了（`IdentityUnreadable`），降级跑。
+    """
+
+
+class IdentityUnreadable(Exception):
+    """身份 marker 读不到或不是 JSON。环境坏了，不是冲突 —— 这一轮照跑，不绑身份。"""
+
+    def __init__(self, label: str, marker: Path, cause: BaseException) -> None:
+        super().__init__(f"cannot read {label} identity marker at {marker}: {cause!r}")
+        self.label = label
+        self.marker = marker
+        self.cause = cause
+
+
+#: 在 `start()` 里允许传播出去的失败。表外的一律被 `_probe` 收成降级。
+_HARD_START_FAILURES: tuple[type[BaseException], ...] = (HardStartFailure, ProjectBusyError)
+
+
+class StartReport:
+    """启动时每一项持久化前提成立与否，和每一项降级的事实。随 `ready` 原样出海。
+
+    `capabilities` 里**没有**的键读作「未报告」，不读作成立（两种词表两个问题：缺席≠正常）。
+    """
+
+    def __init__(self) -> None:
+        self.capabilities: dict[str, bool] = {}
+        self.warnings: list[dict[str, Any]] = []
+
+    def ok(self, capability: str) -> None:
+        self.capabilities[capability] = True
+
+    def degrade(
+        self,
+        capability: str,
+        *,
+        code: str,
+        error: BaseException,
+        path: Path | str | None,
+        consequences: Sequence[str],
+    ) -> None:
+        self.capabilities[capability] = False
+        self.warnings.append(
+            {
+                "type": "environment_warning",
+                "code": code,
+                "capability": capability,
+                "severity": "degraded",
+                "path": str(path) if path is not None else None,
+                "error": f"{type(error).__name__}: {error}"[:2000],
+                "consequences": list(consequences),
+            }
+        )
+
+    def repaired(self, capability: str, *, code: str, path: Path | str, backup: Path | str) -> None:
+        """自愈成立：能力位回到 True，但事实照记（severity=repaired），界面与诊断包都看得到。"""
+        self.capabilities[capability] = True
+        self.warnings.append(
+            {
+                "type": "environment_warning",
+                "code": code,
+                "capability": capability,
+                "severity": "repaired",
+                "path": str(path),
+                "backup": str(backup),
+                "error": None,
+                "consequences": [],
+            }
+        )
+
+    def note_repair_failure(self, capability: str, error: BaseException) -> None:
+        for warning in reversed(self.warnings):
+            if warning.get("capability") == capability and warning.get("severity") == "degraded":
+                warning["repair_attempt"] = f"{type(error).__name__}: {error}"[:500]
+                return
 
 
 _FRONTEND_CLASSES: tuple[type, type] | None = None
@@ -520,6 +620,10 @@ def validate_session_config(
     # 不给只剩 CLI / 夹具，退回这个 home 自己的 `projects/`。见 `docs/RFC_PROJECT_HOME_20260924.md`。
     config["projects_home"] = (_absolute_path(raw.get("projects_home"), "projects_home")
                                if raw.get("projects_home") is not None else None)
+    # 这个家是不是只有一个租户（平台按装配说，worker 不问档位名字）：是 → 身份 marker 读不到
+    # 时**留在这个家**、坏了就留底重建；不是 → 读不到就换私有临时家，不往可能是别人的项目层写
+    # （RFC §3.1 / §3.5）。没说 = 不是（fail-closed）。
+    config["home_is_single_tenant"] = raw.get("home_is_single_tenant") is True
     return config
 
 
@@ -1282,18 +1386,17 @@ def _bind_json_identity(
     finally:
         candidate.unlink(missing_ok=True)
 
+    # 「读不到」和「是别人的」是两件事（RFC §G7）。从前两者都叫 `<code>_corrupt`，
+    # 于是一个被安全软件改了权限的文件和一个真正串了租户的家，死法一模一样。
     try:
         actual = json.loads(marker.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RequestError(
-            f"{conflict_code}_corrupt",
-            f"cannot read {label} identity marker at {marker}",
-        ) from exc
+        raise IdentityUnreadable(label, marker, exc) from exc
     if actual != expected:
         details: dict[str, Any] = {"path": str(marker.parent)}
         if include_conflict_values:
             details.update({"expected": expected, "actual": actual})
-        raise RequestError(
+        raise IdentityConflict(
             conflict_code,
             f"{label} is already bound to a different identity",
             details=details,
@@ -3513,9 +3616,10 @@ _PROVIDER_ENVIRONMENT = ("LLM_BASE_URL", "LLM_MODEL")
 
 
 def _require_provider_environment() -> None:
+    """调模型的**唯一**前提。`start()` 里只有这一处 require，其余全是 probe（RFC §G1）。"""
     missing = [name for name in _PROVIDER_ENVIRONMENT if not os.environ.get(name)]
     if missing:
-        raise RequestError(
+        raise ProviderNotConfigured(
             "provider_not_configured",
             "missing provider environment variables: " + ", ".join(missing),
         )
@@ -3782,6 +3886,8 @@ class PlatformSession:
         self._authorized_risk_classes: list[str] = []
         #: 显式声明的档位（assisted / autonomous / continuous）；None = 只按类别推。
         self._autonomy_mode: str | None = None
+        #: 启动时每项持久化前提成立与否（RFC_WORKER_START_IS_NOT_A_GATE）。随 ready 出海。
+        self._report = StartReport()
         self.base_dir: Path
         self.state: Any
         self.harness: Any
@@ -3805,98 +3911,88 @@ class PlatformSession:
         if self._activity is not None:
             self._activity.touch()
 
+    # ── 启动不是闸（docs/RFC_WORKER_START_IS_NOT_A_GATE_20261016.md §3.1、§3.8）────
+    #
+    # 调模型只有一个前提：模型可达（`_require_provider_environment`，唯一的 require）。
+    # 其余每一步都在保护持久状态，它们**降级、报进 ready、继续**，不把这一轮杀掉。
+    #
+    # 这个函数只有一种写法：每一步经 `self._probe(...)`；函数体里直接出现的调用只能是
+    # `tests/test_start_is_not_a_gate.py` 登记过的「纯代码」调用（设环境变量、import 出来的
+    # 构造器、装回调），其余一律经 probe。裸 `raise` 一个都不许有 —— 允许把这一轮杀掉的
+    # 失败只有 `_HARD_START_FAILURES`，它们从 probe 里**穿过去**，不是在这里抛的。
     async def start(self) -> None:
         if self.injected_llm is None:
             _require_provider_environment()
+        self._report = StartReport()
 
         import chat
         from core import agent_loop
         from core.bootstrap import bootstrap
         from core.llm import LLMClient
         from core.loader import load_harness
-        from shared.tools.run_node import (
-            brief_interrupted_child_runs,
-            recover_interrupted_decision_actions,
-            set_child_event_sink,
-        )
+        from core.worker_activity import session_dir_name
+        from shared.tools.run_node import set_child_event_sink
 
         try:
             self._stack.enter_context(_temporary_home(self.home_dir, self.config.get("org_home"),
                                                       self.config.get("projects_home")))
             self._stack.enter_context(_hide_provider_key_from_children())
-            self.home_dir.mkdir(parents=True, exist_ok=True)
-            _bind_tenant_home(self.home_dir, self.tenant_id)
-            self.base_dir = self.config["state_dir"] or _default_session_state_dir(
-                self.home_dir,
-                self.project_id,
-                self.session_id,
-                self.config.get("projects_home"),
+            # 5. 这个家是不是本租户的。读不到 → 单租户的家留下，多租户的家换私有临时家。
+            self._probe(
+                "home_bound", self._bind_home_step,
+                code="home_marker_unreadable",
+                path=self.home_dir / ".platform-tenant-identity.json",
+                consequences=("无法核实这个家属于本租户", "这一轮读到的个人设置与项目层按原样用"),
+                fallback=self._home_fallback,
             )
-            self.base_dir.mkdir(parents=True, exist_ok=True)
+            # 6. state 目录。建不出 → 进程私有临时目录，这一轮的记录不持久。
+            self.base_dir = self._probe(
+                "state_persistent", self._state_dir_step,
+                code="state_dir_unavailable",
+                path=self.config["state_dir"],
+                consequences=("这一轮的运行记录、对话与产物落在临时目录，进程退出即丢"),
+                fallback=self._private_state_dir,
+            )
             self._stack.enter_context(_temporary_runs_root(self.base_dir))
-            _bind_runtime_identity(
-                self.base_dir,
-                tenant_id=self.tenant_id,
-                project_id=self.project_id,
-                session_id=self.session_id,
-                home_dir=self.home_dir,
+            # 8. state 目录是不是这个会话的。读不到 → 不绑，继续。
+            self._probe(
+                "state_bound", self._bind_state_step,
+                code="state_marker_unreadable",
+                path=self.base_dir / ".platform-runtime-identity.json",
+                consequences=("无法核实这个 state 目录属于本会话",),
+                fallback=self._state_marker_fallback,
             )
-            # 这里可以 import 契约：`start()` 已经在 worker 主路径上，core 必然装得起来
-            # （拿锁那一步不行 —— 它在恢复链最底下，见 `_project_lock` 的说明）。
-            from core.worker_activity import ActivityWriter, activity_path, session_dir_name
-
-            orchestrator_name = session_dir_name(self.project_id, self.session_id)
-            session_root = self.base_dir / orchestrator_name
-            self._stack.enter_context(_project_lock(session_root))
-            # ── 活动维上线（D10）────────────────────────────────────────────
-            #
-            # 锁已经到手 = 这个进程从此对这个 session 负责。活动文件从这一刻
-            # 开始存在，到进程退场为止 —— "有没有这个文件"回答的是所有权那半，
-            # "文件里写着什么"回答的是活动那半。
-            #
-            # 进程的 argv 与启动时刻在这里定格：事后取证问"这进程是哪一轮为了
-            # 什么起的"，答案要在**它自己**手里，不能靠外面某张表记得。
-            self._activity = ActivityWriter(
-                activity_path(session_root),
-                spawn_token=os.environ.get("HARNESS_SPAWN_TOKEN", ""),
-                command=list(sys.argv),
-                started_at=_PROCESS_STARTED_AT,
+            session_root = self.base_dir / session_dir_name(self.project_id, self.session_id)
+            # 9. 单写者锁。被活人持有 → 硬失败（真冲突）；锁文件建不出 → 不加锁继续。
+            self._probe(
+                "lock_held", lambda: self._lock_step(session_root),
+                code="lock_unavailable",
+                path=session_root / ".chat.lock",
+                consequences=("没有单写者锁：同一会话若有第二个进程同时写，记录可能互相覆盖",),
             )
-            self._stack.callback(self._activity.close)
-            self._activity.set_state("idle")
-            # 事件从这一刻起同时落盘：后端不在（重启/崩溃）的窗口里，worker
-            # 产生的进度与转录仍是既成事实，恢复后按 offset 续读补齐。
-            # ⚠️ 探 `self._event_sink`（JsonlEmitter 本尊），不是 `self.emit`
-            # （它是本类的包装方法 `_emit_event`，身上从来没有这个方法）。
-            #
-            # 2026-08-19 实测：原来探错了对象，`getattr → None → if callable`
-            # 静默跳过 —— 部署里 84 个 session 目录，events.jsonl 数量为 0。
-            # 整个"崩了也不致命"的耐久层一天都没生效过，而测试全绿。
-            # `getattr + if callable` 这个惯用法就是静默失效的接缝：对象形状
-            # 一变，防线无声消失。所以探不到时**吵**（发一条协议事件），
-            # 不再无声 —— CLI / 测试替身没有 sink 是合法的，但必须可见。
-            attach = getattr(self._event_sink, "attach_durable_sink", None)
-            if callable(attach):
-                attach(session_events_path(session_root))
-                self._durable_sink = str(session_events_path(session_root))
-            else:
-                # 报告在 `ready` 的字段里，**不发独立事件**。
-                #
-                # 第一版发了一条 `durable_sink_unavailable` 事件，它插在 ready
-                # 前面 —— 而这条通道的契约是**一个请求对一个回应**，调用方
-                # （和测试）按位置读 `events[0]`。诊断插队等于破坏协议本身：
-                # 修一个静默失效，换来一个更广的接缝。
-                #
-                # 事实照样送达，只是挂在它本来就该属于的那次 init 的回应上。
-                self._durable_sink = None
+            # 10. 活性文件。写不了 → 后端按 RPC 心跳判活。
+            self._probe(
+                "activity_file", lambda: self._activity_step(session_root),
+                code="activity_file_unavailable",
+                path=session_root,
+                consequences=("后端只能按 RPC 心跳判断这个 worker 是否还活着",),
+            )
+            # 11. 事件落盘副本。接不上 → None，后端据此知道断线期间的事件补不回来。
+            self._durable_sink = self._probe(
+                "durable_sink", lambda: self._durable_sink_step(session_root),
+                code="durable_sink_unavailable",
+                path=session_root,
+                consequences=("后端不在的窗口里产生的事件没有落盘副本",),
+            )
 
             bootstrap()
-            self.state = chat._make_or_load_orchestrator_state(
-                self.project_id,
-                self.base_dir,
-                tenant_id=self.tenant_id,
-                session_id=self.session_id,
-                project_worktree=self.config["workspace_dir"],
+            # 13. 上次的状态。读不回来 → 换私有临时目录从空状态起。
+            self.state = self._probe(
+                "state_loaded", self._state_step,
+                code="state_unreadable",
+                path=self.base_dir,
+                consequences=("这一轮从空状态开始：上次的对话与运行记录读不回来",),
+                fallback=self._state_fallback,
             )
             self.harness = load_harness("_orchestrator")
             self.client = self.injected_llm or LLMClient()
@@ -3917,24 +4013,21 @@ class PlatformSession:
                 )
 
             self.client.stream_display = stream_display
-            existing = chat._load_conversation(self.state)
-            if existing is None:
-                self.messages = chat.build_messages(self.harness, self.state, node_inputs={})
-            else:
-                self.messages = existing
-                recover_interrupted_decision_actions(self.state)
-                # 上次进程死亡时跑到一半的子 run：既成事实机械送达本会话。
-                # **这条 serve 路径才是平台实际走的入口** —— 2026-08-18 实测：
-                # 简报只接在了一次性执行那条上，平台上一次都没触发过。
-                # 「机制存在但没接到路径」的同款，这次是我自己现造的。
-                brief_interrupted_child_runs(self.state)
-            repairs = chat._repair_message_tool_protocol(self.messages)
-            if repairs:
-                self.state.append_transcript(
-                    "conversation_protocol_repaired",
-                    repairs=repairs,
-                    source="platform_runtime_serve_start",
-                )
+            # 14. 上次的对话。读不回来 → 从开场消息起。
+            self.messages = self._probe(
+                "conversation_loaded", lambda: self._conversation_step(chat),
+                code="conversation_unreadable",
+                path=self.state.root / "conversation.json",
+                consequences=("这一轮从开场消息起：上次的对话读不回来",),
+                fallback=lambda exc: chat.build_messages(self.harness, self.state, node_inputs={}),
+            )
+            # 15. 协议修补记录 + 会话开始记录。写不进 transcript → 这一轮的转录不完整。
+            self._probe(
+                "transcript_writable", lambda: self._transcript_step(chat),
+                code="transcript_unwritable",
+                path=self.state.transcript_path,
+                consequences=("这一轮的转录写不进磁盘",),
+            )
 
             self._tailer = TranscriptTailer(self.base_dir, lambda: self.request_id, self.emit)
             self._tail_task = asyncio.create_task(self._tailer.run())
@@ -3955,11 +4048,6 @@ class PlatformSession:
 
             agent_loop.set_progress_sink(progress_sink)
             set_child_event_sink(child_event_sink)
-            self.state.append_transcript(
-                "platform_session_start",
-                request_id=self.request_id,
-                project_id=self.project_id,
-            )
             self.emit(
                 "ready",
                 request_id=self.request_id,
@@ -3977,6 +4065,9 @@ class PlatformSession:
                     else None
                 ),
                 sandbox_protocol_version=SANDBOX_PROTOCOL_VERSION,
+                # 每项持久化前提成立与否 + 每项降级的事实。**没有**的键读作「未报告」。
+                capabilities=dict(self._report.capabilities),
+                warnings=list(self._report.warnings),
             )
         except BaseException:
             self._closed = True
@@ -3988,6 +4079,219 @@ class PlatformSession:
                 await self._tail_task
             self._stack.close()
             raise
+
+    # ── probe：`start()` 里每一步的唯一写法 ──────────────────────────────────────
+
+    def _probe(
+        self,
+        capability: str,
+        step: Callable[[], Any],
+        *,
+        code: str,
+        path: Path | str | None = None,
+        consequences: Sequence[str] = (),
+        fallback: Callable[[BaseException], Any] | None = None,
+    ) -> Any:
+        """跑一步持久化前提。成立 → 记 True 返回结果；不成立 → 记 False + 一条
+        `environment_warning`，有退路就走退路，没有就返回 None，**不抛**。
+
+        只有 `_HARD_START_FAILURES` 从这里穿过去：模型不可达、身份真冲突、锁被活人持有。
+        这里**不挑异常类型**：环境坏了就是环境坏了，一个 PermissionError 和一个
+        IsADirectoryError 对这一轮的意义相同 —— 这件事做不成，说出来，继续。
+        """
+        try:
+            value = step()
+        except _HARD_START_FAILURES:
+            raise
+        except Exception as exc:  # noqa: BLE001 — 环境故障是观察，不是退出
+            self._report.degrade(
+                capability, code=code, error=exc, path=path, consequences=consequences
+            )
+            if fallback is None:
+                return None
+            return fallback(exc)
+        self._report.ok(capability)
+        return value
+
+    # ── 每一步 ────────────────────────────────────────────────────────────────
+
+    def _bind_home_step(self) -> Path:
+        self.home_dir.mkdir(parents=True, exist_ok=True)
+        return _bind_tenant_home(self.home_dir, self.tenant_id)
+
+    def _home_fallback(self, exc: BaseException) -> None:
+        """只有一个租户的家：marker 读不到也留在这个家，坏了留底重建（`_rebuild_marker`）。
+        多租户的家：这个家可能是别人的，换私有临时家，不往它的项目层写。
+        家本身建不出来：不分租户，只能换。"""
+        single_tenant = self.config.get("home_is_single_tenant") is True
+        if single_tenant and isinstance(exc, IdentityUnreadable):
+            # 只有一个租户：坏掉的 marker 改名留底、重建（RFC §3.5，可撤：把 .bak 改回来）。
+            self._rebuild_marker("home_bound", exc, code="home_marker_rebuilt",
+                                 bind=lambda: _bind_tenant_home(self.home_dir, self.tenant_id))
+            return None
+        self.home_dir = Path(tempfile.mkdtemp(prefix="hf-home-"))
+        self._stack.enter_context(_temporary_home(self.home_dir, self.config.get("org_home"),
+                                                  self.config.get("projects_home")))
+        return None
+
+    def _state_dir_step(self) -> Path:
+        base = self.config["state_dir"] or _default_session_state_dir(
+            self.home_dir,
+            self.project_id,
+            self.session_id,
+            self.config.get("projects_home"),
+        )
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+
+    def _private_state_dir(self, exc: BaseException) -> Path:
+        return Path(tempfile.mkdtemp(prefix="hf-state-"))
+
+    def _bind_state_step(self) -> Path:
+        return _bind_runtime_identity(
+            self.base_dir,
+            tenant_id=self.tenant_id,
+            project_id=self.project_id,
+            session_id=self.session_id,
+            home_dir=self.home_dir,
+        )
+
+    def _state_marker_fallback(self, exc: BaseException) -> None:
+        """state 目录是这个会话私有的（后端按会话给的路径），marker 读不到就改名留底、重建；
+        分不了档位 —— 它不可能是别人的。读得到而写着别人 → IdentityConflict 早就穿出去了。"""
+        if isinstance(exc, IdentityUnreadable):
+            self._rebuild_marker("state_bound", exc, code="state_marker_rebuilt", bind=self._bind_state_step)
+        return None
+
+    def _rebuild_marker(self, capability: str, exc: IdentityUnreadable, *, code: str,
+                        bind: Callable[[], Any]) -> None:
+        """坏掉的身份 marker：改名 `.bak.<时间>` 留底，重建。改不动 / 重建又失败 → 维持降级，
+        把这次尝试记在那条 warning 上。只做可撤销的事：留底不删。"""
+        marker = exc.marker
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+        backup = marker.with_name(f"{marker.name}.bak.{stamp}")
+        try:
+            marker.rename(backup)
+            bind()
+        except _HARD_START_FAILURES:
+            raise
+        except Exception as again:  # noqa: BLE001 — 修不好就维持降级，不升级成失败
+            self._report.note_repair_failure(capability, again)
+            return
+        self._report.repaired(capability, code=code, path=marker, backup=backup)
+
+    def _brief_environment(self) -> None:
+        """降级那一轮，agent 要知道自己的记忆保不保得住 —— 一行，机械送达（injected_messages，
+        agent_loop 每轮开头 drain，模型必见）。同一组 code 只送一次。它拿不到修复工具（RFC §G4），
+        这一行只是让它别向用户许诺「我记住了」。"""
+        degraded = [w for w in self._report.warnings if w.get("severity") == "degraded"]
+        codes = sorted(str(w.get("code")) for w in degraded)
+        if not codes:
+            return
+        hook_state = getattr(self.state, "hook_state", None)
+        if not isinstance(hook_state, dict) or hook_state.get("environment_briefed") == codes:
+            return
+        lines = ["[平台环境提示] 这一轮有持久化前提没成立，用户已在界面上被告知；你不必也不能去修它："]
+        for warning in degraded:
+            consequences = "；".join(str(c) for c in (warning.get("consequences") or [])) or "影响未知"
+            lines.append(f"- {warning.get('code')}（{warning.get('path') or '路径未知'}）：{consequences}")
+        lines.append("不要向用户承诺本轮的内容已被记住或保存；不要试图自己修复权限或目录，那不是你的工具。")
+        hook_state.setdefault("injected_messages", []).append(
+            {"content": "\n".join(lines), "source": "platform_environment"}
+        )
+        hook_state["environment_briefed"] = codes
+
+    def _lock_step(self, session_root: Path) -> None:
+        self._stack.enter_context(_project_lock(session_root))
+
+    def _activity_step(self, session_root: Path) -> None:
+        # ── 活动维上线（D10）────────────────────────────────────────────
+        #
+        # 锁已经到手 = 这个进程从此对这个 session 负责。活动文件从这一刻
+        # 开始存在，到进程退场为止 —— "有没有这个文件"回答的是所有权那半，
+        # "文件里写着什么"回答的是活动那半。
+        #
+        # 进程的 argv 与启动时刻在这里定格：事后取证问"这进程是哪一轮为了
+        # 什么起的"，答案要在**它自己**手里，不能靠外面某张表记得。
+        from core.worker_activity import ActivityWriter, activity_path
+
+        activity = ActivityWriter(
+            activity_path(session_root),
+            spawn_token=os.environ.get("HARNESS_SPAWN_TOKEN", ""),
+            command=list(sys.argv),
+            started_at=_PROCESS_STARTED_AT,
+        )
+        self._stack.callback(activity.close)
+        activity.set_state("idle")
+        self._activity = activity
+
+    def _durable_sink_step(self, session_root: Path) -> str | None:
+        # 事件从这一刻起同时落盘：后端不在（重启/崩溃）的窗口里，worker
+        # 产生的进度与转录仍是既成事实，恢复后按 offset 续读补齐。
+        # ⚠️ 探 `self._event_sink`（JsonlEmitter 本尊），不是 `self.emit`
+        # （它是本类的包装方法 `_emit_event`，身上从来没有这个方法）。
+        #
+        # 2026-08-19 实测：原来探错了对象，`getattr → None → if callable`
+        # 静默跳过 —— 部署里 84 个 session 目录，events.jsonl 数量为 0。
+        # 整个"崩了也不致命"的耐久层一天都没生效过，而测试全绿。
+        # 探不到时不抛也不吵：报告在 `ready` 的字段里（durable_sink=None），
+        # **不发独立事件** —— 这条通道的契约是一个请求对一个回应，诊断插队等于
+        # 破坏协议本身。CLI / 测试替身没有 sink 是合法的，但必须可见。
+        attach = getattr(self._event_sink, "attach_durable_sink", None)
+        if not callable(attach):
+            return None
+        attach(session_events_path(session_root))
+        return str(session_events_path(session_root))
+
+    def _state_step(self) -> Any:
+        import chat
+
+        return chat._make_or_load_orchestrator_state(
+            self.project_id,
+            self.base_dir,
+            tenant_id=self.tenant_id,
+            session_id=self.session_id,
+            project_worktree=self.config["workspace_dir"],
+        )
+
+    def _state_fallback(self, exc: BaseException) -> Any:
+        """state 目录建得出但里面的东西读不回来 / 写不进：换私有临时目录从空状态起。
+        这一步的退路没有退路：临时目录都建不出，这台机器没法跑任何东西。"""
+        self.base_dir = self._private_state_dir(exc)
+        self._stack.enter_context(_temporary_runs_root(self.base_dir))
+        self._report.capabilities["state_persistent"] = False
+        return self._state_step()
+
+    def _conversation_step(self, chat: Any) -> list[Any]:
+        from shared.tools.run_node import (
+            brief_interrupted_child_runs,
+            recover_interrupted_decision_actions,
+        )
+
+        existing = chat._load_conversation(self.state)
+        if existing is None:
+            return chat.build_messages(self.harness, self.state, node_inputs={})
+        recover_interrupted_decision_actions(self.state)
+        # 上次进程死亡时跑到一半的子 run：既成事实机械送达本会话。
+        # **这条 serve 路径才是平台实际走的入口** —— 2026-08-18 实测：
+        # 简报只接在了一次性执行那条上，平台上一次都没触发过。
+        # 「机制存在但没接到路径」的同款，这次是我自己现造的。
+        brief_interrupted_child_runs(self.state)
+        return existing
+
+    def _transcript_step(self, chat: Any) -> None:
+        repairs = chat._repair_message_tool_protocol(self.messages)
+        if repairs:
+            self.state.append_transcript(
+                "conversation_protocol_repaired",
+                repairs=repairs,
+                source="platform_runtime_serve_start",
+            )
+        self.state.append_transcript(
+            "platform_session_start",
+            request_id=self.request_id,
+            project_id=self.project_id,
+        )
 
     async def _wait_for_background(self) -> None:
         from core.session_driver import wait_for_background
@@ -4255,6 +4559,7 @@ class PlatformSession:
                 "pause_pending",
                 "answer the pending pause before starting another turn",
             )
+        self._brief_environment()
         before, tokens_used_before = self._operation_start(request_id, "turn")
         # 单轮也要能插话：一个 experiment 节点可能跑几小时，"这一轮"和"无人值守"
         # 对用户没有区别 —— 区别只在框架内部。

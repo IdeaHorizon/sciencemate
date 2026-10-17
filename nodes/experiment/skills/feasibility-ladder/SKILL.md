@@ -2,7 +2,7 @@
 name: feasibility-ladder
 description: |
   预注册要求的资源（算力 / 软件 / 数据 / 凭证 / 人工环节）拿不到时，按四级阶梯
-  处理并在穷尽后合法声明 infeasible。任何"这一项好像做不了"的时刻使用。
+  处理并在穷尽后形成可接管的诚实 blocker。任何"这一项好像做不了"的时刻使用。
 applies_when:
   - prereg 的某项资源需求在本环境不可得或疑似不可得
   - 撞上平台限制（egress 白名单、配额、可写根、凭证缺失）
@@ -12,9 +12,9 @@ tools_used:
   - search_kb
   - fetch_resource
   - request_human_input
-  - save_artifact
   - report_blocker
-expected_outcome: 资源被合法获取并继续执行，或产出一份能触发框架强制 REDIRECT 的 infeasible 声明
+  - finish
+expected_outcome: 资源被合法获取并继续执行，或留下可接管 blocker 并诚实结束本 run
 status: validated
 ---
 
@@ -50,7 +50,7 @@ status: validated
 
 `safe_run_bash`、`safe_execute_python` 和本地 job 所在的 RunAttempt **没有网络**。
 `curl` / `wget` / `git clone` 在里面必然失败，反复试探只是烧轮次；宿主机有网
-**不等于**当前 Attempt 有网，不要据此判断"网络没问题"。
+**不等于**当前沙箱容器有网，不要据此判断"网络没问题"。
 
 外部文件或公开 Git 源码需要落盘时，唯一通道是 `fetch_resource`：它在只挂空
 staging 的受控下载容器里联网，再把校验后的文件/源码导入获准写根。
@@ -62,34 +62,20 @@ staging 的受控下载容器里联网，再把校验后的文件/源码导入�
 "能不能简化 / 人工环节可否跳过 / 要不要花钱装环境" → `request_human_input`。
 用户在，问一句比猜便宜得多。一次问全：带 options + 推荐项 + 无应答默认。
 
-## ④ declare infeasible —— 合法终态，但必须按格式声明
+## ④ 形成可接管 blocker —— 合法终态，不伪造结果
 
-①②③ 穷尽后确实执行不了，这是**合法终态**。声明格式是硬要求，框架按字段识别：
+①②③ 穷尽后确实执行不了，这是**合法终态**。先调用 `report_blocker`，一次说清：
 
-experiment_log 的 content 里写一个独立段：
+- 缺什么：具体到域名、数据集、软件版本、配额、路径或凭证；
+- 试过什么：probe、acquire 和 ask 的真实结果，附可读取的输出或日志路径；
+- 谁能解除：需要 owner、平台、数据节点还是外部维护者做什么；
+- 恢复后从哪继续：下一条可执行动作，而不是泛泛写“稍后重试”。
 
-```
-## Feasibility
-verdict: infeasible
-缺什么：<具体到域名 / 数据集 / 软件版本 / 配额值>
-试过什么：<probe 证据、acquire 尝试、ask 的结果，各带路径或工具输出>
-建议上游怎么降级：<给 hypothesis 一个可执行的修改方向>
-```
+然后调用 `finish(outcome="blocked", blocker=..., summary=..., limitations=[...])`。
+框架负责生成和冻结交付记录；不要手工创建、保存或冻结结果三件套，也不要替上游选择
+降级方案。若已经得到一部分可用结果，可如实选 `partial`，但仍要把缺口与影响写清。
 
-同时在 `save_artifact` 的 `metadata` 里带：
-
-```
-infeasible: true                       # 必须，布尔真值
-infeasible_reason: "<一句话：缺什么、试过什么、为什么不行>"
-redirect_target: "hypothesis"          # 可选，默认 hypothesis
-```
-
-框架读到声明会**机械强制 REDIRECT** 回上游降级设计（优先级盖过 reviewer 推荐和
-fail-closed），你不用自己纠结"交不了差怎么办"。段落标题写 `## 可行性` 也认，
-判定词写"不可执行/无法执行/不可行"也认。
-
-声明 infeasible 的 run **禁止**翻 claim status —— `validated`/`refuted` 会被框架
-拒绝：没真做实验就没有证伪权。
+没有真实执行就没有科学裁决权：不得把“资源不可得”写成假设已验证或已证伪。
 
 ## ⛔ 绝对红线
 

@@ -148,3 +148,18 @@ store:468 一条吃掉 ~30 拒绝点。
 
 所以「呈裁 3」不再是一个待裁项：框架不再单方面改写 run 的科学地位，因为那条
 效应整个不存在了。留在上面表格里的是**当时的决议原文**，这一节是它的现状。
+
+
+## 2026-10-02 补记：v3 正式输入核验推翻 O2（#1175）
+
+Experiment v3（#1175）把「本动作声明消费的正式输入未通过核验」从 O2 的**照跑 + 记一条
+`execution_precondition_witness`** 改成了 **在 spawn / 提交之前拒绝**
+（`nodes/experiment/tools/input_admission.py` → `formal_input_not_ready`；
+设计依据 `nodes/experiment/docs/experiment_governing_v3.md`「正式输入——只阻止会消费该输入的 action」）。
+
+这与上表 rm:1946 / sb:3517 的 O2 判决相反。**2026-10-02 wangd 裁：v3 起按 B 类墙登记。**
+理由：v3 里任务输入的身份是 canonical A 的一部分，用不对应或未核验的字节跑出的结果会被记成
+「用了那份输入」，账就假了；O2 当年的前提（输入身份只是执行前提、可以事后披露）在 v3 下不成立。
+边界：只拦显式声明消费该输入的动作；不消费的动作与诚实 finish 不受影响；**旧协议 run 仍走 O2
+的见证形态**（`resource_manager.py` / `safe_bash.py` 的 witness 分支保留）。
+registry 条目见 `refusal_registry.yaml`「input_admission.py」段。上表保留当时的决议原文。

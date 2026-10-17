@@ -29,6 +29,7 @@ from app.models.project import OperationMode, Project, ProjectConfig
 from app.models.resource import ProjectResource
 from app.models.user import User
 from app.services import run_failures
+from app.services.session_environment import environment_for_run
 from app.services.research_migration import upgrade_records_before_use
 from app.services.execution_ingest import (
     PAUSE_OFFER_KEY,
@@ -1910,6 +1911,11 @@ async def execute_local_turn(
                 "artifactIds": [],
                 "modelBackendId": backend.id,
                 "executionKernel": "local_demo" if backend.provider == "demo" else "formal_harness",
+                # worker 起来时哪些持久化前提没成立（降级是会话级事实，成功的轮也记）：
+                # 条幅、诊断包、后端重启后的读者都从这里读（RFC_WORKER_START_IS_NOT_A_GATE §3.3）。
+                "environment": await environment_for_run(
+                    db, project_id=project_id, session_id=session_id, run_id=run_id,
+                ),
                 # 这一趟**实际**用了哪种驱动，跟着这次执行走。
                 #
                 # 2026-08-12：wangd 问「你没开 continuous？」，我答不上来 ——
@@ -2177,6 +2183,12 @@ async def execute_local_turn(
                     "assistantMessage": None,
                     "modelBackendId": backend_id,
                     "executionKernel": "formal_harness",
+                    # 环境那一节：活 worker 的降级事实 + 带路径的硬失败做成同形事件 + 同 code 连续第二次
+                    # 自动跑的 doctor（RFC_WORKER_START_IS_NOT_A_GATE §3.6：第二次不再把人当重试循环）。
+                    "environment": await environment_for_run(
+                        db, project_id=project_id, session_id=session_id, run_id=run_id,
+                        failure=failure, exc=exc,
+                    ),
                     "drive": ("unattended" if (autonomy and autonomy.unattended) else "assisted"),
                     "researchSettingsSnapshot": research_settings_ref,
                 }

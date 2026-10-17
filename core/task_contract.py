@@ -37,6 +37,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,8 +57,36 @@ ASSIGNMENT_NONE = "explicit_none"
 ASSIGNMENT_PENDING = "pending_assignment"
 
 
+#: 产物账本的内容身份（sha256 hexdigest）。执行节点按这个形状核，不认别的。
+_CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
 class TaskContractError(ValueError):
     """合同账本上**按设计**的拒绝（分叉冲突、字段非法、试图改写）。"""
+
+
+class PreregAssignmentUnresolved(TaskContractError):
+    """写合同时，exact 绑定补不齐或对不上账本（#1099）。
+
+    `detail` 是给调用方的结构化事实（缺哪几件、账上有哪些冻结版），让它一次改对，
+    而不是对着一句话猜。
+    """
+
+    def __init__(self, message: str, **detail: Any):
+        super().__init__(message)
+        self.detail = detail
+
+
+def _positive_version(value: Any) -> str | None:
+    """版本号的规范写法（正整数的十进制串）；不是正整数就 None。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value) if value >= 1 else None
+    text = str(value or "").strip()
+    if text.isascii() and text.isdecimal() and int(text) >= 1:
+        return str(int(text))
+    return None
 
 
 @dataclass(frozen=True)
@@ -71,11 +100,28 @@ class PreregAssignment:
     reason: str = ""
 
     @classmethod
-    def exact(cls, artifact_id: str, *, version: str = "", content_hash: str = "") -> PreregAssignment:
+    def exact(cls, artifact_id: str, *, version: Any = "", content_hash: str = "") -> PreregAssignment:
+        # exact_bound 是 (artifact_id, version, content_hash) **三件一起**才算数（#1099）。
+        # 此前这里只要 id：合同照写、派发照走，执行节点起步时才以
+        # prereg_assignment_invalid 拒掉 —— 错在父这一步，却要等子 run 起来才看见，
+        # 而子 run 无权改派发输入，只能 blocked 等重派。只有 id 的绑定还会让
+        # "绑的是哪一版"在写合同之后继续漂移（同一 id 后来又冻了新版）。
+        # 写合同时补齐（`resolve_exact_prereg` 从冻结 head 取），补不齐就在这里拒。
         if not str(artifact_id or "").strip():
             raise TaskContractError("exact_bound 必须给 artifact_id")
-        return cls(kind=ASSIGNMENT_EXACT, artifact_id=str(artifact_id).strip(),
-                   version=str(version or ""), content_hash=str(content_hash or ""))
+        aid = str(artifact_id).strip()
+        v = _positive_version(version)
+        h = str(content_hash or "").strip().lower()
+        missing = [name for name, ok in (
+            ("version（正整数）", v is not None),
+            ("content_hash（64 位十六进制 sha256）", bool(_CONTENT_HASH_RE.fullmatch(h))),
+        ) if not ok]
+        if missing:
+            raise TaskContractError(
+                f"exact_bound 是 (artifact_id, version, content_hash) 三件一起才算数，"
+                f"{aid} 缺 {'、'.join(missing)}。只有 id 的绑定执行节点认不了，"
+                "而且同一 id 之后再冻新版时，「绑的是哪一版」就说不清了。")
+        return cls(kind=ASSIGNMENT_EXACT, artifact_id=aid, version=v, content_hash=h)
 
     @classmethod
     def none(cls, reason: str) -> PreregAssignment:
@@ -107,6 +153,109 @@ class PreregAssignment:
         if kind == ASSIGNMENT_NONE:
             return cls(kind=kind, reason=str(data.get("reason") or ""))
         raise TaskContractError(f"未知的 prereg 绑定形态：{kind!r}")
+
+
+def resolve_exact_prereg(
+    state: Any, artifact_id: str, *, version: Any = "", content_hash: str = "",
+) -> tuple[PreregAssignment, str]:
+    """写合同时把 exact 绑定对着产物账本补齐、核对（#1099）。返回 `(绑定, 补自哪里)`。
+
+    - 只给 id：head 冻结 → 取 head 的 version + content_hash（`frozen_head`）；
+      head 是未冻结草稿、或从没冻结过 → 拒。草稿压在旧冻结版上时有两个说得通的
+      答案（等草稿冻结 / 绑旧冻结版），**不替调用方选**，把冻结版列出来让它点名。
+    - 给了 version：那一版必须存在且冻结，content_hash 从它补（给了就必须相等）。
+    - 只给 content_hash：必须恰好对上一个冻结版。
+
+    哈希的算法与执行节点核对时同一个式子（账本的 content_hash，缺了才 sha256 正文），
+    否则这里补进去的值子 run 起来照样对不上。
+    """
+    from core.ledger import record_version, sha256_text
+
+    aid = str(artifact_id or "").strip()
+    if not aid:
+        raise TaskContractError("exact_bound 必须给 artifact_id")
+    given_version = str(version if version is not None else "").strip()
+    given_hash = str(content_hash or "").strip().lower()
+    missing = [name for name, given in (("prereg_version", given_version),
+                                        ("prereg_content_hash", given_hash)) if not given]
+
+    def _unresolved(message: str, code: str, **extra: Any) -> PreregAssignmentUnresolved:
+        return PreregAssignmentUnresolved(
+            message, reason_code=code, artifact_id=aid, missing=missing, **extra)
+
+    want_version = _positive_version(given_version) if given_version else None
+    if given_version and want_version is None:
+        raise _unresolved(f"prereg_version={given_version!r} 不是正整数。", "version_invalid")
+    if given_hash and not _CONTENT_HASH_RE.fullmatch(given_hash):
+        raise _unresolved(
+            "prereg_content_hash 不是 64 位十六进制 sha256 —— 照抄产物账本上的 content_hash。",
+            "content_hash_invalid")
+
+    try:
+        versions = list(state.artifact_versions(aid))
+    except Exception as exc:  # noqa: BLE001 —— 读不到账 ≠ 账上没有，分开报
+        raise _unresolved(f"读不到 {aid} 的版本账（{type(exc).__name__}），核对不了这份绑定。",
+                          "read_failed") from exc
+    if not versions:
+        raise _unresolved(
+            f"这个 run 看得到的产物账上没有 {aid}。绑不了一份找不到的预注册 —— "
+            "先 list_artifacts(artifact_type='pre_registration') 确认 id。", "not_found")
+    head = versions[-1]
+    if head.get("type") != "pre_registration":
+        raise _unresolved(f"{aid} 是 {head.get('type')!r}，不是 pre_registration。",
+                          "not_pre_registration")
+
+    def _hash(record: dict) -> str:
+        return str(record.get("content_hash") or "") or sha256_text(str(record.get("content") or ""))
+
+    def _frozen(record: dict) -> bool:
+        return bool((record.get("metadata") or {}).get("frozen"))
+
+    frozen = [{"version": record_version(r), "content_hash": _hash(r)}
+              for r in versions if _frozen(r)]
+
+    if want_version is not None:
+        exact = next((r for r in versions if str(record_version(r)) == want_version), None)
+        if exact is None:
+            raise _unresolved(f"{aid} 没有 v{want_version}。", "version_not_found",
+                              frozen_versions=frozen)
+        if not _frozen(exact):
+            raise _unresolved(
+                f"{aid} v{want_version} 没冻结过。未冻结的预注册不构成执行授权 —— "
+                "先冻结它，或改绑一个冻结版。", "version_not_frozen", frozen_versions=frozen)
+        actual = _hash(exact)
+        if given_hash and given_hash != actual:
+            raise _unresolved(
+                f"{aid} v{want_version} 的 content_hash 是 {actual}，不是你给的 {given_hash}。",
+                "content_hash_mismatch", frozen_versions=frozen)
+        return (PreregAssignment.exact(aid, version=want_version, content_hash=actual),
+                "caller" if given_hash else "exact_version")
+
+    if given_hash:
+        hits = [f for f in frozen if f["content_hash"] == given_hash]
+        if len(hits) != 1:
+            raise _unresolved(
+                (f"{aid} 没有哪个冻结版的 content_hash 是 {given_hash}。" if not hits else
+                 f"{aid} 有 {len(hits)} 个冻结版内容相同（v{', v'.join(str(h['version']) for h in hits)}），"
+                 "只给 content_hash 分不出绑哪一版 —— 带上 prereg_version。"),
+                "content_hash_not_found" if not hits else "content_hash_ambiguous",
+                frozen_versions=frozen)
+        return (PreregAssignment.exact(aid, version=hits[0]["version"],
+                                       content_hash=given_hash), "content_hash")
+
+    if _frozen(head):
+        return (PreregAssignment.exact(aid, version=record_version(head),
+                                       content_hash=_hash(head)), "frozen_head")
+    if frozen:
+        last = frozen[-1]
+        raise _unresolved(
+            f"{aid} 的 head v{record_version(head)} 是未冻结的修订草稿，上一个冻结版是 "
+            f"v{last['version']}。只给 id 有两个说得通的答案（等草稿冻结 / 绑旧冻结版），"
+            f"不替你选：要绑冻结版就带 prereg_version={last['version']}；要绑修订版就先冻结它。",
+            "head_is_unfrozen_draft", frozen_versions=frozen)
+    raise _unresolved(
+        f"{aid} 从没冻结过。未冻结的预注册不构成执行授权 —— 先冻结，再写合同；"
+        "这一趟确实不该绑预注册的话，用 no_prereg_reason 明说。", "never_frozen")
 
 
 @dataclass(frozen=True)

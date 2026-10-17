@@ -34,6 +34,10 @@ def _effect(kind=EFFECT_OPERATIONAL, contribution=CONTRIBUTION_NONE):
         source_receipt={"artifact_id": "a1", "closure_id": "c1", "content_hash": "h1"})
 
 
+#: exact_bound 三件齐全（#1099）—— 只有 id 的绑定写不进合同。
+_H1 = PreregAssignment.exact("pre_registration__H1", version="1", content_hash="a" * 64)
+
+
 def _revision(tmp_path, assignment):
     return TaskContractLog(tmp_path / "tasks").append(
         task_instance_uuid="u1", objective="测 Tc", actor="orch",
@@ -46,7 +50,7 @@ def _revision(tmp_path, assignment):
 def test_a_pure_build_child_does_not_close_the_scientific_objective(tmp_path) -> None:
     """#1097 验收 6：exact-bound 的科学任务下，纯构建 child 可以 completed，
     但父侧机械读到 `scientific_contribution=none`，科学目标保持 open。"""
-    rev = _revision(tmp_path, PreregAssignment.exact("pre_registration__H1"))
+    rev = _revision(tmp_path, _H1)
     out = remaining_obligation(rev, _effect(), child_status="completed")
 
     assert out["operational_subtask_closed"] is True
@@ -56,7 +60,7 @@ def test_a_pure_build_child_does_not_close_the_scientific_objective(tmp_path) ->
 
 def test_a_real_scientific_child_closes_it(tmp_path) -> None:
     """对照：真推进了科学目标的那一趟要能关掉它，否则 reducer 成了永不满足的墙。"""
-    rev = _revision(tmp_path, PreregAssignment.exact("pre_registration__H1"))
+    rev = _revision(tmp_path, _H1)
     out = remaining_obligation(
         rev, _effect(EFFECT_FULL, CONTRIBUTION_EVIDENCE), child_status="completed")
     assert out["scientific_objective_open"] is False
@@ -64,7 +68,7 @@ def test_a_real_scientific_child_closes_it(tmp_path) -> None:
 
 def test_an_unreported_effect_is_not_read_as_done(tmp_path) -> None:
     """「没报告」和「报告说全做完了」必须是两个答案。"""
-    rev = _revision(tmp_path, PreregAssignment.exact("pre_registration__H1"))
+    rev = _revision(tmp_path, _H1)
     out = remaining_obligation(rev, None, child_status="completed")
     assert out["scientific_objective_open"] is True
     assert out["operational_subtask_closed"] is False
@@ -78,7 +82,7 @@ def test_a_task_with_no_prereg_has_no_scientific_objective_to_close(tmp_path) ->
 
 
 def test_a_child_that_did_not_finish_closes_nothing(tmp_path) -> None:
-    rev = _revision(tmp_path, PreregAssignment.exact("pre_registration__H1"))
+    rev = _revision(tmp_path, _H1)
     out = remaining_obligation(rev, _effect(EFFECT_FULL, CONTRIBUTION_EVIDENCE),
                                child_status="blocked")
     assert out["scientific_objective_open"] is True
@@ -245,7 +249,7 @@ def test_a_child_reads_its_assignment_in_one_call(tmp_path) -> None:
     """节点不必自己拼项目路径，更不该去扫"此刻项目里有几份 prereg"。"""
     from core.task_contract import ASSIGNMENT_EXACT, ASSIGNMENT_PENDING, assignment_for_state
 
-    rev = _revision(tmp_path, PreregAssignment.exact("pre_registration__H1"))
+    rev = _revision(tmp_path, _H1)
 
     class _Child:
         task_instance_uuid = "u1"

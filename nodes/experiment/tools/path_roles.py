@@ -407,12 +407,31 @@ def _is_system_root(path: str) -> bool:
     if not path:
         return False
     normalized = str(Path(path)).rstrip("/") or "/"
-    if normalized in _SYSTEM_ROOTS or normalized in _SHARED_MOUNT_ROOTS:
+    if normalized in _machine_roots():
         return True
     try:
-        return normalized == str(Path.home()).rstrip("/")
+        home = Path.home()
+        return normalized in {str(home).rstrip("/"), str(home.resolve()).rstrip("/")}
     except (RuntimeError, OSError):
         return False
+
+
+def _machine_roots() -> set[str]:
+    """系统根与共享挂载根，**字面形与解析形都算**（#1184，框架侧代改，owner: lujy）。
+
+    传进 ``_is_system_root`` 的路径已经过 ``_normalize_path`` 的 ``resolve()``。
+    macOS 上 ``/etc`` → ``/private/etc``、``/var`` → ``/private/var``，拿解析过的
+    路径去比没解析的名单，两者都会被当成**普通子树**放行成可写的 dependency_root
+    —— 等于对整台机器关掉写边界。名单两种形态一起比，别名绕不过去。
+    """
+    roots: set[str] = set()
+    for raw in (*_SYSTEM_ROOTS, *_SHARED_MOUNT_ROOTS):
+        roots.add(raw)
+        try:
+            roots.add(str(Path(raw).resolve()).rstrip("/") or "/")
+        except (RuntimeError, OSError):
+            continue
+    return roots
 
 
 def _coerce_role(role: str, spec: Any, source: str,

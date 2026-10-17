@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -183,16 +184,89 @@ def _make_job(k, *, memory_bytes: int, pids: int) -> V:
     return job
 
 
+#: 账本（RFC_WORKER_START_IS_NOT_A_GATE §3.9）：我们是整个系统里唯一会改用户目录权限的人，
+#: 从前这里 `check=False, capture_output` 连输出都扔了 —— 任何权限悬案都只能猜「是不是我们干的」。
+#: 由 `run()` 从 spec["journal"] 设；探针（probe）里不记（临时目录，不是用户的东西）。
+_JOURNAL: str | None = None
+
+
+def _icacls_text(path: str) -> str | None:
+    try:
+        done = subprocess.run(["icacls", path], capture_output=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (done.stdout or b"").decode("utf-8", "replace").strip() or None
+
+
+def _journal(record: dict) -> None:
+    if not _JOURNAL:
+        return
+    try:
+        import datetime as _dt
+        record = {"at": _dt.datetime.now(_dt.UTC).isoformat(), **record}
+        os.makedirs(os.path.dirname(_JOURNAL) or ".", exist_ok=True)
+        with open(_JOURNAL, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass   # 账记不上不该让命令跑不成；账本自己的缺席在快照比对里看得见
+
+
 def _icacls(path: str, level: str) -> None:
     """给 path 打强制完整性标签。level 'L'=Low(放行 Low-IL 写)、'M'=Medium(拒 Low-IL 写)。
     只降/平级：给对象打不高于自己令牌的标签不需要管理员（打 High 才要 SeRelabelPrivilege）。
-    对自己拥有的对象失败不抛（探针会把真结果反映出来）。"""
-    subprocess.run(["icacls", path, "/setintegritylevel", f"(OI)(CI){level}"],
-                   capture_output=True, timeout=15, check=False)
+    对自己拥有的对象失败不抛（探针会把真结果反映出来）—— 但**每一次都记账**：路径、改前、改后、
+    返回码、哪个 run / spawn token。"""
+    before = _icacls_text(path) if _JOURNAL else None
+    try:
+        done = subprocess.run(["icacls", path, "/setintegritylevel", f"(OI)(CI){level}"],
+                              capture_output=True, timeout=15, check=False)
+        rc, err = done.returncode, (done.stderr or b"").decode("utf-8", "replace").strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        rc, err = None, f"{type(exc).__name__}: {exc}"
+    if _JOURNAL:
+        _journal({
+            "op": "setintegritylevel", "path": path, "level": level,
+            "before": before, "after": _icacls_text(path), "returncode": rc, "stderr": err[:2000],
+            "spawn_token": (os.environ.get("HARNESS_SPAWN_TOKEN") or "")[:8],
+            "run_id": os.environ.get("HARNESS_RUN_ID") or None,
+            "pid": os.getpid(),
+        })
+
+
+def _msys_quote(arg: str) -> str:
+    r"""一个参数按 MSYS（Cygwin）运行时切命令行的规则加引号：整段包进双引号，里面的 ``\``
+    与 ``"`` 前面各加一个 ``\``。
+
+    MSYS 程序被原生进程起时，argv 不是 MSVC CRT 切的，是 ``msys-2.0.dll`` 自己按 Cygwin 的
+    规则从 Windows 命令行切回来的（#1204）。两套规则不一样，``list2cmdline`` 交过去会被静默改写：
+
+    * 引号里的 ``\\`` 折成 ``\`` —— ``printf '%s\n' 'a\\b'`` 打出 ``a\b``、正则 ``\\d``
+      变 ``\d``，不报错；
+    * 不带引号的参数（``list2cmdline`` 只给含空白的加引号）按 glob 展开（``*``、``a?``、
+      ``{a,b}``、``~``），``'`` 被当引号吃掉（``it's`` → ``its``），换行切成两个参数，
+      ``@文件`` 被换成那个文件的内容。
+
+    **永远**加引号就全避开了：引号里不做 glob / brace / ``~`` 展开，``@`` 不在词首，
+    换行不切词。转义只有 ``\\`` → ``\`` 与 ``\"`` → ``"`` 两条。真机（Git for Windows
+    bash 5.3）逐条验过 49 种参数（反斜杠、引号、盘符路径、通配、``@``、中文、换行、空串）
+    全部原样到达；``list2cmdline`` 是 29/49；照 Git for Windows ``quote_arg_msys2`` 的做法
+    只给「需要」的参数加引号是 48/49，栽在 ``@文件``。
+    """
+    return '"' + arg.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _command_line(argv: list[str], *, msys: bool) -> str:
+    """CreateProcess 的命令行。argv[0] 是程序路径，由 CreateProcess 自己取（到配对引号为止、
+    不认转义），所以它照 ``list2cmdline``；其余参数归**被起的那个程序**去切：MSYS 程序按
+    Cygwin 规则（:func:`_msys_quote`），原生程序按 MSVC 规则（``list2cmdline``）。"""
+    if not msys:
+        return subprocess.list2cmdline(argv)
+    return " ".join([subprocess.list2cmdline(argv[:1]), *(_msys_quote(arg) for arg in argv[1:])])
 
 
 def _spawn_low_and_wait(k, a, argv: list[str], job: V, *, timeout_ms: int = INFINITE,
-                        inherit: bool = True, use_std_handles: bool = False) -> int:
+                        inherit: bool = True, use_std_handles: bool = False,
+                        msys: bool = False) -> int:
     """用 Low IL 令牌起 argv、放进 job、等它退出，返回退出码。
 
     `use_std_handles`（真实载荷路径 `run()` 用）：设 STARTF_USESTDHANDLES，把**本启动器
@@ -220,7 +294,8 @@ def _spawn_low_and_wait(k, a, argv: list[str], job: V, *, timeout_ms: int = INFI
     # lpApplicationName=NULL：CreateProcess 从命令行取 argv[0]。list2cmdline 会把带空格的
     # 路径（如 `C:\Program Files\Git\usr\bin\bash.exe`）加引号，所以第一 token 无歧义；
     # 裸 `cmd.exe` 走正常搜索（System32）。传全路径当 app 反而要求 argv[0] 必须是绝对路径。
-    cmdline = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
+    # 其余参数按被起的程序自己的切法加引号：MSYS bash 不是 MSVC 规则（#1204）。
+    cmdline = ctypes.create_unicode_buffer(_command_line(argv, msys=msys))
     ok = a.CreateProcessAsUserW(
         token, None, cmdline, None, None, bool(inherit),
         CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW, None, None,
@@ -237,6 +312,8 @@ def _spawn_low_and_wait(k, a, argv: list[str], job: V, *, timeout_ms: int = INFI
 
 
 def run(spec: dict, argv: list[str]) -> int:
+    global _JOURNAL
+    _JOURNAL = str(spec.get("journal") or "") or None
     k, a = _win32()
     for root in spec.get("writable", []):
         _icacls(str(root), "L")            # 可写根：Low-IL 可写
@@ -249,7 +326,14 @@ def run(spec: dict, argv: list[str]) -> int:
         _icacls(str(marker), "M")          # 其下 .git：打 Medium，Low-IL 写不进（Medium 无需特权）
     job = _make_job(k, memory_bytes=int(spec.get("memory_bytes") or 0),
                     pids=int(spec.get("pids") or 0))
-    return _spawn_low_and_wait(k, a, argv, job, use_std_handles=True)
+    # 载荷继承本启动器的当前目录。cwd 由 spec 带进来、这里自己进（#943）：调用方不必再拿
+    # MSYS bash 包一层 `cd` —— 那一跳会把本启动器的 argv（含这份 spec）按 Cygwin 规则重新
+    # 解析坏掉。进不去就抛 OSError，main() 报 win32_setup_failed，不在别处静默跑。
+    if spec.get("cwd"):
+        os.chdir(spec["cwd"])
+    # "msys"：载荷是 MSYS 程序（判据在 shared.lib.shell.msys_runtime_bin，由 win32 后端填）。
+    return _spawn_low_and_wait(k, a, argv, job, use_std_handles=True,
+                               msys=bool(spec.get("msys")))
 
 
 def probe() -> dict:

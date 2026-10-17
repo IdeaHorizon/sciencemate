@@ -209,7 +209,10 @@ def test_the_mechanical_net_catches_what_a_stale_prompt_still_says():
     """
     stale = _designated_dead_targets()
     named = {where.rsplit("→ ", 1)[-1].strip("'\"") for where, _ in stale}
-    for node in named:
+    # 存量清零后（#1063 改掉了最后一条 data harness 的措辞）`named` 是空集，循环
+    # 一次不跑也是绿的 —— 防线缺席看起来和防线有效一模一样。所以每个关不掉 flow
+    # 的节点都过一遍：下一份烂掉的 spec 点名谁，这里已经替它验过了。
+    for node in named | _cannot_close_a_flow():
         out = _recommend_with_tmp(node)
         assert out["status"] == "error", (
             f"{node!r} 还写在某份 spec 里，而机械闸放行了它 —— 防线不在场：\n  "

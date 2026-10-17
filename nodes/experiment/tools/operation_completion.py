@@ -33,6 +33,8 @@ _OPERATION_TASK_KIND_COMPATIBILITY = {
 }
 _OUTCOMES = frozenset({"success", "failed", "blocked"})
 _CLOSURE_OWNER = "record_operation_completion"
+#: 060 S1a 过渡：v3 的 finish 也是合法 closure owner；S1d 后本模块的路线半部分与 ROC 模型面删除。
+_CLOSURE_OWNERS = frozenset({_CLOSURE_OWNER, "finish"})
 _CLOSURE_SCHEMA_VERSION = 1
 _CHILD_OBLIGATION_SCHEMA_VERSION = 1
 _EXTERNAL_JOB_SCOPE_FIELDS = (
@@ -56,6 +58,37 @@ _OPERATION_CLOSURE_ARTIFACT_TYPES = frozenset(
         "experiment_log",
     }
 )
+
+_V3_RESERVED_DELIVERY_REASON = (
+    "v3 的 raw_results、clean_results 与 experiment_log 是同一笔原子交付，"
+    "只允许 finish 拥有的私有 delivery transaction 创建并冻结；"
+    "公开 save_artifact 不能写入或冒充这笔交付"
+)
+_V3_FINISH_HINT = (
+    "保留真实输出与限制，然后调用 "
+    "finish(outcome, summary, deliverables, limitations)；"
+    "不要手工保存、冻结或换名补写三件套。"
+)
+
+
+def _v3_protocol_phase(state: Any) -> str:
+    """Return the durable v3 bootstrap phase without changing run state."""
+    try:
+        try:
+            from .ledger import bootstrap_phase, detect_epoch
+            from .protocol_epoch import PROTOCOL_EPOCH
+        except ImportError:  # pragma: no cover - standalone node bootstrap.
+            from tools.ledger import bootstrap_phase, detect_epoch  # type: ignore
+            from tools.protocol_epoch import PROTOCOL_EPOCH  # type: ignore
+        epoch = str(detect_epoch(state) or "unreadable")
+        if epoch == PROTOCOL_EPOCH:
+            return str(bootstrap_phase(state) or "unreadable")
+        if epoch in {"fresh", "old_protocol"}:
+            return "none"
+        return epoch
+    except Exception:
+        # An unreadable authority must never fall back to the retired writer.
+        return "unreadable"
 
 
 def _current_execution_mode(state: Any) -> str:
@@ -305,12 +338,21 @@ def _operation_closure_artifact_save_gate(
     state: Any,
     draft: dict[str, Any],
 ) -> dict[str, Any]:
-    """operation 三件套只能由 record_operation_completion 原子生成。"""
+    """Reserve the v3 delivery triplet for its private transaction writer."""
     if str(getattr(state, "node_type", "") or "") != "experiment":
         return {}
     artifact_type = str((draft or {}).get("type") or "")
     if artifact_type not in _OPERATION_CLOSURE_ARTIFACT_TYPES:
         return {}
+    if _v3_protocol_phase(state) != "none":
+        # The public gate has no trusted owner credential by design.  The sole
+        # writer is delivery_transaction, which is private node code and uses
+        # State directly; accepting caller metadata here would create a second,
+        # forgeable writer.
+        return {
+            "failures": {"closure_owner": _V3_RESERVED_DELIVERY_REASON},
+            "hint": _V3_FINISH_HINT,
+        }
 
     mode = _current_execution_mode(state)
     if mode == "scientific":
@@ -1710,7 +1752,7 @@ def _closure_state(state: Any, closure_id: str) -> dict[str, Any]:
         item
         for item in all_records
         if not (
-            _closure_metadata(item).get("operation_closure_owner") == _CLOSURE_OWNER
+            _closure_metadata(item).get("operation_closure_owner") in _CLOSURE_OWNERS
             and _closure_metadata(item).get("operation_closure_id") == closure_id
             and _closure_metadata(item).get("operation_closure_version") == _CLOSURE_SCHEMA_VERSION
         )
@@ -1858,7 +1900,7 @@ def operation_closure_status(state: Any) -> dict[str, Any]:
         item
         for item in records
         if (
-            _closure_metadata(item).get("operation_closure_owner") == _CLOSURE_OWNER
+            _closure_metadata(item).get("operation_closure_owner") in _CLOSURE_OWNERS
             and _closure_metadata(item).get("operation_closure_id") == closure_id
         )
     ]
@@ -1969,10 +2011,11 @@ def _route_completion_verification(state: Any) -> dict[str, Any]:
                 f"；其中步骤 {step_ids} 永远不会有 attempt：只读命令直接执行、不带 route_step_id，"
                 "工具名不是可执行入口"
             )
+            # v3 起收尾工具是 finish（record_operation_completion 已退出工具面）。
             incomplete["next_actions"] = [
                 f"declare_execution_route 带 amendment_reason 修订路线：删掉步骤 {step_ids}，"
                 "并同时把它们从其他步骤的 after 里删掉",
-                'record_operation_completion(outcome="success") 重新收尾',
+                'finish(outcome="success", summary=...) 重新收尾',
             ]
         cancelled_steps = sorted(
             str(step_id) for step_id, info in (snapshot.get("steps") or {}).items()
@@ -1984,7 +2027,7 @@ def _route_completion_verification(state: Any) -> dict[str, Any]:
                 f"；步骤 {cancelled_steps} 的作业被取消，提交时没有声明计划内停止，不算完成")
             incomplete["next_actions"] = [
                 *incomplete.get("next_actions", []),
-                'record_operation_completion(outcome="blocked") 如实收尾，写明作业被取消',
+                'finish(outcome="blocked", summary=<作业被取消的经过>) 如实收尾，写明作业被取消',
                 "任务本身要求中途停下（常驻服务、按判据停、重启测试）时，提交时声明 "
                 "expected_termination.planned_stop；不要为了记 success 重跑，也不要绕开 cancel_job",
             ]
@@ -2376,6 +2419,39 @@ async def _record_operation_completion(
     **_: Any,
 ) -> dict[str, Any]:
     """Create and freeze raw evidence, clean verification, and the canonical operation log."""
+    v3_phase = _v3_protocol_phase(state)
+    if v3_phase in {"initializing", "ready"}:
+        # S1d atomic cutover: once a durable v3 bootstrap marker exists, this
+        # retired writer must not inspect old closure state, save a draft, or
+        # freeze anything.  ``initializing`` is included so an interrupted v3
+        # bootstrap cannot fall back to the old protocol.
+        return {
+            "status": "error",
+            "error_code": "v3_finish_required",
+            "error": (
+                "record_operation_completion 已退出 v3 写入路径；"
+                + _V3_RESERVED_DELIVERY_REASON
+            ),
+            "hint": _V3_FINISH_HINT,
+            "v3_phase": v3_phase,
+            "side_effects": False,
+            "retryable": False,
+            "owner": "finish",
+        }
+    if v3_phase != "none":
+        return {
+            "status": "error",
+            "error_code": "delivery_protocol_unreadable",
+            "error": (
+                "当前 run 的 Experiment 协议纪元不可识别；"
+                "旧 record_operation_completion 不得回退写入三件套"
+            ),
+            "hint": "保留现场并由当前 run owner 修复或接管协议账本；不要重提作业或补写交付物。",
+            "v3_phase": v3_phase,
+            "side_effects": False,
+            "retryable": False,
+            "owner": "experiment_runtime",
+        }
     # 判决拆除·第三波（oc:132，2026-09-02）：作用域归注册表/分诊层——本工具只在
     # operation 模式派发。走到这里而 mode 不对是**框架**路由不变量被破坏，模型对
     # 此无能为力，所以不再当 error 返给模型：记 log.error，收据照记（如实带 mode）。
@@ -3673,8 +3749,14 @@ register_tool(
     _record_operation_completion,
 )
 
+try:
+    from .delivery_transaction import MODEL_DELIVERY_CONTRACT
+except ImportError:  # pragma: no cover
+    from tools.delivery_transaction import MODEL_DELIVERY_CONTRACT
+
 for _artifact_type in sorted(_OPERATION_CLOSURE_ARTIFACT_TYPES):
     register_save_gate(
         _artifact_type,
         _operation_closure_artifact_save_gate,
+        content_contract=MODEL_DELIVERY_CONTRACT,
     )

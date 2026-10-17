@@ -29,9 +29,21 @@ def _cors_layer(monkeypatch, **overrides):
 
 @pytest.fixture(autouse=True)
 def _restore_app_module():
-    """本文件 reload app.main；跑完还原，免得污染同进程的其它测试。"""
+    """本文件 reload app.main；跑完**原样**放回，免得污染同进程的其它测试。
+
+    原来的「还原」是再 reload 一次 —— 可 reload 是在同一个模块对象上重跑一遍，
+    `app.main.app` 换成了又一个**新**实例。别的测试文件在导入时拿到的是最早那个
+    app（夹具在它上面装 `dependency_overrides[get_db]`、请求也发给它），而在调用
+    时才 `from app.main import app` 的辅助函数拿到的是新的、overrides 为空的那个，
+    于是退回全局库 —— `no such table: users`，红在 test_project_blockers /
+    test_project_file_preview 里，只在 xdist 恰好把本文件分到它们前面时出现
+    （2026-10-09 #1197 连红两次，本机全绿）。所以存下命名空间，跑完整个放回。
+    """
+    module = importlib.import_module("app.main")
+    saved = dict(module.__dict__)
     yield
-    importlib.reload(importlib.import_module("app.main"))
+    module.__dict__.clear()
+    module.__dict__.update(saved)
 
 
 def test_local_deploy_accepts_any_loopback_port(monkeypatch):

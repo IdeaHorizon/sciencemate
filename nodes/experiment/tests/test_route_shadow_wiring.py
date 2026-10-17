@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import asyncio
 import inspect
 import json
@@ -57,6 +59,7 @@ def _recording_executor(observed: dict, result: dict | None = None):
         cmd,
         timeout=600,
         cwd=None,
+        tool_name="safe_run_bash",
         resource_profile=None,
         *,
         sandbox_profile="bash",
@@ -66,6 +69,8 @@ def _recording_executor(observed: dict, result: dict | None = None):
         execution_action=None,
         execution_decision=None,
         execution_route_binding=None,
+        execution_params=None,
+        input_observation=None,
     ):
         observed.update(
             cmd=cmd,
@@ -2345,6 +2350,7 @@ def _dispatch_route_block_resolution(state: State, records: list[dict]) -> None:
     asyncio.run(run_on_end([hook], ctx, SimpleNamespace(tool_calls=records)))
 
 
+@pytest.mark.skip(reason="v2 模型面：route_block_resolution 钩子退役；v3 承接见 action boundary 探针 test_060_s1d_no_route_authority.py / test_060_s1d_natural_flows.py")
 def test_route_block_resolution_hook_is_enabled_in_experiment_harness():
     """hook 必须在 agent_loop 实际启用集里 —— 只注册不启用 = on_end 永不派发。"""
     from core.agent_loop import resolve_enabled_hook_names

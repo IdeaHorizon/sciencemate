@@ -904,6 +904,38 @@ class SemanticScholarSearch:
 
 
 # ---------- CrossRef ----------
+# 出版日期按 issued → published → published-print → published-online 取，
+# **不取 created**：created 是 DOI 登记进 Crossref 的日子，不是发表日。老文献
+# 补登 DOI 时差出几十年（1984 年的论文 created=2002），旧实现在 issued 缺席时
+# 回退到 created，就把补登年当成了发表年（#1185 第 1 项，源自 #981 回退后的
+# 采纳清单）。issued 是 Crossref 定义的「已知最早发表日」，排第一。
+_CROSSREF_PUBLICATION_DATE_KEYS = ("issued", "published", "published-print", "published-online")
+
+
+def crossref_publication_date(item: dict) -> tuple[int | None, str]:
+    """Crossref 记录的发表年与发表日，两者出自同一个字段；取不到给 (None, "")。
+
+    部分日期保持部分：只有年就是 "2024"，不补成 1 月 1 日。日期必须是真实
+    日历日（2024-02-30 这种跳过、换下一个字段），格式与 PubMed 一致按零填充
+    （下游 date.fromisoformat 按 ISO 读，"2024-3-5" 读不出来）。
+    """
+    for key in _CROSSREF_PUBLICATION_DATE_KEYS:
+        value = item.get(key)
+        parts = value.get("date-parts") if isinstance(value, dict) else None
+        if not isinstance(parts, list) or not parts or not isinstance(parts[0], list):
+            continue
+        date = parts[0]
+        if not 1 <= len(date) <= 3 or any(type(x) is not int for x in date):
+            continue
+        try:
+            datetime(*date, *([1] * (3 - len(date))))
+        except (ValueError, OverflowError):
+            continue
+        return date[0], "-".join(
+            f"{x:04d}" if i == 0 else f"{x:02d}" for i, x in enumerate(date))
+    return None, ""
+
+
 class CrossrefSearch:
     def __init__(self, client: httpx.AsyncClient):
         self.client = client
@@ -1007,14 +1039,9 @@ class CrossrefSearch:
                     authors.append(name.strip())
             doi = item.get("DOI", "")
             pub_type = item.get("type", "journal-article")
-            pub_date = ""
-            for dp in ["published-print", "published-online", "created"]:
-                dp_data = item.get("date-parts", item.get(dp))
-                if isinstance(dp_data, dict) and dp_data.get("date-parts"):
-                    dp_data = dp_data["date-parts"]
-                if dp_data and isinstance(dp_data, list) and dp_data[0]:
-                    pub_date = "-".join(str(x) for x in dp_data[0])
-                    break
+            # 年与日出自同一个字段：旧实现年取 published-print→created、日取
+            # published-print→published-online→created，两条链各走各的。
+            year, pub_date = crossref_publication_date(item)
             # CrossRef 不同 publication type 的 venue 来源不同
             venue = ""
             container_title = item.get("container-title", [])
@@ -1049,8 +1076,7 @@ class CrossrefSearch:
             papers.append(Paper(
                 title=html.unescape("".join(item.get("title", []))),
                 authors=authors,
-                year=item.get("published-print", {}).get("date-parts", [[None]])[0][0]
-                      or item.get("created", {}).get("date-parts", [[None]])[0][0],
+                year=year,
                 venue=venue,
                 doi=doi, source="crossref",
                 citations=item.get("is-referenced-by-count", 0),
@@ -2176,15 +2202,9 @@ class SearchManager:
                                 ],
                                 "venue": (item.get("container-title") or [""])[0]
                                 or item.get("publisher", ""),
-                                "year": (
-                                    (
-                                        item.get("published-print")
-                                        or item.get("published-online")
-                                        or item.get("issued")
-                                        or {}
-                                    ).get("date-parts")
-                                    or [[None]]
-                                )[0][0],
+                                # 与检索结果同一个出处（crossref_publication_date），
+                                # 别让补齐路径另有一条字段顺序。
+                                "year": crossref_publication_date(item)[0],
                                 "url": item.get("URL", ""),
                             }
                         if source == "openalex":

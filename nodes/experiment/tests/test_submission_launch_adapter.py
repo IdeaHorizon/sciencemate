@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.state import State
-from nodes.experiment.tools import resource_manager as manager
+from nodes.experiment.tools import ledger, resource_manager as manager
 
 
 class _FakeLaunchAdapter:
@@ -123,6 +123,29 @@ def test_intent_failure_abandons_prepared_adapter_without_launch(tmp_path, monke
     result = _submit_local(state, "route-adapter-intent-failure")
 
     assert result["status"] == "error"
+    assert events == ["prepare", "abandon"]
+
+
+def test_attempt_marker_failure_abandons_prepared_adapter_without_launch(tmp_path, monkeypatch):
+    state = State.new("experiment", tmp_path / "runs", session_id="owner")
+    state.hook_state["node_inputs"] = {"requested_work": "adapter marker boundary"}
+    ledger.open_ledger(state, write=True, bootstrap=True)
+    ledger.mark_bootstrap_ready(state)
+    events: list[str] = []
+    adapter = _FakeLaunchAdapter(events)
+    _prepare_fake_local(monkeypatch, state, adapter)
+    real_try_record = ledger.try_record
+
+    def fail_marker(state_arg, kind, /, **fields):
+        if kind == "submission_attempted":
+            return None
+        return real_try_record(state_arg, kind, **fields)
+
+    monkeypatch.setattr(ledger, "try_record", fail_marker)
+    result = _submit_local(state, "route-adapter-marker-failure")
+
+    assert result["error_code"] == "submission_attempt_not_durably_recorded"
+    assert result["submission_boundary_crossed"] is False
     assert events == ["prepare", "abandon"]
 
 

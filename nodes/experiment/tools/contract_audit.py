@@ -23,6 +23,9 @@ from typing import Any
 from core.tool_registry import _REGISTRY, ToolDefinition, contract_requirement, register_tool
 
 try:
+    from . import delivery_transaction as _delivery_transaction
+    from . import ledger as _ledger
+    from .dataset_checks import inspect_dataset_package
     from .input_delivery import (
         InputDeliveryLedgerError,
         active_input_delivery_entries,
@@ -41,6 +44,9 @@ try:
         resolve_run_acceptance,
     )
 except ImportError:  # loaded as top-level ``tools.contract_audit`` by node runtime
+    from tools import delivery_transaction as _delivery_transaction  # type: ignore
+    from tools import ledger as _ledger  # type: ignore
+    from tools.dataset_checks import inspect_dataset_package
     from tools.input_delivery import (
         InputDeliveryLedgerError,
         active_input_delivery_entries,
@@ -64,6 +70,9 @@ except ImportError:  # loaded as top-level ``tools.contract_audit`` by node runt
 #
 # 一份声明，两个消费者：`register_tool` 渲染进模型看到的 description，校验器用
 # `contract_requirement()` 取拒绝措辞。想让两边分叉，得先把这个 dict 拆成两个。
+#: operation 闭包的合法 owner：v2 的 record_operation_completion 与 v3 的 finish（060 S1a 过渡；S1d 后只剩 finish）。
+_OPERATION_CLOSURE_OWNERS = frozenset({"record_operation_completion", "finish"})
+
 RAW_RESULTS_CONTRACT = {
     "files": "a non-empty list; each item needs path (absolute), sha256 (64-hex), "
              "role, retention (protected|disposable), bytes (int). Freeze re-hashes "
@@ -592,7 +601,7 @@ def audit_experiment_log_integrity(state: Any) -> dict[str, Any]:
                 "reason": (
                     "one run may have only one canonical experiment_log; aliases cannot "
                     "replace frozen evidence。产物不可删除，但误建的多余草稿有出路："
-                    "supersede_closure_draft(artifact_id=<误建的草稿 id>, reason=...) "
+                    "对误建草稿追加否定记录（该工具已退出模型面；v3 由 finish 一次生成三件套，不会产生多余草稿）"
                     "追加不可变否定记录后即从计数中排除（frozen log 是已验证证据，"
                     "一律不可否定）")}
     return {"passed": True, "n_logs": 1, "canonical_log_id": ids[0],
@@ -1542,11 +1551,15 @@ def _frozen_raw_results_record(state: Any, artifact_id: str) -> tuple[dict[str, 
         record = state.read_artifact(artifact_id)
     except Exception:
         record = None
+    # 措辞从 CLEAN_RESULTS_CONTRACT 的声明取（与 _replay_manifest_errors 同源），不再手写
+    # 「<字段> must …」—— 手写的那份会和声明各自演化（tests/test_tool_contracts_reach_the_caller.py）。
     if not isinstance(record, dict) or record.get("type") != "raw_results":
-        return None, ["replay_manifest.raw_results_artifact_id must identify raw_results"]
+        return None, [contract_requirement(CLEAN_RESULTS_CONTRACT, "replay_manifest.raw_results_artifact_id")
+                      + " (the referenced artifact is not raw_results)"]
     metadata = record.get("metadata") or {}
     if not isinstance(metadata, dict) or not metadata.get("frozen"):
-        return None, ["replay_manifest.raw_results_artifact_id must identify frozen raw_results"]
+        return None, [contract_requirement(CLEAN_RESULTS_CONTRACT, "replay_manifest.raw_results_artifact_id")
+                      + " (the referenced raw_results is not frozen)"]
     _, errors = _validate_raw_results_manifest(record, verify_files=False)
     return record, errors
 
@@ -1745,7 +1758,7 @@ def _data_dispatch_material(spec_id: str, request: dict[str, Any]) -> dict[str, 
     """Build the exact Data input and digest it before the managed dispatch.
 
     The receipt belongs to the existing input-delivery ledger.  It binds an
-    actual ``run_node(data)`` return to this already validated request, rather
+    actual Data child return to this already validated request, rather
     than trusting a later free-form child id or transcript preview.
     """
     payload = _compose_data_request_payload(request)
@@ -2020,21 +2033,60 @@ def _require_spec(state: Any, spec_id: str, *, spec: bool = True, delivery: bool
     return spec_record, delivery_record, error
 
 
-async def _verify_dataset_consumption(state: Any, dataset_artifact_id: str, spec_id: str, **_: Any) -> dict[str, Any]:
+def _data_family_intent_binding(state: Any) -> dict[str, Any]:
+    """Data 家族（派发 / 对账 / 消费 / fallback）读的那一份任务绑定（#1052）。
+
+    v3 run 没有 prereg、调用方也没点名 scope 时，bootstrap 把 scope 留成「未定」——
+    这是正常情况，不是缺手续。旧的 ``audit_execution_intent_binding`` 在这里永远
+    ``scope_unbound``，还叫模型去调已退役的 classify_experiment_scope：Data 派发成了
+    无出口拒绝。fetch_resource 早已改读 v3 的 ``audit_selected_task_binding``（只要求
+    所选任务 A 不变），Data 家族与它同一判据。
+
+    不放宽 prereg authority：绑定了冻结 prereg 的 v3 run 由 bootstrap 分类为
+    scientific，旧收据审计对它完整适用（含 prereg 三元组漂移），照旧再核一遍；
+    formal 派发与 fallback 仍各自按入口收据逐项核 id/version/hash。旧协议 run 不变。
+    """
+    if not _ledger.v3_active(state):
+        return audit_execution_intent_binding(state, require=True)
     try:
-        ledger = load_input_delivery_ledger(state)
-    except InputDeliveryLedgerError as exc:
-        return {"status": "error", "error": "input_delivery_ledger_unreadable", "detail": str(exc)}
-    entry = ledger["specs"].get(spec_id)
-    if not isinstance(entry, dict):
-        return {"status": "error", "error": "unknown spec_id; validate spec first"}
-    if entry.get("lifecycle_status") != "active":
+        from .task_input_view import audit_selected_task_binding
+    except ImportError:  # pragma: no cover - standalone node bootstrap.
+        from tools.task_input_view import audit_selected_task_binding
+    binding = audit_selected_task_binding(state)
+    if not binding.get("passed", False):
+        return binding
+    # scope 未定的 v3 run 没有入口收据（bootstrap 只在 scope 已定时建它）。
+    # 有收据就照旧核：读不出的收据仍 fail closed，绑定了 prereg 的收据仍核三元组。
+    acceptance = resolve_run_acceptance(state, bind_if_absent=False)
+    if acceptance.get("status") == "run_authority_receipt_missing":
         return {
-            "status": "error",
-            "error": "spec_id_not_active",
-            "superseded_by": entry.get("superseded_by"),
+            **binding,
+            "prereg_binding": {"artifact_id": None, "version": None, "content_hash": None},
         }
-    spec = entry.get("request")
+    governing = (
+        acceptance["receipt"].get("governing_task_input_binding")
+        if acceptance.get("passed", False) else None
+    )
+    if not acceptance.get("passed", False) or isinstance(governing, dict):
+        return audit_execution_intent_binding(state, require=True)
+    return {
+        **binding,
+        "prereg_binding": {"artifact_id": None, "version": None, "content_hash": None},
+    }
+
+
+def _inspect_delivered_dataset(
+    state: Any, dataset_artifact_id: str, spec_id: str,
+    spec: dict[str, Any] | None, delivery: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Read current producer/structure facts using the original delivery authority.
+
+    Shared by initial consumption verification and the action-entry recheck.
+    This function neither rewrites the historical verification nor imports a
+    different producer, and does not claim package-member content-hash or
+    scientific validation. Managed dispatch request/payload digests are still
+    checked by the existing receipt validator.
+    """
     if not isinstance(spec, dict):
         return {"status": "error", "error": "unknown spec_id; validate spec first"}
 
@@ -2042,14 +2094,13 @@ async def _verify_dataset_consumption(state: Any, dataset_artifact_id: str, spec
     # Formal input must first acquire the managed dispatch provenance below;
     # after that, only a dataset named by the direct child receipt is eligible.
     # The same receipt check applies after Core deliberately skipped pause import.
-    delivery = entry.get("delivery")
     receipt = delivery.get("data_dispatch_receipt") if isinstance(delivery, dict) else None
     formal_receipt_missing = (
         spec.get("request_kind") == "formal_input_preparation"
         and not isinstance(receipt, dict)
     )
     if isinstance(receipt, dict):
-        intent_binding = audit_execution_intent_binding(state, require=True)
+        intent_binding = _data_family_intent_binding(state)
         if not intent_binding.get("passed", False):
             return {
                 "status": "error",
@@ -2119,61 +2170,37 @@ async def _verify_dataset_consumption(state: Any, dataset_artifact_id: str, spec
             }
     if not isinstance(record, dict) or record.get("type") != "dataset":
         return {"status": "error", "error": "dataset_artifact_id must identify dataset"}
-    view = dict(record.get("metadata") or {})
+    checked = inspect_dataset_package(record, required_assets=spec["required_assets"])
+    passed = checked["passed"]
+    result = {"status": "success" if passed else "error", "dataset_artifact_id": dataset_artifact_id,
+              "spec_id": spec_id, **checked}
+    return result
+
+
+async def _verify_dataset_consumption(state: Any, dataset_artifact_id: str, spec_id: str, **_: Any) -> dict[str, Any]:
     try:
-        content = json.loads(record.get("content") or "{}")
-        if isinstance(content, dict):
-            for key, value in content.items():
-                view.setdefault(key, value)
-    except (TypeError, json.JSONDecodeError):
-        pass
-    aliases_by_field = {"package_path": ("package_path", "package_dir", "data_path", "path"), "manifest": ("manifest", "manifest_path"), "lineage": ("lineage",), "downstream_contract": ("downstream_contract",)}
-    missing = [key for key, aliases in aliases_by_field.items() if not any(view.get(a) not in (None, "", [], {}) for a in aliases)]
-    package_path = next((view.get(a) for a in aliases_by_field["package_path"] if view.get(a)), None)
-    package_dir: Path | None = None
-    if not isinstance(package_path, str):
-        missing.append("package_path_not_usable")
-    else:
-        candidate = Path(package_path).expanduser()
-        if not candidate.is_dir():
-            missing.append("package_path_not_found_or_not_directory")
-        else:
-            package_dir = candidate.resolve()
-
-    manifest_path = next((view.get(a) for a in aliases_by_field["manifest"] if view.get(a)), None)
-    if not isinstance(manifest_path, str) or not Path(manifest_path).expanduser().is_file():
-        missing.append("manifest_path_not_found")
-    else:
-        try:
-            manifest = json.loads(Path(manifest_path).expanduser().read_text(encoding="utf-8"))
-            if not isinstance(manifest, dict):
-                missing.append("manifest_not_an_object")
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            missing.append("manifest_not_readable_json")
-
-    contract = view.get("downstream_contract")
-    if isinstance(contract, str):
-        try:
-            contract = json.loads(contract)
-        except json.JSONDecodeError:
-            pass
-    contract_text = json.dumps(contract, ensure_ascii=False, sort_keys=True) if isinstance(contract, (dict, list)) else str(contract or "")
-    undeclared = [asset["name"] for asset in spec["required_assets"] if asset["name"] not in contract_text]
-    missing_assets: list[str] = []
-    if package_dir is not None:
-        for asset in spec["required_assets"]:
-            relative_name = asset["name"]
-            direct = package_dir / relative_name
-            # Data may place deliverables in a declared stage subdirectory.
-            # Accept that layout only when the requested file is in the package.
-            found = direct.is_file() or any(path.is_file() for path in package_dir.rglob(Path(relative_name).name))
-            if not found:
-                missing_assets.append(relative_name)
-    passed = not missing and not undeclared and not missing_assets
-    result = {"status": "success" if passed else "error", "passed": passed, "dataset_artifact_id": dataset_artifact_id, "spec_id": spec_id, "missing_dataset_fields": missing, "undeclared_requested_assets": undeclared, "missing_requested_assets": missing_assets}
+        ledger = load_input_delivery_ledger(state)
+    except InputDeliveryLedgerError as exc:
+        return {"status": "error", "error": "input_delivery_ledger_unreadable", "detail": str(exc)}
+    entry = ledger["specs"].get(spec_id)
+    if not isinstance(entry, dict):
+        return {"status": "error", "error": "unknown spec_id; validate spec first"}
+    if entry.get("lifecycle_status") != "active":
+        return {
+            "status": "error",
+            "error": "spec_id_not_active",
+            "superseded_by": entry.get("superseded_by"),
+        }
+    result = _inspect_delivered_dataset(
+        state, dataset_artifact_id, spec_id, entry.get("request"), entry.get("delivery"),
+    )
+    if "passed" not in result:
+        return result
+    passed = result["passed"]
     if passed:
         delivery = entry["delivery"]
-        delivery.update({"provider": "data", "verified": True, "input_package_artifact_id": dataset_artifact_id, "package_dir": str(package_dir), "manifest_path": str(manifest_path)})
+        delivery.update({"provider": "data", "verified": True, "input_package_artifact_id": dataset_artifact_id,
+                         "package_dir": result["package_dir"], "manifest_path": result["manifest_path"]})
         try:
             committed = save_input_delivery_ledger(state, ledger)
         except Exception as exc:
@@ -2370,11 +2397,11 @@ def _read_child_run_artifact(
 DATA_RECOVERABLE_OUTCOMES: dict[str, str] = {
     "needs_input": (
         "补齐 data 点名缺的输入值，用**同一个 spec_id** 重新 "
-        "run_node(node_type='data', ...)；不要改写 data 已锁定的请求"
+        "dispatch_data_request(spec_id=<同一个 spec_id>, user_note=...)；不要改写 data 已锁定的请求"
     ),
     "externally_blocked": (
         "补齐 data 点名缺的运行环境/工具（这是 experiment 的职责：data 不再自己"
-        "装包或建工具链），然后用**同一个 spec_id** 重新 run_node(node_type='data', ...)"
+        "装包或建工具链），然后用**同一个 spec_id** 重新 dispatch_data_request(spec_id=<同一个 spec_id>, user_note=...)"
     ),
 }
 
@@ -2714,7 +2741,7 @@ async def _reconcile_data_dispatch(
     if not isinstance(delivery, dict):
         return {"status": "error", "error": "input_delivery_ledger_entry_invalid"}
 
-    intent_binding = audit_execution_intent_binding(state, require=True)
+    intent_binding = _data_family_intent_binding(state)
     if not intent_binding.get("passed", False):
         return {
             "status": "error",
@@ -2916,7 +2943,7 @@ async def _dispatch_data_request(
             "spec_id": spec_id,
         }
 
-    intent_binding = audit_execution_intent_binding(state, require=True)
+    intent_binding = _data_family_intent_binding(state)
     if not intent_binding.get("passed", False):
         return {
             "status": "error",
@@ -3029,12 +3056,16 @@ async def _dispatch_data_request(
     # Keep the compatibility admission immediately adjacent to the actual
     # child-run side effect.  Pure request/receipt validation above remains
     # authoritative and can therefore return its more specific correction.
+    # #1052：pending-assignment census 是 v2 兼容 lane 的门，读的是 classify 写下
+    # 的入口收据；v3 run scope 未定时根本没有那张收据，它会叫父「带 typed prereg
+    # 重派」——对已经带了 typed none 的 run 也一样，是第二道无出口拒绝。
+    # fetch_resource / safe_write_file 在 v3 下同样不过这道门。
     try:
         try:
             from .execution_action_census import pending_operation_action_block
         except ImportError:
             from tools.execution_action_census import pending_operation_action_block
-        pending_block = pending_operation_action_block(
+        pending_block = None if _ledger.v3_active(state) else pending_operation_action_block(
             state,
             {
                 "tool": "dispatch_data_request",
@@ -3402,7 +3433,7 @@ def _fallback_allowed(state: Any) -> tuple[bool, str, dict[str, Any]]:
     run can acquire and verify its own declared input after Data terminates.
     """
     contract = load_run_contract(state)
-    intent_binding = audit_execution_intent_binding(state, require=True)
+    intent_binding = _data_family_intent_binding(state)
     policy = contract.get("input_delivery_policy")
     if not isinstance(policy, dict) or policy.get("experiment_fallback_permitted") is not True:
         reason = "frozen pre_registration does not permit Experiment data fallback"
@@ -3748,18 +3779,65 @@ async def _verify_experiment_fallback_inputs(state: Any, fallback_artifact_id: s
     return result
 
 
+def _consumed_input_selector_error(artifact_id: Any, bindings: Any) -> str | None:
+    """Validate a selector's shape without inventing task or delivery authority."""
+    if artifact_id is not None and bindings is not None:
+        return "input_package_selector_conflict"
+    if artifact_id is None and bindings is None:
+        return "input_package_selector_missing"
+    if bindings is not None:
+        if not (
+            isinstance(bindings, dict) and bool(bindings)
+            and all(isinstance(key, str) and key.strip() and isinstance(value, str) and value.strip()
+                    for key, value in bindings.items())
+        ):
+            return "input_package_bindings_invalid"
+    elif not isinstance(artifact_id, str) or not artifact_id.strip():
+        return "input_package_artifact_invalid"
+    return None
+
+
+def _inspect_ordinary_consumed_datasets(state: Any, artifact_id: str | None, bindings: dict | None) -> dict:
+    """Inspect selected visible packages, without minting formal Data receipts.
+
+    These observations describe the current catalog records and payload shape;
+    they are not Core's dispatch pins or a claim of scientific task fitness.
+    The normal action/job writer persists them in its existing execution context.
+    """
+    selected = sorted(set(bindings.values())) if bindings is not None else [artifact_id]
+    checks = {
+        selected_id: {"artifact_id": selected_id, **inspect_dataset_package(state.read_artifact(selected_id))}
+        for selected_id in selected
+    }
+    passed = all(checked["passed"] for checked in checks.values())
+    return {
+        "passed": passed, "applicable": True, "spec_ids": [],
+        "inspection_kind": "ordinary_dataset_structure",
+        "verification_performed": False, "formal_verification": "not_performed",
+        "task_fit": "not_evaluated", "package_checks": checks,
+        "blocking_reasons": [] if passed else ["selected_dataset_structure_invalid"],
+    }
+
+
 def audit_input_delivery_for_execution(
     state: Any,
     input_package_artifact_id: str | None = None,
     input_package_bindings: dict[str, str] | None = None,
+    consumed_only: bool = False,
 ) -> dict[str, Any]:
-    """Verify the exact Data packages consumed by one execution.
+    """Check the selected inputs consumed by one execution.
 
     A single package id cannot represent two independently validated request
     specs.  Keep the legacy scalar only for the unambiguous one-spec case;
     multi-spec execution must provide the complete ``spec_id -> artifact_id``
     mapping.  The mapping selects no authority: every entry is checked against
-    the already verified Data delivery owned by this run.
+    the already verified Data delivery owned by this run.  An action that
+    explicitly identifies only the packages it consumes may set
+    ``consumed_only``; its selector first narrows independent active specs, but
+    all existing verification and contract checks still apply within every
+    selected spec. With no active request or required fallback, an explicit
+    v3 selector instead receives a structural package check, not a fabricated
+    formal verification or a demand to start another Data run.
     """
     try:
         entries = active_input_delivery_entries(state)
@@ -3779,10 +3857,16 @@ def audit_input_delivery_for_execution(
         ),
         key=lambda pair: pair[0],
     )
+    active_ids = [sid for sid, _ in active]
+    if consumed_only:
+        selector_error = _consumed_input_selector_error(input_package_artifact_id, input_package_bindings)
+        if selector_error:
+            return {"passed": False, "applicable": True, "blocking_reasons": [selector_error],
+                    "spec_ids": active_ids}
     if not active:
         contract = load_run_contract(state)
         if requires_experiment_fallback_input_gate(contract):
-            return {
+            result = {
                 "passed": False,
                 "applicable": True,
                 "blocking_reasons": ["experiment_fallback_input_required"],
@@ -3792,14 +3876,61 @@ def audit_input_delivery_for_execution(
                 ),
                 "spec_ids": [],
             }
-        return {
+            if consumed_only:
+                result["verification_performed"] = False
+            return result
+        if consumed_only:
+            return _inspect_ordinary_consumed_datasets(state, input_package_artifact_id, input_package_bindings)
+        result = {
             "passed": True,
             "applicable": False,
             "reason": "no formal data request registered",
             "spec_ids": [],
         }
+        return result
 
-    active_ids = [sid for sid, _ in active]
+    bindings: dict[str, str]
+    if consumed_only:
+        mapping_selected = input_package_bindings is not None
+        if mapping_selected:
+            bindings = dict(input_package_bindings)
+            unknown = sorted(set(bindings) - set(active_ids))
+            if unknown:
+                return {
+                    "passed": False,
+                    "applicable": True,
+                    "blocking_reasons": ["input_package_binding_incomplete"],
+                    "spec_ids": active_ids,
+                    "missing_spec_ids": [],
+                    "unknown_spec_ids": unknown,
+                }
+            selected_ids = set(bindings)
+            active = [pair for pair in active if pair[0] in selected_ids]
+        else:
+            matches = [
+                pair for pair in active
+                if pair[1].get("input_package_artifact_id")
+                == input_package_artifact_id
+            ]
+            if not matches:
+                return {
+                    "passed": False,
+                    "applicable": True,
+                    "blocking_reasons": ["input_package_artifact_unknown"],
+                    "spec_ids": active_ids,
+                }
+            if len(matches) != 1:
+                return {
+                    "passed": False,
+                    "applicable": True,
+                    "blocking_reasons": ["input_package_binding_ambiguous"],
+                    "spec_ids": [sid for sid, _ in matches],
+                    "hint": "use input_package_bindings to identify the consumed specs",
+                }
+            active = matches
+            bindings = {active[0][0]: input_package_artifact_id}
+        active_ids = [sid for sid, _ in active]
+
     unverified = [sid for sid, item in active if not item.get("verified")]
     if unverified:
         return {
@@ -3809,8 +3940,7 @@ def audit_input_delivery_for_execution(
             "spec_ids": unverified,
         }
 
-    bindings: dict[str, str]
-    if input_package_bindings is not None:
+    if not consumed_only and input_package_bindings is not None:
         if not isinstance(input_package_bindings, dict):
             return {
                 "passed": False,
@@ -3834,7 +3964,7 @@ def audit_input_delivery_for_execution(
                 "missing_spec_ids": missing,
                 "unknown_spec_ids": extra,
             }
-    else:
+    elif not consumed_only:
         if len(active) != 1 and input_package_artifact_id:
             return {
                 "passed": False,
@@ -3920,12 +4050,25 @@ def audit_input_delivery_for_execution(
             "input_package_bindings": bindings,
             "fallback_receipt_errors": fallback_receipt_errors,
         }
+    package_checks = {
+        sid: _inspect_delivered_dataset(
+            state, bindings[sid], sid, entries[sid].get("request"), item,
+        )
+        for sid, item in active if item.get("provider") == "data"
+    }
+    invalid_packages = [sid for sid, checked in package_checks.items() if not checked.get("passed")]
     return {
-        "passed": True,
+        "passed": not invalid_packages,
         "applicable": True,
         "spec_ids": active_ids,
         "input_package_bindings": bindings,
         "providers": [item.get("provider") for _, item in active],
+        **({
+            "inspection_kind": "registered_dataset_current_structure",
+            "package_checks": package_checks,
+            "blocking_reasons": ["selected_dataset_revalidation_failed"] if invalid_packages else [],
+            "invalid_spec_ids": invalid_packages,
+        } if package_checks else {}),
     }
 
 
@@ -3947,7 +4090,7 @@ register_tool(ToolDefinition(
     name="dispatch_data_request",
     description=(
         "Synchronously dispatch one validated Data request through the existing run_node path and "
-        "persist a hash-bound current-child receipt. Use this, rather than raw run_node(data), for "
+        "persist a hash-bound current-child receipt. Use this, rather than a raw Data child call, for "
         "any formal request that may need an Experiment fallback after a terminal Data blocker."
     ),
     parameters_schema={
@@ -4348,7 +4491,7 @@ def _operation_result_bundle(state: Any) -> dict[str, Any]:
             if receipt_payload.get("schema_version") != 2:
                 errors.append("operation verification receipt must use closure schema_version=2")
             raw_closure_id = raw_metadata.get("operation_closure_id") if isinstance(raw_metadata, dict) else None
-            if not raw_closure_id or raw_metadata.get("operation_closure_owner") != "record_operation_completion":
+            if not raw_closure_id or raw_metadata.get("operation_closure_owner") not in _OPERATION_CLOSURE_OWNERS:
                 errors.append("operation raw_results must be owned by record_operation_completion")
             if receipt_payload.get("closure_id") != raw_closure_id:
                 errors.append("operation verification receipt closure_id must bind raw_results ownership")
@@ -4389,7 +4532,7 @@ def _operation_result_bundle(state: Any) -> dict[str, Any]:
     if isinstance(clean_record, dict):
         clean_metadata = clean_record.get("metadata") or {}
         if (not isinstance(clean_metadata, dict)
-                or clean_metadata.get("operation_closure_owner") != "record_operation_completion"
+                or clean_metadata.get("operation_closure_owner") not in _OPERATION_CLOSURE_OWNERS
                 or clean_metadata.get("operation_closure_id") != (raw_metadata.get("operation_closure_id") if isinstance(raw_metadata, dict) else None)):
             errors.append("operation clean_results must share record_operation_completion closure ownership with raw_results")
         if not isinstance(clean_metadata, dict) or not clean_metadata.get("frozen"):
@@ -4572,7 +4715,7 @@ def audit_operation_log_contract(
             "passed": False, "execution_mode": contract.get("execution_mode"),
             "intent_binding": intent_binding,
             "reason": ("operation requires exactly one experiment_log；误建的多余草稿"
-                       "可用 supersede_closure_draft(artifact_id, reason) 追加否定记录"
+                       "多余草稿的否定记录工具已退出模型面（v3 由 finish 一次生成三件套）"
                        "（frozen log 不可否定）"),
             "log_count": len(records),
             "superseded_ids": superseded_ids,
@@ -4604,7 +4747,7 @@ def audit_operation_log_contract(
     result_bundle = _operation_result_bundle(state)
     goal_effect = _operation_goal_effect_audit(state, intent_binding=intent_binding)
     if (not isinstance(metadata, dict)
-            or metadata.get("operation_closure_owner") != "record_operation_completion"
+            or metadata.get("operation_closure_owner") not in _OPERATION_CLOSURE_OWNERS
             or metadata.get("operation_closure_id") != result_bundle.get("closure_id")):
         result_bundle.setdefault("errors", []).append("operation experiment_log must share record_operation_completion closure ownership")
         result_bundle["passed"] = False
@@ -4667,6 +4810,108 @@ def audit_operation_log_contract(
         "upstream_goal_effect": goal_effect,
         "reason": reason,
     }
+
+
+def audit_experiment_delivery(state: Any) -> dict[str, Any]:
+    """Read the v3 delivery closure without repairing or settling any state.
+
+    The persisted transaction manifest is the only C plan. A delivery is
+    sealed only when every manifest checkpoint is present, the current Core
+    head is the exact frozen identity recorded by that manifest, and exactly
+    one ``finish`` row for the same closure records those identities.
+    Legacy closure metadata is deliberately not consulted.
+    """
+    if not _ledger.v3_active(state):
+        return {
+            "passed": True,
+            "applicable": False,
+            "status": "not_applicable",
+            "reason": "the run is not active on the Experiment v3 protocol",
+        }
+
+    manifest: dict[str, Any] | None = None
+    try:
+        manifest = _delivery_transaction.read_manifest(state)
+        if manifest is None:
+            raise _delivery_transaction.DeliveryTransactionError(
+                "closure_manifest_missing",
+                "the v3 delivery manifest does not exist",
+            )
+        _delivery_transaction.validate_manifest(state, manifest)
+
+        artifacts = manifest.get("artifacts") or {}
+        if (not manifest.get("prepared_digest")
+                or any(not isinstance((artifacts.get(kind) or {}).get("prepared"), dict)
+                       for kind in _delivery_transaction.TRIO)):
+            raise _delivery_transaction.DeliveryTransactionError(
+                "closure_manifest_not_prepared",
+                "the delivery manifest does not contain all prepared identities",
+            )
+        if any(not isinstance((artifacts.get(kind) or {}).get("frozen"), dict)
+               for kind in _delivery_transaction.TRIO):
+            raise _delivery_transaction.DeliveryTransactionError(
+                "closure_manifest_not_frozen",
+                "the delivery manifest does not contain all frozen identities",
+            )
+        if not isinstance(manifest.get("commit"), dict):
+            raise _delivery_transaction.DeliveryTransactionError(
+                "closure_manifest_not_committed",
+                "the delivery manifest has no finish commit checkpoint",
+            )
+
+        led = _ledger.open_ledger(state, write=False)
+        tail_report = led.tail_report()
+        if int(tail_report.get("corrupt_tail_bytes") or 0):
+            raise _delivery_transaction.DeliveryTransactionError(
+                "closure_ledger_tail_incomplete",
+                "the delivery ledger has an incomplete tail, so finish uniqueness is unknown",
+                corrupt_tail_bytes=tail_report.get("corrupt_tail_bytes"),
+            )
+
+        # ``_sealed`` is a read-only assertion shared with transaction
+        # recovery: it validates exact Core heads/frozen identities and the
+        # one same-closure finish row, without invoking any writer.
+        sealed = _delivery_transaction._sealed(state, led, manifest)
+    except _delivery_transaction.DeliveryTransactionError as exc:
+        result = {
+            "passed": False,
+            "applicable": True,
+            "status": "failed",
+            "error_code": exc.code,
+            "reason": exc.detail,
+        }
+        if manifest is not None:
+            result["closure_id"] = manifest.get("closure_id")
+        if exc.facts:
+            result["facts"] = dict(exc.facts)
+        return result
+    except Exception as exc:
+        return {
+            "passed": False,
+            "applicable": True,
+            "status": "audit_error",
+            "error_code": "delivery_audit_error",
+            "closure_id": manifest.get("closure_id") if manifest else None,
+            "reason": f"v3 delivery audit failed: {type(exc).__name__}: {exc}",
+        }
+
+    return {
+        "passed": True,
+        "applicable": True,
+        "status": "sealed",
+        "reason": (
+            "the persisted delivery manifest, exact frozen heads, and unique "
+            "same-closure finish row agree"
+        ),
+        "closure_id": sealed["closure_id"],
+        "delivery_digest": sealed["delivery_digest"],
+        "outcome": sealed["delivery"].get("outcome"),
+        "artifact_ids": sealed["artifact_ids"],
+        "artifact_identities": sealed["artifact_identities"],
+        "finish_seq": sealed["finish_seq"],
+    }
+
+
 def audit_experiment_contract(state: Any) -> dict[str, dict[str, Any]]:
     contract = load_run_contract(state)
     require_intent = (
@@ -4678,6 +4923,7 @@ def audit_experiment_contract(state: Any) -> dict[str, dict[str, Any]]:
         log_integrity = _experiment_log_integrity_with_correction_disclosure(
             state, log_integrity)
     return {
+        "experiment_delivery": audit_experiment_delivery(state),
         "verdict": audit_verdict(state),
         "sediment": audit_sediment(state),
         "execution_record": audit_execution_record(state),
@@ -4701,6 +4947,31 @@ def audit_experiment_contract(state: Any) -> dict[str, dict[str, Any]]:
 # 这里原来是三个各自包一层的 freeze_* 工具（同一个动作三个名字）。门禁逻辑
 # 逐字保留，只是从"工具"变成"类型的性质"：freeze_artifact 冻结前自动执行。
 from shared.tools.library.artifacts_extra import register_freeze_gate as _register_freeze_gate
+
+
+_V3_RESERVED_FREEZE_CHECK = "v3_delivery_transaction_required"
+
+
+def _v3_reserved_trio_freeze_refusal(
+    state: Any, record: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Keep every public freeze path outside the v3 delivery transaction."""
+    if not _ledger.v3_active(state):
+        return None
+    artifact_type = str(record.get("type") or "reserved delivery artifact")
+    reason = (
+        f"{artifact_type} is reserved for the active v3 finish delivery "
+        "transaction and cannot be frozen through generic freeze_artifact"
+    )
+    return {
+        "failures": {_V3_RESERVED_FREEZE_CHECK: reason},
+        "errors": [reason],
+        "hint": (
+            "Call finish once with the honest terminal outcome. The private "
+            "delivery transaction prepares and freezes all three reserved "
+            "artifacts together; metadata or scope cannot bypass this gate."
+        ),
+    }
 
 
 def _experiment_log_correction_disclosure_failures(
@@ -4788,6 +5059,9 @@ def _experiment_log_integrity_with_correction_disclosure(
 
 
 def _experiment_log_freeze_gate(state, artifact_id, record):
+    refusal = _v3_reserved_trio_freeze_refusal(state, record)
+    if refusal is not None:
+        return refusal
     contract = load_run_contract(state)
     if contract.get("execution_mode") == "operational":
         operation = audit_operation_log_contract(
@@ -4884,6 +5158,9 @@ def _experiment_log_freeze_gate(state, artifact_id, record):
 
 
 def _clean_results_freeze_gate(state, artifact_id, record):
+    refusal = _v3_reserved_trio_freeze_refusal(state, record)
+    if refusal is not None:
+        return refusal
     errors = _validate_clean_results_payload(state, record)
     errors.extend(_operation_clean_results_freeze_errors(state, record))
     return {
@@ -4894,6 +5171,9 @@ def _clean_results_freeze_gate(state, artifact_id, record):
 
 
 def _raw_results_freeze_gate(state, artifact_id, record):
+    refusal = _v3_reserved_trio_freeze_refusal(state, record)
+    if refusal is not None:
+        return refusal
     _, errors = _validate_raw_results_manifest(record, verify_files=True)
     return {
         "failures": ({"raw_results_manifest": "; ".join(errors)} if errors else {}),
@@ -4902,8 +5182,12 @@ def _raw_results_freeze_gate(state, artifact_id, record):
     }
 
 
-# 契约跟着门一起注册：这两个 dict 既是校验器的拒绝措辞（contract_requirement），
-# 也是模型在 freeze_artifact 说明里读到的要求 —— 仍然是一份声明两个消费者。
-_register_freeze_gate("experiment_log", _experiment_log_freeze_gate)
-_register_freeze_gate("clean_results", _clean_results_freeze_gate, CLEAN_RESULTS_CONTRACT)
-_register_freeze_gate("raw_results", _raw_results_freeze_gate, RAW_RESULTS_CONTRACT)
+# Keep validators for direct callers, while teaching the v3 transaction entry
+# before a model meets the gate. No internal result schema is model input.
+_register_freeze_gate("experiment_log", _experiment_log_freeze_gate,
+                      content_contract=_delivery_transaction.MODEL_DELIVERY_CONTRACT)
+# The same scoped contract is rendered at both save and freeze entry points.
+_register_freeze_gate("clean_results", _clean_results_freeze_gate,
+                      content_contract=_delivery_transaction.MODEL_DELIVERY_CONTRACT)
+_register_freeze_gate("raw_results", _raw_results_freeze_gate,
+                      content_contract=_delivery_transaction.MODEL_DELIVERY_CONTRACT)

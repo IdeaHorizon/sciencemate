@@ -70,6 +70,22 @@ entries:
     class: C
     why: >-
       task_contract_digest 与 uuid 的组合解析失败时的兜底出口（上面几条的共用返回点）。
+  # ── node_inputs 收不成对象（#1165，2026-10-09）──────────────────────────────
+  - file: shared/tools/run_node.py
+    class: C
+    why: >-
+      node_inputs 是解析不了的 JSON 字符串，或解析出来不是对象（list / 标量 / null）。
+      这是派发 ABI 的形状，不评判内容：以前解析失败就当成"没给"、照样起子节点，
+      坏输入冒充空输入（FVCOM 现场丢了整份 spec）。拒在任何副作用之前，重发是干净的；
+      合法对象与能解析成对象的 JSON 字符串照旧放行，省略照旧交给正式契约判。
+  # ── 一个 run 同一时刻一个 loop（#1164，2026-10-09）─────────────────────────
+  - file: shared/tools/run_node.py
+    class: B
+    why: >-
+      显式 resume_run_id 指名的 run 在本进程里还有执行者（active / paused / 有 driver）。
+      它没被打断，续它就是在同一个 run_id 上再起一个 loop —— 两次 finish、两个
+      run_end，账本对同一个 run 记两份终态。报错给出合法出口：progress / inject /
+      cancel，或 resume_run_id='fresh'。
   - file: shared/tools/library/tasks.py
     class: C
     why: >-
@@ -88,6 +104,14 @@ entries:
     class: C
     why: >-
       TaskContractError 的转述出口（CAS 冲突、字段非法、explicit_none 缺理由）。
+  - file: shared/tools/library/tasks.py
+    class: C
+    why: >-
+      exact prereg 绑定在写合同时补不齐或对不上产物账本（#1099）：只给 id 而 head
+      未冻结 / 草稿压在旧冻结版上 / id 找不到 / 给的 version、content_hash 对不上。
+      exact_bound 的协议就是 (id, version, content_hash) 三件一起；此前半截绑定照写，
+      子 run 起步才以 prereg_assignment_invalid 拒，而它无权改派发输入只能 blocked。
+      这里在父这一步拒，结构化列出缺哪几件与账上的冻结版，父改一次就对。
   # check_lean 收进咽喉（#793）：把「调用 Lean 失败」拆成三种可分辨的事实。
   # 三条都是 C —— 说的是「这一次执行本身没做成，以及是谁的问题」，不是评判命题成不成立。
   # 拆细是有代价的（拒绝点从 14 涨到 15），但压平的代价已经付过一次：三轮
@@ -1495,3 +1519,286 @@ entries:
       adopt：在那个项目的项目层里读不到原结论（RFC_PROJECT_HOME：项目层一个项目一份）。读不到时
       promote 照样能拿卡片正文写出一条 org 记录，但证据闭包一条都带不过去、出处是空的 —— 一条
       说不出凭什么的「组织知识」。拒的是记录不完整，不判结论好不好。
+
+  # ── PR#1175（experiment v3：finish 收尾 / 账本边界 / 受控 Slurm）的登记，2026-10-02 ──────
+  #
+  # ⚠️ 出处说明：本段分类由 framework 侧起草，依据是 owner lujy 的只读交接件
+  # nodes/experiment/docs/refusal_registry_handoff_20260924.md（当时 22 点）加上按 fa6f177c5
+  # 逐点重读代码；交接件之后新增的 8 点（finish 恢复分支 1、resource_manager Slurm/auto 6、
+  # safe_bash 1）是本次新判，materialize_writable_roots 两点由交接件的 collector 改判 C。
+  # **不是 owner 自填**。owner 不同意任何一条，直接改这里 —— 别把这段「谁判的」删掉。
+  #
+  # 净增 30，不是「现值−基线」的 57：其中 27 点早被既有条目覆盖（origin/main 上
+  # operation_completion 38=26+12、resource_manager 106=96+10、safe_bash 32=27+5，恰好用满）。
+  # 逐点对 origin/main 做 AST 比对：resource_manager 表面 +20/−13，其中 13 对是
+  # _submit_sync→_submit_sync_impl 改名、probe_external_job_health 拆 _impl 与文案修改，
+  # 真新增 7；operation_completion、safe_bash 无删除。
+  #
+  # 计量盲区（如实）：DeliveryTransactionError（73 处 raise / 44 个 code）与
+  # _FinishAssemblyError（9 处 raise）不在 CONTRACT_EXCEPTIONS 里，扫描器只看见各自一个
+  # as_result 工厂返回点。两条工厂条目只登记现有 code 族，不是以后新增 code 的额度。
+  #
+  # input_admission.py 的 1 点（formal_input_not_ready）**故意未登记**：它与
+  # verdicts_experiment_data.md 的 rm:1946/sb:3517 → O2 判决冲突，待 owner 裁。
+
+  # ── nodes/experiment/tools/action_boundary.py（+3，新文件）──────────────────────
+  # [new · PR#1175] BoundaryRefusal.as_result → bootstrap_incomplete（L110）
+  - file: nodes/experiment/tools/action_boundary.py
+    class: C
+    why: >-
+      v3 run 停在 initializing（账本 meta 已开、bootstrap.ready 从未写下）时，
+      safe_run_bash / safe_execute_python / safe_write_file / fetch_resource 的 begin()
+      在任何副作用前拒绝。没有冻结的 A（义务、授权包络、已物化可写根），这一趟既不是
+      合法的 v3 动作、也不能退回旧协议 —— 协议状态事实，不评判动作该不该做。
+      payload_spawned=false；出口归 runtime（每轮重放幂等 establish），长期不成就
+      report_blocker 交人。
+  # [new · PR#1175] BoundaryRefusal.as_result → action_not_durably_recorded（L120）
+  - file: nodes/experiment/tools/action_boundary.py
+    class: B
+    why: >-
+      begin() 写 action_started 抛错（LedgerError 或其它异常）时 fail-closed。先记再动手
+      是为了 ACK 丢失或会话重开时不必猜；记不下还执行，就是一次没有动作身份的副作用。
+      与 execution_action_census 的 persistence_failed 同族。未执行；runtime 修账本后重试。
+  # [new · PR#1175] record_completed_effect → bootstrap_incomplete（L347）
+  - file: nodes/experiment/tools/action_boundary.py
+    class: B
+    why: >-
+      副作用已发生之后的补记入口遇到 initializing：返回 side_effect_committed=true、
+      payload_must_not_rerun=true。已发生的写入不能当普通 v3 事实交付，也不能让模型重跑；
+      与上面「尚未执行」的同名 code 语义不同。⚠️ 该函数目前零生产调用方（只有
+      test_060_* 引用；r3a_managed_output_provenance_20260923 已把终态 settlement 改走
+      job_terminal）。按第三波「零调用方即删」应连函数一起删，删后本文件只需 2 条。
+
+  # ── nodes/experiment/tools/delivery_transaction.py（+1，新文件）──────────────────
+  # [new · PR#1175] DeliveryTransactionError.as_result（L75，工厂）
+  - file: nodes/experiment/tools/delivery_transaction.py
+    class: B
+    why: >-
+      finish 三件套原子交付事务的错误信封工厂。现有 44 个 code / 73 处 raise：manifest
+      缺失、损坏或形状不合；delivery / plan / prepared 摘要不符；artifact id、name、内容
+      摘要与冻结身份漂移；账本 epoch / owner / ready 不符；commit 与 manifest 不一致；
+      revision 冲突。主体是「持久化的交付事实缺失、损坏或漂移」，放行就会覆盖已冻结事实
+      或铸出不可重放的交付；少数（closure_ledger_read_only、canonical_json_invalid、
+      closure_durability_unavailable）是 C 性质。不评判实验结果。中断事务按原 manifest
+      恢复缺失阶段，摘要/身份冲突交 owner，不重跑物理作业。
+
+  # ── nodes/experiment/tools/finish.py（+12，新文件）──────────────────────────────
+  # [new · PR#1175] _FinishAssemblyError.as_result（L655，工厂）
+  - file: nodes/experiment/tools/finish.py
+    class: B
+    why: >-
+      组装交付的错误信封工厂，现有 3 个 code / 9 处 raise。run_authority_unavailable /
+      run_authority_invalid（bootstrap 已 ready 却投影不出 canonical A、schema 版本不对、
+      scope 与 scope_status 自相矛盾、bound_valid 却无精确 prereg 绑定、未知
+      prereg_status）：在损坏的 A 上组装交付等于替 run 改写任务权威。
+      finish_parameters_invalid（blocker 不是对象、outcome=blocked 却没说阻塞原因、
+      success 带 blocker）：交付记录自相矛盾或缺了它唯一的内容。不判理由写得好不好。
+  # [new · PR#1175] _owner_ledger → ledger_unavailable（L1225）
+  - file: nodes/experiment/tools/finish.py
+    class: B
+    why: >-
+      打开可写账本抛错。账本是交付唯一的事实源，读写不了就无从核对交付、也无处记 finish；
+      修复账本访问后重试，不重跑已发生的动作。
+  # [new · PR#1175] _owner_ledger → not_run_owner（L1228）
+  - file: nodes/experiment/tools/finish.py
+    class: C
+    why: >-
+      账本以只读打开：当前会话不是本 run 的写 owner（led.reason 原样带出）。写所有权是
+      协议事实；由现 owner 收尾或走正式接管，不伪造 ownership。
+  # [new · PR#1175] _finish 恢复分支 → closure_observation_unavailable（L1339）
+  - file: nodes/experiment/tools/finish.py
+    class: B
+    why: >-
+      已有持久化交付时，校验 manifest 或把已封存交付与当前文件/账本事实比对抛出
+      ValueError / TypeError / KeyError / OSError。比不了，就既不能断言「没变、原样重放」，
+      也不能据此封一版新 revision —— fail-closed，side_effects=none。出口：恢复交付对象
+      可读后重试 finish，不重跑载荷；交付件本身损坏则保留现场交 runtime owner。
+  # [new · PR#1175] _finish → finish_parameters_invalid（未知参数，L1349）
+  - file: nodes/experiment/tools/finish.py
+    class: C
+    why: >-
+      调用带了 schema 之外的参数。派发口校验器不查 additionalProperties，这条只能留在
+      工具体内；报错列出未知参数名。
+  # [new · PR#1175] _finish → finish_parameters_invalid（outcome 词表，L1353）
+  - file: nodes/experiment/tools/finish.py
+    class: C
+    why: >-
+      outcome 不在 success / partial / failed / blocked / cancelled 里。⚠️ schema 已声明
+      enum，派发口（core/tool_registry._check_leaf）先于此处拒绝，而 _finish 唯一调用方是
+      _finish_for_model —— 按第三波规则这是重复抄件，建议删掉这条手写检查（删后本文件
+      只需 11 条）。
+  # [new · PR#1175] _finish → finish_parameters_invalid（summary，L1356）
+  - file: nodes/experiment/tools/finish.py
+    class: C
+    why: >-
+      summary 不是非空字符串。空值派发口 minLength:1（strip 后）已挡；留下的是类型半边
+      （派发口不查 type）：交付摘要必须是一段文字。
+  # [new · PR#1175] _finish → finish_parameters_invalid（deliverables，L1361）
+  - file: nodes/experiment/tools/finish.py
+    class: C
+    why: >-
+      deliverables 不是对象数组。类型契约（派发口不查 type）；修正形状后照常交付真实对象。
+  # [new · PR#1175] _finish → finish_parameters_invalid（limitations，L1366）
+  - file: nodes/experiment/tools/finish.py
+    class: C
+    why: >-
+      limitations 不是字符串数组。类型契约；修正形状，不要求删减真实限制。
+  # [new · PR#1175] _finish → finish_parameters_invalid（next_step，L1369）
+  - file: nodes/experiment/tools/finish.py
+    class: C
+    why: >-
+      next_step 不是字符串。类型契约，不要求额外执行步骤。
+  # [new · PR#1175] _finish → bootstrap_incomplete（L1373）
+  - file: nodes/experiment/tools/finish.py
+    class: C
+    why: >-
+      bootstrap_phase 不是 ready（initializing，或根本不是 v3 run）时没有 canonical A 可
+      组装 ExperimentDeliveryV1。协议状态事实；已有 manifest 的恢复分支先于此检查，不受
+      影响。出口：runtime 完成 bootstrap 后再 finish；非 v3 run 走旧收尾入口。
+  # [new · PR#1175] _finish → finish_parameters_invalid（VerificationError 转述，L1391）
+  - file: nodes/experiment/tools/finish.py
+    class: C
+    why: >-
+      verification 方法形状不合（条目或检查超过 100、kind 不在 file/glob/check、主字段为空、
+      字段类型不对、min_count 或 timeout_s 越界），或没有原任务正文可对照。方法 schema
+      事实，在执行任何检查前报出，不评判科学价值；改正字段或去掉 verification 后重试，
+      正式 required 检查照跑。
+
+  # ── nodes/experiment/tools/operation_completion.py（+2）──────────────────────────
+  # [new · PR#1175] _record_operation_completion → v3_finish_required（L2427）
+  - file: nodes/experiment/tools/operation_completion.py
+    class: C
+    why: >-
+      run 已在 v3 纪元（initializing 或 ready）时，退役的 record_operation_completion 在读旧
+      closure、存草稿、冻结任何东西之前拒绝：v3 三件套是 finish 私有 delivery transaction 的
+      一笔原子交付，两个 writer 写同一组产物会分叉。工具/纪元协议事实，side_effects=false，
+      出口 finish。注：initializing 时 finish 自己也以 bootstrap_incomplete 拒绝，那时 hint
+      指向的出口要等 runtime 修好启动。
+  # [new · PR#1175] _record_operation_completion → delivery_protocol_unreadable（L2441）
+  - file: nodes/experiment/tools/operation_completion.py
+    class: B
+    why: >-
+      协议纪元读不出或不认识（_v3_protocol_phase 返回 unreadable / 未知 epoch）。读不出的
+      权威不能当成「旧协议」回退写三件套 —— 若其实是 v3 run，就会留下两份互相矛盾的交付。
+      与 run_contract 的 prereg_assignment_authority_unavailable 同判据。side_effects=false；
+      出口是 run owner 修复或接管协议账本，不重提作业、不补写交付物。
+
+  # ── nodes/experiment/tools/resource_manager.py（+7）──────────────────────────────
+  # 背景：origin/main 上 _submit_job 对一切非 local 真实提交一刀拒绝
+  # （remote_sandbox_contract_unavailable）。本 PR 打开 Slurm 单任务 CPU / 单 GPU，那堵总墙
+  # 收窄到 PBS 等仍无契约的调度器；下面 4 条 _submit_job Slurm 条目都在确认卡与提交之前、
+  # 作业未提交，实际拒绝面比 main 小。另 3 条是启动日志目录、v3 启动未就绪、auto 无候选。
+  # [new · PR#1175] _submit_sync_impl → slurm_bootstrap_dir_unavailable（L4391）
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: >-
+      真实 Slurm 提交前，在已授权 output_dir 下建按 nonce 命名的启动日志目录失败（OSError）。
+      Slurm 在脚本运行前就要打开 stdout，目录不存在，作业脚本自己建不出来 —— 物理事实。
+      在 intent 落账与 sbatch 之前返回，job_submitted=false。
+  # [new · PR#1175] _submit_sync_impl → bootstrap_incomplete（L4420）
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: >-
+      v3 run 停在 initializing 时，submit_job 在写 intent 与 sbatch 之前拒绝。与
+      action_boundary.BoundaryRefusal 同一条件、同一出口；submit_job 不经 begin()、自己记
+      intent，所以单独一处。payload_spawned=false、job_submitted=false；出口归 runtime 重放
+      bootstrap。
+  # [new · PR#1175] _submit_job → no_submission_candidate（L6659）
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: >-
+      scheduler=auto 而 discover 的 recommended_default 为空。本 PR 的 _discover 只把「可用且
+      有公开 launch adapter」的后端列为候选（auto 只选本地边界，不猜远端站点），所以它现在
+      可以为空；不拦就会把 str(None) 当 scheduler 名往下走。没有可提交后端是物理/协议事实；
+      side_effects=none，出口是看 discover_resources 修能力缺口、显式选 scheduler，或诚实报告受阻。
+  # [new · PR#1175] _submit_job → slurm_single_task_cpu_or_gpu_only（L6761）
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: >-
+      真实 Slurm 提交要求 mpi_ranks==1 且 gpus 为 0 或 1。受管作业的终态对账、取消与输出
+      观察目前只对单节点单任务验收过，MPI / 多任务 / 多 GPU 没有对应的生命周期契约 ——
+      与 PBS「尚无真实提交契约」同一性质，是适配器边界，不是对作业的判决。dry_run 不受影响。
+  # [new · PR#1175] _submit_job → slurm_shared_paths_required（L6771）
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: >-
+      真实 Slurm 提交没给显式 workdir 与 output_dir。框架缺省的 run-local 目录在提交机上，
+      计算节点看不见；框架也不知道站点哪些路径是共享文件系统，无从代选。物理事实，未提交。
+  # [new · PR#1175] _submit_job → slurm_walltime_required（L6780）
+  - file: nodes/experiment/tools/resource_manager.py
+    class: A
+    why: >-
+      真实 Slurm 作业没给 walltime_minutes。远端算力是不可逆花费，且远端写隔离尚缺
+      （discover 报 remote_write_isolation=missing）；没有上限就是一次由分区默认值决定的
+      无界占用。资源边界；补上限即可重提。
+  # [new · PR#1175] _submit_job → slurm_path_not_ready（L7042）
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: >-
+      真实 Slurm 提交的 workdir / output_dir 不是绝对路径、不存在或不是目录。Slurm 在脚本
+      运行前打开 stdout/stderr，不存在的输出目录不能由同一脚本创建 —— 物理事实；报错指名
+      哪个字段，建好目录后重提。
+
+  # ── nodes/experiment/tools/run_bootstrap.py（+3，新文件）────────────────────────
+  # [new · PR#1175] _startup_blocker（L44）
+  - file: nodes/experiment/tools/run_bootstrap.py
+    class: collector
+    why: >-
+      不是工具返回，是写进 canonical A 的启动事实构造器（status=blocked + code + reason）：
+      legacy / mixed prereg 输入、prereg_assignment invalid / pending、bound prereg 解析不到
+      精确冻结版、任务输入身份变化或不可核验、scope 冲突。它不拦任何动作；读端是 one_page
+      的「启动输入阻断」披露，与 finish 的 gaps / contradictions（success 不可达时 partial /
+      blocked / failed / cancelled 照常可达，blocked 自动带上这条 blocker）。检查照跑、
+      结果入账、由收尾应答 —— 义务形态。
+  # [new · PR#1175] materialize_writable_roots → 读路径角色抛错（L268）
+  - file: nodes/experiment/tools/run_bootstrap.py
+    class: C
+    why: >-
+      bootstrap 读路径角色抛异常，不知道该建哪些可写根。内部返回值，不直接到模型；
+      establish 把它记进 run_bootstrap 事件，bootstrap 停在 initializing、下一轮幂等重试。
+      不扩张可写范围，也不让模型猜路径授权。
+  # [new · PR#1175] materialize_writable_roots → 部分可写根建不出（L293）
+  - file: nodes/experiment/tools/run_bootstrap.py
+    class: C
+    why: >-
+      一个或多个 writable 角色目录建不出来（路径已存在但不是目录、mkdir 抛 OSError、建完
+      仍不是目录）。原样返回 created / skipped / failures，已建目录不回滚。物理事实；没建
+      出来的根本来就会被 subprocess_policy 以「受权路径角色尚未物化」拒绝。
+
+  # ── nodes/experiment/tools/safe_bash.py（+1）─────────────────────────────────────
+  # [new · PR#1175] _safe_write_file → ProjectWorkspaceError 转述（L10136）
+  - file: nodes/experiment/tools/safe_bash.py
+    class: A
+    why: >-
+      safe_write_file 改为先经 Core 的 resolve_tool_path(write=True) 解析目标：路径逃出 run
+      目录 / Project 边界 / 本节点写作用域时 Core 抛 ProjectWorkspaceError，这里原样转成
+      error 信封。写边界（写到别处不可逆、写不跨节点）是 Core 的既有墙，本处不新增条件，
+      只是在任何记账、建目录、写入之前把它说出来。
+
+  # ── nodes/experiment/tools/input_admission.py（+1，新文件）──────────────────────
+  # [new · PR#1175] check_consumed_input → formal_input_not_ready（L89）
+  # 裁决（wangd 2026-10-02，见 verdicts_experiment_data.md「2026-10-02 补记」）：v3 起正式输入
+  # 核验是 B 类墙，推翻 rm:1946/sb:3517 的 O2「照跑 + 记见证」。旧协议 run 仍走 O2 见证形态。
+  - file: nodes/experiment/tools/input_admission.py
+    class: B
+    why: >-
+      v3 run 中本动作显式声明消费（input_package_artifact_id / bindings）的输入，其身份审计
+      失败时在 spawn / 提交之前拒绝：输入账本读不出、artifact 未知或歧义、与已交付 artifact
+      不符、绑定不全、交付未核验、fallback 授权缺失。用不对应或未核验的字节跑出的结果会被
+      记成「用了那份输入」，账就假了 —— 这是 2026-10-02 对 O2 的改判（v3 的任务输入身份是
+      canonical A 的一部分，不是可以事后披露的执行前提）。不消费这些输入的动作与诚实 finish
+      不受影响；旧协议 run 保留 O2 的 execution_precondition_witness 形态。
+
+  # ── shared/lib/publication_figures.py（+1）──────────────────────────────────────
+  # [#439 重挂] _check_annotated_values → raise FigureContradictsItsSource
+  # 不是新墙：PR#1007 就有这处 raise，但 FigureContradictsItsSource 不在扫描器的契约异常
+  # 名单里，棘轮从没数到它。这次名单补上它、它也第一次有了生产路径（core/state.py 的
+  # save_artifact 铸 figure 时调 value_check_at_mint），于是在这里补登记。
+  - file: shared/lib/publication_figures.py
+    class: B
+    why: >-
+      图记录声明了「图上印的某个数来自某份产物的某个字段」，而那个字段的值与印的数差出
+      声明的容差 —— 记录与它自己声称的出处自相矛盾（E2E v26：图上 2.268776 / 冻结的
+      clean_results 2.2692871655836173，跨过预注册的 2σ 门）。拒绝铸这份记录，报错把两个
+      数、出处 id 与字段路径一起说出来。声明了却够不到出处 / 路径不存在 / 不是数字同样
+      不放行（观测不到不许当成一致）。没声明 annotated_values 的不拦，缺席落进记录。

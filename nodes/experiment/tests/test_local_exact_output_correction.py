@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,7 +23,25 @@ from nodes.experiment.tools.execution_route import (
     resolve_execution_context,
     step_definition_hash,
 )
+from nodes.experiment.tools.output_postconditions import STALE_TOLERANCE_NS
 from nodes.experiment.tools.run_contract import _classify_experiment_scope
+
+_SECOND_NS = 1_000_000_000
+
+
+@contextmanager
+def _bind_clock_offset(offset_ns: int):
+    """把 attempt 绑定读到的墙钟相对真实时刻平移 ``offset_ns``（#1146）。
+
+    夹具原来靠「bind 后 sleep(0.01) 再写文件」保证文件落在窗口里；CI runner 的
+    CLOCK_REALTIME 每 ~40 s 往回跳 0.6–1 s，回跳落进那 10 ms 就随机红。这里只平移
+    绑定那一次读数：负值 = 绑定早于写入，不再依赖墙钟在这几毫秒里单调前进；正值 =
+    模拟绑定之后墙钟回拨（绑定读数比随后写下的文件戳还晚）。
+    """
+    real_time_ns = time.time_ns
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(time, "time_ns", lambda: real_time_ns() + offset_ns)
+        yield
 
 
 def _state(
@@ -162,6 +181,7 @@ def _window_receipt(timestamp_ns: int) -> dict:
         "post_terminal_create",
         "post_terminal_overwrite",
         "post_terminal_utime_rollback",
+        "ctime_just_beyond_stamp_tolerance",
         "missing_bound_time",
         "missing_terminal_time",
         "symlink",
@@ -193,12 +213,16 @@ def test_local_output_correction_witness_rejects_unsafe_candidates(
         terminal_ns = min(stat.st_mtime_ns, stat.st_ctime_ns) - 1_000_000_000
         bound_ns = terminal_ns - 1_000_000_000
     elif case == "post_terminal_utime_rollback":
-        terminal_ns = time.time_ns()
-        time.sleep(0.01)
+        # 终态时刻从文件自己的 ctime 往前推（超出容差），不靠 sleep 与墙钟先后（#1146）。
         candidate.write_bytes(b"overwritten after terminal\n")
+        terminal_ns = (
+            candidate.stat().st_ctime_ns - STALE_TOLERANCE_NS - _SECOND_NS)
         rolled_back_ns = terminal_ns - 500_000_000
         os.utime(candidate, ns=(rolled_back_ns, rolled_back_ns))
         bound_ns = terminal_ns - 1_000_000_000
+    elif case == "ctime_just_beyond_stamp_tolerance":
+        # 容差就是共享 evaluator 那一把：超出一纳秒仍判「不是本次写入」。
+        bound_ns = stat.st_ctime_ns + STALE_TOLERANCE_NS + 1
     elif case == "symlink":
         target = actual_dir / "target.tar.gz"
         target.write_bytes(b"target\n")
@@ -234,16 +258,60 @@ def test_local_output_correction_witness_rejects_unsafe_candidates(
     assert violations
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        "mtime_preserved_from_the_past",
+        "bind_clock_a_few_ms_ahead",
+        "bind_clock_ahead_at_tolerance_edge",
+    ],
+)
+def test_local_output_witness_accepts_fresh_file_despite_clock_skew(
+    tmp_path, case,
+):
+    """#1146：文件戳与绑定读数是两个时钟；真新鲜的产物不能因此被判「不是本次写入」。
+
+    - wget / tar x / cp -p / curl -R 合法地把 mtime 还原成归档时间，ctime 仍是这次写入；
+    - Linux 文件戳取内核粗时钟、墙钟还会回拨，绑定读数可以比随后写下的文件戳晚几毫秒。
+    所有时刻都从文件自己的 ctime 推出，不靠 sleep 与墙钟先后。
+    """
+    workdir = tmp_path / "work"
+    candidate = workdir / "actual" / "source.tar.gz"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"fresh archive\n")
+    if case == "mtime_preserved_from_the_past":
+        three_days_ago = candidate.stat().st_ctime_ns - 3 * 86_400 * _SECOND_NS
+        os.utime(candidate, ns=(three_days_ago, three_days_ago))
+    ctime_ns = candidate.stat().st_ctime_ns
+    bound_ns = {
+        "mtime_preserved_from_the_past": ctime_ns - _SECOND_NS,
+        "bind_clock_a_few_ms_ahead": ctime_ns + 5_000_000,
+        "bind_clock_ahead_at_tolerance_edge": ctime_ns + STALE_TOLERANCE_NS,
+    }[case]
+
+    witness, violations = _local_output_repoint_witness(
+        {"resolved_workdir": str(workdir), "bound_at_ns": bound_ns,
+         "expected_outputs": ["declared/source.tar.gz"]},
+        _window_receipt(ctime_ns + _SECOND_NS),
+        "attempt-clock-skew",
+        ["actual/source.tar.gz"],
+    )
+
+    assert violations == []
+    assert witness["physical_postcondition_verified"] is True
+    assert witness["files"][0]["ctime_ns"] == ctime_ns
+
+
 def test_same_name_sideproduct_passes_only_the_disclosed_physical_scope(
     tmp_path,
 ):
     workdir = tmp_path / "work"
     candidate = workdir / "sideproduct" / "source.tar.gz"
     candidate.parent.mkdir(parents=True)
-    before_ns = datetime.now(timezone.utc).timestamp() * 1_000_000_000
-    time.sleep(0.01)
     candidate.write_bytes(b"same-name sideproduct\n")
-    after_ns = datetime.now(timezone.utc).timestamp() * 1_000_000_000
+    ctime_ns = candidate.stat().st_ctime_ns
+    before_ns = ctime_ns - _SECOND_NS
+    after_ns = ctime_ns + _SECOND_NS
 
     witness, violations = _local_output_repoint_witness(
         {"resolved_workdir": str(workdir), "bound_at_ns": int(before_ns),
@@ -267,10 +335,9 @@ def test_local_output_witness_rejects_path_replacement_during_stable_read(
     workdir = tmp_path / "work"
     candidate = workdir / "actual" / "source.tar.gz"
     candidate.parent.mkdir(parents=True)
-    before_ns = time.time_ns()
-    time.sleep(0.01)
     candidate.write_bytes(b"original inode\n")
-    terminal_ns = time.time_ns()
+    before_ns = candidate.stat().st_ctime_ns - _SECOND_NS
+    terminal_ns = before_ns + 2 * _SECOND_NS
     replacement = candidate.with_name("replacement.tar.gz")
     replacement.write_bytes(b"replacement inode\n")
     original_fingerprint = er._local_identity_fingerprint
@@ -326,10 +393,9 @@ def test_local_output_witness_never_blocks_on_fifo_swap(
     workdir = tmp_path / "work"
     candidate = workdir / "actual" / "source.tar.gz"
     candidate.parent.mkdir(parents=True)
-    before_ns = time.time_ns()
-    time.sleep(0.01)
     candidate.write_bytes(b"regular before race\n")
-    terminal_ns = time.time_ns()
+    before_ns = candidate.stat().st_ctime_ns - _SECOND_NS
+    terminal_ns = before_ns + 2 * _SECOND_NS
     original_open = er.os.open
     observed_flags = 0
 
@@ -361,6 +427,8 @@ def _corrected_local_route(
     *,
     original_outputs: list[str] | None = None,
     corrected_outputs: list[str] | None = None,
+    bind_clock_offset_ns: int = -_SECOND_NS,
+    preserved_mtime_ns: int | None = None,
 ) -> tuple[State, dict, dict, Path]:
     # This helper exercises correction of one acquired file.  It deliberately
     # trims away the build and smoke steps, so freezing the run as a
@@ -389,15 +457,18 @@ def _corrected_local_route(
         "workdir_resolution_status": "resolved",
         "resolved_workdir": str(workdir),
     })
-    binding = begin_route_step_attempt(
-        state, decision, tool="safe_run_bash",
-        action={"payload_digest": "c" * 64},
-    )
-    time.sleep(0.01)
+    with _bind_clock_offset(bind_clock_offset_ns):
+        binding = begin_route_step_attempt(
+            state, decision, tool="safe_run_bash",
+            action={"payload_digest": "c" * 64},
+        )
     for relative_path in corrected_outputs:
         output = workdir / relative_path
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(b"same-name local output\n")
+        if preserved_mtime_ns is not None:
+            # wget / tar x / cp -p：内容是这次写的（ctime 新），mtime 还原成旧时间。
+            os.utime(output, ns=(preserved_mtime_ns, preserved_mtime_ns))
     finish_route_step_attempt(
         state, binding, result={"status": "success", "returncode": 0})
     corrected = json.loads(json.dumps(route))
@@ -452,6 +523,7 @@ def test_local_correction_preserves_verified_and_repoints_missing_output(
         "self_asserted_regular_fifo",
         "both_reuse_kinds",
         "wrong_source_event",
+        "frozen_ctime_before_bound_beyond_tolerance",
     ],
 )
 def test_local_correction_reuse_revalidates_frozen_witness_bindings(
@@ -491,6 +563,14 @@ def test_local_correction_reuse_revalidates_frozen_witness_bindings(
         elif mutation == "wrong_source_event":
             receipt["attempt_receipt"]["source_event"] = (
                 "route_step_external_execution_verified")
+        elif mutation == "frozen_ctime_before_bound_beyond_tolerance":
+            # 复核走的是与创建同一个时间窗判据（#1146）：冻结的 ctime 越出容差即拒。
+            file_record = witness["files"][0]
+            file_record["ctime_ns"] = (
+                witness["bound_at_ns"] - STALE_TOLERANCE_NS - 1)
+            identity = er._local_file_record_identity(file_record)
+            file_record["fingerprint"] = er._local_identity_fingerprint(
+                file_record["path"], identity)
         else:
             file_record = witness["files"][0]
             file_record["mode"] = 0o010644
@@ -505,6 +585,31 @@ def test_local_correction_reuse_revalidates_frozen_witness_bindings(
     assert snapshot["steps"]["acquire"]["state"] == "pending"
     assert snapshot["steps"]["acquire"].get("attempt_id") != binding["attempt_id"]
     assert snapshot["correction_witness_limitations"] == []
+
+
+@pytest.mark.parametrize(
+    "fixture_kwargs",
+    [
+        # tar x / wget：内容这次写入，mtime 是归档里的旧时间。
+        {"preserved_mtime_ns": 1_700_000_000 * _SECOND_NS},
+        # 绑定之后墙钟回拨 20 ms：绑定读数比随后写下的文件戳还晚。
+        {"bind_clock_offset_ns": 20_000_000},
+    ],
+    ids=["preserved_mtime", "bind_clock_backstep"],
+)
+def test_local_correction_creates_and_revalidates_with_one_window_predicate(
+    tmp_path, fixture_kwargs,
+):
+    """#1146：创建见证与复用前复核走同一个时间窗判据，任一侧还是旧尺都会在这里红。"""
+    state, _corrected, binding, _output = _corrected_local_route(
+        tmp_path, **fixture_kwargs)
+
+    snapshot = build_route_snapshot(state)
+    assert snapshot["steps"]["acquire"]["state"] == "verified"
+    assert snapshot["steps"]["acquire"]["attempt_id"] == binding["attempt_id"]
+    assert [item["attempt_id"]
+            for item in snapshot["correction_witness_limitations"]] == [
+        binding["attempt_id"]]
 
 
 def test_correction_disclosure_fails_closed_when_lineage_cannot_be_read(
@@ -616,11 +721,11 @@ def test_second_local_correction_preserves_the_first_lineage_head(tmp_path):
             "workdir_resolution_status": "resolved",
             "resolved_workdir": str(workdir),
         })
-        binding = begin_route_step_attempt(
-            state, decision, tool="safe_run_bash",
-            action={"payload_digest": digest * 64},
-        )
-        time.sleep(0.01)
+        with _bind_clock_offset(-_SECOND_NS):
+            binding = begin_route_step_attempt(
+                state, decision, tool="safe_run_bash",
+                action={"payload_digest": digest * 64},
+            )
         path = workdir / output
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(step_id, encoding="utf-8")

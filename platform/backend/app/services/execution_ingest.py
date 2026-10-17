@@ -435,6 +435,61 @@ def _result_summary(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def _foreground_key(raw: dict[str, Any]) -> str:
+    """一次前台派发在 `foregroundSteps` 里的键 —— 实时与重放共用这**一个**定义（#1052）。
+
+    此前键是 `child_node_type`，可「同类型」不等于「同一次派发」：
+
+    * 后台跑的同类型子节点结束时，它的 `subagent_call_end` 按类型 pop 掉了**正在
+      前台跑**的那个的记账，前台那个随后 pause，`run.paused` 就链不到自己那一步；
+    * 一次派发起了头却没走到结束（例如 run_node 在 `subagent_call_start` 之后因
+      `resume_task_identity_mismatch` 提前返回），同类型的下一次 fresh 派发被当成
+      「重叠」拒收 —— #1052 翼型会话 seq 5158/5166 的那条拒绝 —— 新 child 的
+      pause 还会链到旧那次的 step 上。
+
+    `dispatch_id` 是 run_node 每次调用现发的身份（#1080 第 4 条），start / paused /
+    end 三条都带。没有它的是老 transcript：退回按类型记，行为与从前一致。
+    """
+    dispatch_id = raw.get("dispatch_id")
+    if isinstance(dispatch_id, str) and dispatch_id:
+        return dispatch_id
+    return str(raw.get("child_node_type") or "research")
+
+
+_TRUNCATED_STATUS = re.compile(r'^\{"status":\s*"([^"\\]{1,64})"')
+
+
+def _tool_result_status(raw: dict[str, Any], result: Any) -> str | None:
+    """工具 envelope 的 `status` —— `tool.completed` 的结构化结局（#947）。
+
+    权限 pause 和批准后的真实成功**都**落成 `tool.completed`，此前能分开它俩的
+    只有 `resultSummary` 那串可能被截断的文本：harness 的 `_brief` 对超过 500
+    字节的成功结果整体压成截断字符串（pause 的 envelope 带着整段问题与选项，
+    几乎总是超）。审计与 benchmark 只能在字符串里猜 `"status": "pause"`。
+
+    取值顺序 = 哪份更完整：预览本身就是 dict → 它就是原结果；否则读同一行的
+    `content`（harness 发给模型的那份完整序列化，#734）；老 transcript 没有
+    `content`，再从截断预览的开头认 envelope。判不出就不写 —— 没有 ≠ 成功。
+    """
+    if isinstance(result, dict):
+        status = result.get("status")
+        return status if isinstance(status, str) and status else None
+    content = raw.get("content")
+    if isinstance(content, str):
+        try:
+            full = json.loads(content)
+        except ValueError:
+            full = None  # 脱敏截过（>4000 字）或非 JSON —— 走下一个来源
+        if isinstance(full, dict):
+            status = full.get("status")
+            return status if isinstance(status, str) and status else None
+    if isinstance(result, str):
+        found = _TRUNCATED_STATUS.match(result)
+        if found:
+            return found.group(1)
+    return None
+
+
 def _validated_cost(value: Any) -> Decimal | None:
     if value is None:
         return None
@@ -675,15 +730,15 @@ class TranscriptAdapter:
             )
         if raw_event == "subagent_call_start":
             step_id = f"step_{event_id[:24]}"
-            node_type = str(raw.get("child_node_type") or "research")
             if raw.get("background") is True:
                 return None
+            key = _foreground_key(raw)
             foreground = dict(adapter_state.get("foregroundSteps") or {})
-            if node_type in foreground:
+            if key in foreground:
                 raise RecordRejectedError(
                     "overlapping foreground subagent starts cannot be associated safely"
                 )
-            foreground[node_type] = step_id
+            foreground[key] = step_id
             adapter_state["foregroundSteps"] = foreground
             # **不在这里发 step.started。**
             #
@@ -696,9 +751,8 @@ class TranscriptAdapter:
             # foregroundSteps 记账（用于 pause 关联与重叠检测）。
             return None
         if raw_event in {"subagent_call_end", "subagent_call_paused"}:
-            node_type = str(raw.get("child_node_type") or "research")
             foreground = dict(adapter_state.get("foregroundSteps") or {})
-            step_id = foreground.pop(node_type, None)
+            step_id = foreground.pop(_foreground_key(raw), None)
             adapter_state["foregroundSteps"] = foreground
             if not step_id:
                 child_run_id = raw.get("child_run_id")
@@ -779,6 +833,9 @@ class TranscriptAdapter:
                     at,
                 )
             payload = {**common, "resultSummary": _result_summary(result)}
+            result_status = _tool_result_status(raw, result)
+            if result_status is not None:
+                payload["resultStatus"] = result_status
             if isinstance(result, dict) and isinstance(result.get("count"), int):
                 payload["resultCount"] = result["count"]
             return EventDraft("tool.completed", EventVisibility.STANDARD, payload, at)
@@ -1881,16 +1938,21 @@ class ExecutionIngestService:
             adapter_state.pop("rootStepId", None)
             adapter_state.pop("activeTool", None)
             return
-        if existing.kind == "step.started" and raw.get("background") is not True:
-            node_type = str(raw.get("child_node_type") or "research")
+        # 前台派发记账：键与实时路径同一个定义（`_foreground_key`）。
+        #
+        # 结束一侧按**原始事件**认，不按落库的 kind 认：`subagent_call_paused` 落的是
+        # `run.paused`，此前这里只认老 adapter 留下的 `step.completed/failed`，于是
+        # 从头重读（重启 / 补事件）时 pause 不出账，同类型的下一次派发被判「重叠」，
+        # 凭空多出一条首读时没有的 `record.rejected`。
+        if raw.get("event") in {"subagent_call_end", "subagent_call_paused"}:
             foreground = dict(adapter_state.get("foregroundSteps") or {})
-            foreground[node_type] = existing.payload.get("stepId")
+            foreground.pop(_foreground_key(raw), None)
             adapter_state["foregroundSteps"] = foreground
             return
-        if existing.kind in {"step.completed", "step.failed"}:
-            node_type = str(raw.get("child_node_type") or "research")
+        # 2026-08-10 之前的 adapter 为前台派发落过一条 `step.started`。
+        if existing.kind == "step.started" and raw.get("background") is not True:
             foreground = dict(adapter_state.get("foregroundSteps") or {})
-            foreground.pop(node_type, None)
+            foreground[_foreground_key(raw)] = existing.payload.get("stepId")
             adapter_state["foregroundSteps"] = foreground
             return
         if existing.kind == "tool.started":

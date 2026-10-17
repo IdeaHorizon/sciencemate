@@ -266,6 +266,43 @@ def test_unprovable_targets_become_unresolved(tmp_path, workspace, cmd,
     assert (sb.UNRESOLVED in targets) is expect_unresolved, targets
 
 
+@pytest.mark.parametrize("command", [
+    "tar -cf - .",
+    "tar cf - .",
+    "tar --create --file=- .",
+    "tar -C runtime/source/FVCOM --exclude=.git -cf - .",
+])
+def test_tar_create_to_stdout_has_no_file_write_target(command):
+    assert sb._analyze_shell_path_effects(command, "/work") == []
+
+
+def test_tar_stdout_pipeline_attributes_only_extract_destination():
+    command = (
+        "tar -C runtime/source/FVCOM --exclude=.git -cf - . "
+        "| tar -C build/FVCOM -xf -"
+    )
+    assert sb._analyze_shell_path_effects(command, "/work") == [
+        ("tar", "/work/build/FVCOM"),
+    ]
+
+
+@pytest.mark.parametrize("command", [
+    "tar -cf",
+    "tar --create --file= .",
+    "tar -cf - . -C",
+    "tar -cf - . --directory=",
+    'tar -cf "$ARCHIVE" .',
+    "tar --remove-files -cf - .",
+    "tar --checkpoint-action=exec=touch -cf - .",
+    "tar --to-command=cat -cf - .",
+    "tar -I gzip -cf - .",
+    "tar --listed-incremental=snapshot -cf - .",
+])
+def test_tar_unknown_or_source_mutating_stdout_controls_stay_unresolved(command):
+    assert ("tar", sb.UNRESOLVED) in sb._analyze_shell_path_effects(
+        command, "/work")
+
+
 @pytest.mark.parametrize("command,relative_target", [
     ("touch file", "file"),
     ("mkdir -p child", "child"),
@@ -310,6 +347,25 @@ def test_unresolved_target_is_rejected_before_running(tmp_path, workspace):
     )
     assert blocked is not None and blocked["status"] == "error"
     assert blocked["blocker"]["scope"] == "unresolved_target"
+
+
+@pytest.mark.parametrize("protected", [False, True])
+def test_literal_loop_projection_preserves_path_role_permission(tmp_path, workspace, protected):
+    build = workspace / "gromacs-2024.6-build"
+    source = workspace / "gromacs-2024.6"
+    state = _FakeState(tmp_path, roles={
+        "build_root": str(build), "source_baseline_root": str(source),
+    })
+    target = source if protected else build
+    blocked = sb._bash_path_effects_guard(
+        state, f'ROOT={target}; for cfg in a b; do touch "$ROOT/$cfg"; done',
+        cwd=str(build), allow_authorization=False,
+    )
+    if protected:
+        assert blocked is not None and blocked["status"] == "error"
+        assert blocked["blocker"]["scope"] == "protected_source_tree"
+    else:
+        assert blocked is None
 
 def test_lexical_cd_resolves_not_yet_created_directory(tmp_path, workspace):
     """mkdir -p X && cd X && rm -rf *：X 尚不存在也必须解析到 X，而不是回退旧 cwd。"""

@@ -286,6 +286,84 @@ def test_workdir_var_paths_remain_inside_declared_run_root():
         st, cmd, cwd=str(ws), allow_authorization=False) is None
 
 
+# ── 误报回归 3（#939）：bash 层设备名在按宿主路径解析之前认 ────────────────────
+# Windows 真机：`> /dev/null` 被 os.path.abspath 解析成 `C:\dev\null`，判
+# unknown_absolute 事前拦截。命令跑在 MSYS bash 里，守卫要按 bash 的词表判。
+
+_SHELL_DEVICE_REDIRECTS = (
+    "echo hi > /dev/null",
+    "echo hi 2> /dev/null",
+    "echo hi >> /dev/stdout",
+    "echo hi 2> /dev/stderr",
+    "echo hi > /dev/fd/2",
+    'OUT=/dev/null; echo hi > "$OUT"',
+)
+
+
+@pytest.mark.parametrize("cmd", _SHELL_DEVICE_REDIRECTS)
+def test_shell_device_redirect_is_not_a_write(cmd):
+    """本机语义下也成立；`/dev/fd/N` 修之前在 POSIX 上同样被判 unknown_absolute。"""
+    st = _mk_state()
+    ws = _workspace(st)
+    assert sb._bash_path_effects_guard(
+        st, cmd, cwd=str(ws), allow_authorization=False) is None
+
+
+def _windows_path_semantics(ntpath):
+    """ntpath 的副本，只把 realpath 改成接受 `strict`。
+
+    pathlib 的 `resolve()` 会调 `os.path.realpath(p, strict=...)`；而在非 Windows
+    主机上 ntpath.realpath 是 `_abspath_fallback`，3.11 的它不收 strict（3.12+ 收）。
+    整个换掉 os.path 时，节点里的 `Path(...).resolve()` 就在 CI 的 3.11 上炸
+    TypeError —— 那是测试替身的版本差异，不是被测的守卫。
+    """
+    import types
+
+    shim = types.SimpleNamespace(
+        **{k: getattr(ntpath, k) for k in dir(ntpath) if not k.startswith("__")})
+    _realpath = ntpath.realpath
+
+    def realpath(path, *args, strict=False, **kwargs):
+        return _realpath(path)
+
+    shim.realpath = realpath
+    return shim
+
+
+@pytest.mark.parametrize("cmd", _SHELL_DEVICE_REDIRECTS)
+def test_shell_device_redirect_is_not_a_write_under_windows_path_semantics(
+    cmd, monkeypatch,
+):
+    """把宿主 os.path 换成 ntpath，复现 Windows 上的解析：修之前 `/dev/null`
+    会被解析成 `\\dev\\null` 并被拦下（真机上是 `C:\\dev\\null`）。"""
+    import ntpath
+    st = _mk_state()
+    ws = _workspace(st)
+    with monkeypatch.context() as m:
+        # ntpath.expanduser 在非 Windows 上只认 USERPROFILE。
+        m.setenv("USERPROFILE", os.environ.get("HOME", str(ws)))
+        m.setattr(os, "path", _windows_path_semantics(ntpath))
+        effects = sb._analyze_shell_path_effects(cmd, str(ws))
+        _, targets, _ = sb._extract_write_targets(cmd, str(ws))
+        guard = sb._bash_path_effects_guard(
+            st, cmd, cwd=str(ws), allow_authorization=False)
+    assert [e for e in effects if e[0] == "redirect"] == []
+    if "$" not in cmd:  # 按段的词法解析不展开命令内变量，$OUT 本来就是 unresolved
+        assert targets == []
+    assert guard is None
+
+
+def test_msys_nul_redirect_is_still_a_real_write_in_cwd():
+    """`nul` 不是 bash 层设备：MSYS/Cygwin 不吃 Win32 的 DOS 设备名映射，
+    `> nul` 在 cwd 真建一个 nul 文件，所以照常按 cwd 下的路径判。"""
+    st = _mk_state()
+    ws = _workspace(st)
+    for cmd in ("echo hi > nul", "echo hi > NUL"):
+        effects = sb._analyze_shell_path_effects(cmd, str(ws))
+        name = cmd.rsplit(" ", 1)[-1]
+        assert effects == [("redirect", str(ws / name))], effects
+
+
 # ── 保护不回退 ───────────────────────────────────────────────────────────────
 
 def test_true_git_source_tree_still_blocked():
@@ -735,7 +813,9 @@ def test_safe_write_file_requires_scope_before_writer_or_parent_creation(
     monkeypatch,
 ):
     st = State.new("experiment", tmp_path)
-    target = tmp_path / "not-created" / "sentinel.txt"
+    # Keep this scope-order test inside Core's writer ownership; an external
+    # target is independently rejected by Core before any node action.
+    target = sb.experiment_output_dir(st, "runtime") / "not-created" / "sentinel.txt"
     calls = []
 
     async def forbidden(*_args, **_kwargs):
@@ -752,7 +832,11 @@ def test_safe_write_file_requires_scope_before_writer_or_parent_creation(
 
 def test_safe_write_file_uses_same_path_authorization(monkeypatch):
     st = _mk_state()
-    target = "/etc/harness-test-write-file.conf"
+    # A fake writer must not manufacture permission to write /etc. Exercise
+    # the node approval inside Core ownership, with a read-only dependency.
+    dependency = sb.experiment_output_dir(st, "runtime") / "dependency"
+    st.hook_state["path_roles"] = {"dependency_root": str(dependency)}
+    target = str(dependency / "config.txt")
 
     async def fake_write(state, path, content, create_dirs=True, **kwargs):
         return {"status": "success", "path": path}
@@ -1042,3 +1126,22 @@ def test_framework_guard_exception_blocks_payload_even_with_bypass(monkeypatch):
     assert result["blocker"]["source"] == "build_gate"
     assert result["blocker"]["bypass_allowed"] is False
     assert spawned == []
+
+
+def test_a_system_root_reached_through_an_alias_is_still_a_system_root(tmp_path, monkeypatch):
+    """#1184：传进来的路径已 resolve；名单要连解析形一起比，别名绕不过去。
+
+    macOS 上 /etc → /private/etc 就是这个形状。这里用 tmp 里的软链接在任何系统上
+    复现：名单写的是别名，传进来的是它解析后的真身。
+    """
+    from nodes.experiment.tools import path_roles
+
+    real = tmp_path / "real-root"
+    real.mkdir()
+    alias = tmp_path / "alias-root"
+    alias.symlink_to(real)
+    monkeypatch.setattr(path_roles, "_SYSTEM_ROOTS", frozenset({str(alias)}))
+    assert path_roles._is_system_root(str(alias.resolve()))
+    assert path_roles._is_system_root(str(alias))
+    # 子树仍是合法的可写依赖根
+    assert not path_roles._is_system_root(str((alias / "lib").resolve()))

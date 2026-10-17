@@ -160,7 +160,7 @@ def test_needs_input_is_not_terminal_and_keeps_the_fallback_shut(tmp_path: Path)
     assert result["outcome"] == "recoverable"
     assert result["data_terminally_blocked"] is False
     assert result["detail"]["missing_fields"] == ["reynolds_number"]
-    assert "重新 run_node" in result["next_step"]
+    assert "重新 dispatch_data_request" in result["next_step"]  # v3（060 S1d）：run_node 不在模型面
     assert state.hook_state["input_delivery_state"][spec["spec_id"]]["data_terminally_blocked"] is False
     # 降格后：授权照给，但「没有终态 blocker」必须如实进账（corroborated=False）
     assert _fallback_authorization_is_uncorroborated(state, spec["spec_id"])

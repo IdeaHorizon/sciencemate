@@ -12,55 +12,81 @@ tools_used:
   - read_file
   - safe_run_bash
   - safe_execute_python
-expected_outcome: GPU binary built and acceleration verified against an equivalent CPU workload
+expected_outcome: Actual GPU device computation and its numerical result verified; build evidence is required only when a build is part of the task
 status: validated
 ---
 
 # NVIDIA CUDA HPC Build and Verification
 
 This skill is conditional.  Do not infer CUDA from the word “GPU”.  First record
-the device, compute capability, driver, toolkit, host compiler, MPI wrappers,
-and the target software's documented backend.
+the device, driver, installed application/runtime backend, and the target
+software's documented backend.  Record the toolkit and host compiler only when
+building; record MPI wrappers only when the workload actually uses MPI.
 
 ## Required workflow
 
-1. Establish hardware and toolchain evidence before changing configuration:
+1. Establish device and runtime evidence before changing configuration:
 
    ```bash
    nvidia-smi --query-gpu=name,compute_cap,memory.total,driver_version --format=csv
+   ```
+
+   `nvidia-smi` is inventory/visibility evidence, not proof that the application
+   executed a GPU kernel.  Record the selected application's CUDA backend and
+   runtime version inside the allocated job.
+
+   For a preinstalled runtime workload, do not require `nvcc`, a host compiler,
+   an MPI installation, or a source build.  If a source build is required, then
+   capture its toolchain:
+
+   ```bash
    nvcc --version
    gcc --version
-   which nvcc mpicc mpicxx mpif90
+   which nvcc
+   ```
+
+   Probe MPI wrappers only when the workload uses MPI:
+
+   ```bash
+   which mpicc mpicxx mpif90
    mpicc -show
    mpif90 -show
    ```
 
-2. Read the target software's official GPU build instructions and the frozen
-   run contract.  Use the software's native NVIDIA GPU package/backend first
+2. Read the target software's official GPU runtime/use instructions, its build
+   instructions when a build is required, and the frozen run contract.  Use the
+   software's native NVIDIA GPU package/backend first
    for a single-GPU workload.  Escalate to KOKKOS, RAJA, SYCL, or another
    abstraction only when the native route cannot satisfy the preregistered
    multi-GPU, portability, or performance requirement; record the reason.
 
-3. Check one coherent toolchain before the first build.  CUDA, the host
+3. When building, check one coherent toolchain before the first build.  CUDA, the host
    compiler, MPI wrappers, BLAS/LAPACK libraries, and the launcher must come
    from compatible installations.  Fix module/PATH selection before changing
    source or generated configuration.  Never patch vendor CUDA headers as the
    first response to a host-compiler error.
 
-4. Match the binary to the detected GPU architecture.  For CUDA, explicitly
+4. When building, match the binary to the detected GPU architecture.  For CUDA, explicitly
    pass the target through the application's official interface, such as
    `-arch=sm_XX` or `GPU_ARCH=sm_XX`; do not assume every build system accepts
    the same spelling.  Never rely on auto-detection when the interface exposes
    an architecture option.
 
-5. Build in the declared `build_root` or `source_worktree_root`; never modify
+5. If building, build in the declared `build_root` or `source_worktree_root`; never modify
    `source_baseline_root`.  Preserve configure/build commands, compiler and
    toolkit versions, architecture flags, and the resulting binary path.
 
-6. Verify actual acceleration using an equivalent CPU/GPU workload permitted
-   by the preregistration.  Record application backend evidence, GPU utilization,
-   wall time, workload size, and comparison limits.  There is no universal
-   cross-application speedup threshold.
+6. Verify actual GPU computation with an application-level operation permitted
+   by the preregistration.  Disable or reject CPU fallback, synchronize the GPU
+   operation, and record the selected backend, device, workload, and numerical
+   result.  If the requested GPU backend/device is unavailable, fail closed instead
+   of falling back to CPU.  Independently check the numerical result against a
+   CPU or analytic reference.
+
+   A CPU/GPU performance comparison is optional unless performance is part of
+   the task or frozen contract.  When it is required, record wall time, workload
+   size, warm-up/synchronization method, and comparison limits.  There is no
+   universal cross-application speedup threshold.
 
 ## Architecture and compatibility reminders
 

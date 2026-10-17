@@ -140,8 +140,22 @@ def load_index(entity: str, scope: str,
         m = read_manifest(scope, project_id)
         dim = (m or {}).get("dim", 384)
         return np.zeros((0, dim), dtype=np.float32), []
-    vectors = np.load(v_path)
-    ids = json.loads(i_path.read_text(encoding="utf-8"))
+    # 派生的东西坏了就当没有：.npy / ids 读不出或不是合法内容，和「长度不一致」走同一条路 ——
+    # 返空，caller 决定 rebuild（RFC_WORKER_START_IS_NOT_A_GATE §3.5：派生索引自己会重建，
+    # 不该让一份损坏的缓存把这一轮杀掉）。
+    try:
+        vectors = np.load(v_path)
+        ids = json.loads(i_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.warning("%s 向量索引读不出（%s: %s）—— 当空处理，触发 rebuild", entity, type(exc).__name__, exc)
+        m = read_manifest(scope, project_id)
+        dim = (m or {}).get("dim", 384)
+        return np.zeros((0, dim), dtype=np.float32), []
+    if not isinstance(ids, list):
+        log.warning("%s ids 不是列表 —— 当空处理，触发 rebuild", entity)
+        m = read_manifest(scope, project_id)
+        dim = (m or {}).get("dim", 384)
+        return np.zeros((0, dim), dtype=np.float32), []
     if vectors.shape[0] != len(ids):
         log.warning(
             "%s vectors/ids 长度不一致 (%d vs %d) —— 触发 rebuild",

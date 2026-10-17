@@ -35,7 +35,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -502,11 +502,15 @@ def payload_environment(
     *,
     scratch_dir: Path,
     home: str = "host",
+    msys_bin: str | None = None,
 ) -> dict[str, str]:
     """宿主环境减去凭据，再按 ``home``（``CommandSpec.home``）安排程序住哪，最后叠调用方显式给的。
 
     * ``host``：用户真实的家照旧可见；私有 tmp + 持久缓存（``XDG_CACHE_HOME``）。
     * ``own``：墙给的家（:func:`payload_home`），整套原生词汇都换掉。
+
+    ``msys_bin``：载荷是 MSYS 程序时它的 ``/usr/bin``（``shared.lib.shell.msys_runtime_bin``，
+    只有 win32 后端会给）。排在解释器目录之后、继承来的 PATH 之前（#1203）。
 
     凭据判据与 core.secrets 同源。调用方（``CommandSpec.environment``）显式设的变量
     最后叠上去、它说了算 —— 那是它自己的决定和后果。
@@ -536,12 +540,22 @@ def payload_environment(
     # ``import numpy`` 直接 ModuleNotFoundError。与 ``the_interpreter_for_model_code()``
     # （原样的 ``sys.executable``）是同一个答案。取不到（空串 / None）就不加：
     # ``Path("").parent`` 是 ``.``，放在最前面等于让工作目录里的文件顶替命令。
+    front: list[str] = []
     if sys.executable:
         interpreter_bin = Path(sys.executable).parent
         if _WINDOWS:
             python3_is_python(interpreter_bin)
+        front.append(str(interpreter_bin))
+    # Windows：载荷是 MSYS bash（模型的 shell、本地作业脚本）时，它自己的 ``/usr/bin`` 紧跟在
+    # 解释器后面 —— Git Bash 的 ``/etc/profile`` 就是这么排的（``/usr/bin`` 在继承来的 Windows
+    # PATH 之前）。不在这里放，生成的作业脚本 ``mkdir: command not found`` 退 127；放到后面，
+    # bash 里的 ``find``/``sort`` 先撞上 System32 的 ``FIND.EXE``/``SORT.EXE``。只放进这个
+    # 子进程的环境，不碰全局 PATH（后端自己按 PATH 找 ``find`` 的地方不受影响，#1203）。
+    if msys_bin:
+        front.append(msys_bin)
+    if front:
         env["PATH"] = os.pathsep.join(
-            [str(interpreter_bin), *(p for p in env.get("PATH", "").split(os.pathsep) if p)]
+            [*front, *(p for p in env.get("PATH", "").split(os.pathsep) if p)]
         )
     if home == "own":
         env.update(payload_home(scratch_dir))
@@ -596,8 +610,18 @@ class NativeLaunch:
     unit: str | None = None
     """linux：systemd scope 名。有它，terminate 就 ``systemctl --user stop`` 整个 cgroup。"""
     stop_argv: list[str] = field(default_factory=list)
+    limit_witness: Callable[[int | None], tuple[str, str] | None] | None = None
+    """命令跑完后答「撞了哪堵资源墙」：``(resource, detail)`` 或 None（#1179）。
+
+    只有后端知道墙记在哪（linux：这条命令自己那片 cgroup 的 ``memory.events``），咽喉只管
+    把答案翻成 ``HARNESS_SANDBOX_LIMIT`` 词表。没有墙可问的后端（darwin / win32 /
+    没有 systemd 的 linux）留 None —— 行为照旧。"""
     scratch_dir: Path | None = None
     """本条命令的私有 scratch，cleanup 时整目录删掉。每个后端都给，不再挂共享 /tmp。"""
+    cwd_in_argv: bool = False
+    """argv 自己会进 ``cwd``（启动器从它的 spec 里取，win32 的 ``_win32_exec.py`` 就是）。
+    兼容入口 ``core.sandbox._native_launch`` 据此不再拿 POSIX shell 给它包一层 ``cd`` ——
+    Windows 上那层 shell 是 MSYS bash，原生程序的 argv 过它一跳就被重新解析坏了（#943）。"""
     unmet: tuple[tuple[str, str], ...] = ()
     """**这一条命令**没兑现的不变量：((invariant, 原因), ...)。
 
@@ -605,6 +629,12 @@ class NativeLaunch:
     却是**逐条命令**才知道守没守住 —— 典型是"可写根内部的只读洞"在纯放行清单后端上
     超了规则预算（#900-B1）。那种时候不能沉默，也不能改 capabilities 去骗全局记账：
     挂在这条 launch 上，由咽喉写进 transcript（``isolation_gap``）。"""
+
+    def limit_hit(self, returncode: int | None) -> tuple[str, str] | None:
+        """必须在 :meth:`cleanup` 之前问：cleanup 会把记着这件事的 cgroup 一起收走。"""
+        if self.limit_witness is None:
+            return None
+        return self.limit_witness(returncode)
 
     def terminate(self, *, remove: bool = False) -> bool:
         del remove

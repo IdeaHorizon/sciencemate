@@ -86,6 +86,132 @@ def _flatten_params(value: Any, prefix: str = "") -> dict[str, Any]:
     return flattened
 
 
+def compare_execution_parameters(
+    contract: dict[str, Any], execution_params: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Compare declared execution parameters with one frozen prereg contract.
+
+    This is a pure comparison of caller-reported parameters and frozen
+    commitments.  A passing result does not prove which parameters an
+    executor actually used and does not authorize a deviation.
+
+    The contract may be exact preregistration metadata containing a v1
+    execution_contract, or the legacy normalized run-contract view with
+    expected_params.  Structured contracts derive their expected scientific
+    parameters from the structured value itself so callers do not need to
+    reproduce load_run_contract normalization.
+    """
+    # execution_contract 住在上游（hypothesis）冻结的 prereg 里，不是本节点模型的调用参数：
+    # 报的是「绑定的 prereg 坏了」，措辞指明出处，不写成对调用方的字段契约。
+    _invalid_contract_reason = (
+        "the bound preregistration's execution_contract is not version 1 "
+        "with scientific_params and runtime_params objects"
+    )
+    if not isinstance(contract, dict) or not contract.get("execution_contract_valid", True):
+        return {
+            "passed": False,
+            "reason": _invalid_contract_reason,
+            "blocking_reasons": ["execution_contract_invalid"],
+        }
+
+    declared_contract = contract.get("execution_contract")
+    structured_contract = declared_contract is not None
+    if structured_contract:
+        if not (
+            isinstance(declared_contract, dict)
+            and declared_contract.get("version") == 1
+            and isinstance(declared_contract.get("scientific_params"), dict)
+            and isinstance(declared_contract.get("runtime_params", {}), dict)
+        ):
+            return {
+                "passed": False,
+                "reason": _invalid_contract_reason,
+                "blocking_reasons": ["execution_contract_invalid"],
+            }
+        expected = declared_contract["scientific_params"]
+        if not isinstance(execution_params, dict) or "derived_params" in execution_params:
+            return {
+                "passed": False,
+                "reason": "v1 execution_contract accepts framework-derived params only as outputs",
+                "blocking_reasons": ["derived_params_forbidden"],
+            }
+        unexpected_sections = sorted(
+            set(execution_params) - {"scientific_params", "runtime_params"}
+        )
+        scientific_params = execution_params.get("scientific_params")
+        runtime_params = execution_params.get("runtime_params", {})
+        if (
+            unexpected_sections
+            or not isinstance(scientific_params, dict)
+            or not isinstance(runtime_params, dict)
+        ):
+            return {
+                "passed": False,
+                "reason": "v1 execution_params must contain scientific_params and optional runtime_params only",
+                "blocking_reasons": ["execution_params_structure_invalid"],
+            }
+        actual_params = scientific_params
+    else:
+        expected = contract.get("expected_params")
+        actual_params = execution_params
+
+    if expected is None or expected == {}:
+        return {
+            "passed": False,
+            "reason": "simulation consuming a formal input package requires non-empty frozen preregistration expected_params",
+            "blocking_reasons": ["expected_params_missing"],
+        }
+    if not isinstance(expected, dict):
+        return {
+            "passed": False,
+            "reason": "simulation preregistration expected_params must be an object",
+            "blocking_reasons": ["expected_params_invalid"],
+        }
+    if not isinstance(actual_params, dict) or not actual_params:
+        return {
+            "passed": False,
+            "blocking_reasons": ["execution_params_missing"],
+        }
+
+    expected_flat = _flatten_params(expected)
+    actual_flat = _flatten_params(actual_params)
+    missing = sorted(key for key in expected_flat if key not in actual_flat)
+    unexpected = sorted(key for key in actual_flat if key not in expected_flat)
+    mismatched = [
+        {
+            "parameter": key,
+            "expected": expected_flat[key],
+            "actual": actual_flat[key],
+        }
+        for key in expected_flat
+        if key in actual_flat and expected_flat[key] != actual_flat[key]
+    ]
+    passed = not missing and not unexpected and not mismatched
+    return {
+        "passed": passed,
+        "expected_params": expected,
+        "execution_params": execution_params,
+        "scientific_params": actual_params,
+        "missing_expected_parameters": missing,
+        "unexpected_execution_parameters": unexpected,
+        "mismatched_parameters": mismatched,
+        "blocking_reasons": (
+            []
+            if passed
+            else (
+                (["execution_params_missing_fields"] if missing else [])
+                + (["execution_params_unregistered_fields"] if unexpected else [])
+                + (["execution_params_mismatch"] if mismatched else [])
+            )
+        ),
+        "reason": (
+            "frozen preregistration parameters match this simulation"
+            if passed
+            else "execution parameters differ from frozen preregistration"
+        ),
+    }
+
+
 def audit_execution_contract(
     state: Any, execution_params: dict[str, Any] | None, *, stage: str,
     runner: str | None = None,
@@ -206,58 +332,22 @@ def audit_execution_contract(
                 **({"not_applicable_reason": role_reason}
                    if (role_reason := run_role_non_applicability_reason(contract))
                    else {})}
-    if not contract.get("execution_contract_valid", True):
-        return {"passed": False, "stage": normalized_stage, "applicable": True,
-                "reason": "execution_contract must be version 1 with scientific_params and runtime_params objects",
-                "blocking_reasons": ["execution_contract_invalid"]}
-    structured_contract = isinstance(contract.get("execution_contract"), dict)
-    if structured_contract:
-        if not isinstance(execution_params, dict) or "derived_params" in execution_params:
-            return {"passed": False, "stage": normalized_stage, "applicable": True,
-                    "reason": "v1 execution_contract accepts framework-derived params only as outputs",
-                    "blocking_reasons": ["derived_params_forbidden"]}
-        unexpected_sections = sorted(set(execution_params) - {"scientific_params", "runtime_params"})
-        scientific_params = execution_params.get("scientific_params")
-        runtime_params = execution_params.get("runtime_params", {})
-        if unexpected_sections or not isinstance(scientific_params, dict) or not isinstance(runtime_params, dict):
-            return {"passed": False, "stage": normalized_stage, "applicable": True,
-                    "reason": "v1 execution_params must contain scientific_params and optional runtime_params only",
-                    "blocking_reasons": ["execution_params_structure_invalid"]}
-        actual_params = scientific_params
-    else:
-        actual_params = execution_params
-    expected = contract.get("expected_params")
-    if expected is None or expected == {}:
-        return {"passed": False, "stage": normalized_stage, "applicable": True,
-                "runner": runner,
-                "reason": "simulation consuming a formal input package requires non-empty frozen preregistration expected_params",
-                "blocking_reasons": ["expected_params_missing"]}
-    if not isinstance(expected, dict):
-        return {"passed": False, "stage": normalized_stage, "applicable": True,
-                "runner": runner,
-                "reason": "simulation preregistration expected_params must be an object",
-                "blocking_reasons": ["expected_params_invalid"]}
-    if not isinstance(actual_params, dict) or not actual_params:
-        return {"passed": False, "stage": normalized_stage, "applicable": True,
-                "blocking_reasons": ["execution_params_missing"]}
-    expected_flat, actual_flat = _flatten_params(expected), _flatten_params(actual_params)
-    missing = sorted(key for key in expected_flat if key not in actual_flat)
-    unexpected = sorted(key for key in actual_flat if key not in expected_flat)
-    mismatched = [{"parameter": key, "expected": expected_flat[key], "actual": actual_flat[key]}
-                  for key in expected_flat if key in actual_flat and expected_flat[key] != actual_flat[key]]
-    passed = not missing and not unexpected and not mismatched
-    return {"passed": passed, "stage": normalized_stage, "applicable": True,
-            "runner": runner,
-            "expected_params": expected, "execution_params": execution_params, "scientific_params": actual_params,
-            "missing_expected_parameters": missing,
-            "unexpected_execution_parameters": unexpected,
-            "mismatched_parameters": mismatched,
-            "blocking_reasons": ([] if passed else
-                (["execution_params_missing_fields"] if missing else []) +
-                (["execution_params_unregistered_fields"] if unexpected else []) +
-                (["execution_params_mismatch"] if mismatched else [])),
-            "reason": "frozen preregistration parameters match this simulation" if passed else
-                      "execution parameters differ from frozen preregistration"}
+    comparison = compare_execution_parameters(contract, execution_params)
+    result = {
+        **comparison,
+        "stage": normalized_stage,
+        "applicable": True,
+    }
+    # Preserve the historical audit payload: runner was present for
+    # expected-contract failures and completed comparisons, but not for
+    # malformed execution-parameter structures.
+    if (
+        "expected_params" in comparison
+        or comparison.get("blocking_reasons")
+        in (["expected_params_missing"], ["expected_params_invalid"])
+    ):
+        result["runner"] = runner
+    return result
 
 def audit_experiment_preflight(
     state: Any, *, phase: str = "experiment_start",

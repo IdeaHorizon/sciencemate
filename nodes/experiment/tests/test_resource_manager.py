@@ -462,6 +462,43 @@ def test_discovery_does_not_report_visible_gpus_as_locally_executable(monkeypatc
     assert local["availability_detail"] == "no bwrap"
 
 
+@pytest.mark.parametrize("schedulable", [False, True])
+def test_local_gpu_execution_supported_follows_core_gpu_capability(
+    monkeypatch, schedulable,
+):
+    """#895 C：本地能否受管地用 GPU 是 Core 的回答（gpu_capability().schedulable），
+    节点照抄、不写死——Core 接上 GPU 分配与隔离那天，资源画像跟着变。"""
+    from core import sandbox
+    from nodes.experiment.tools import resource_manager as rm
+
+    monkeypatch.setattr(rm.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(rm, "_run", lambda *_a, **_k: {
+        "ok": True, "stdout": "0, A100, 40000, 39000, 0\n"})
+    monkeypatch.setattr(sandbox, "availability", lambda **_k: (True, ""))
+    monkeypatch.setattr(sandbox, "gpu_capability", lambda: sandbox.GpuCapability(
+        visible=1, schedulable=schedulable, isolated=schedulable,
+        reason="" if schedulable else "core says: no GPU allocation contract"))
+
+    local = rm._local_resources()
+    assert local["gpu_execution_supported"] is schedulable
+    if not schedulable:
+        assert local["gpu_execution_detail"] == "core says: no GPU allocation contract"
+
+
+def test_local_gpu_execution_unknown_is_reported_as_unsupported(monkeypatch):
+    from core import sandbox
+    from nodes.experiment.tools import resource_manager as rm
+
+    def _boom():
+        raise RuntimeError("gpu probe exploded")
+
+    monkeypatch.setattr(sandbox, "availability", lambda **_k: (True, ""))
+    monkeypatch.setattr(sandbox, "gpu_capability", _boom)
+    local = rm._local_resources()
+    assert local["gpu_execution_supported"] is False
+    assert "gpu probe exploded" in local["gpu_execution_detail"]
+
+
 def test_local_gpu_recommendation_says_local_cannot_run_gpu(tmp_path, monkeypatch):
     from nodes.experiment.tools import resource_manager as rm
 
@@ -783,7 +820,7 @@ def test_accepted_job_is_recoverable_when_primary_submission_write_fails(
 @pytest.mark.parametrize("scheduler", ("slurm", "pbs"))
 def test_remote_real_submission_fails_closed_before_identity_recovery(
         tmp_path, monkeypatch, scheduler):
-    """Public remote submission never reaches a scheduler without a sandbox."""
+    """Remote submission without explicit shared paths never reaches a scheduler."""
     from shared.lib import dangerous_commands as danger
 
     state = _planned_state(tmp_path)
@@ -813,10 +850,13 @@ def test_remote_real_submission_fails_closed_before_identity_recovery(
 
     assert calls == []
     assert result["status"] == "error"
-    assert result["blocker"] == {
-        "kind": "remote_sandbox_contract_unavailable",
-        "scheduler": scheduler,
-    }
+    if scheduler == "slurm":
+        assert result["blocker"] == {"kind": "slurm_shared_paths_required"}
+    else:
+        assert result["blocker"] == {
+            "kind": "remote_sandbox_contract_unavailable",
+            "scheduler": scheduler,
+        }
     assert state.list_artifacts("job_submission") == []
     assert state.list_artifacts("external_job_submission_recovery") == []
     assert state.list_artifacts("external_job_identity_recovery_workflow") == []
@@ -834,6 +874,7 @@ def test_scheduler_success_without_parseable_identity_is_not_success(tmp_path, m
         1.0, 8.0, 1, None, None, None, str(tmp_path), False, None,
         stage_in=None,
         state=state,
+        output_dir=str(tmp_path),
     )
 
     assert result["status"] == "accepted_identity_unresolved"
@@ -2258,7 +2299,7 @@ def test_scheduler_script_runs_identity_preflight_before_payload(tmp_path):
 
 
 
-def test_real_slurm_submission_is_fail_closed_without_remote_sandbox(tmp_path):
+def test_real_slurm_submission_requires_explicit_shared_paths(tmp_path):
     state = _planned_state(tmp_path)
 
     result = asyncio.run(_submit_job(
@@ -2267,8 +2308,7 @@ def test_real_slurm_submission_is_fail_closed_without_remote_sandbox(tmp_path):
     ))
 
     assert result["status"] == "error"
-    assert result["blocker"] == {
-        "kind": "remote_sandbox_contract_unavailable", "scheduler": "slurm"}
+    assert result["blocker"] == {"kind": "slurm_shared_paths_required"}
 
 
 def test_high_risk_job_payload_uses_the_same_submission_confirmation(tmp_path, trusted_sandbox):
@@ -2390,7 +2430,7 @@ def test_submit_job_description_does_not_promise_kubernetes_submission():
 
     description = get_tool("submit_job").description
     assert "绝不会自动选择 Kubernetes" in description
-    assert "缺少显式 PVC/volume 合同时连 dry-run 也会拒绝" in description
+    assert "Kubernetes 缺 PVC/volume 契约时拒绝" in description
     assert "then Kubernetes" not in description
     assert "real submission always goes through" not in description
     assert "普通本地受管提交" in description
@@ -2997,7 +3037,55 @@ def test_submit_local_omitted_walltime_keeps_platform_safety_cap(
     sandbox = result["sandbox_contract"]
     assert sandbox["walltime_seconds"] == 3600
     assert sandbox["walltime_source"] == "platform_safety_default"
-    # cpus 是请求值，不冒充已生效的限额（#841）：Core 的隔离义务里没有 CPU_CAP。
+    # cpus 是请求值；它是否生效照抄隔离层的 cpu_cap（#841），本机答什么就记什么。
     assert sandbox["cpus_source"] == "requested"
-    assert sandbox["cpu_limit_enforcement"] == "backend_dependent_unverified"
+    from core import isolation
+    snap = isolation.enforcement_snapshot()
+    assert sandbox["cpu_limit_enforcement"] == (
+        "enforced" if "cpu_cap" in snap["enforced"] else "not_enforced")
+    assert sandbox["cpu_limit_enforcement_backend"] == str(
+        snap.get("backend") or "unknown")
     assert result["time_contract"]["scheduler_walltime_source"] == "not_applicable"
+
+
+@pytest.mark.parametrize(
+    ("enforced", "expected"),
+    ((["walltime", "write_boundary"], "not_enforced"),
+     (["cpu_cap", "mem_cap", "pids_cap", "walltime"], "enforced")),
+)
+def test_submit_local_cpu_limit_enforcement_follows_isolation_cpu_cap(
+    enforced, expected, tmp_path, monkeypatch,
+) -> None:
+    # #841：sandbox_contract.cpus=1 被模型读成「单核契约」，可 darwin 后端根本不限
+    # CPU，作业正多核跑着。生效性必须跟着隔离层的 cpu_cap 走，不是一个常量。
+    import core.isolation as iso
+
+    monkeypatch.setattr(iso, "enforcement_snapshot", lambda: {
+        "backend": "linux", "enforced": list(enforced),
+        "missing_for_unattended": []})
+    state = _planned_state(tmp_path)
+    result = asyncio.run(_submit_job(
+        state=state, command="echo ok", scheduler="local", dry_run=True,
+    ))
+    assert result["status"] == "success", result
+    sandbox = result["sandbox_contract"]
+    assert sandbox["cpus_source"] == "requested"
+    assert sandbox["cpu_limit_enforcement"] == expected
+    assert sandbox["cpu_limit_enforcement_backend"] == "linux"
+
+
+def test_submit_local_cpu_limit_enforcement_says_unknown_when_isolation_cannot_answer(
+    tmp_path, monkeypatch,
+) -> None:
+    import core.isolation as iso
+
+    def _boom():
+        raise RuntimeError("no isolation backend here")
+
+    monkeypatch.setattr(iso, "enforcement_snapshot", _boom)
+    state = _planned_state(tmp_path)
+    result = asyncio.run(_submit_job(
+        state=state, command="echo ok", scheduler="local", dry_run=True,
+    ))
+    assert result["status"] == "success", result
+    assert result["sandbox_contract"]["cpu_limit_enforcement"] == "unknown"

@@ -57,16 +57,21 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 #: snake_case、至少两段。不限定开头动词 —— 限定开头就是名单。
 _IDENT = r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+"
 #: 调用形状 `name(`；前面不能挨着 `.` 或标识符字符（排除 `obj.method(`）。
-#: 名字和括号之间**不许跨行** —— 多条参数描述拼在一起时，上一条以
-#: `concept_id` 结尾、下一条以 `(claims only)` 开头，`\s*` 会把它们粘成一次
-#: 调用。实测这一条就贡献了大半噪声。
+#: 括号必须**紧跟**名字 —— 这是 Python 自己的调用写法，也是全仓真调用站点
+#: 的写法。`name (…)` 中间隔着空格的是散文里给字段加的注解：
+#: 「**返回**: available_schedulers (remote: installed clients), recommended_default
+#: (null if none)」（2026-09-30 #1175 撞到，三个返回字段被当成幽灵工具）。
+#: 上一版允许 `[ \t]*`：量过，放开它全仓只多认出这三个注解和一个内部函数名
+#: （render_guidance，本来就被 `_defined_functions` 排除），**没有任何真工具靠
+#: 它被认出**。多行更不行 —— 多条参数描述拼在一起时，上一条以 `concept_id`
+#: 结尾、下一条以 `(claims only)` 开头，`\s*` 会把它们粘成一次调用。
 #: 括号里紧跟中文的不算调用 —— `reputation_note(≤80字符)`、
 #: `layer_filter('kb'=项目+org)` 是在给字段加注解，不是在教模型调工具。
 #: 这条会漏掉 `create_claim(text="中文…")` 这类真调用站点，但**不影响判定**：
 #: 两遍扫只要求一个名字在全仓有**任意一处**干净的调用形状，就认定它是工具
 #: 形态，之后它的裸提及照样被抓。漏站点便宜，漏名字才贵。
 _CALL_SHAPE = re.compile(
-    r"(?<![\w.])(%s)[ \t]*\((?![^)\n]{0,14}[一-鿿])" % _IDENT)
+    r"(?<![\w.])(%s)\((?![^)\n]{0,14}[一-鿿])" % _IDENT)
 #: 中文调用动词后面紧跟的名字。ASCII 动词要求前面是词边界 —— 否则 `use` 会
 #: 匹配进 `user_prompt` 的内部，把 `r_prompt` 当成工具名（实测 287 条噪声里
 #: 一大半是这么来的）。
@@ -375,6 +380,26 @@ def test_the_scanner_tells_call_sites_from_field_names() -> None:
         "统一替代 v2 的 update_claim_status / update_question_status",  # 解释历史名字
     ):
         assert not _named_tools(text), f"噪声被当成点名：{text!r} → {_named_tools(text)}"
+
+
+def test_a_field_note_in_parentheses_is_not_a_call() -> None:
+    """`name (注解)` 是在解释返回字段，`name(` 才是调用（2026-09-30，#1175）。
+
+    `discover_resources` 的 description 写「**返回**: available_schedulers (remote:
+    installed clients), submittable_schedulers (…), recommended_default (null if none)」，
+    三个返回字段被当成了幽灵工具。放开名字和括号之间的空格，全仓只多认出这三个
+    注解和一个本就被排除的内部函数名 —— 没有一个真工具靠它被认出。所以调用形状
+    就是 Python 的调用形状：括号紧跟名字。
+    """
+    note = ("**返回**: available_schedulers (remote: installed clients, not submit permission), "
+            "submittable_schedulers (public launch candidates), recommended_default (null if none).")
+    assert not _named_tools(note), f"返回字段注解被当成调用：{_named_tools(note)}"
+    # 同一段文字里真正的调用形状照样认得，裸提及也照样被第二遍抓住。
+    corpus = [("desc", note + " 拿不到就 kb_register_artifact_as_chunk(artifact_id=...)"),
+              ("bare", "先 kb_register_artifact_as_chunk 拿 id")]
+    phantom = _phantom_mentions(corpus, known=set(), internal=set())
+    assert phantom == {"desc": ["kb_register_artifact_as_chunk"],
+                       "bare": ["kb_register_artifact_as_chunk"]}, phantom
 
 
 def test_the_legal_shape_is_described_in_exactly_one_place() -> None:

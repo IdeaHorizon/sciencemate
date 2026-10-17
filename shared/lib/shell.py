@@ -17,7 +17,7 @@ import shutil
 import sys
 from pathlib import Path
 
-__all__ = ["posix_shell", "bash_shell"]
+__all__ = ["posix_shell", "bash_shell", "msys_runtime_bin"]
 
 _WINDOWS = sys.platform == "win32"
 
@@ -65,6 +65,39 @@ def _windows_bash() -> str:  # pragma: no cover - 由 Windows 真机与 tests �
         if candidate.exists():
             return str(candidate)
     raise FileNotFoundError("Git for Windows Bash is unavailable; repair the installation or set HARNESS_BASH")
+
+
+def msys_runtime_bin(program: str) -> str | None:
+    r"""``program`` 是 MSYS 程序就返回它所在的目录（MSYS 的 ``/usr/bin``），否则 None。POSIX 恒 None。
+
+    判据是**机械的**：和 ``msys-2.0.dll`` 同目录 —— Windows 加载器先在程序自己的目录找 DLL，
+    所以这个目录里的程序（Git for Windows 的 ``usr/bin/bash.exe``、``sh.exe``……）跑的都是
+    这一份 MSYS 运行时。不按名字猜：随包布局、系统 Git、``HARNESS_BASH`` 指过去的 MSYS2
+    都一样认；WSL 的 ``bash.exe``（System32 / WindowsApps）旁边没有它，不认。
+
+    原生进程起 MSYS 程序要替它做两件 login shell 才会做、我们直接起 ``bash.exe`` 就没人做
+    的事（调用方：``core.isolation.win32``）：
+
+    * 它自己的 ``/usr/bin`` 放上 PATH（#1203）。``mkdir``、``cut``、``find``、``sort`` 都在
+      那里；Git for Windows 只把 ``cmd``/``bin`` 放上全局 PATH，于是本地作业脚本
+      ``mkdir: command not found`` 退 127。只给这个子进程放、不放全局：放全局最前面，后端里
+      按 PATH 找 ``find``/``sort`` 的都拿到 MSYS 版；放全局最后面，bash 里的 ``find`` 先撞上
+      System32 的 ``FIND.EXE``。这正是 Git Bash 的 ``/etc/profile`` 做的事（``/usr/bin`` 排在
+      继承来的 Windows PATH 之前）。
+    * 命令行按 Cygwin 的规则加引号（#1204），不是 MSVC 的 ``list2cmdline``：MSYS 运行时自己
+      把 Windows 命令行切回 argv，引号里的 ``\\`` 折成 ``\``、不带引号的 ``*``/``{a,b}``/``~``
+      被展开、``'`` 当引号吃掉、``@文件`` 被换成文件内容。
+    """
+    if not _WINDOWS or not program:
+        return None
+    path = Path(program)
+    if not path.is_absolute():
+        found = shutil.which(program)
+        if not found:
+            return None
+        path = Path(found)
+    folder = path.parent
+    return str(folder) if (folder / "msys-2.0.dll").is_file() else None
 
 
 def resolve_bash_executable(name: str) -> str | None:

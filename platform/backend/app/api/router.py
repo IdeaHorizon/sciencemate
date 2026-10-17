@@ -17,6 +17,7 @@ from app.api.v1 import (
     projects,
     resources,
     session_changes,
+    session_environment,
     sessions,
     settings,
     update,
@@ -46,6 +47,10 @@ api_router.include_router(
 )
 api_router.include_router(
     session_changes.router, prefix="/projects", tags=["session-changes"],
+    dependencies=authenticated,
+)
+api_router.include_router(
+    session_environment.router, prefix="/projects", tags=["session-environment"],
     dependencies=authenticated,
 )
 api_router.include_router(resources.router, prefix="/projects", tags=["resources"])

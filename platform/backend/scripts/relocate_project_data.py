@@ -47,6 +47,27 @@ def _repository_root_beside(worktree_root: Path) -> Path | None:
     return None
 
 
+def _relocated(target_root: Path, recorded_path: str) -> Path:
+    """记录的 worktree 路径在新根下的位置：换掉根、**保留最后两段目录名原样**。
+
+    目录名怎么拼是 `project_repository` 的事（POSIX 用 id 原文，Windows 用 sha256 的前 12 位，
+    见 `_worktree_dir_name`）；这里不重新算 —— 重算过一次，Windows 上就把 0/1 个会话判成
+    "搬完仍然查无此处"（升级彩排抓到的）。路径即身份，身份不变，变的只是根。"""
+    old = Path(recorded_path)
+    return target_root / "project-worktrees" / old.parent.name / old.name
+
+
+def _repository_dir_under(target_root: Path, project_id: str) -> Path | None:
+    """这个项目的仓库在新根下的目录：id 原文，或 Windows 那种 hash 过的名字 —— 哪个在就是哪个。"""
+    import hashlib
+
+    for name in (project_id, hashlib.sha256(project_id.encode("utf-8")).hexdigest()[:12]):
+        candidate = target_root / "project-repositories" / name
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def _run(*command: str) -> subprocess.CompletedProcess:
     return subprocess.run(command, capture_output=True, text=True)
 
@@ -116,6 +137,9 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--to", required=True, help="新的 PLATFORM_DATA_ROOT（绝对路径）")
     parser.add_argument("--apply", action="store_true", help="真的动手（默认只打印计划）")
+    parser.add_argument("--copied", action="store_true",
+                        help="数据**已经**整份抄到 --to 了（升级彩排把上一版的数据根抄到新位置时就是这样）："
+                             "不搬目录，只 git worktree repair + 改写 sessions.git_worktree_path + 复核")
     args = parser.parse_args()
 
     target_root = Path(args.to).expanduser()
@@ -144,6 +168,9 @@ async def main() -> None:
         }
         print(f"  {project_id}")
         for source_worktree_root in sorted(source_roots):
+            if args.copied:
+                print(f"    已抄到位（--copied），不搬：{source_worktree_root} → {target_root / 'project-worktrees'}")
+                continue
             worktree_root = Path(source_worktree_root)
             repository_root = _repository_root_beside(worktree_root)
             if repository_root is None:
@@ -156,12 +183,12 @@ async def main() -> None:
                     print(line)
 
         if args.apply:
-            repository = target_root / "project-repositories" / project_id
-            if repository.is_dir():
+            repository = _repository_dir_under(target_root, project_id)
+            if repository is not None:
                 for _, pid, path in recorded:
                     if pid != project_id:
                         continue
-                    worktree = target_root / "project-worktrees" / project_id / Path(path).name
+                    worktree = _relocated(target_root, path)
                     if not worktree.is_dir():
                         continue
                     result = _run("git", "-C", str(repository), "worktree", "repair", str(worktree))
@@ -172,10 +199,7 @@ async def main() -> None:
         print("\n（dry-run 结束，什么都没动。）")
         return
 
-    mapping = {
-        session_id: str(target_root / "project-worktrees" / project_id / Path(path).name)
-        for session_id, project_id, path in recorded
-    }
+    mapping = {session_id: str(_relocated(target_root, path)) for session_id, project_id, path in recorded}
     changed = await _rewrite(mapping)
     print(f"\n已改写 {changed} 行 sessions.git_worktree_path")
 

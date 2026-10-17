@@ -136,6 +136,8 @@ class BashAnalysis:
     dynamic_execution: bool = False
     parse_error: bool = False
     analyzer_unavailable: str | None = None
+    # Analysis-only work budget, shared across nested literal-loop expansion.
+    path_loop_iterations: int = 0
 
     @property
     def unsafe_dynamic(self) -> bool:
@@ -148,7 +150,7 @@ def _source(node: Node, source: bytes) -> str:
 
 def _contains_expansion(node: Node) -> bool:
     return (
-        node.type in {"command_substitution", "process_substitution"}
+        node.type in {"command_substitution", "process_substitution", "expansion"}
         or node.type.endswith("_expansion")
         or any(_contains_expansion(child) for child in node.children)
     )
@@ -221,6 +223,56 @@ def _resolved_values(node: Node, source: bytes, bindings: Bindings) -> StaticVal
             return None
         parts.append(values)
     return _combine_values(parts) if parts else ("",)
+
+
+def _literal_for_values(node: Node, source: bytes) -> StaticValues | None:
+    """Resolve literal shell words without splitting, globbing or evaluation.
+
+    Preserve order and duplicate iterations: this is a sequence, not the
+    union-of-possible-values used by command classification.
+    """
+    values = node.children_by_field_name("value")
+    if not values or len(values) > _MAX_STATIC_VALUES:
+        return None
+    resolved: list[str] = []
+    for value in values:
+        literal = _literal(value, source)
+        if literal is None or value.type not in {"word", "string", "raw_string"}:
+            return None
+        if (not literal
+                or any(not (c.isalnum() or c in "_./:+-") for c in literal)):
+            return None
+        resolved.append(literal)
+    return tuple(resolved)
+
+
+def _invalidate_runtime_bindings(head: str, args: list[str], bindings: Bindings) -> bool:
+    """Share runtime builtin invalidation between command and path passes."""
+    if head not in {"read", "mapfile", "readarray", "unset"} and not (
+            head == "printf" and "-v" in args):
+        return False
+    if _DYNAMIC_TOKEN in args:
+        bindings.clear()
+    elif head == "read":
+        names = [arg for arg in args if arg.isidentifier()]
+        for name in names or ["REPLY"]:
+            bindings[name] = None
+    elif head in {"mapfile", "readarray"}:
+        names = [arg for arg in args if arg.isidentifier()]
+        bindings[(names or ["MAPFILE"])[-1]] = None
+    elif head == "unset":
+        for name in args:
+            if name.isidentifier():
+                bindings.pop(name, None)
+            elif not name.startswith("-"):
+                bindings.clear()
+    else:
+        index = args.index("-v")
+        if index + 1 < len(args) and args[index + 1].isidentifier():
+            bindings[args[index + 1]] = None
+        else:
+            bindings.clear()
+    return True
 
 
 HeadPair = tuple[str, str | None]
@@ -931,24 +983,7 @@ def _classify_command(
         bindings.clear()
         result.dynamic_execution = True
         return
-    if head == "read":
-        names = [arg for arg in args if arg.isidentifier()]
-        for name in names or ["REPLY"]:
-            bindings[name] = None
-        return
-    if head in {"mapfile", "readarray"}:
-        names = [arg for arg in args if arg.isidentifier()]
-        bindings[(names or ["MAPFILE"])[-1]] = None
-        return
-    if head == "unset":
-        for name in args:
-            if name.isidentifier():
-                bindings.pop(name, None)
-        return
-    if head == "printf" and "-v" in args:
-        index = args.index("-v")
-        if index + 1 < len(args) and args[index + 1].isidentifier():
-            bindings[args[index + 1]] = None
+    if _invalidate_runtime_bindings(head, args, bindings):
         return
 
     if head in _SHELLS:
@@ -1418,6 +1453,11 @@ def _path_substitutions(
     external_bindings: Bindings, depth: int,
     call_stack: frozenset[str], context: tuple[str, ...],
 ) -> None:
+    if node.type == "arithmetic_expansion":
+        # Arithmetic may assign variables; its state transitions are not
+        # part of the bounded word evaluator.
+        result.path_unverifiable = True
+        bindings.clear()
     for child in node.named_children:
         if child.type in {"command_substitution", "process_substitution"}:
             _walk_path(
@@ -1576,6 +1616,22 @@ def _path_classify_command(
         )
     if head == "cd":
         return _CwdOutcome(_cwd_success_after_cd(incoming, args), incoming)
+    if _invalidate_runtime_bindings(head, args, bindings):
+        if head in {"mapfile", "readarray"} and "-C" in args:
+            result.path_unverifiable = True
+            bindings.clear()
+        return _cwd_unchanged(incoming)
+    if head in _PERSISTENT_ASSIGNMENT_BUILTINS or head in {"let", "getopts"}:
+        # Do not reuse entry values after unmodeled builtin assignments.
+        bindings.clear()
+        if head in {"declare", "typeset", "local", "readonly"}:
+            result.path_unverifiable = True
+        return _cwd_unchanged(incoming)
+    if head in {"break", "continue", "return"}:
+        result.path_unverifiable = True
+        bindings.clear()
+        unknown = _cwd_unknown(incoming)
+        return _CwdOutcome(unknown, unknown)
     if head in {"pushd", "popd"}:
         result.path_unverifiable = True
         unknown = _cwd_unknown(incoming)
@@ -1714,6 +1770,24 @@ def _walk_path(
         unknown = _cwd_unknown(incoming)
         return _CwdOutcome(unknown, unknown)
 
+    if node.type in {"unset_command", "declaration_command"} or (
+            node.type == "compound_statement" and node.children
+            and node.children[0].type == "(("):
+        _path_substitutions(
+            node, source, result, incoming, functions, bindings,
+            external_bindings, depth, call_stack, context,
+        )
+        bindings.clear()
+        if node.type == "compound_statement" or (
+                node.type == "declaration_command"
+                and _source(node, source).split(None, 1)[0] != "export"):
+            result.path_unverifiable = True
+        if node.type == "unset_command" and functions:
+            # `unset name` can remove a function when no variable has that
+            # name; do not keep dispatching a stale known function body.
+            result.path_unverifiable = True
+        return _cwd_unchanged(incoming)
+
     if node.type == "redirected_statement":
         for child in node.named_children:
             if child.type == "file_redirect":
@@ -1820,6 +1894,8 @@ def _walk_path(
             result.path_unverifiable = True
         else:
             name = _source(name_node, source)
+            if name == "IFS":
+                result.path_unverifiable = True
             bindings[name] = (
                 ("",) if value_node is None
                 else _resolved_values(value_node, source, bindings)
@@ -1839,10 +1915,42 @@ def _walk_path(
             functions[name] = FunctionBinding(((body, source),))
         return _CwdOutcome(incoming, CwdDomain())
 
+    if node.type == "for_statement":
+        values = _literal_for_values(node, source)
+        variable = node.child_by_field_name("variable")
+        body = node.child_by_field_name("body")
+        if values is not None and variable is not None and body is not None:
+            name = _source(variable, source)
+            active = incoming
+            terminated = CwdDomain()
+            last = _cwd_unchanged(incoming)
+            for value in values:
+                if not active.values and not active.unknown:
+                    break
+                if result.path_loop_iterations >= _MAX_STATIC_COMMANDS:
+                    result.path_unverifiable = True
+                    bindings.clear()
+                    unknown = _cwd_unknown(active)
+                    return _CwdOutcome(unknown, unknown, terminated)
+                result.path_loop_iterations += 1
+                bindings[name] = (value,)
+                last = _walk_path(
+                    body, source, result, active, functions, bindings,
+                    external_bindings, depth, call_stack,
+                    context + ("literal-for",),
+                )
+                terminated = _cwd_union(terminated, last.terminated)
+                active = _cwd_union(last.success, last.failure)
+            return _CwdOutcome(last.success, last.failure, terminated)
+
     if node.type in {
         "for_statement", "while_statement", "until_statement",
         "if_statement", "elif_clause", "case_statement",
     }:
+        # Unknown control flow may also change variables or function bodies;
+        # retaining entry values would falsely authorize absolute paths.
+        result.path_unverifiable = True
+        bindings.clear()
         uncertain = _cwd_unknown(incoming)
         _path_sequence(
             list(node.named_children), source, result, uncertain,

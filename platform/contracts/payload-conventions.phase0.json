@@ -91,7 +91,7 @@
     },
     "tool.completed": {
       "required": ["stepId", "toolCallId", "toolName", "resultSummary"],
-      "optional": ["resultCount", "summarySource"],
+      "optional": ["resultStatus", "resultCount", "summarySource"],
       "valueShapes": {"summarySource": "SummarySource"}
     },
     "tool.failed": {

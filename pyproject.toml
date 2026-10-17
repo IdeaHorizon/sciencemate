@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "harness-framework"
-version = "0.5.6"
+version = "0.5.7"
 description = "Minimal teaching scaffold for the AI4S research platform's node harness layer."
 requires-python = ">=3.11"
 dependencies = [
@@ -119,9 +119,11 @@ pdf-images = [
 #
 # 升级 pygments 的正确姿势：改这里的版本号 + 重建 docs-html/ + 一起提交。
 # 那一次 diff 全是高亮标记的变化，本身就是这次升级的**证据**，该被人看见。
-# （markdown 不敏感：3.5 与 3.10.3 输出逐字节相同，维持 >=3.5。）
+# markdown 也钉死（2026-10-16）：此前写着「不敏感，3.5 与 3.10.3 逐字节相同」，10-13 发布的
+# 3.11.1 把六页 RFC 渲染得不一样，CI 当天就红在一条与文档无关的 PR 上（#1224）。
+# 「凡是 [docs] 允许装的版本都必须生成同一份字节」—— 允许一个区间就是把这句话交给上游。
 docs = [
-    "markdown>=3.5",
+    "markdown==3.10.3",
     "pygments==2.21.0",
 ]
 visualization-advanced = [

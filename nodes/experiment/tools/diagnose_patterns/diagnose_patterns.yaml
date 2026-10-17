@@ -360,12 +360,10 @@ patterns:
     category: "runtime"
     severity: "error"
     confidence: 0.8
-    description: "MPI 进程数超过可用核心"
-    generic_fix: "减少 np 进程数或添加 --oversubscribe"
-    auto_fixable: true
-    suggested_fix:
-      type: "mpirun_flag"
-      flag: "--oversubscribe"
+    description: "MPI slots 不足或出现超额订阅信号"
+    context_hint: "slots 是 launcher 的进程容量，不等于物理核心数；需核对调度分配和实际亲和性"
+    generic_fix: "核对分配、slots 与 rank/线程布局，在已分配资源内调整进程数或映射；不要自动添加 --oversubscribe，它不会增加资源，也不能作为性能修复"
+    auto_fixable: false
 
   # ─── 输入/文件 ────────────────────────────────────────────────────────────────
   - id: "input_error"

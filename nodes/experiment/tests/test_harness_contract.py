@@ -1,6 +1,8 @@
 """Fail-fast-style checks for the experiment YAML contract."""
 from __future__ import annotations
 
+import pytest
+
 from pathlib import Path
 
 import yaml
@@ -57,17 +59,19 @@ def test_experiment_declares_the_full_scientific_dispatch_contract():
 
     assert {
         "experiment_spec",
-        "prereg_artifact_id",
-        "prereg_version",
+        "prereg_assignment",
         "stage",
         "dataset_artifact_id",
         "input_package_artifact_id",
         "execution_params",
         "path_roles",
     }.issubset(expected)
+    assert "prereg_artifact_id" not in expected
+    assert "prereg_version" not in expected
     assert "run_role" not in expected
-    assert "正整数" in expected["prereg_version"]
-    assert "prereg_artifact_id" in expected["prereg_version"]
+    assert "artifact_id/version/content_hash" in expected["prereg_assignment"]
+    assert "kind=pending" in expected["prereg_assignment"]
+    assert "额外键" in expected["prereg_assignment"]
     assert "simulation" in expected["stage"]
     assert "diagnostic" in expected["stage"]
     assert "toolchain_build" in expected["stage"]
@@ -91,17 +95,28 @@ def test_experiment_data_dispatch_includes_the_required_user_note():
 def test_reviewer_spec_uses_raw_results_as_the_evidence_interface():
     spec = (Path(__file__).resolve().parents[1] / "review_spec.md").read_text(encoding="utf-8")
     assert "raw_results" in spec
-    assert "record_kind: operation" in spec
-    assert "operation_verification_receipt" in spec
+    assert "metadata.record_kind=experiment_delivery" in spec
+    assert "clean_results.delivery.scope" in spec
+    assert "scope=unknown" in spec
     assert "evidence_integrity" in spec
 
 
 def test_reviewer_spec_keeps_final_scientific_adjudication_in_analysis():
     spec = (Path(__file__).resolve().parents[1] / "review_spec.md").read_text(encoding="utf-8")
-    assert "execution_assessment_quality" in spec
-    assert "才负责最终的 per-hypothesis 科学裁决" in spec
-    assert "`validated` / `refuted` 状态更新" in spec
+    assert "Reviewer 不作最终假说裁决" in spec
+    assert "科学意义交给 Analysis 和用户" in spec
     assert "experiment 节点接管了原 analysis 节点的 per-hypothesis verdict" not in spec
+
+
+def test_reviewer_spec_does_not_gate_on_legacy_eligibility_or_sediment():
+    spec = (Path(__file__).resolve().parents[1] / "review_spec.md").read_text(encoding="utf-8")
+    assert "不得据其值给数值证据判资格" in spec
+    assert "不得要求 `create_claim`" in spec
+    assert "不得仅因绑定失效要求重算已核实的数值" in spec
+    assert "`approve` 和 `recommended_action=proceed`" in spec
+    assert "实际使用情况还须由代码、日志或输出支撑" in spec
+    assert "secondary run 不得仅因有输出就进入正式统计" not in spec
+    assert "每次实验都该有一次 KB 复利尝试" not in spec
 
 
 def test_experiment_exposes_managed_submission_not_legacy_job_bookkeeping():
@@ -144,6 +159,7 @@ def test_gpu_skill_stays_resolvable_after_leaving_yaml_skills():
     assert get_skill("gpu-hpc-porting") is not None
 
 
+@pytest.mark.skip(reason="v2 模型面：secondary 恢复/sediment/contract_audit 钩子退役，finish 为唯一收尾；v3 承接见 test_060_finish_predicate_and_closure.py")
 def test_recovery_runs_before_contract_audit():
     """兜底记录必须先落地，contract_audit 才能看到它并按自动记录 fail-closed。
 
@@ -243,6 +259,7 @@ def test_safe_execute_python_exposes_input_package_artifact_id():
     assert "requirements" not in properties
 
 
+@pytest.mark.skip(reason="v2 模型面：route_step_id 已从 schema 删除；v3 承接见 test_060_s1d_no_route_authority.py / test_060_s1d_natural_flows.py")
 def test_safe_execution_tool_schemas_expose_route_step_id():
     """A route gate cannot require a model argument that the tool schema hides."""
     bootstrap(force=True)
@@ -443,7 +460,7 @@ def test_no_hook_mechanism_depends_on_rewriting_the_llm_response():
 
 
 def test_node_skills_are_in_the_l1_index_but_not_resident():
-    """049-0：7 个节点 skill 里 6 个进 harness.yaml 的 skills:（只渲染 L1 索引行），
+    """节点 skill 进 harness.yaml 的 L1 索引，
     gpu-hpc-porting 仍走条件注入。索引模式下不得把正文带进 system_prompt。"""
     from core.skill_registry import render_skills
 
@@ -452,11 +469,12 @@ def test_node_skills_are_in_the_l1_index_but_not_resident():
     )
     listed = set(config.get("skills", []))
     assert {"feasibility-ladder", "formal-input-recovery", "hpc-build",
-            "primary-scientific-closure", "scheduler-longrun", "scientific-results"} <= listed
+            "scheduler-longrun", "scientific-results"} <= listed
+    assert "primary-scientific-closure" not in listed
     assert "gpu-hpc-porting" not in listed
     bootstrap(force=True)
     rendered = render_skills(config["skills"], node_type="experiment", mode="index")
-    for name in ("hpc-build", "scheduler-longrun", "scientific-results"):
+    for name in ("hpc-build", "scheduler-longrun", "feasibility-ladder", "scientific-results"):
         assert f"### {name}" in rendered, name
         assert f"load_skill('{name}')" in rendered, name
     assert "### Skill:" not in rendered            # index lines only, no bodies

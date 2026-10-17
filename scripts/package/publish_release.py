@@ -170,6 +170,9 @@ INSTALL_SCRIPTS = {
 #: Windows 验收收据的文件名。它**不上传** —— 它是"这份包被人在 Windows 上真跑过"
 #: 的凭据，留在发布机上；发布页上该有的是发布件。
 WINDOWS_ACCEPTANCE = "windows-acceptance.json"
+#: 升级彩排收据：这份安装器**在上一版真跑过课题的数据根上**装起来、起来、发过一轮，旧 run / 旧 KB
+#: 读得回、权限没变（RFC_WORKER_START_IS_NOT_A_GATE §3.10）。同样不上传。
+WINDOWS_REHEARSAL = "windows-upgrade-rehearsal.json"
 
 #: 清单里哪一条是 Windows 安装器。**与 `install.ps1` 认安装器用的是同一条规则**
 #: （它下 SHA256SUMS、挑 `*Setup.exe`）—— 两处各写一条规则就会在改名那天分叉，
@@ -232,6 +235,52 @@ def refuse_a_windows_build_nobody_ran(release_dir: Path) -> None:
         f"{WINDOWS_ACCEPTANCE} 认的是 {verified or '(空)'}，而这一版要发的是 "
         + "、".join(f"{n}={h}" for n, h in sorted(installers.items()))
         + " —— 验过的和要发的不是同一份字节，别发。" + how)
+
+
+def refuse_a_windows_build_that_never_rehearsed_an_upgrade(release_dir: Path) -> None:
+    """发 Windows 安装器之前，必须有人拿**这些字节**在**上一版真跑过课题的数据根**上装起来跑过一轮。
+
+    由来：lujy 10-15（0.5.4 → 0.5.6）—— 上一版写下的身份 marker、run 目录、.git 新版全读不了，
+    六次「继续」六次同一句。发布前没有任何闸能红：装完自检只在临时目录跑一条载荷，从不碰一份
+    上一版的数据根。这道闸把「升级后旧数据读不读得回」从用户机器上搬回发布之前。
+
+    收据由 `scripts/acceptance/upgrade_rehearsal.py check` 写，且只在四件都过之后写：环境条幅没有
+    降级、上一版的 run 在、上一版的 KB 读得回、权限快照零差异（上一版没有快照时如实记 None）。
+    这里核：收据在不在、认的 sha256 是不是清单里这个安装器、有没有 previous_version、checks 里
+    有没有 False。
+    """
+    sums = (release_dir / "SHA256SUMS").read_text(encoding="utf-8")
+    installers = the_windows_installers(sums)
+    if not installers:
+        return
+    receipt_path = release_dir / WINDOWS_REHEARSAL
+    how = (
+        "\n  在 Windows 上：把上一版的夹具抄到一个空目录，以 PLATFORM_DATA_ROOT 指过去起装好的壳，然后：\n"
+        f"    python scripts\\acceptance\\upgrade_rehearsal.py check --url http://127.0.0.1:<端口> \\\n"
+        f"        --fixture <夹具目录> --data-root <那个空目录> --receipt {WINDOWS_REHEARSAL} \\\n"
+        f"        --for-installer <这个 Setup.exe 的路径>\n"
+        f"  四件都过它才会写收据。把收据拷进发布目录再发。"
+    )
+    if not receipt_path.is_file():
+        raise SystemExit(
+            f"这一版要发 Windows 安装器（{', '.join(sorted(installers))}），"
+            f"但发布目录里没有 {WINDOWS_REHEARSAL} —— 没有人在上一版的数据根上彩排过升级。" + how)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if not receipt.get("against") or not receipt.get("previous_version"):
+        raise SystemExit(f"{WINDOWS_REHEARSAL} 缺 against / previous_version —— 它验的不是装好跑着的新版对上一版的数据根。" + how)
+    failed = sorted(k for k, v in (receipt.get("checks") or {}).items() if v is False)
+    if failed:
+        raise SystemExit(f"{WINDOWS_REHEARSAL} 里有没过的项：{failed} —— 收据只该在全过之后写。" + how)
+    verified = str(receipt.get("sha256", "")).lower()
+    for name, sha256 in sorted(installers.items()):
+        if verified == sha256.lower():
+            print(f"  ✓ 升级彩排：{name} 在 {receipt.get('host', '?')} 上从 "
+                  f"{receipt.get('previous_version')} 的数据根起来跑通（{receipt.get('ran_at', '?')}）")
+            return
+    raise SystemExit(
+        f"{WINDOWS_REHEARSAL} 认的是 {verified or '(空)'}，而这一版要发的是 "
+        + "、".join(f"{n}={h}" for n, h in sorted(installers.items()))
+        + " —— 彩排过的和要发的不是同一份字节，别发。" + how)
 
 
 def bake_the_release_url(filename: str, script: str, base: str) -> str:
@@ -481,6 +530,7 @@ def publish(release_dir: Path, api: Forgejo, host: str, repo: str) -> dict:
     version = manifest["version"]; tag = f"v{version}"
     refuse_if_this_repo_publishes_another_edition(api, repo, manifest.get("edition", "personal"))
     refuse_a_windows_build_nobody_ran(release_dir)
+    refuse_a_windows_build_that_never_rehearsed_an_upgrade(release_dir)
     refuse_if_the_wire_broke(api, release_dir, manifest, tag)
     base = download_base(host, repo, tag)
     print(f"  版本 {version} → tag {tag}\n  下载地址 {base}/")
@@ -492,8 +542,8 @@ def publish(release_dir: Path, api: Forgejo, host: str, repo: str) -> dict:
         # 2026-09-18 它们真的被当成资产传上去了。点开头的一律不是发布件。
         if not path.is_file() or path.name.startswith("."):
             continue
-        if path.name == WINDOWS_ACCEPTANCE:
-            continue            # 凭据，不是发布件（它也不在 SHA256SUMS 里）
+        if path.name in (WINDOWS_ACCEPTANCE, WINDOWS_REHEARSAL):
+            continue            # 两张收据都是过程证据，不是发布件（也不在 SHA256SUMS 里）
         data = path.read_bytes()
         if path.name in INSTALL_SCRIPTS:
             data = bake_the_release_url(path.name, data.decode("utf-8"), base).encode("utf-8")

@@ -1,51 +1,97 @@
 ---
 name: scientific-results
 description: |
-  Parse, validate, preserve, and freeze results from any scientific Experiment
-  run. Use after a scientific simulation or analysis-producing execution,
-  including secondary and diagnostic scientific runs.
+  科学任务的执行与证据收口：忠实使用正式输入和参数，保存原始事实，完成适用的质量检查，披露偏离，并通过统一 finish 交付。
 applies_when:
-  - scope is scientific and raw outputs need parsing, validation, aggregation, or freezing
-  - A scientific result has anomalies, unit/schema uncertainty, or replay/provenance needs
+  - 本 run 的认知目的是探索、比较、估计或为新的科学结论提供证据；既适用于精确绑定 prereg，也适用于没有 prereg 的探索任务
 tools_used:
-  - freeze_artifact
-  - save_artifact
+  - read_file
   - read_artifact
-expected_outcome: Traceable raw and clean results with honest quality annotations and a frozen execution record
-status: validated
+  - safe_run_bash
+  - safe_execute_python
+  - submit_job
+  - job_status
+  - wait_for_external_job
+  - finish
+expected_outcome: 科学执行的输入、参数、原始记录、质量检查和偏离均可追溯，并由统一 finish 形成诚实三件套
+status: proposed
 ---
 
 # Scientific Results
 
-1. Preserve raw output before interpretation. Record command, input identifiers,
-   output paths, exit evidence, hashes where applicable, and the mapping from
-   raw files to derived values. Do not delete an input named by frozen result
-   provenance.
-2. Parse with declared units, schema, parameter values, and run role. Validate
-   completeness, numeric sanity, convergence/completion signals, duplicates,
-   missing values, and anomalies. Keep uncertain values as uncertain; do not
-   turn a successful process exit into a scientific claim.
-3. Save an explicit raw-results manifest, then create clean results whose
-   metadata points back to exact raw evidence. Aggregate or normalize only with
-   the stated method and preserve exclusions, transformations, and limits.
-4. Save each evidence artifact with its declared type, then freeze in order by
-   calling `freeze_artifact` on the `raw_results` artifact ID, the
-   `clean_results` artifact ID, and finally the one canonical `experiment_log`
-   artifact ID. Do not create a
-   `_v2` or replacement log to evade an incomplete record.
-5. Leave result eligibility alone: there is no eligibility bit to set. Say what
-   the run is (run_role, execution_mode) and let the contract derive the rest.
-   If a completed measurement genuinely cannot be replayed, declare
-   `not_replayable: true` with a `reason`. Secondary, pilot, or
-   diagnostic output may be useful evidence but is not a primary preregistered
-   result. Report failures and blockers honestly rather than silently filling
-   gaps.
+这个 skill 帮你把科学任务真正做完并留下可核查证据。它不替下游判断科学结论，
+也不另建一套收尾状态；最终只使用统一的 `finish`。
 
-6. A scientific run without a frozen prereg is exploratory. Say so in the
-   `experiment_log` ("exploratory, no prereg"), list the parameter points
-   actually used and the observables measured, and leave what the result means
-   to downstream judgement. There is no extra schema field for this.
+验证边界：当前正文和真实 loader/白名单由确定性测试覆盖，本地安全执行闭环已有实测；
+这不表示 live LLM、UI 或受管调度器路径已经验收。
 
-For a primary simulation, load `primary-scientific-closure` before writing
-verdict, sediment, or credibility closure. This skill never changes a
-hypothesis status and never substitutes for service-side freeze/QC checks.
+## 1. 先确认本次实际能消费的输入
+
+- 有精确绑定的 prereg 时，只按该绑定版本工作，不从 catalog、目录或“最新版本”猜选替代品。
+- 正式输入是 pending、invalid 或 unavailable 时，不执行会消费该输入的动作；仍可做不依赖它的
+  环境诊断、输入获取，并以真实的 non-success outcome 收口。
+- 没有 prereg 不会把探索任务变成 operation。此时按任务目标选择方法和参数，并明确标成
+  `exploratory, no prereg`，不要把模型选择写成用户承诺。
+- 只在动作确实消费某项正式输入时给执行工具传相应 selector；不要为了通过检查虚构消费关系。
+
+## 2. 让影响结果的计算参数与实际执行都可核查
+
+- 对影响结果的实际科学计算，精确绑定 prereg 时，`execution_params.scientific_params` 必须与
+  绑定的科学参数一致。调用形状为 `{scientific_params: {...}, runtime_params: {...}}`；runtime_params
+  如实记录实际选择，仍须满足任务的资源与授权约束，不能把它们全部误当冻结的科学参数。
+  若执行前已知有实质冲突，先取得平台支持的授权或停止，不得静默改值。
+- 无 prereg 的探索计算也要用同样结构记录所选参数及来源，使工具调用留下参数 witness。
+  不影响结果的准备、编译或探查动作不必重复填写；也不要让用户补 run/action/job 等内部 ID。
+  witness 只证明调用参数是什么，不证明程序实际使用了它。
+- 用真实命令、配置文件、程序日志或输出元数据佐证程序实际采用的参数。没有这种证据就写
+  `not_observed`，不能从 witness 反推实际使用。
+
+## 3. 执行并保留原始事实
+
+- 有界、同步、可在本次调用内完成的计算使用 `safe_run_bash` 或 `safe_execute_python`。
+- 会跨调用存活、需要调度资源、取消或恢复的计算使用 `submit_job`，再用 `job_status` /
+  `wait_for_external_job` 跟踪到物理终态。
+- 保留源码/输入身份、配置、stdout、stderr、return code、作业终态、程序版本和原始输出路径。
+  框架会记录动作、作业和输出观察；不要手写平行的执行事实或三件套。
+
+## 4. 做任务真正需要的质量检查
+
+对照原任务与正式条件，确认关键要求没有被遗漏或替换。关键方法优先采用适用的成熟实现或
+可靠依据；自行实现或实质改动的关系，要核实适用条件及影响解释的单位、坐标和符号约定。
+针对最可能推翻交付主张的假设，选择成本相称、能区分对错的检查，实际运行并保留依据、
+命令、输出和判据。可信的已有证据可以复用；准备、编译、读取或沿用已核实流程，不因此
+一律追加科学复核。
+
+预期应来自任务定义、独立推导、参考解/实现或可靠来源，不能只复用被测公式或从本次结果
+反推判据。独立不要求另一个模型、软件或依赖：简短推导、已知特例也可；预期可以是范围、
+关系或不变量，不必已知完整答案。按本任务风险选择单位、极限、守恒或参考值等检查，
+不把示例变成固定清单；重复运行或内部一致不自动证明所针对的错误已被排除。
+
+不确定哪种领域方法适用时，可用现有文档/技能检索补足依据；已知 HPC 方法来源可按需读
+`load_skill(name='hpc-build', asset='references/external-method-sources.md')`。
+先判断来源与当前模型、版本和数据条件是否匹配，再选择能识别本任务实际错误的检查；
+公开技能里的示例与阈值不自动成为本任务要求，也不替代已有正式条件。
+
+出现矛盾时，在任务和授权范围内定位、纠正受影响部分并复查；不要通过放宽阈值、删掉要求
+或把失败改称通过来消除矛盾。需要改变正式目标或约束时交还原 owner，不自动扩大为全量重跑。
+
+检查没做就是 `not_run`，证据拿不到就是 `unavailable`，只覆盖一部分就是 `partial`；缺少输入
+或依据时保留已有结果并限制主张，不凭直觉宣称错误。实现/数值核验与现实观测验证不能互相
+替代；没有观测数据不妨碍诚实的探索交付。不得把退出码 0、文件存在或局部检查通过写成
+整体科学质量已经通过，也不要宣布 hypothesis 已 validated/refuted 或决定下游是否采用结果。
+
+## 5. 如实披露偏离
+
+- 有 prereg 时列出预期值、实际值、发现时间、原因、影响和仍未解决的风险。
+- 执行前已知且可能改变结果解释的偏离，不得在没有相应授权时继续产生副作用。
+- 执行中或执行后才发现的偏离要保留结果并披露，不能删掉不利证据或重写历史。
+- 无 prereg 时仍要披露对任务、所选方法或所选参数的偏离，但不要把探索性选择包装成正式授权。
+
+## 6. 用统一 finish 交付
+
+调用 `finish(outcome, summary, deliverables, limitations, next_step, blocker)`。框架据持久事实生成并
+冻结 raw_results、clean_results、experiment_log；不要另行手工拼装。
+
+`success` 表示约定执行、必需产物和适用检查有证据支持，不表示科学假设成立。无显著效应、空结果
+或结论仍不确定，可以是执行成功并在限制中说明。执行只完成一部分、真实失败、输入受阻或已取消时，
+分别使用诚实的 `partial`、`failed`、`blocked` 或 `cancelled`，并给出已有证据和下一安全动作。

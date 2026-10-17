@@ -10,6 +10,8 @@ scope 内（#923）。两名并存让任一版本的断言都能通过。
 """
 from __future__ import annotations
 
+import pytest
+
 import sys
 from pathlib import Path
 
@@ -35,6 +37,7 @@ def _executors() -> dict:
     return _REGISTRY.executors
 
 
+@pytest.mark.skip(reason="v2 模型面：closure supersede 退出模型面（060 S1d 任务书）；v3 承接见 finish 幂等重入（test_060_s1d_natural_flows）")
 def test_both_names_are_on_the_node_tool_surface():
     tools = load_harness("experiment").tools
     assert _CANON in tools, "正名必须在工具面上"
@@ -71,6 +74,7 @@ def test_the_canonical_name_is_identifiable_from_the_description():
         "正名的描述不应被过渡期措辞污染 —— 删掉别名时它不必跟着改")
 
 
+@pytest.mark.skip(reason="v2 模型面：closure supersede 退出模型面（060 S1d 任务书）；v3 承接见 finish 幂等重入（test_060_s1d_natural_flows）")
 def test_harness_records_the_deletion_condition():
     """兼容层必须写明删除条件，否则会变成永久债。"""
     raw = (Path(__file__).resolve().parents[1] / "harness.yaml").read_text(encoding="utf-8")

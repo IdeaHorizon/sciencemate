@@ -178,11 +178,36 @@ def test_manifest_reads_legacy_logs_without_writing_new_logs_there(tmp_path):
 def test_force_creates_bundle_for_failed_primary(tmp_path, monkeypatch):
     state = _state(tmp_path)
     monkeypatch.setattr(repro_snapshot, "_run", lambda *args, **kwargs: "")
+    input_before = tmp_path / "before.yaml"
+    input_before.write_text("value: 7\n", encoding="utf-8")
+    output_before = tmp_path / "before.out"
+    output_before.write_text("49\n", encoding="utf-8")
+    output_alias = tmp_path / "before-output-alias.yaml"
+    output_alias.symlink_to(output_before)
+    input_after = tmp_path / "after.yaml"
+    input_after.write_text("value: 8\n", encoding="utf-8")
+    output_after = tmp_path / "after.out"
+    output_after.write_text("64\n", encoding="utf-8")
+    overlong = "/" + ("prompt-prose" * 80)
+    state.save_artifact(
+        "declared_route",
+        "bad_optional_candidates",
+        "# route evidence\n",
+        metadata={
+            "source_path": overlong,
+            "input_paths": [overlong],
+            "output_paths": [overlong],
+        },
+    )
 
     bundle = repro_snapshot.create_repro_bundle(
         state,
         snap={},
         result_info={"credibility": "questionable"},
+        transcript_text=(
+            f"{input_before} {output_before} {output_alias} {overlong} "
+            f"{input_after} {output_after}"
+        ),
         force=True,
     )
 
@@ -191,6 +216,68 @@ def test_force_creates_bundle_for_failed_primary(tmp_path, monkeypatch):
         state.root / "outputs" / "experiment" / "repro" / "manifest.json"
     ).is_file()
     assert bundle["min_run_success"] is False
+    assert [row["source_path"] for row in bundle["inputs"]] == [
+        str(input_before),
+        str(input_after),
+    ]
+    assert str(output_alias) not in {
+        row["source_path"] for row in bundle["inputs"]
+    }
+    assert [row["source_path"] for row in bundle["outputs"]] == [
+        str(output_before),
+        str(output_after),
+    ]
+    diagnostic_sources = {
+        row["source"] for row in bundle["path_probe_diagnostics"]
+    }
+    assert {
+        "declared_route",
+        "declared_output",
+        "declared_input",
+        "text_fallback",
+        "heuristic_output",
+        "heuristic_input",
+    }.issubset(diagnostic_sources)
+
+
+def test_repro_snapshot_hook_preserves_structured_candidate_diagnostic(
+    tmp_path,
+    monkeypatch,
+):
+    state = _state(tmp_path)
+    overlong = "/" + ("prompt-prose" * 80)
+    state.transcript_path.write_text(
+        json.dumps({
+            "event": "loop_seed",
+            "messages": [{"role": "system", "content": overlong}],
+        }) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(repro_snapshot, "_run", lambda *args, **kwargs: "")
+
+    hooks._repro_snapshot_on_end(
+        SimpleNamespace(state=state, turn=1),
+        SimpleNamespace(status="completed", returncode=0),
+    )
+
+    snapshots = state.list_artifacts("environment_snapshot", own_only=True)
+    assert len(snapshots) == 1
+    record = state.read_artifact(snapshots[0]["id"])
+    diagnostics = record["metadata"]["structured"]["path_probe_diagnostics"]
+    assert diagnostics[0]["source"] == "text_fallback"
+    assert diagnostics[0]["error_type"] == "OSError"
+    assert "Path probe diagnostics" in record["content"]
+    manifest = json.loads(
+        (
+            Path(state.root)
+            / "outputs"
+            / "experiment"
+            / "repro"
+            / "run_manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert manifest["raw_bundle"]["reason"] == "secondary_run"
+    assert "snapshot_error" not in manifest["raw_bundle"]
 
 
 def test_secondary_missing_log_gets_frozen_minimal_record(tmp_path):

@@ -67,14 +67,17 @@ def test_a_failing_part_does_not_swallow_the_others(tmp_path, monkeypatch):
     assert "turn_one_briefing_part_failed" in ctx.state.transcript_path.read_text(encoding="utf-8")
 
 
-def test_the_harness_lists_the_merged_hook_in_place_of_the_four(tmp_path):
+def test_the_v3_harness_starts_from_bootstrap_not_the_merged_briefing(tmp_path):
+    """S1d：v3 的 turn-1 由 experiment_v3_bootstrap 一页纸承担；turn_one_briefing 及其四个部件
+    不再是正式 hook。函数与 emits 仍在（历史实现，未接线），供旧协议 run 的测试使用。"""
     config = yaml.safe_load((_NODE / "harness.yaml").read_text(encoding="utf-8"))
     loop_hooks = config["loop_hooks"]
 
     assert [name for name, _part in hooks._TURN_ONE_BRIEFING_PARTS] == list(_PARTS)
-    assert not set(_PARTS).intersection(loop_hooks)
-    # 仍排在 blocker 提醒之前：prereg 派发阻塞在同一轮先登记，提醒才看得到。
-    assert loop_hooks.index("turn_one_briefing") < loop_hooks.index("foreign_owner_blocker_ask_nudge")
+    assert "turn_one_briefing" not in loop_hooks
+    # 事实型的两个部件仍作为独立 hook 列出；路径角色与 prereg 绑定简报由一页纸承担
+    assert "task_briefing" in loop_hooks and "data_source_reachability_preflight" in loop_hooks
+    assert loop_hooks.index("experiment_v3_bootstrap") < loop_hooks.index("foreign_owner_blocker_ask_nudge")
     assert set(hooks.turn_one_briefing.emits) >= {
         "path_role_convention_injected", "task_briefing_injected",
         "prereg_binding_briefing_injected", "data_source_reachability_preflight",

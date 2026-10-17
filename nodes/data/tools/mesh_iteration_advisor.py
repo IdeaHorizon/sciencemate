@@ -3,7 +3,9 @@
 The tool in this module does not generate meshes.  It classifies missing or
 ambiguous information during mesh setup/review into three buckets:
 
-* can be resolved from local case profiles or public benchmark references;
+* can be resolved mechanically: the request is routed to a registered mesh
+  family (case_type/mesh_type) and defaultable flow conditions are filled in
+  as recorded assumptions -- no parameter value comes from a case profile;
 * should be searched in literature/reference tools before asking the user;
 * must be supplied or confirmed by the user because guessing would change the
   actual geometry, boundary semantics, or scientific intent.
@@ -875,21 +877,6 @@ def _reference_notes_lack_usable_geometry(reference_notes: str) -> bool:
     )
 
 
-def _reference_notes_need_coordinate_profile_build(reference_notes: str) -> bool:
-    text = str(reference_notes or "").strip().lower()
-    if not text:
-        return False
-    return bool(
-        re.search(
-            r"(separate surface|separate.*points|pressure side|suction side|upper.*lower|"
-            r"分开.*坐标|两面.*数据|压力面|吸力面|需要.*合并|requiring combination|"
-            r"combine.*profile|closed profile)",
-            text,
-            flags=re.IGNORECASE,
-        )
-    )
-
-
 def _geometry_policy_requires_user_file(params: dict[str, Any], reference_notes: str = "") -> bool:
     """Return True when the flow explicitly requires a real geometry asset.
 
@@ -1187,7 +1174,6 @@ async def _resolve_mesh_iteration_inputs(
     parameters: str = "",
     review_issues: str = "",
     reference_notes: str = "",
-    allow_public_defaults: bool = True,
     require_user_confirmation: bool = True,
     **extra: Any,
 ) -> dict[str, Any]:
@@ -1200,7 +1186,9 @@ async def _resolve_mesh_iteration_inputs(
             params[key] = value
     apply_mesh_density_from_text(params, spec)
 
-    public_case = None
+    # #909 删掉了 nodes/data/cases/cfd/*.yaml，这里只剩「请求→已注册网格类型」的
+    # 路由结论（explicit_mesh_contract），不再有任何 case profile / 公开 benchmark
+    # profile 可供补值 —— 原先那条恒为 None 的 public_case 及其分支已随 #911 删除。
     local_case = explicit_mesh_contract(spec, params, case_type=case_type)
     disallowed_airfoil = _disallowed_airfoil_resolution_request(
         state=state,
@@ -1208,7 +1196,6 @@ async def _resolve_mesh_iteration_inputs(
         case_type=case_type,
         params=params,
         local_case=local_case,
-        public_case=public_case,
     )
     if disallowed_airfoil:
         return disallowed_airfoil
@@ -1218,7 +1205,6 @@ async def _resolve_mesh_iteration_inputs(
         case_type=case_type,
         params=params,
         local_case=local_case,
-        public_case=public_case,
     )
     if disallowed_canonical:
         return disallowed_canonical
@@ -1313,7 +1299,7 @@ async def _resolve_mesh_iteration_inputs(
         and not _has_any(params, _PRIVATE_GEOMETRY_FIELDS)
         and not surrogate_geometry_explicitly_approved(params)
     ):
-        case_label = str((public_case or local_case or {}).get("case_type") or case_type or params.get("case_type") or "public_geometry")
+        case_label = str((local_case or {}).get("case_type") or case_type or params.get("case_type") or "public_geometry")
         return _build_pause_payload(
             question="请提供可复现的几何文件，或确认同类公开几何下载来源。",
             context=(
@@ -1346,7 +1332,7 @@ async def _resolve_mesh_iteration_inputs(
             },
         )
 
-    user_fields = _required_user_fields(spec, params, local_case, public_case)
+    user_fields = _required_user_fields(spec, params, local_case, None)
 
     if user_fields and require_user_confirmation:
         if _has_any(params, _PRIVATE_GEOMETRY_FIELDS):
@@ -1356,12 +1342,12 @@ async def _resolve_mesh_iteration_inputs(
                     params=params,
                     missing_fields=user_fields,
                     case_profile=local_case,
-                    public_profile=public_case,
+                    public_profile=None,
                     case_type=case_type,
                 )
             if _reference_notes_indicate_search_failure(reference_notes):
                 case_label = (
-                    str((local_case or public_case or {}).get("case_type") or case_type or params.get("case_type") or "未确定算例")
+                    str((local_case or {}).get("case_type") or case_type or params.get("case_type") or "未确定算例")
                 )
                 return _build_pause_payload(
                     question="公开检索没有补齐几何相关网格参数，请确认缺失信息。",
@@ -1390,7 +1376,7 @@ async def _resolve_mesh_iteration_inputs(
             pass
         else:
             case_label = (
-                str((local_case or public_case or {}).get("case_type") or case_type or params.get("case_type") or "未确定算例")
+                str((local_case or {}).get("case_type") or case_type or params.get("case_type") or "未确定算例")
             )
             example_parts = []
             if any("geometry" in item["field"] or "几何" in item["field"] for item in user_fields):
@@ -1421,30 +1407,16 @@ async def _resolve_mesh_iteration_inputs(
     source_trace: list[dict[str, Any]] = []
     resolved = dict(params)
     if local_case:
-        defaults = local_case.get("defaults") or {}
-        resolved = {**defaults, **resolved}
+        # #911：这里如实记「请求被路由到哪类已注册网格」，而不是「值取自某个 profile」。
+        # 原先写的是 source=local_case_profile、path=None —— profile 目录早随 #909 删光，
+        # 读记录的人（下游节点、reviewer、复盘 transcript 的人）会以为域尺寸/边界条件
+        # 来自某个本地模板。路由只定 case_type/mesh_type，不填任何参数值。
         resolved.setdefault("case_type", local_case.get("case_type"))
         resolved.setdefault("mesh_type", local_case.get("mesh_type"))
         source_trace.append({
-            "source": "local_case_profile",
-            "path": local_case.get("_source"),
+            "source": "spec_routing",
             "case_type": local_case.get("case_type"),
-        })
-
-    if public_case and allow_public_defaults:
-        for key, value in (public_case.get("suggested_parameters") or {}).items():
-            if key == "mesh_type" and resolved.get("mesh_type") in {"public_geometry", "generic_gmsh", "", None}:
-                resolved["mesh_type"] = value
-            else:
-                resolved.setdefault(key, value)
-        resolved.setdefault("case_type", public_case.get("case_type"))
-        if resolved.get("mesh_type") in {"public_geometry", "", None}:
-            resolved["mesh_type"] = public_case.get("mesh_type")
-        source_trace.append({
-            "source": "public_benchmark_profile_hint",
-            "case_type": public_case.get("case_type"),
-            "case_family": public_case.get("case_family"),
-            "hint": public_case.get("public_reference_hint"),
+            "mesh_type": local_case.get("mesh_type"),
         })
 
     flow_defaults = _apply_defaultable_flow_conditions(resolved, spec, reference_notes)
@@ -1461,7 +1433,6 @@ async def _resolve_mesh_iteration_inputs(
         case_type=case_type,
         params=resolved,
         local_case=local_case,
-        public_case=public_case,
     )
     if disallowed_resolved_airfoil:
         return disallowed_resolved_airfoil
@@ -1471,142 +1442,9 @@ async def _resolve_mesh_iteration_inputs(
         case_type=case_type,
         params=resolved,
         local_case=local_case,
-        public_case=public_case,
     )
     if disallowed_resolved_canonical:
         return disallowed_resolved_canonical
-
-    # 判决拆除三波（mia:1514 降格，2026-09-02）：「像公开 benchmark 且没写
-    # reference_notes 就必须先检索」是顺序仪式（参数已 resolved 也拦）。改为用
-    # resolved/默认参数继续，如实挂 public_benchmark_params_unverified 义务
-    # （resolved_parameters + source_trace + 顶层 obligations + transcript）；
-    # 检索线索照给，模型想核实随时可走。
-    public_benchmark_unverified: dict[str, Any] | None = None
-    if public_case and not reference_notes:
-        public_benchmark_unverified = {
-            "kind": "public_benchmark_params_unverified",
-            "case_type": public_case.get("case_type"),
-            "case_family": public_case.get("case_family"),
-            "message": (
-                "该算例像公开 CFD benchmark，但没有 reference_notes：标准域尺寸/边界条件"
-                "取自本地 profile 与公开参考默认值，未经检索核实。"
-            ),
-            "clear_by": (
-                "用 search_kb/data_web_search 检索下列 query，把摘要、来源、"
-                "download.saved_path/sha256 写入 reference_notes 后再次调用 "
-                "prepare_scientific_mesh(operation='resolve')。"
-            ),
-            "search_queries": _public_search_queries(spec, params, public_case),
-            "recommended_tools": ["search_kb", "data_web_search", "data_web_download"],
-            "search_policy": dict(_FAST_MESH_REFERENCE_SEARCH_POLICY),
-        }
-        resolved["public_benchmark_params_unverified"] = True
-        source_trace.append({
-            "source": "public_benchmark_params_unverified",
-            "case_type": public_case.get("case_type"),
-            "case_family": public_case.get("case_family"),
-            "requires_human_input": False,
-        })
-        try:
-            state.append_transcript(
-                "mesh_public_benchmark_params_unverified",
-                case_type=public_case.get("case_type"),
-                case_family=public_case.get("case_family"),
-            )
-        except Exception:
-            pass
-
-    if public_case and reference_notes:
-        source_trace.append({
-            "source": "reference_notes",
-            "summary": reference_notes[:1000],
-        })
-        if _reference_notes_need_coordinate_profile_build(reference_notes):
-            return {
-                "status": "needs_geometry_processing",
-                "message": (
-                    "公开几何坐标已找到，但当前是多个二维坐标段/上下表面/压力面和吸力面，"
-                    "必须先合成为闭合 profile，不能退回 NACA 或占位几何。"
-                ),
-                "recommended_tools": ["prepare_scientific_mesh"],
-                "next_action": (
-                    "调用 prepare_scientific_mesh(operation='build_profile', coordinate_files=[...]) 合成闭合 profile；"
-                    "然后调用 prepare_scientific_mesh(operation='generate', mesh_type='coordinate_profile_gmsh', "
-                    "parameters 中传 coordinate_profile_path, convert_to_openfoam=true, write_tecplot=true)。"
-                ),
-                "resolved_parameters": resolved,
-                "source_trace": source_trace,
-            }
-        if (
-            _reference_notes_indicate_search_failure(reference_notes)
-            or _reference_notes_lack_usable_geometry(reference_notes)
-        ):
-            return _build_pause_payload(
-                question="公开检索没有找到可复现的几何参数，请确认是否能提供几何文件。",
-                context=(
-                    "节点已优先尝试使用公开资料检索几何参数，但当前检索结果不足以可靠生成网格。"
-                    "如果只找到了 benchmark 页面、论文或数据库入口，但没有可直接使用的坐标/CAD/网格文件，"
-                    "仍不能生成合格网格。继续自迭代需要用户提供本地几何文件，"
-                    "或明确确认某个同类公开来源中可下载的具体几何文件。\n"
-                    + _surrogate_geometry_warning()
-                ),
-                required_fields=[
-                    {
-                        "field": "geometry_file 或同类 candidate_geometry_source",
-                        "why": "没有可复现几何坐标/参数时，节点无法保证生成的是用户指定几何；跨类别替代会改变物理问题。",
-                    }
-                ],
-                example_reply=(
-                    "geometry_file=/absolute/path/to/geometry.step\n"
-                    "或：确认采用同类候选来源 <source-name/url> 的几何参数\n"
-                    "或：surrogate_geometry_approved=true, surrogate_geometry=<同类/指定替代几何>, "
-                    "surrogate_reason=<原因>, nonphysical_approximation=true"
-                ),
-                metadata={
-                    "case_type": public_case.get("case_type"),
-                    "case_family": public_case.get("case_family"),
-                    "review_issues": review_issues,
-                    "parameters": resolved,
-                    "reference_notes": reference_notes[:1000],
-                    "do_not_suggest": [
-                        "不要建议用不同几何角色/不同流动拓扑的标准几何替代用户指定几何",
-                        "不要建议用翼型/NACA 替代非翼型、内部通道、周期通道、级联或真实 CAD 几何",
-                        "不要把替代几何作为验证算例，除非用户明确 surrogate_geometry_approved=true",
-                    ],
-                },
-            )
-
-    unresolved_public_fields = []
-    if public_case:
-        for field in public_case.get("needs_user_if_missing", []):
-            normalized = str(field)
-            if "reynolds" in normalized and _has_any(resolved, ("reynolds_number",)):
-                continue
-            if "y_plus" in normalized and _has_any(resolved, ("target_y_plus", "boundary_layer_first")):
-                continue
-            if "scale" in normalized and _has_any(resolved, ("scale", "length_unit", "step_height", "plate_length")):
-                continue
-            unresolved_public_fields.append(normalized)
-    if unresolved_public_fields and require_user_confirmation:
-        required = [
-            {
-                "field": field,
-                "why": "公开 benchmark 可能有多种变体；该字段需要用户确认采用哪个物理工况或尺度。",
-            }
-            for field in unresolved_public_fields
-        ]
-        return _build_pause_payload(
-            question="请确认公开 benchmark 的具体变体参数。",
-            context="已找到可公开参考的算例类型，但仍有会影响网格和物理问题的关键变体需要确认。",
-            required_fields=required,
-            example_reply="reynolds_number=1000\nstep_height=0.01 m\n使用推荐网格质量门",
-            metadata={
-                "case_type": public_case.get("case_type"),
-                "case_family": public_case.get("case_family"),
-                "review_issues": review_issues,
-                "parameters": resolved,
-            },
-        )
 
     suggestions = []
     issues_text = review_issues.lower()
@@ -1619,21 +1457,29 @@ async def _resolve_mesh_iteration_inputs(
     if "openfoam" in issues_text or "polymesh" in issues_text:
         suggestions.append("重新执行 OpenFOAM 转换，并检查 constant/polyMesh/boundary 与 system/controlDict。")
 
+    if local_case:
+        routing_note = (
+            f"本步骤只把请求路由到网格类型 {local_case.get('mesh_type')}"
+            "（见 source_trace 的 spec_routing），没有从任何模板或公开参考补值"
+        )
+    else:
+        routing_note = "本步骤未能从请求确定网格类型，也没有从任何模板或公开参考补值"
     result = {
         "status": "success",
         "resolved_parameters": resolved,
         "source_trace": source_trace,
         "mesh_iteration_guidance": suggestions,
         "requires_human_input": False,
-        "confidence": 0.78 if source_trace else 0.45,
+        # #911：原先 0.78 那一档由「profile/公开参考补齐了参数」撑着，那条出处是假的。
+        # 现在这条路上没有任何一步提供或核实参数值 —— 路由只定网格类型，流动工况是
+        # 记成 assumption 的默认值 —— 所以只剩「未经核实」那一档，与原先公开
+        # benchmark 参数未核实时的封顶值是同一个 0.45。
+        "confidence": 0.45,
         "notes": (
-            "已尽量使用本地 case profile/公开参考线索补齐可自动处理的信息。"
-            "几何、边界语义、单位和用户目标仍不得擅自猜测。"
+            routing_note
+            + "；除 case_type/mesh_type"
+            + ("与作为 assumption 记录的自动流动工况默认值" if flow_defaults else "")
+            + "外，resolved_parameters 都来自调用方。几何、边界语义、单位和用户目标仍不得擅自猜测。"
         ),
     }
-    if public_benchmark_unverified:
-        result["obligations"] = [public_benchmark_unverified]
-        result["public_benchmark_params_unverified"] = True
-        result["confidence"] = min(float(result["confidence"]), 0.45)
-        result["notes"] += " 公开 benchmark 参数未经检索核实（见 obligations）。"
     return result

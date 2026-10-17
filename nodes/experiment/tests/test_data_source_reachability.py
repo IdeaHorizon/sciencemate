@@ -15,6 +15,8 @@
 """
 from __future__ import annotations
 
+import pytest
+
 import json
 import re
 import os
@@ -297,6 +299,7 @@ def test_extraction_keeps_bare_hostnames_in_table_cells():
 # ── 装配与非阻断 ──────────────────────────────────────────────────────────
 
 
+@pytest.mark.skip(reason="v2 模型面：turn_one_briefing 退役；data_source_reachability_preflight 现直接列在 loop_hooks；v3 承接见 test_data_source_reachability_preflight_is_a_v3_loop_hook（同文件）")
 def test_hook_is_enabled_in_harness_loop_hooks():
     """E-3 教训：只在 hooks.py 注册而不进 harness.yaml 的 loop_hooks 就是死代码。"""
     config = yaml.safe_load(
@@ -693,17 +696,14 @@ def test_acquire_rung_makes_redesign_the_last_resort():
     assert "不能是\"平台不让我拿\"" in skill
 
 
-def test_infeasible_declaration_protocol_matches_what_the_framework_reads():
-    """阶梯第 ④ 级的字段名必须和判决侧逐字对齐，否则强制 REDIRECT 永远不触发。"""
+def test_infeasible_rung_uses_the_v3_honest_finish_instead_of_a_manual_redirect_artifact():
+    """v3 的 blocked 由 finish 统一交付，不让模型手写旧 redirect metadata。"""
     skill = _feasibility_skill()
-    feasibility_src = (
-        Path(__file__).resolve().parents[3] / "shared" / "lib" / "feasibility.py"
-    ).read_text(encoding="utf-8")
-    for field in ("infeasible: true", "infeasible_reason", "redirect_target"):
-        assert field in skill, field
-        assert field.split(":")[0] in feasibility_src, field
-    assert "## Feasibility" in skill
-    assert "verdict: infeasible" in skill
+    assert "`report_blocker`" in skill
+    assert 'finish(outcome="blocked"' in skill
+    assert "不要手工创建、保存或冻结结果三件套" in skill
+    for retired in ("infeasible: true", "infeasible_reason", "redirect_target", "`save_artifact`"):
+        assert retired not in skill, retired
 
 
 def test_feasibility_ladder_is_reachable_from_the_live_sop_router():
@@ -720,7 +720,8 @@ def test_live_system_prompt_did_not_grow():
     assert "客观缺失" not in live
     # node20 的 23a0fe78 把口诀压成了 `probe→acquire→ask→infeasible`（去掉 declare），
     # 所以这里只钉前三级 —— 判据在 skill 里，rules 只需保住这个指针。
-    assert "probe→acquire→ask→" in "\n".join(_config()["rules"])
+    # v3（060 S1d）：阶梯口诀不再常驻 rules；问人判据只保留「源不可达」这一条指针。
+    assert "源不可达" in "\n".join(_config()["rules"])
 
 
 def test_harness_yaml_has_no_orphan_top_level_keys():
@@ -768,5 +769,13 @@ def test_the_rule_no_longer_carries_this_criterion():
     config = _config()
     assert "foreign_owner_blocker_ask_nudge" in config["loop_hooks"]
     rules = config["rules"]
-    assert len(rules) == 16
+    assert len(rules) == 9  # v3（060 S1d）：9 条
     assert not any("suggested_owner" in rule for rule in rules)
+
+
+def test_data_source_reachability_preflight_is_a_v3_loop_hook():
+    """v3 起不再经 turn_one_briefing 合并，直接列在 loop_hooks（E-3 教训同样适用）。"""
+    config = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "harness.yaml").read_text(encoding="utf-8")
+    )
+    assert "data_source_reachability_preflight" in config["loop_hooks"]

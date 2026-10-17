@@ -4,7 +4,7 @@
 
 **性质**：只有事实与判据，没有操作步骤，不含任何站点路径、分区名或 module 名。
 **谁叫模型读它**：节点 hook `experiment_scheduler_facts_router`（on_turn_end）在
-`check_external_job_health` / `wait_for_external_job` / `finalize_external_job` 返回
+`job_status` / `check_external_job_health` / `wait_for_external_job` 返回
 `scheduler_phase = terminal` 且 `scheduler = slurm` 时，对每个作业点名一次
 `load_skill(name='scheduler-longrun', asset='references/slurm-terminal-facts.md')`。
 **来源口径**：SchedMD 在线文档（站点导航标 Version 26.05；页面不印修改日期），抓取
@@ -150,6 +150,15 @@ Slurm 23.11.4（Ubuntu 24.04 发行包），**未在真实集群上验证**。
 - 来源：https://slurm.schedmd.com/sbatch.html 、 https://slurm.schedmd.com/sacct.html（Version 26.05，抓取 2026-09-21）
 - 原文："A terminated job state will be JOB_CANCELLED. If this option is not specified the system wide behavior applies. By default the job stays pending with reason DependencyNeverSatisfied"
 - 会说谎：DEADLINE 和依赖取消都留下 ExitCode `0:0`、通常无 Start 时间的终态记录；不看 Start / Elapsed 就把 `0:0` 或 CANCELLED 读成"跑过又被停"是错的——它可能根本没执行过。
+
+### S21 提交时写进 `--comment` 的串，两条查询路径看到的不一样
+
+- 事实：`squeue` 的输出格式符 `%k` 返回作业的 comment，对 PENDING / RUNNING 的作业直接可读，**不依赖站点的 accounting 配置**。`sacct -o Comment` 则只有站点设了 `AccountingStoreFlags=job_comment` 才有内容（Slurm 21.08 起该 flag 取代旧的 `AccountingStoreJobComment`）。
+- 来源：https://slurm.schedmd.com/squeue.html OUTPUT FORMAT（`%k` = Comment）；https://slurm.schedmd.com/slurm.conf.html `AccountingStoreFlags` 的 `job_comment`（抓取 2026-09-23）。
+- 实测：2026-09-23，Docker Slurm 23.11.4。带 `--comment=ai4s:<nonce>` 提交的作业，在未设 `AccountingStoreFlags` 时 `sacct -o JobIDRaw,JobName,Comment,State` 的 Comment 列**整列为空**；把 `AccountingStoreFlags=job_comment` 写进 slurm.conf 并 `scontrol reconfigure` 之后同样的查询才返回 `ai4s:<nonce>`。`squeue -h -o '%i %j %k %T'` 在两种配置下都能看到 comment。
+- 会说谎：**用 sacct 的空 Comment 列判断"这次提交没进队列"会得出相反的结论**。ACK 丢失后据此重提，就是同一个意图提交两次。空列只说明站点没存 comment，不说明作业不存在。
+- 节点侧：`tools/scheduler_adapters.SlurmAdapter.reconnect` 以 squeue 为主路径、sacct 为补充；Comment 列整列为空时返回 `cannot_query` 而不是 `absent`，`resolve_lost_ack` 据此记 `job_unknown` 并禁止重提。
+
 
 ## 2. 节点代码对照
 

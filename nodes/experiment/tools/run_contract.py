@@ -95,7 +95,7 @@ _RUN_ACCEPTANCE_BINDING_SOURCES_V1 = frozenset({
     "explicit_node_input", "selected_input", "unique_auto_claim", "none",
 })
 _RUN_ACCEPTANCE_BINDING_SOURCES_V2 = frozenset({
-    "explicit_node_input", "selected_input",
+    "explicit_node_input", "selected_input", "task_contract",
 })
 _RUN_ACCEPTANCE_COMMON_DIGEST_FIELDS = (
     "schema_version",
@@ -126,7 +126,7 @@ _LEGACY_CLASSIFIED_RUN_AUTHORITY_REASON = (
     "receipt (for example, it began before run acceptance receipts were "
     "supported); this version does not reconstruct execution authority for "
     "it; start a fresh run. If this run can be closed honestly, use "
-    "declare_inconclusive_verdict(reason=..., next_step=...) to record why; "
+    'finish(outcome="blocked", summary=..., next_step=...) to record why; '
     "do not fabricate an assessment"
 )
 
@@ -627,6 +627,18 @@ def _validated_run_acceptance_receipt(
         # the v2 digest or transcript authority payload.
         payload["governing_task_input_binding"] = binding
         payload["binding_source"] = source
+    from .task_input_view import resolve_task_inputs
+    task_view = resolve_task_inputs(state)
+    if task_view["task_contract"] or source == "task_contract":
+        if not task_view["task_contract"] or task_view["error"]:
+            return None, "task-contract receipt has no readable Core-selected authority"
+        expected_assignment, assignment_error = _validated_prereg_assignment(
+            task_view["inputs"].get("prereg_assignment"), require_bound_source=False,
+        )
+        recorded_assignment = {key: value for key, value in payload["prereg_assignment"].items()
+                               if key != "source"}
+        if assignment_error or recorded_assignment != expected_assignment:
+            return None, "receipt prereg assignment does not match the Core-selected contract"
     visibility = payload["unbound_prereg_visibility_witness"]
     needs_visibility = (
         schema_version == _LEGACY_RUN_ACCEPTANCE_SCHEMA_VERSION
@@ -1487,7 +1499,9 @@ def load_run_contract(state: Any) -> dict[str, Any]:
     input_assignment: dict[str, Any] | None = None
     input_assignment_error: str | None = None
     declared_not_found = False
-    node_inputs = hook_state.get("node_inputs")
+    from .task_input_view import resolve_task_inputs
+    task_view = resolve_task_inputs(state)
+    node_inputs = task_view["inputs"]
     if isinstance(node_inputs, dict):
         node_declared_id = str(node_inputs.get("prereg_artifact_id") or "").strip()
         declared_stage = str(node_inputs.get("stage") or "").strip().lower()
@@ -1506,7 +1520,8 @@ def load_run_contract(state: Any) -> dict[str, Any]:
                 input_assignment_error = (
                     "caller prereg_assignment must not provide receipt source"
                 )
-            if input_assignment and input_assignment.get("kind") == "pending":
+            if (input_assignment and input_assignment.get("kind") == "pending"
+                    and not task_view["task_contract"]):
                 input_assignment = None
                 input_assignment_error = (
                     "pending prereg assignment is represented only by an omitted "
@@ -1721,7 +1736,8 @@ def load_run_contract(state: Any) -> dict[str, Any]:
         chosen = [(i, m) for i, m in frozen if i == declared_id]
         if chosen:
             selected_prereg_id = chosen[0][0]
-            prereg_binding_source = "explicit_node_input"
+            prereg_binding_source = ("task_contract" if task_view["task_contract"]
+                                     else "explicit_node_input")
             bound_version, bound_hash = bound_versions[selected_prereg_id]
             if (
                 node_declared_content_hash
@@ -1984,7 +2000,7 @@ def load_run_contract(state: Any) -> dict[str, Any]:
                 "artifact_id": selected_prereg_id,
                 "version": bound_versions[selected_prereg_id][0],
                 "content_hash": bound_versions[selected_prereg_id][1],
-                "source": "explicit_node_input",
+                "source": prereg_binding_source,
             }
         else:
             contract["prereg_assignment"] = dict(input_assignment)
@@ -2002,6 +2018,7 @@ def load_run_contract(state: Any) -> dict[str, Any]:
         }
     else:
         contract["prereg_assignment"] = {"kind": "pending"}
+    contract["task_contract"] = task_view["task_contract"]
     if isinstance(durable_obligation_witness, dict):
         contract["durable_verdict_obligation_witness"] = dict(
             durable_obligation_witness
@@ -2110,7 +2127,9 @@ def observe_current_prereg_binding_witness(state: Any) -> dict[str, Any]:
     receipt.  Callers must never use it as a substitute governing input.
     """
     hook_state = getattr(state, "hook_state", {}) or {}
-    node_inputs = hook_state.get("node_inputs")
+    from .task_input_view import resolve_task_inputs
+    task_view = resolve_task_inputs(state)
+    node_inputs = task_view["inputs"]
     declared_id = ""
     declared_version: int | None = None
     declared_content_hash = ""
@@ -2141,6 +2160,11 @@ def observe_current_prereg_binding_witness(state: Any) -> dict[str, Any]:
                     ),
                 }
             if typed_assignment and typed_assignment.get("kind") == "pending":
+                if task_view["task_contract"]:
+                    return {"passed": False, "status": "prereg_assignment_pending",
+                            "binding": None, "task_contract": task_view["task_contract"],
+                            "reason": "selected Core task contract has no prereg assignment",
+                            "authorizing": False}
                 return {
                     "passed": False,
                     "status": "prereg_assignment_invalid",
@@ -2235,7 +2259,7 @@ def observe_current_prereg_binding_witness(state: Any) -> dict[str, Any]:
         chosen = [item for item in frozen if item[0] == declared_id]
         if chosen:
             selected_id = declared_id
-            source = "explicit_node_input"
+            source = "task_contract" if task_view["task_contract"] else "explicit_node_input"
             if (
                 declared_content_hash
                 and bound_versions[selected_id][1] != declared_content_hash
@@ -2320,6 +2344,7 @@ def observe_current_prereg_binding_witness(state: Any) -> dict[str, Any]:
         "status": "bound" if binding is not None else "unbound",
         "binding": binding,
         "binding_source": source,
+        "task_contract": task_view["task_contract"],
         "prereg_assignment": (
             {"kind": "bound", **binding, "source": source}
             if binding is not None else {"kind": "pending"}
@@ -3224,10 +3249,19 @@ def execution_intent_snapshot(state: Any) -> dict[str, Any]:
             "source": "node_inputs+forwarded_input_ids",
             "reason": "forwarded_input_ids_invalid",
         }
+    from .task_input_view import resolve_task_inputs
+    task_view = resolve_task_inputs(state)
+    if task_view["task_contract"]:
+        if task_view["error"]:
+            return {"available": False, "source": "task_contract",
+                    "reason": task_view["error"]["code"]}
+        node_inputs = task_view["inputs"]
     intent_material = {
         "node_inputs": node_inputs,
         "forwarded_input_ids": sorted(set(forwarded_input_ids)),
     }
+    if task_view["task_contract"]:
+        intent_material["task_contract"] = task_view["task_contract"]
     try:
         canonical = json.dumps(
             intent_material,
@@ -3245,7 +3279,8 @@ def execution_intent_snapshot(state: Any) -> dict[str, Any]:
         }
     return {
         "available": True,
-        "source": "node_inputs+forwarded_input_ids",
+        "source": ("task_contract+node_inputs+forwarded_input_ids" if task_view["task_contract"]
+                   else "node_inputs+forwarded_input_ids"),
         "intent_digest": hashlib.sha256(encoded).hexdigest(),
         "input_keys": sorted(str(key) for key in node_inputs),
     }

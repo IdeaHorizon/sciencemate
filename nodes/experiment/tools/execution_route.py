@@ -2754,13 +2754,13 @@ def execution_route_block(
         return _route_block_payload(
             decision,
             reason="execution_envelope_required",
+            # declare_execution_envelope 已退出本节点工具面（v3）：只报事实与本工具面上的出口。
             message=(
                 "enforce 档下 scientific_execution 必须在 spawn 前绑定冻结 "
-                "execution envelope；本次动作未执行。纠偏序列：① "
-                "declare_execution_envelope(route_step_id=<step id>, "
-                "assurance_class=evidence_bearing, ...)；② 把返回的 "
-                "evidence_ref 逐字放入该 step.action.evidence_refs；③ 带 "
-                "amendment_reason 修订同一条冻结路线后重试。"
+                "execution envelope；本次动作未执行。本版本的工具面上没有补绑 envelope 的"
+                "工具，本 run 内无法纠偏：用 report_blocker(summary=<缺 envelope 的步骤与原因>, "
+                "requested_action=<请 owner 在新 run 里以 v3 路线重做>) 登记阻塞，或以 "
+                'finish(outcome="blocked", summary=...) 诚实收尾；不要绕过 envelope 直接执行。'
             ),
             suggested_owner="experiment",
             node_action="declare_execution_envelope_then_amend_route",
@@ -4730,9 +4730,12 @@ def _valid_local_correction_witness(
             and item.get("symlink_free") is True
             and statmod.S_ISREG(identity[2])
             and identity[3] == 1
-            and identity[5] >= bound_ns
-            and identity[6] >= bound_ns
-            and max(identity[5], identity[6]) <= terminal_ns
+            # 与创建见证同一个判据（#1146），不再各写一份。
+            and _output_postconditions.attempt_window_freshness(
+                mtime_ns=identity[5], ctime_ns=identity[6],
+                nlink=identity[3], not_before_ns=bound_ns,
+                not_after_ns=terminal_ns,
+            )[0]
             and item.get("fingerprint") == _local_identity_fingerprint(
                 str(item.get("path") or ""), identity)
         ):
@@ -6229,12 +6232,23 @@ def _local_output_repoint_witness(
                 f"{rel}：见证期间文件身份或时间发生变化，拒绝 TOCTOU 混合收据")
             continue
         st = after
-        if bound_ns and min(st.st_mtime_ns, st.st_ctime_ns) < bound_ns:
-            violations.append(f"{rel}：mtime/ctime 早于 attempt 绑定，不是本次写入")
-            continue
-        if terminal_ns and max(st.st_mtime_ns, st.st_ctime_ns) > terminal_ns:
-            violations.append(f"{rel}：在 attempt 终态后被创建或改动，疑似事后伪造")
-            continue
+        # 时间窗与 route 验证 / health / ROC 同一把尺（#1146）：下界只看 ctime、
+        # 两侧留粗时钟容差。原来这里零公差比 min(mtime, ctime)：Linux 文件戳落后
+        # time.time_ns() 几毫秒、墙钟回拨都会把真新鲜的文件判成旧的，wget / tar x /
+        # cp -p 合法保留的旧 mtime 更是必拒。复核（_valid_local_correction_witness）
+        # 调的是同一个函数。
+        if bound_ns and terminal_ns:
+            in_window, basis = _output_postconditions.attempt_window_freshness(
+                mtime_ns=st.st_mtime_ns, ctime_ns=st.st_ctime_ns,
+                nlink=st.st_nlink, not_before_ns=bound_ns,
+                not_after_ns=terminal_ns,
+            )
+            if basis == _output_postconditions.REASON_AFTER_TERMINAL:
+                violations.append(f"{rel}：在 attempt 终态后被创建或改动，疑似事后伪造")
+                continue
+            if not in_window:
+                violations.append(f"{rel}：ctime 早于 attempt 绑定，不是本次写入")
+                continue
         # 051：同一次见证顺手冻结 P0a 形状的产物身份收据（lexical 路径、kind、
         # dev/ino/size、正文 sha256）。纠正后的步骤没有 outcome=success 事件，
         # ROC 的产物归属门（P0a v4）只认这种收据——没有它，纠正复用了原 attempt、
@@ -7176,11 +7190,15 @@ def _operation_closure_route_change_block(state: Any) -> dict[str, Any] | None:
             "这是诚实终态：把已完成的部分与未完成的原因记录清楚后结束本 run，"
             "由人开 continuation run 继续。"
             if complete else
+            # supersede_closure_draft 已退出本节点工具面（v3 由 finish 一次性原子交付三件套，
+            # 不再手工否定草稿）；这里只报事实和本工具面上有的出口。
             "当前 run 存在未完成或冲突的 operation closure，正挡住路线修订。"
-            + (" 其中这些草稿尚未冻结，可以先否定掉再原样重试本次 declare："
+            + (" 其中这些草稿尚未冻结："
                + "、".join(
                    (closure_status.get("supersedable_artifact_ids") or [])[:5])
-               + "；逐字调用 supersede_closure_draft(artifact_id=..., reason=...)。"
+               + "。本版本不再手工否定草稿：按真实结果调一次 finish(outcome=..., summary=...) "
+               "统一收尾（它会原子交付三件套并取代未冻结草稿）；若本 run 不在 v3 协议下，"
+               "用 report_blocker(summary=..., requested_action=...) 交人处理。"
                if closure_status.get("supersedable_artifact_ids") else
                " 没有可否定的未冻结草稿；先按原输入完成闭环，或由人开 "
                "continuation run。")
@@ -7266,11 +7284,11 @@ def _canonical_route_integrity_problem(
         "next_actions": [
             f'report_blocker(summary="canonical 路线记录 {route_id} v{version} {problem}", '
             'requested_action="核对工作区记录目录与 git 历史，按账本 sha256 恢复该文件")',
-            # record_operation_completion 是 operation run 的收尾工具；scientific run 登记 blocker
-            # 后结束本轮（第三会话复审 0914c 971fd66a P3）。
-            ("保存已有的有效工作后结束本轮：scientific run 不经 record_operation_completion 收尾"
+            # v3 起收尾工具是 finish（record_operation_completion 已退出工具面）；scientific run
+            # 登记 blocker 后结束本轮（第三会话复审 0914c 971fd66a P3）。
+            ("保存已有的有效工作后结束本轮：scientific run 登记 blocker 后不再另行收尾"
              if _run_execution_mode(state) == "scientific"
-             else 'record_operation_completion(outcome="blocked")——诚实收尾，会永久封口本 run'),
+             else 'finish(outcome="blocked", summary=<路线记录为何不可信>)——诚实收尾，会永久封口本 run'),
         ],
     }
 
@@ -7353,15 +7371,16 @@ def _route_envelope_enforce_refusal(route: dict[str, Any]) -> dict[str, Any] | N
     return {
         "status": "error",
         "error_code": "execution_envelope_required",
+        # declare_execution_envelope / declare_execution_route 已退出本节点工具面（v3），
+        # 这里只能说本 run 内有什么出口，不能再指使模型去调它调不到的工具
+        # （tests/test_instructed_tools_are_in_whitelist.py）。本分支只在旧协议 run +
+        # EXPERIMENT_ENVELOPE_GATE=enforce 时触发。
         "error": (
             "scientific_execution 步骤必须先绑定冻结 execution envelope"
-            f"（缺失步骤：{missing_envelope_steps}）。纠偏序列："
-            "① declare_execution_envelope(route_step_id=<step id>, "
-            "assurance_class=evidence_bearing, target_profile_ref=..., "
-            "storage_binding=..., environment_lock_artifact_ids=[...])；"
-            "② 把返回的 evidence_ref 逐字放入该 step.action.evidence_refs；"
-            "③ 重新 declare_execution_route（路线已冻结时带 "
-            "amendment_reason 修订同一身份）。"
+            f"（缺失步骤：{missing_envelope_steps}）。本版本的工具面上没有补绑 envelope 的"
+            "工具，本 run 内无法纠偏：用 report_blocker(summary=<缺 envelope 的步骤与原因>, "
+            "requested_action=<请 owner 在新 run 里以 v3 路线重做>) 登记阻塞，或以 "
+            'finish(outcome="blocked", summary=...) 诚实收尾；不要绕过 envelope 直接执行。'
         ),
         "step_ids": missing_envelope_steps,
     }
@@ -7875,17 +7894,10 @@ register_tool(
     _declare_execution_route,
 )
 
-# declared_route 的字段契约与校验器同源（build_contract.DECLARED_ROUTE_CONTRACT）。
-# 此前 describe_contract_requirements() 定义了却从没被调用 —— 声明存在、模型看不见，
-# 于是 env_domains 这类字段只能靠撞墙学会（tests/test_tool_contracts_reach_the_caller
-# 抓到的就是这个）。在 save gate 上登记 content_contract，让同一份声明真的送到调用方。
-try:
-    from .build_contract import DECLARED_ROUTE_CONTRACT as _DECLARED_ROUTE_CONTRACT
-except ImportError:  # pragma: no cover - standalone node bootstrap.
-    from tools.build_contract import DECLARED_ROUTE_CONTRACT as _DECLARED_ROUTE_CONTRACT
-
-register_save_gate("declared_route", _canonical_route_save_gate,
-                   content_contract=dict(_DECLARED_ROUTE_CONTRACT))
+# The v3 model surface does not ask the model to create a route.  Keep the
+# compatibility gate for old artifacts, but do not inject its contract into
+# the shared save_artifact description seen by every v3 run.
+register_save_gate("declared_route", _canonical_route_save_gate)
 
 
 def resolve_external_route_expected_outputs(

@@ -511,6 +511,7 @@ def _supersede(state, artifact_id, reason):
         state=state, artifact_id=artifact_id, reason=reason))
 
 
+@pytest.mark.skip(reason="v2 模型面：closure supersede 退出模型面（060 S1d）；v3 由 finish 一次生成三件套、重入只读回（test_060_s1d_natural_flows）")
 def test_duplicate_log_failure_names_supersede_tool_as_the_way_out(tmp_path: Path):
     state = _non_scientific_state(tmp_path)
     _non_scientific_log(state, "original")

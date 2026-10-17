@@ -1234,7 +1234,7 @@ def prove_the_uninstaller_works(install_dir: Path, shortcuts: list[Path], data_r
 SELFCHECK_UNINSTALL_KEY = r"Software\ScienceMate-SelfCheck\Uninstall\ScienceMate"
 
 
-def prove_the_installer_works(setup: Path) -> None:
+def prove_the_installer_works(setup: Path, upgrade_fixture: Path | None = None) -> None:
     r"""装完自检：`Setup.exe --no-launch` 解到 installDir，再**从那个新位置真起一次壳**，
     证明整包搬走后还能跑（这才抓得住 backend.json 绝对路径不可搬走那类 bug——只查文件
     在、不真起壳，一度漏掉了）。
@@ -1320,6 +1320,7 @@ def prove_the_installer_works(setup: Path) -> None:
         prove_the_shell_outlives_its_launcher(shell)
         prove_a_model_command_runs_from_the_installed_app(install_dir)
         prove_the_installed_app_makes_the_platforms_pdf(install_dir)
+        prove_an_upgrade_from_the_previous_release_works(install_dir, exe, setup, upgrade_fixture)
         # 这一条必须在壳**还活着**的时候跑 —— 它验的就是「开着的时候重装」。
         prove_a_reinstall_never_breaks_a_working_install(setup, install_dir)
         # 卸载要在壳**关掉之后**跑（开着的时候卸载器会拒绝，那是另一条闸）。这里显式
@@ -1633,6 +1634,74 @@ def python3_lands_on_the_packaged_interpreter(typed: dict, python: Path) -> None
     print(f"  ✅ 模型 shell 里的 python3 = 包内解释器（{prefix}），名字是包里带的")
 
 
+def prove_an_upgrade_from_the_previous_release_works(install_dir: Path, exe: Path, setup: Path,
+                                                     fixture: Path | None) -> None:
+    r"""升级彩排（RFC_WORKER_START_IS_NOT_A_GATE §3.10）：把**上一版真跑过课题的数据根**（夹具）抄到一个
+    空目录，以 PLATFORM_DATA_ROOT 指过去再起一次装好的壳，然后对它核四件 —— 旧会话上发一轮有回复、
+    环境条幅没有降级、上一版的 run 在、上一版的 KB 读得回、权限快照零差异。全过写收据
+    `dist/windows-upgrade-rehearsal.json`；发布那头（publish_release）没有这张收据不发 Windows 件。
+
+    由来：lujy 10-15（0.5.4 → 0.5.6）—— 上一版写下的 marker / run 目录 / .git 新版全读不了，而装完
+    自检只在临时目录跑一条载荷，从不碰一份上一版的数据根，所以发布前没有任何闸能红。
+
+    没给夹具（`--upgrade-fixture`）：这一步不跑、大声说一句；发布闸会拦。
+    """
+    step("升级彩排：上一版的数据根装新版")
+    if fixture is None:
+        print("  ⚠️ 没有 --upgrade-fixture：这次没在上一版的数据根上彩排。publish_release 会拒发 Windows 件；"
+              "先 `python scripts\\acceptance\\upgrade_rehearsal.py capture …` 抄一份夹具。")
+        return
+    rehearsal = REPO / "scripts" / "acceptance" / "upgrade_rehearsal.py"
+    # 数据根要**短**：夹具里 project-worktrees/…/runs/orchestrator__<36>__session__<36>/… 一层层下来
+    # 已经接近 260；放 %TEMP%\\win-upgrade-rehearsal-xxxx\\data 下第一次彩排就 WinError 206。
+    home = Path(tempfile.mkdtemp(prefix="u", dir=os.environ.get("LOCALAPPDATA") or None))
+    data_root = home / "d"
+    installed_python = install_dir / "Resources" / "python" / "python.exe"
+    proc = subprocess.run([sys.executable, str(rehearsal), "restore", "--fixture", str(fixture), "--to", str(data_root),
+                           "--python", str(installed_python), "--tree", str(REPO)],
+                          capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
+    print((proc.stdout or "").strip())
+    if proc.returncode != 0:
+        raise SystemExit(f"❌ 夹具抄不过去（rc={proc.returncode}）：{proc.stderr}")
+    env = {**os.environ, "PLATFORM_DATA_ROOT": str(data_root),
+           "HARNESS_FRAMEWORK_HOME": str(data_root), "PYTHONUNBUFFERED": "1"}
+    log = data_root / "logs" / "shell.log"
+    already = log.stat().st_size if log.is_file() else 0
+    shell = start_the_shell_the_way_a_user_does(exe, data_root, env)
+    url = None
+    try:
+        deadline = time.time() + 180
+        while time.time() < deadline:
+            for line in read_the_shell_log_since(log, already).splitlines():
+                m = re.match(r"READY (http://127\.0\.0\.1:\d+/)", line.strip())
+                if m:
+                    url = m.group(1)
+                    break
+            if url:
+                break
+            if shell.poll() is not None:
+                raise SystemExit("❌ 新版在上一版的数据根上起不来：" +
+                                 explain_the_shell_exit(shell.returncode, read_the_shell_log_since(log, already)))
+            time.sleep(0.5)
+        if not url:
+            raise SystemExit("❌ 新版在上一版的数据根上没说 READY\n" + _indent(read_the_shell_log_since(log, already)))
+        print(f"   shell> READY {url}（数据根 = 夹具 {fixture.name}）")
+        receipt = DIST / "windows-upgrade-rehearsal.json"
+        proc = subprocess.run([sys.executable, str(rehearsal), "check", "--url", url, "--fixture", str(fixture),
+                               "--data-root", str(data_root), "--receipt", str(receipt), "--for-installer", str(setup)],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
+        print(_indent((proc.stdout or "").strip()))
+        if proc.returncode != 0:
+            backend_log = data_root / "logs" / "backend.log"
+            tail = backend_log.read_text("utf-8", "replace")[-4000:] if backend_log.is_file() else "(没有 backend.log)"
+            raise SystemExit("❌ 升级彩排没过：\n" + _indent((proc.stderr or "").strip())
+                             + "\n--- 后端日志尾部 ---\n" + _indent(tail))
+        print(f"  ✅ 升级彩排过了：收据 {receipt}")
+    finally:
+        stop_the_shell(shell)
+        shutil.rmtree(io_path(home), ignore_errors=True)
+
+
 def prove_the_installed_app_makes_the_platforms_pdf(install_dir: Path) -> None:
     """装完自检：**在安装位置**真编一次平台的 PDF 样本（中文 + GB/T 7714 参考文献 + 插图）。
 
@@ -1692,6 +1761,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sign-with-thumbprint", default="", metavar="指纹",
                         help="用 CurrentUser\\My 里这个指纹的证书签。也可用环境变量 "
                              "WINDOWS_SIGNING_THUMBPRINT")
+    parser.add_argument("--upgrade-fixture", default="", metavar="夹具目录",
+                        help="上一版真跑过课题的数据根夹具（scripts/acceptance/upgrade_rehearsal.py capture 抄的）。"
+                             "给了就在装完自检里把新版装到它上面跑一轮；发布闸要那张收据")
     args = parser.parse_args(argv)
 
     if sys.platform != "win32":
@@ -1754,7 +1826,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.installer:
         setup = make_the_installer(app, args.edition, certificate)
         if not args.skip_check:
-            prove_the_installer_works(setup)
+            prove_the_installer_works(setup, Path(args.upgrade_fixture) if args.upgrade_fixture else None)
             prove_the_signature_survived_the_payload(setup, certificate)
         if certificate is None:
             say_it_is_unsigned(setup)

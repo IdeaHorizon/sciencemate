@@ -47,6 +47,13 @@ export type EventPayloadView = {
   actionGroupId?: string;
   technicalName?: string;
   toolArguments?: Record<string, unknown>;
+  /**
+   * 工具 envelope 自报的结局（`tool.completed` 带，#947）：`success` / `pause` /
+   * `started_background` …。权限 pause 和批准后的真实执行都是 `tool.completed`，
+   * 分开它俩只能读这个字段 —— `summary` 可能是截断的文本，别在里面猜。
+   * 缺失 = 判不出，不等于成功。
+   */
+  resultStatus?: string;
   resultCount?: number;
   durationMs?: number;
   progress?: ProgressView;
@@ -282,6 +289,7 @@ export function readPayload(event: ExecutionEvent): EventPayloadView {
     actionGroupId: string(payload.actionGroupId),
     technicalName: toolName ?? string(payload.technicalName),
     toolArguments: event.kind === "tool.started" ? record(payload.arguments) : undefined,
+    resultStatus: event.kind === "tool.completed" ? string(payload.resultStatus) : undefined,
     resultCount: number(payload.resultCount),
     durationMs: number(payload.durationMs),
     progress: parseProgress(payload.progress),

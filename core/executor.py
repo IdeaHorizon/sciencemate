@@ -132,6 +132,10 @@ def _inherit_sandbox_capability(child: State, parent: State) -> None:
     )
 
 
+
+class RunStillLiveError(RuntimeError):
+    """要续的 run 还有执行者（#1164）—— 一个 run 同一时刻只能有一个 loop。"""
+
 async def execute_node(
     node_type: str,
     *,
@@ -233,6 +237,16 @@ async def execute_node(
         "reason": None,
     }
     if resume_run_id:
+        # 同一个 run 只能有一个执行者（#1164）。调用方（run_node）已经在扫描和
+        # 显式续跑两处排除了还在跑的 run；这里是最后一道：从这一行到下面的
+        # register_active 之间没有 await，查和登记在同一个事件循环里是原子的。
+        # 不退回"新开"—— 那会让同一件事并排跑两份，比报错更难查。
+        from .pause import find_child_state as _live_state, has_driver as _driven
+
+        if _live_state(resume_run_id) is not None or _driven(resume_run_id):
+            raise RunStillLiveError(
+                f"run {resume_run_id} 在本进程里还有执行者，拒绝 reopen：同一个 run "
+                f"上第二个 loop 会重复分析、补记录和 finish（#1164）。")
         try:
             state = State.reopen(run_id=resume_run_id, **_state_kwargs)
         except (FileNotFoundError, OSError) as exc:

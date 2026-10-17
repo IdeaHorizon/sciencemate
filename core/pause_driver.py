@@ -537,6 +537,9 @@ def _cascade_tool_result(ctx, parent_ctx, result, child_summary: dict | None) ->
             child_summary,
             ctx.harness,
             None,
+            # 派它出来的那一次 run_node 调用（#1052）：`subagent_call_end` 与当初的
+            # `subagent_call_start` 同一个身份。
+            dispatch_id=ctx.state.parent_dispatch_id,
         )
     except Exception as exc:                      # noqa: BLE001
         log.warning("cascade _finish_child failed for child %s: %s", ctx.run_id, exc)

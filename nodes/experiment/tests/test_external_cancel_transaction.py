@@ -1157,7 +1157,7 @@ def test_exited_job_is_never_recorded_cancelled(tmp_path, monkeypatch, command, 
         assert result["cancelled"] is False
         assert result["observed_end"]["source"] == "native_job_record"
         assert result["observed_end"]["exit_code"] == exit_code
-        assert result["next_tool"]["name"] == "finalize_external_job"
+        assert result["next_tool"]["name"] == "finish"  # v3（060 S1d）：下一动作是 finish
         assert manager.lifecycle_for_submission(state, submission)["status"] is None
         assert not state.list_artifacts("external_job_cancellation_intent")
         assert not state.list_artifacts("external_job_cancellation_outcome")
@@ -1220,7 +1220,7 @@ def test_job_ending_after_probe_is_not_signalled_or_recorded_cancelled(tmp_path,
         assert result["status"] == "already_ended", result
         assert result["reason"] == "external_job_already_ended"
         assert result["cancelled"] is False
-        assert result["next_tool"]["name"] == "finalize_external_job"
+        assert result["next_tool"]["name"] == "finish"  # v3（060 S1d）
         assert manager.lifecycle_for_submission(state, submission)["status"] is None
         outcomes = state.list_artifacts("external_job_cancellation_outcome")
         assert len(outcomes) == 1

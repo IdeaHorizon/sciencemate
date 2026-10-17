@@ -164,6 +164,43 @@ def test_no_obligation_only_because_nothing_unverified_was_filled_in():
     )
 
 
+# ── #911：什么都没填，记录也不许声称填过 ──────────────────────────────────────
+#
+# 上一条管「没挂义务就不许替用户填值」；这一条管反方向的那句假话：#909 之后
+# 这条路上已经没有任何 case profile，可 resolve 的记录还写着
+# source=local_case_profile、path=None、notes「已尽量使用本地 case profile/公开
+# 参考线索补齐」，confidence 0.78 正是被那条假出处撑起来的。读记录的人会以为
+# 域尺寸/边界条件来自某个本地模板。出处字段的全部价值在于回答「这个值哪来的」。
+# 走模型真正调用的入口 prepare_scientific_mesh(operation='resolve')。
+
+def test_resolve_provenance_names_only_the_routing_that_actually_happened():
+    r = _dispatch(
+        "prepare_scientific_mesh", spec="lid driven cavity benchmark mesh",
+        operation="resolve", parameters="{}",
+    )
+    assert r["status"] == "success", r
+    trace = r["source_trace"]
+
+    sources = {t.get("source") for t in trace}
+    assert not sources & {"local_case_profile", "public_benchmark_profile_hint"}, (
+        f"出处里还写着已经不存在的来源：{trace}"
+    )
+    # 声称有文件出处就得说得出文件在哪 —— path: null 就是「有出处但不知道在哪」。
+    for entry in trace:
+        if "path" in entry:
+            assert entry["path"] and Path(entry["path"]).exists(), entry
+
+    # 真实发生的只有「请求→网格类型」这一步路由，记录要如实说它。
+    routing = [t for t in trace if t.get("source") == "spec_routing"]
+    assert routing, trace
+    assert routing[0]["mesh_type"] == r["resolved_parameters"]["mesh_type"]
+
+    notes = r["notes"]
+    assert "case profile" not in notes and "公开参考线索补齐" not in notes, notes
+    # 没有任何一步提供或核实参数值 → 只能是「未经核实」那一档。
+    assert r["confidence"] <= 0.45, r["confidence"]
+
+
 # ── downgrade：preprocessing_planner 7100/7290/7134/7153/7268 ────────────────
 
 def _analysis(**scope) -> dict:
