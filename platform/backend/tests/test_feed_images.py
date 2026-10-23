@@ -268,3 +268,42 @@ def test_a_page_of_body_text_is_never_mistaken_for_a_figure() -> None:
     a_real_figure = 468.0 * 124.0   # 实测样本：2608.21349 里裁出来的那张
     assert a_real_figure / page_area < thumbnail.MAX_FIGURE_PAGE_FRACTION, \
         "这道闸把真实插图也拦掉了"
+
+
+def test_text_cover_height_follows_title_lines_with_light_gradient():
+    from xml.etree import ElementTree as ET
+    short = ET.fromstring(thumbnail.generated_cover(title="Short title", venue="Journal", domain="cs.LG"))
+    long = ET.fromstring(thumbnail.generated_cover(title="Long title " * 12, venue="Journal", domain="cs.LG"))
+    assert int(short.attrib["height"]) < int(long.attrib["height"]) < 360
+    ns = {"s": "http://www.w3.org/2000/svg"}
+    for cover in (short, long):
+        assert cover.attrib["viewBox"].endswith(cover.attrib["height"])
+        for stop in cover.findall(".//s:stop", ns):
+            color = stop.attrib["stop-color"].lstrip("#")
+            assert min(int(color[i:i+2], 16) for i in (0, 2, 4)) >= 210
+        assert all(float(text.attrib["y"]) < int(cover.attrib["height"]) for text in cover.findall("s:text", ns))
+
+
+def test_cover_uses_width_and_preserves_whole_english_words():
+    title = "Lattice Boltzmann simulation of irregular particles settling in a three dimensional fluid"
+    lines = thumbnail._cover_title_lines(title)
+    assert " ".join(lines) == title
+    assert len(lines[0]) > 26
+    for current, following in zip(lines, lines[1:]):
+        assert thumbnail._cover_text_width(current) <= 560
+        assert thumbnail._cover_text_width(current + " " + following.split()[0]) > 560
+    chinese = "三维不规则颗粒沉降过程中的流固耦合数值模拟研究" * 2
+    assert "".join(thumbnail._cover_title_lines(chinese)) == chinese
+    assert all(thumbnail._cover_text_width(line) <= 560 for line in thumbnail._cover_title_lines(chinese))
+    assert thumbnail._cover_title_lines("Supercalifragilisticexpialidocious" * 3) == ["Supercalifragilisticexpialidocious" * 3]
+
+
+def test_old_encoded_journal_names_are_decoded_for_cards_and_covers():
+    from app.api.v1.feed import _to_out
+    item = FeedItem(id='dddd0004-0000-4000-8000-000000000004', kind='paper',
+                    title='Water treatment', venue='ACS ES&amp;T Water', domains=[], extra={})
+    assert _to_out(item).venue == 'ACS ES&T Water'
+    svg = thumbnail.generated_cover(title=item.title, venue=item.venue, domain='').decode()
+    import xml.etree.ElementTree as ET
+    assert 'ACS ES&T Water' in ''.join(ET.fromstring(svg).itertext())
+    assert '&amp;amp;' not in svg

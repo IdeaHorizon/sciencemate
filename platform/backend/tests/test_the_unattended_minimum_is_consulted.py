@@ -16,18 +16,43 @@ def test_a_machine_with_everything_just_runs() -> None:
     assert verdict.allowed and not verdict.reason and not verdict.note
 
 
-@pytest.mark.parametrize("missing", ["write_boundary", "git_unwritable", "net_deny"])
+@pytest.mark.parametrize("missing", ["write_boundary", "git_unwritable"])
 def test_a_missing_boundary_is_refused_on_any_machine(missing: str) -> None:
-    """不可恢复的三条，在**自己的电脑上也不让步**。
+    """写边界与 .git 不可写，在**自己的电脑上也不让步**。
 
-    缺了它们不是"弱一点"，是根本没有边界。判据不该因为"这是我自己的机器"
-    就松口 —— 放着不管地跑等于把整台机器交给模型。
+    缺了它们不是"弱一点"，是根本没有边界：文件和历史会在用户看不见的时候被改掉或分叉。
+    判据不该因为"这是我自己的机器"就松口 —— 放着不管地跑等于把整台机器交给模型。
     """
     for own_machine in (True, False):
         verdict = judge_unattended([missing], weak_resource_walls_are_acceptable=own_machine)
         assert not verdict.allowed, (missing, own_machine)
         assert verdict.reason, "拒绝必须说清楚缺什么"
         assert "不会自己开下一轮" in verdict.reason, "拒绝要给出还能怎么办"
+
+
+def test_no_network_wall_on_your_own_machine_is_a_note_that_says_the_model_can_reach_the_network() -> None:
+    """#931：断网在用户自己的机器上降为可恢复 —— 外泄的对象与承担者是同一个人。
+
+    此前每一台 Windows 都因 `net_deny` 永远缺而被判「不能无人值守」，长课题跑到每个 turn
+    边界就停下等人。放行，但话要说实：模型跑的命令能上网，由用户自己承担。
+    """
+    verdict = judge_unattended(["net_deny"], weak_resource_walls_are_acceptable=True)
+    assert verdict.allowed and not verdict.reason
+    assert "能上网" in verdict.note and "你自己的" in verdict.note, verdict.note
+    assert "写边界" in verdict.note, "要说清哪些仍然守着"
+
+
+def test_no_network_wall_on_a_shared_executor_is_still_refused() -> None:
+    """组织的共享执行器上数据不只是一个人的：断不掉网仍是不可恢复。"""
+    verdict = judge_unattended(["net_deny"], weak_resource_walls_are_acceptable=False)
+    assert not verdict.allowed
+    assert "断不掉网络" in verdict.reason and "不会自己开下一轮" in verdict.reason
+
+
+def test_no_network_wall_plus_weak_resource_walls_on_your_own_machine_mentions_both() -> None:
+    verdict = judge_unattended(["net_deny", "mem_cap"], weak_resource_walls_are_acceptable=True)
+    assert verdict.allowed
+    assert "能上网" in verdict.note and "内存上限" in verdict.note, verdict.note
 
 
 def test_weak_resource_walls_are_a_note_on_your_own_machine() -> None:
@@ -51,7 +76,10 @@ def test_weak_resource_walls_stop_a_shared_executor() -> None:
 def test_an_unrecoverable_miss_beats_a_recoverable_one() -> None:
     """两种都缺时按重的判 —— 一句"注意资源占用"配不上"没有写边界"。"""
     verdict = judge_unattended(
-        ["mem_cap", "net_deny"], weak_resource_walls_are_acceptable=True
+        ["mem_cap", "write_boundary"], weak_resource_walls_are_acceptable=True
     )
     assert not verdict.allowed
-    assert "断不掉网络" in verdict.reason
+    assert "沙箱后端" in verdict.reason
+    # 共享执行器上断网也是重的那一档：和内存一起缺时按断网拒。
+    verdict = judge_unattended(["mem_cap", "net_deny"], weak_resource_walls_are_acceptable=False)
+    assert not verdict.allowed and "断不掉网络" in verdict.reason

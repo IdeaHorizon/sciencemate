@@ -21,6 +21,7 @@ from uuid import uuid4
 from app.config import settings, the_org_home
 from app.models.user import User
 from app.services import harness_bridge_once
+from app.services.say import SaidToAPerson
 from app.services.instructions import harness_home_for
 from app.services.harness_runtime import (
     harness_subprocess_env,
@@ -30,8 +31,8 @@ from app.services.harness_runtime import (
 _TIMEOUT_SECONDS = 60  # 探针要 ssh 出去，比一次 KB 读慢
 
 
-class ComputeGrantsError(RuntimeError):
-    """算力授权读不出来 / 写不进去，且说得出为什么。"""
+class ComputeGrantsError(SaidToAPerson, RuntimeError):
+    """算力授权读不出来 / 写不进去，且说得出为什么。「资源」页原话显示，两种语言都写。"""
 
 
 async def read(user: User) -> dict[str, Any]:
@@ -56,7 +57,8 @@ async def machines(user: User, replace_with: list[dict] | None = None) -> dict[s
 async def _ask(user: User, request: dict[str, Any], *, expect: str) -> dict[str, Any]:
     root = Path(settings.harness_root).expanduser().resolve()
     if not (root / "core" / "capabilities.py").is_file():
-        raise ComputeGrantsError("HARNESS_ROOT 不是一份当前的 harness checkout")
+        raise ComputeGrantsError("HARNESS_ROOT 不是一份当前的 harness checkout",
+                                 en="HARNESS_ROOT is not a current harness checkout")
     payload = {
         **request,
         "request_id": f"grants-{uuid4().hex}",

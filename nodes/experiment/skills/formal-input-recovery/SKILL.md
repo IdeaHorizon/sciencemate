@@ -40,7 +40,10 @@ status: validated
    `child_run_id` 与 `all_child_artifacts` 中的 blocker id 传给 `record_data_delivery_outcome`；
    若该 child pause 后恢复，必须先调用 `reconcile_data_dispatch`，只接受它从同一直属
    child 唯一终态 blocker 返回的 id，再记录 outcome。任意历史报告或裸 `run_node` 结果均
-   不能授权兜底。只有冻结 prereg 的
+   不能授权兜底。可恢复报告对应的 child 已结束后，补齐环境或不改变请求含义的输入，
+   可用同一 spec 重派；仍运行、暂停或状态未知时接续原 child，已有交付先验收。
+   多次受阻不证明数据不可得；无进展时诊断或诚实受阻，修改冻结请求须走原修订机制。
+   只有冻结 prereg 的
    `input_delivery_policy.mode=experiment_data_fallback` 且
    `experiment_fallback_permitted=true` 时，Experiment 才可接手；否则在 experiment_log 中保留
    精确缺失输入证据并 report_blocker。不得把运行改标为成功，也不得静默替换或合成数据。
@@ -58,12 +61,13 @@ status: validated
 - 按 prereg 把**已有**输入复制到 workdir
 - 续跑类的常规改名/搬运，例如 VASP 的 `CONTCAR` → `POSCAR`
 
-判据：你是在**生成一份本来不存在的科学输入**（越界），还是在**摆放/参数化一份
-已经存在的输入**（运行化，可做）。
+判据是正式任务与输入契约的授权和来源要求，而非是否出现新文件。
+不得以自行合成替换缺失的正式输入；任务明确要求的生成工作不因文件名而成为越界。
 
 另外注意与 verdict 分开：这条针对**输入缺失**；输入齐全但数据判不动
 （confound / 缺 metric / N 太小）走 `verdict: inconclusive`，不是这条路。
-本 run 是否越界由 hook 机械对账（`preprocessing_boundary_audit` 事件），不靠自述。
+`preprocessing_boundary_audit` 只记录本 run 的非约束线索，不证明越界或授权；
+实际权限、正式输入身份和消费仍按既有契约核验。
 
 该恢复流程通过负责服务创建或获取输入；它不修改冻结 pre-registration，也不授权
 科学 closure。

@@ -91,6 +91,7 @@ class FeedItemKind:
 class FeedVisibility:
     PLATFORM = "platform"
     ORGANIZATION = "organization"
+    INSTITUTION = "institution"
 
 
 class FeedEngagementAction:

@@ -47,10 +47,12 @@ _needs_abi4 = pytest.mark.skipif(
 )
 
 #: 连本机一个**真在听**的端口：被拒 → 0，连上 → 4，其它 → 3。
+#: ``socket()`` 也在 try 里：#1180 起 deny 下有 seccomp 一层，建 socket 那一步就 EPERM；
+#: Landlock 那层在 connect 时 EACCES。两种都是"被拒"。
 _PROBE = (
     "import errno, socket, sys\n"
-    "s = socket.socket(); s.settimeout(3)\n"
-    "try:\n    s.connect(('127.0.0.1', int(sys.argv[1])))\n"
+    "try:\n    s = socket.socket(); s.settimeout(3)\n"
+    "    s.connect(('127.0.0.1', int(sys.argv[1])))\n"
     "except PermissionError:\n    sys.exit(0)\n"
     "except OSError as e:\n"
     "    sys.exit(0 if e.errno in (errno.EACCES, errno.EPERM) else 3)\n"
@@ -114,9 +116,12 @@ def test_backend_declares_net_deny_with_tcp_scope_without_bwrap(monkeypatch):
     caps = backend.capabilities()
     assert Invariant.NET_DENY in caps
     assert Invariant.WRITE_BOUNDARY in caps
-    assert backend.net_scope == "tcp"
+    # 没有 bwrap 的机器口径是 Landlock 那层（tcp），或 Landlock + seccomp（inet，#1180）；
+    # 哪一档由探针真探出来，`test_net_deny_covers_udp_without_bwrap` 钉住 inet 的条件。
+    # 这里守的是另一件事：不许长得和 bwrap 整个网络命名空间（all）一样。
+    assert backend.net_scope in ("tcp", "inet"), backend.net_scope
     record = isolation.enforcement_record(backend).as_event()
-    assert record["net_scope"] == "tcp", "只断 TCP 的机器在账上不许长得和整个断网一样"
+    assert record["net_scope"] == backend.net_scope != "all", "没有 bwrap 的机器在账上不许长得和整个断网一样"
     assert "net_deny" in record["enforced"]
 
 
@@ -152,7 +157,7 @@ def test_a_model_command_cannot_connect_through_the_backend(tmp_path, listening_
         assert status == "done", err
         assert rc == 0, f"connect 没被拒（rc={rc}）: {err!r}"
         record = [e for e in state.events if e["event"] == "isolation_enforcement"][0]
-        assert record["net_scope"] == "tcp"
+        assert record["net_scope"] in ("tcp", "inet"), record["net_scope"]
     finally:
         isolation._reset_for_tests()
 

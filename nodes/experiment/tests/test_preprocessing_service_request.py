@@ -527,7 +527,7 @@ def test_end_to_end_a_run_without_prereg_routes_a_mesh_through_data_and_emits_au
     events = [json.loads(line) for line in state.transcript_path.read_text(encoding="utf-8").splitlines()
               if line.strip() and json.loads(line).get("event") == "preprocessing_boundary_audit"]
     assert len(events) == 1
-    assert events[0]["verdict"] == "PASS"
+    assert events[0]["verdict"] == "OBSERVATION"
     assert events[0]["n_unaccounted"] == 0
 
 

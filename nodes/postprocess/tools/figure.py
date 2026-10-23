@@ -56,12 +56,15 @@ from ..figure_audit import (
 from ..figure_contract import (
     COMPILED_FAMILIES,
     FAMILY_CHECKLIST,
+    ILLUSTRATION_FAMILIES,
+    MEDIA,
     check_result_diff,
     contract_diff,
     contract_hash,
     contract_schema,
     contract_summary,
     coverage_findings,
+    edge_role_colors,
     evaluate_assertions,
     failed_assertions,
     family_for_asset_kind,
@@ -70,6 +73,7 @@ from ..figure_contract import (
     redeclaration_losses,
     empty_row_findings,
     medium_of,
+    role_colors,
     unexpressed_findings,
     redrawn_component_findings,
     unroled_edge_findings,
@@ -181,7 +185,7 @@ def _request_findings(state: State, request_id: str | None) -> tuple[list[dict[s
 
 
 def _resolve_output_declarations(
-    state: State, workspace: Path, output_files: list[str]
+    workspace: Path, output_files: list[str]
 ) -> list[tuple[str, Path]]:
     # 「至少一个」由 parameters_schema 的 minItems=1 在派发口核；这里只剩类型前提。
     if not isinstance(output_files, list):
@@ -516,18 +520,39 @@ async def _declare_figure_contract(
     """
 
     try:
-        family = family_for_asset_kind(asset_kind)
-        if family is None:
-            raise VisualContractError(
-                f"asset_kind {asset_kind!r} has no figure contract family. "
-                f"Contracts cover: schematic (compiled from the contract), "
-                f"quantitative and composite (checked against the rendered object "
-                f"model). Other asset kinds render without a contract."
-            )
         # ── 调用方绑定：家族归请求，不归模型自填 ─────────────────────────
         # iter7/iter11 实测：schematic 请求被改标 composite 走手写 matplotlib，
         # 「schematic 不许传 code」的闸只看模型自填的 asset_kind → 改标即绕过。
         policy, caller_request = _bound_policy(state, request_id)
+        # ── 轨道判定（输入形态轴，方案 A §4.1 第 2 层：declare 锁定）──────
+        # 纯文字描述的请求路由到 SVG 轨 → illustration 家族合同（断言对 SVG
+        # DOM 求值）。轨道与 genre 锁进合同账本 —— 此后 agent 改标
+        # asset_kind 也改不了轨道；渲染时轨道与源码形态不符即拒。
+        from ..contracts import route_track
+        from ..hooks import _genre_of
+
+        track = route_track(caller_request or {"asset_kind": asset_kind})
+        genre = _genre_of(
+            str((caller_request or {}).get("intent") or ""),
+            str((caller_request or {}).get("style_intent") or ""),
+        )
+        family = family_for_asset_kind(asset_kind)
+        if track == "svg" and (family is None or asset_kind == "schematic"):
+            # SVG 轨的落点是 illustration 家族。两个方向都有钉死的理由：
+            # - quantitative/composite 是**调用方绑定的数据图家族**：请求里没带
+            #   source_artifact_ids ≠ 没数据（数据在渲染时才绑，既有用法如此），
+            #   不能因「纯文字」翻轨 —— 家族是调用方的决定；
+            # - schematic 相反：纯文字（无 spec）时按用户拍板（v2.1）转 SVG 轨，
+            #   编译轨只接 spec 驱动的请求。
+            family = "illustration"
+        if family is None:
+            raise VisualContractError(
+                f"asset_kind {asset_kind!r} has no figure contract family. "
+                f"Contracts cover: schematic (compiled from the contract), "
+                f"illustration (SVG track, assertions checked against the SVG DOM), "
+                f"quantitative and composite (checked against the rendered object "
+                f"model). Other asset kinds render without a contract."
+            )
         if policy["asset_kind"] and policy["asset_kind"] != asset_kind:
             raise VisualContractError(
                 f"request {request_id!r} is a {policy['asset_kind']} request by the "
@@ -574,8 +599,13 @@ async def _declare_figure_contract(
 
         # compiled 家族的断言就是对这张**声明的图**求值 —— 渲染由它编译而来，
         # 所以此刻就能知道成不成立。让 agent 在写第一行渲染代码之前就知道，
-        # 而不是渲染完再说。
-        results = evaluate_assertions(normalized) if family in COMPILED_FAMILIES else []
+        # 而不是渲染完再说。illustration（SVG 轨）同理：先核声明自洽，铸造时
+        # 再对 SVG DOM 核一次（两次读的结构不同：声明 vs 实际标记）。
+        results = (
+            evaluate_assertions(normalized)
+            if family in COMPILED_FAMILIES or family in ILLUSTRATION_FAMILIES
+            else []
+        )
         failures = failed_assertions(results)
         if failures:
             raise VisualContractError(
@@ -615,10 +645,11 @@ async def _declare_figure_contract(
             if key in {"intent", "style_intent", "notes"} and value
         )
         coverage = coverage_findings(normalized, request_text)
-        # 词表接不住的键走**原始**合同（归一化正是丢键的那一步）。与
-        # coverage 一样不按家族分岔：统计图一样会写出没有词的字段。
+        # 词表接不住的键走**原始**合同（归一化正是丢键的那一步）。
+        # unexpressed/dropped 按家族分岔 —— 词表本来就是按家族定义的，
+        # 拿编译轨的 bands 去问插画轨的合同只会产出诬告（2026-10-16 e2e 实测）。
         coverage = coverage + unexpressed_findings(contract, family)
-        coverage = coverage + dropped_findings(contract, normalized)
+        coverage = coverage + dropped_findings(contract, normalized, family)
         coverage = coverage + empty_row_findings(normalized)
         coverage = coverage + unroled_edge_findings(normalized)
         coverage = coverage + redrawn_component_findings(normalized)
@@ -655,7 +686,30 @@ async def _declare_figure_contract(
                     remedies = print_fit_remedies(normalized, fit)
                     raise VisualContractError(_print_fit_rejection(fit, remedies))
         else:
-            guidance = render_guidance(normalized, medium=normalized["medium"], floor_pt=floor_pt)
+            if family in ILLUSTRATION_FAMILIES:
+                # SVG 轨的渲染引导（方案 A §六-B5：角色色框架发色，机械推给作者）：
+                # 版心与字号下限照绑；调色板按合同角色首现序发；试渲染通道明示。
+                spec = MEDIA[normalized["medium"]]
+                guidance = {
+                    "track": "svg",
+                    "genre": genre,
+                    "medium": normalized["medium"],
+                    "print_box_mm": [spec["w"], spec["h"]],
+                    "font_floor_pt": floor_pt,
+                    "role_colors": role_colors(normalized),
+                    "edge_role_colors": edge_role_colors(normalized),
+                    "marker_rule": (
+                        "合同里声明的每个 id 必须在 SVG DOM 里以标记出现且恰好一次 "
+                        "(data-role+data-node / data-edge-from+data-edge-to / "
+                        "data-label / data-group / data-placeholder)；缺标记即 finding"
+                    ),
+                    "trial_render": (
+                        "render_illustration(request_id=..., contract_id=..., "
+                        "svg_text=..., trial=true) 试渲染并返回审计摘要，不占渲染预算"
+                    ),
+                }
+            else:
+                guidance = render_guidance(normalized, medium=normalized["medium"], floor_pt=floor_pt)
 
         contract_id = f"contract__{slug(request_id)}__{digest[7:15]}"
         _contract_store(state)[contract_id] = {
@@ -663,6 +717,11 @@ async def _declare_figure_contract(
             "contract_hash": digest,
             "request_id": request_id,
             "asset_kind": asset_kind,
+            # 轨道与内容文体在 declare 这一刻锁定（方案 A §4.1 第 2 层）——
+            # 此后 agent 改标 asset_kind 也改不了轨道；render_illustration
+            # 只接 track=svg 的合同。
+            "track": track,
+            "genre": genre,
             "assertion_results": results,
             # 覆盖类 findings 过去只活在这个工具的**返回值**里 —— 模型看得见，
             # 而铸出来的记录一个字都没有。于是「记录如实披露图上缺什么」是一句
@@ -681,6 +740,8 @@ async def _declare_figure_contract(
             "contract_id": contract_id,
             "contract_hash": digest,
             "family": family,
+            "track": track,
+            "genre": genre,
             "bound": {
                 "asset_kind": policy["asset_kind"] or asset_kind,
                 "medium": normalized["medium"],
@@ -701,7 +762,13 @@ async def _declare_figure_contract(
             # 从没加载过它。
             "family_checklist": list(FAMILY_CHECKLIST.get(family, ())),
             "next_step": (
-                f"render_figure(request_id={request_id!r}, contract_id={contract_id!r}, ...)"
+                (
+                    f"render_illustration(request_id={request_id!r}, "
+                    f"contract_id={contract_id!r}, ...)"
+                    if family in ILLUSTRATION_FAMILIES
+                    else f"render_figure(request_id={request_id!r}, "
+                    f"contract_id={contract_id!r}, ...)"
+                )
                 + (
                     " —— schematic 由框架按本合同编译渲染，不要再传 code/script_path。"
                     + (
@@ -717,9 +784,16 @@ async def _declare_figure_contract(
                         else ""
                     )
                     if family in COMPILED_FAMILIES
-                    else " —— 按 render_guidance 写你的绘图代码（figsize 上限 / 字号"
-                    "下限 / 调色板 / 图例与轴标签义务）；渲染后框架读 matplotlib "
-                    "对象模型逐条核对本合同的断言与这些设计义务。"
+                    else (
+                        f" —— SVG 轨：手写 SVG（遵守 render_guidance.marker_rule 与"
+                        f" role_colors），先 render_illustration(request_id={request_id!r}, "
+                        f"contract_id={contract_id!r}, svg_text=..., trial=true) 试渲染看"
+                        "审计摘要，定稿后同形调用（trial=false）铸记录。"
+                        if family in ILLUSTRATION_FAMILIES
+                        else " —— 按 render_guidance 写你的绘图代码（figsize 上限 / 字号"
+                        "下限 / 调色板 / 图例与轴标签义务）；渲染后框架读 matplotlib "
+                        "对象模型逐条核对本合同的断言与这些设计义务。"
+                    )
                 )
                 # 版面判据是**改合同**能解决的事，不是渲染完再修图。有缺陷时把
                 # 这句摆在 next_step 里，因为 next_step 是模型一定会读的那一行。
@@ -1033,6 +1107,18 @@ async def _render_figure(
         contract = (contract_entry or {}).get("contract")
         compiled = bool(contract) and contract["family"] in COMPILED_FAMILIES
         asserted = bool(contract) and contract["family"] in ASSERTED_FAMILIES
+        # ── 家族闸（2026-10-20 审查修复）：illustration 合同的断言是对 SVG DOM
+        # 求值的，本门没有 DOM 可读 —— 结构类断言只读合同自身、必全真，等于
+        # 铸一份「断言从未看过图」的记录。SVG 轨的唯一铸造门是
+        # render_illustration（它那边对非 svg 轨同样有反向闸）。
+        if contract is not None and contract["family"] in ILLUSTRATION_FAMILIES:
+            raise VisualContractError(
+                f"contract {contract_id!r} is family 'illustration': its assertions "
+                "are evaluated against the SVG DOM, which only render_illustration "
+                "can see. Minting it here would produce a record whose contract "
+                "checks never looked at the pixels. Use "
+                "render_illustration(request_id=..., contract_id=..., svg_text=...)."
+            )
 
         # ── 入参与出处的机械校验 ─────────────────────────────────────────
         if compiled:
@@ -1090,7 +1176,7 @@ async def _render_figure(
 
         workspace = validate_tool_cwd(state, None)
         workspace.mkdir(parents=True, exist_ok=True)
-        declared_outputs = _resolve_output_declarations(state, workspace, output_files)
+        declared_outputs = _resolve_output_declarations(workspace, output_files)
 
         # ── 渲染代码逐字节冻结（referee 重跑的锚点）────────────────────────
         geometry: dict[str, Any] | None = None
@@ -1159,13 +1245,16 @@ async def _render_figure(
             )
         script_dir = workspace / "figure_src"
         script_dir.mkdir(parents=True, exist_ok=True)
-        frozen_script = script_dir / f"{slug(output_name)}_render.py"
         # hash 的就是落盘的那几个字节：同一份 bytes 既写盘又算 hash。
         # write_text 在 Windows 上会把 \n 写成 \r\n，盘上的冻结脚本就不再是
         # 记录里 content_hash 说的那份，referee 拿文件对 hash 必然对不上。
         code_bytes = code_text.encode("utf-8")
-        frozen_script.write_bytes(code_bytes)
         render_code_hash = hash_bytes(code_bytes)
+        # 文件名带内容 hash（2026-10-20 审查修复）：同一 output_name 的下一版
+        # 不再覆写上一版的冻结证据 —— 旧记录的 replay 与 content_hash 永远
+        # 指得到自己那一份字节。内容相同的重铸落到同一文件名，幂等无害。
+        frozen_script = script_dir / f"{slug(output_name)}_{render_code_hash[7:15]}_render.py"
+        frozen_script.write_bytes(code_bytes)
 
         # ── 沙箱执行（复用 execute_python 的强制沙箱；不自建执行器）─────────
         from shared.tools.library import python_exec
@@ -1806,10 +1895,12 @@ register_tool(
                 },
                 "asset_kind": {
                     "type": "string",
-                    "enum": ["schematic", "quantitative", "composite"],
+                    "enum": sorted(ASSET_KINDS),
                     "description": (
-                        "schematic：合同即渲染源；quantitative/composite：合同即断言，"
-                        "渲染后读对象模型核对"
+                        "与调用方请求绑定的 asset_kind 逐字一致。家族由它+轨道机械推出："
+                        "schematic=合同即渲染源；quantitative/composite=合同即断言、"
+                        "渲染后读对象模型核对；纯文字请求（SVG 轨）=illustration，"
+                        "断言对 SVG DOM 求值（含 generative_illustration）"
                     ),
                 },
                 "contract": {
@@ -1841,10 +1932,16 @@ async def _figure_contract_schema_tool(state: State, asset_kind: str, **_: Any) 
 def _figure_contract_schema(asset_kind: str) -> dict[str, Any]:
     family = family_for_asset_kind(asset_kind)
     if family is None:
-        return {
-            "status": "error",
-            "error": f"asset_kind {asset_kind!r} has no contract family",
-        }
+        # SVG 轨（AutoFigure 移植）：generative_illustration 恒 SVG 轨；其余
+        # asset_kind 的轨道由请求的输入形态定（这里看不到请求）—— 纯文字
+        # 描述的请求都走 SVG 轨、合同家族是 illustration，先给它就是。
+        if asset_kind == "generative_illustration":
+            family = "illustration"
+        else:
+            return {
+                "status": "error",
+                "error": f"asset_kind {asset_kind!r} has no contract family",
+            }
     example: dict[str, Any] = (
         {
             "title": "两级 PCIe 交换拓扑",
@@ -2021,6 +2118,41 @@ def _figure_contract_schema(asset_kind: str) -> dict[str, Any]:
             ],
         }
     )
+    if family in ILLUSTRATION_FAMILIES:
+        # SVG 轨合同示例：结构与编译轨同款（nodes/groups/edges），但没有
+        # bands —— 布局归作者，合同是宣言不是渲染源。声明的每个 id 都要在
+        # SVG DOM 里以标记出现且恰好一次。
+        example = {
+            "title": "双卡 PCIe 拓扑（SVG 轨）",
+            "medium": "double_column",
+            "nodes": [
+                {"id": "sw0", "label": "PCIe Switch 0", "role": "PCIe Switch"},
+                {"id": "g0", "label": "G0", "role": "GPU", "sublabel": "RTX PRO 6000"},
+                {"id": "g1", "label": "G1", "role": "GPU", "sublabel": "RTX PRO 6000"},
+                {"id": "nic0", "label": "NIC 0", "role": "NIC", "sublabel": "400 Gbps RoCE"},
+            ],
+            "groups": [
+                {"id": "srv1", "label": "Server 1", "ranks": [["sw0", "g0", "g1", "nic0"]]},
+            ],
+            "edges": [
+                {"from": "g0", "to": "sw0", "role": "PCIe"},
+                {"from": "g1", "to": "sw0", "role": "PCIe"},
+                {"from": "nic0", "to": "sw0", "role": "PCIe"},
+            ],
+            "assertions": [
+                {"id": "n-gpu", "kind": "node_count", "selector": {"role": "GPU"},
+                 "equals": 2, "derived_from": "「两张 GPU」"},
+                {"id": "sw-degree", "kind": "degree", "selector": {"role": "PCIe Switch"},
+                 "equals": 3, "derived_from": "「switch 挂两张 GPU 和一张网卡」"},
+            ],
+            "_dom_marking": (
+                "SVG 里对应地写："
+                "<rect data-role=\"GPU\" data-node=\"g0\"/>、"
+                "<path data-edge-from=\"g0\" data-edge-to=\"sw0\"/>、"
+                "<text data-label=\"g0\">G0</text>、"
+                "<g data-group=\"srv1\">…</g> —— 每个声明的 id 恰好出现一次"
+            ),
+        }
     return {
         "status": "success",
         "family": family,
@@ -2143,7 +2275,7 @@ register_tool(
             "properties": {
                 "asset_kind": {
                     "type": "string",
-                    "enum": ["schematic", "quantitative", "composite"],
+                    "enum": sorted(ASSET_KINDS),
                 }
             },
             "required": ["asset_kind"],

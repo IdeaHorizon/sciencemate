@@ -232,9 +232,16 @@ def own_holders(project_id: str, session_id: str) -> list[dict[str, Any]]:
             alive = hs._process_is_a_runtime_worker(pid)
         except Exception:  # noqa: BLE001
             alive = None
+        try:
+            from app.services.spawn_ledger import recognise
+
+            ours, why = recognise(project_id, session_id, record)
+        except Exception as exc:  # noqa: BLE001 —— 认不了亲也要把事实给出去
+            ours, why = "unknown", f"{type(exc).__name__}: {exc}"
         holders.append({
             "pid": pid, "spawn_token": str(record.get("spawn_token") or "")[:8] or None,
             "alive": alive, "record": reader.__name__, "error": None,
+            "ours": ours, "ours_reason": why,
         })
     return holders
 
@@ -243,21 +250,33 @@ def own_holders(project_id: str, session_id: str) -> list[dict[str, Any]]:
 
 
 def repair_proposal(code: str, *, error: str | None, data_root: Path | str) -> dict[str, Any] | None:
-    """按 code 与错误形状查表。表里没有 → None（只有事实，没有提案）。"""
+    """按 code 与错误形状查表。表里没有 → None（只有事实，没有提案）。
+
+    `changes` 两种语言都写：提案跟着事件存下来，之后谁用哪种语言看，写的这一刻不知道 ——
+    前端按那一屏挑（`environment.ts`；老事件里是一句字符串，照原样给）。
+    """
     if code in _HARD_CODES:
         return {
             "kind": "needs_administrator", "argv": None, "command": None,
-            "changes": "这是部署问题：目录与身份的对应在后端日志里，要管理员判断是搬了家还是真串了人",
+            "changes": {
+                "zh": "这是部署问题：目录与身份的对应在后端日志里，要管理员判断是搬了家还是真串了人",
+                "en": "This is a deployment problem: which directory belongs to whom is in the backend log; "
+                      "an administrator has to judge whether it was moved or really got mixed up",
+            },
             "reversible": None, "needs_consent": True, "automatic": False,
         }
     if code in _PERMISSION_SHAPED_CODES and _looks_like_permission_denial(error):
         root = str(data_root)
         if sys.platform == "win32":
             argv = ["icacls", root, "/reset", "/T", "/C"]
-            changes = "把数据根下所有对象的权限恢复成从上级目录继承；只影响本应用的数据目录"
+            changes = {"zh": "把数据根下所有对象的权限恢复成从上级目录继承；只影响本应用的数据目录",
+                       "en": "Resets everything under the data root to inherit permissions from its parent "
+                             "folder; only this app's data directory is affected"}
         else:
             argv = ["chmod", "-R", "u+rwX", root]
-            changes = "给数据根下所有对象加回本用户的读写权限；只影响本应用的数据目录"
+            changes = {"zh": "给数据根下所有对象加回本用户的读写权限；只影响本应用的数据目录",
+                       "en": "Gives your user read and write access back on everything under the data root; "
+                             "only this app's data directory is affected"}
         return {
             "kind": "reset_data_root_permissions", "argv": argv, "command": _shell_text(argv),
             "changes": changes, "reversible": False, "needs_consent": True, "automatic": False,
@@ -314,7 +333,7 @@ def hard_failure_warning(exc: BaseException, *, project_id: str, session_id: str
     warning = {
         "type": "environment_warning", "code": code, "capability": "identity", "severity": "fatal",
         "path": str(path) if path else None, "error": str(exc)[:2000],
-        "consequences": ["这一轮没有起跑"],
+        "consequences": [{"zh": "这一轮没有起跑", "en": "This run did not start"}],
         "details": {k: v for k, v in (details or {}).items() if k != "path"} if isinstance(details, dict) else None,
     }
     return enrich_warning(warning, project_id=project_id, session_id=session_id, data_root=data_root)

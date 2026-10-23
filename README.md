@@ -6,7 +6,7 @@ Install it, open it, and say what you want to research — it writes the code, r
 
 Data and computation stay **on your own machine**: every project is a local git repository, and model keys are stored encrypted on that machine only. Python, git, LaTeX (tectonic), and a bash shell for running experiments ship with the app — **nothing to set up first**.
 
-- Current version: [v0.5.7](../../releases/tag/v0.5.7) · [Download for macOS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.7/ScienceMate-0.5.7-arm64.dmg) · [Download for Windows](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.7/ScienceMate-Setup.exe) · changelog in [Releases](../../releases)
+- Current version: [v0.5.8](../../releases/tag/v0.5.8) · [Download for macOS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.8/ScienceMate-0.5.8-arm64.dmg) · [Download for Windows](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.8/ScienceMate-Setup.exe) · changelog in [Releases](../../releases)
 - This repository holds the **source code** of the Personal edition and its **releases** (installers and updates). The installers are built from this tree; see [DEVELOPMENT.md](DEVELOPMENT.md) to run it from source.
 - This is the **Personal edition**: everything runs on your own machine. The Professional edition adds a shared organization server for teams and is not distributed here.
 
@@ -32,10 +32,10 @@ Open a research session inside a project and say what you need in the input box 
 
 | Platform | Download | Size |
 |---|---|---|
-| macOS (Apple Silicon) | [ScienceMate-0.5.7-arm64.dmg](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.7/ScienceMate-0.5.7-arm64.dmg) | 342 MB |
-| Windows 10 / 11 (64-bit) | [ScienceMate-Setup.exe](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.7/ScienceMate-Setup.exe) | 394 MB |
+| macOS (Apple Silicon) | [ScienceMate-0.5.8-arm64.dmg](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.8/ScienceMate-0.5.8-arm64.dmg) | 342 MB |
+| Windows 10 / 11 (64-bit) | [ScienceMate-Setup.exe](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.8/ScienceMate-Setup.exe) | 394 MB |
 
-Checksums: [SHA256SUMS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.7/SHA256SUMS) · all files: [Releases](../../releases/latest)
+Checksums: [SHA256SUMS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.8/SHA256SUMS) · all files: [Releases](../../releases/latest)
 
 - **macOS**: open the dmg and drag ScienceMate into Applications. The first launch is blocked once because the app is not yet signed: **System Settings → Privacy & Security → scroll down → "Open Anyway"**, then confirm. One time per machine.
 - **Windows**: run `ScienceMate-Setup.exe`. If SmartScreen shows "Windows protected your PC", click **More info → Run anyway**. One time per machine.

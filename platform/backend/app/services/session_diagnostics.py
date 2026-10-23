@@ -55,6 +55,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 #: 日志目录在数据根下的名字。壳（`platform/desktop/*`）把后端输出接到这里。
 LOGS_DIRNAME = "logs"
 BACKEND_LOG_NAME = "backend.log"
+#: 环境报告在包里的文件名（logs/ 下）。
+ENVIRONMENT_FILENAME = "environment.json"
 
 #: 单个文件进包的上限。超过的文本日志留尾巴（出事的地方通常在最后），别的跳过。
 FILE_CAP_BYTES = 64 * 1024 * 1024
@@ -87,24 +89,17 @@ class Redactor:
     """
 
     def __init__(self, secrets: Iterable[str]) -> None:
-        # 太短的不算密钥（`none`、`test` 这类会把正文抹花）。长的先替：一个值是
-        # 另一个的前缀时，先替短的会留下一截尾巴。
-        values = {
-            secret.strip().encode()
-            for secret in secrets
-            if secret and len(secret.strip()) >= 8
-        }
-        self._values = sorted(values, key=len, reverse=True)
+        # 哪些值算密钥：和 worker、会话同一条规则（`shared.lib.secret_values`，#1228）——
+        # 太短的不算（`none`、`test`、一个字母会把正文抹花），长的先替。这里按字节替，所以编码一次。
+        from app.services.harness_imports import harness_module
+
+        self._rule = harness_module("shared.lib.secret_values")
+        self._values = self._rule.secret_values(secrets)
 
     def __call__(self, data: bytes) -> tuple[bytes, int]:
         from app.services.redaction import scrub_secrets_in_text
 
-        count = 0
-        for value in self._values:
-            hits = data.count(value)
-            if hits:
-                data = data.replace(value, REDACTED)
-                count += hits
+        data, count = self._rule.redact_values_counted(data, self._values)
         text, hits = scrub_secrets_in_text(data.decode("utf-8", errors="surrogateescape"))
         if hits:
             data = text.encode("utf-8", errors="surrogateescape")
@@ -433,6 +428,22 @@ def _readme(session_id: str, generated: datetime) -> str:
     )
 
 
+def _environment_summary(environment: dict) -> dict:
+    """manifest 里的 environment 节：来源、能力位、每条警告的 code / 严重度 / 路径；原文在 logs/。"""
+    if "unavailable" in environment:
+        return {"unavailable": environment["unavailable"], "file": f"logs/{ENVIRONMENT_FILENAME}"}
+    warnings = environment.get("warnings") if isinstance(environment.get("warnings"), list) else []
+    return {
+        "source": environment.get("source"),
+        "capabilities": environment.get("capabilities"),
+        "warnings": [
+            {k: w.get(k) for k in ("code", "severity", "path")} for w in warnings if isinstance(w, dict)
+        ],
+        "escalated": environment.get("escalated"),
+        "file": f"logs/{ENVIRONMENT_FILENAME}",
+    }
+
+
 def write_diagnostics_bundle(
     *,
     project_id: str,
@@ -447,6 +458,7 @@ def write_diagnostics_bundle(
     app_version: str | None,
     destination_dir: Path | None = None,
     now: datetime | None = None,
+    environment: dict | None = None,
 ) -> DiagnosticsBundle:
     """把诊断包写进一个临时文件。同步、会读大量文件 —— 调用方放到线程里跑。"""
     generated = now or datetime.now(UTC)
@@ -470,6 +482,16 @@ def write_diagnostics_bundle(
             log_facts = _collect_logs(
                 archive, ledger, redact, logs_dir, since_local=since_local, naming=naming
             )
+            # 会话顶部条幅读的那一份环境报告（能力位 + 每条 environment_warning 的事实与提案）。
+            # 原文进 logs/，摘要进 manifest 的 environment 节；没有就写明没有，不省略。
+            if environment is None:
+                environment = {"unavailable": "这次打包没有拿到环境报告"}
+            environment_bytes = json.dumps(environment, ensure_ascii=False, indent=2, default=str).encode()
+            _add(
+                archive, ledger, redact, f"logs/{ENVIRONMENT_FILENAME}", environment_bytes,
+                original_bytes=len(environment_bytes), modified=generated.astimezone().replace(tzinfo=None),
+                note="会话条幅读的那一份环境报告",
+            )
             manifest = {
                 "format": 1,
                 "generated_at": generated.isoformat(),
@@ -481,6 +503,7 @@ def write_diagnostics_bundle(
                     "python": platform.python_version(),
                 },
                 "session": {"id": session_id, "project_id": project_id, **session_facts},
+                "environment": _environment_summary(environment),
                 "sources": {
                     "runs_root": str(runs_root) if runs_root is not None else None,
                     "logs": log_facts,
@@ -538,6 +561,7 @@ def build_for_session(
     session_facts: dict,
     session_created_at: datetime | None,
     secrets: Iterable[str],
+    environment: dict | None = None,
 ) -> DiagnosticsBundle:
     """按这台后端的配置找齐来源，写出诊断包。同步 —— 放到线程里调。"""
     from app.assembly import profile_name, the_backend_log_is_shared
@@ -559,4 +583,5 @@ def build_for_session(
         shared_log=the_backend_log_is_shared(),
         profile_label=profile_name(),
         app_version=version,
+        environment=environment,
     )

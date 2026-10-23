@@ -111,7 +111,7 @@ export function ArtifactDetail({ projectId, artifactId }: { projectId: string; a
 
       {metadata.length > 0 && (
         <details className="artifact-document-metadata">
-          <summary>{t({ zh: "元信息", en: "Metadata" })}<span>{metadata.length} 项</span></summary>
+          <summary>{t({ zh: "元信息", en: "Metadata" })}<span>{t({ zh: "{count} 项", en: "{count} fields" }, { count: metadata.length })}</span></summary>
           <dl>
             {metadata.slice(0, 12).map(([key, value]) => (
               <div key={key}><dt>{fmtFieldName(key)}</dt><dd>{formatValue(value)}</dd></div>

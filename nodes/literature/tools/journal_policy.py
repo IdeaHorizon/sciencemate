@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import csv
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
+from .journal_scope import journal_key, scope_matches
 
 @dataclass(frozen=True, slots=True)
 class JournalDecision:
@@ -18,13 +18,13 @@ class JournalDecision:
     domains: tuple[str, ...] = ()
 
 def _norm(value: object) -> str:
-    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+    return journal_key(value)
 
 def _path(env: str, default: str) -> Path:
     configured = os.environ.get(env, "").strip()
     return Path(configured).expanduser() if configured else Path(__file__).resolve().parents[3] / "docs" / default
 
-_mapped: dict[str, dict[str, str]] | None = None
+_mapped: dict[str, list[dict[str, str]]] | None = None
 _cas: dict[str, dict[str, str]] | None = None
 
 def _read(path: Path) -> dict[str, dict[str, str]]:
@@ -39,10 +39,18 @@ def _read(path: Path) -> dict[str, dict[str, str]]:
         return {}
     return result
 
-def _load_mapped() -> dict[str, dict[str, str]]:
+def _load_mapped() -> dict[str, list[dict[str, str]]]:
     global _mapped
     if _mapped is None:
-        _mapped = _read(_path("HARNESS_JOURNAL_DOMAIN_MAP", "xiaohongshu_journal_map.tsv"))
+        _mapped = {}
+        try:
+            with _path("HARNESS_JOURNAL_DOMAIN_MAP", "xiaohongshu_journal_map.tsv").open(encoding="utf-8", newline="") as handle:
+                for row in csv.DictReader(handle, delimiter="\t"):
+                    key = _norm(row.get("journal_name"))
+                    if key:
+                        _mapped.setdefault(key, []).append(row)
+        except (OSError, csv.Error):
+            _mapped = {}
     return _mapped
 
 def _load_cas() -> dict[str, dict[str, str]]:
@@ -57,7 +65,7 @@ def reset_cache() -> None:
 
 _MANUAL_BASES = frozenset({"manual_source_verified", "manual_expert_review"})
 
-def decide(*, venue: str, source: str = "", pub_type: str = "", title: str = "") -> JournalDecision:
+def decide(*, venue: str, source: str = "", pub_type: str = "", title: str = "", abstract: str = "") -> JournalDecision:
     """返回准入结果；不会在此处建立或修改期刊映射。"""
     source_id = str(source or "").strip().lower().split("/", 1)[0]
     if source_id == "arxiv" or "arxiv" in str(venue or "").lower():
@@ -69,11 +77,16 @@ def decide(*, venue: str, source: str = "", pub_type: str = "", title: str = "")
     key = _norm(venue)
     mapped = _load_mapped().get(key)
     if mapped is not None:
-        codes = tuple(x for x in str(mapped.get("二级学科代码", "")).split(";") if x.strip())
-        status = str(mapped.get("分类状态", "")).strip()
-        basis = str(mapped.get("分类依据", "")).strip()
-        if status == "manually_verified" and basis in _MANUAL_BASES and codes:
-            return JournalDecision(True, "offline_mapped_journal", codes)
+        verified_codes = tuple(dict.fromkeys(
+            x.strip() for row in mapped
+            if row.get("分类状态") == "manually_verified" and row.get("分类依据") in _MANUAL_BASES
+            for x in str(row.get("二级学科代码", "")).split(";") if x.strip()
+        ))
+        if verified_codes:
+            codes = tuple(code for code in verified_codes if scope_matches(code, venue, title, abstract))
+            if codes:
+                return JournalDecision(True, "offline_mapped_journal", codes)
+            return JournalDecision(False, "paper_outside_mapped_scope")
         return JournalDecision(False, "offline_mapping_not_manually_verified")
     generic = _load_cas().get(key)
     if generic is None:

@@ -493,6 +493,10 @@
    按钮用的是上面那两个通用类，这里只管它们怎么排。 */
 .about-update-row > .about-update-actions { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-self: end; }
 .about-update-actions > a { text-decoration: none; }
+/* 「关于」页的开发者模式：源码目录那一行是一个输入框 + 两个按钮，按钮按内容宽，输入框占满剩下的。 */
+.developer-source-row { grid-template-columns: minmax(220px, 1fr) auto; }
+.developer-source-row > .about-update-actions { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: end; justify-self: end; }
+.developer-source-field > span { font-size: var(--settings-type); }
 .about-update-actions .is-spinning { animation: about-update-spin 1s linear infinite; }
 @keyframes about-update-spin { to { transform: rotate(360deg); } }
 /* 「减少动效」开着，或系统就这么设的：别转。转圈是个装饰，不是信息 ——
@@ -501,3 +505,48 @@
 @media (prefers-reduced-motion: reduce) {
   :root:not([data-reduce-motion="false"]) .about-update-actions .is-spinning { animation: none; }
 }
+
+/* 界面语言切换钮 —— 写的是另一种语言自己的名字（见 LanguageSwitch.tsx）。
+   侧栏里它借 .app-nav-item 的样子；这里只把 <button> 的默认外观抹掉。 */
+.language-switch-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  font: inherit;
+  color: var(--color-fg-muted);
+  text-align: left;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.language-switch-toggle:hover { color: var(--color-fg); }
+.language-switch-toggle:disabled { cursor: progress; opacity: .7; }
+/* 侧栏里和别的导航项一个样子：间距、内边距、字号跟 .app-nav-item 走（选择器更具体，不靠导入顺序）。 */
+.app-nav-item.language-switch-toggle { gap: var(--space-3); padding: var(--space-2) var(--space-3); font-size: var(--font-size-control); }
+/* 登录 / 注册页：表单右上角一个小钮。 */
+.login-language { display: flex; width: fit-content; margin: 0 0 var(--space-3) auto; font-size: var(--font-size-caption); }
+
+.language-switch-both {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  justify-self: start;
+  padding: 3px 4px 3px 8px;
+  color: var(--color-fg-subtle);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+.language-switch-option {
+  padding: 3px 10px;
+  font: inherit;
+  font-size: var(--font-size-control);
+  color: var(--color-fg-muted);
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+}
+.language-switch-option:hover { color: var(--color-fg); }
+.language-switch-option.is-active { color: var(--color-fg); background: var(--color-bg-input); font-weight: 560; }
+

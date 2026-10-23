@@ -1,8 +1,9 @@
 "use client";
 
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { skipToken, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { qk } from "@/lib/query/keys";
+import { useT } from "@/shared/i18n";
 import { pushError, pushSuccess } from "@/stores/notification";
 
 /**
@@ -23,13 +24,13 @@ export function useProjects() {
 export function useProject(id: string | undefined) {
   return useQuery({
     queryKey: id ? qk.project(id) : ["project", "none"],
-    queryFn: () => (id ? api.getProject(id) : Promise.reject(new Error("No id"))),
-    enabled: !!id,
+    queryFn: id ? () => api.getProject(id) : skipToken,
   });
 }
 
 export function useCreateProject() {
   const qc = useQueryClient();
+  const t = useT();
   return useMutation({
     mutationFn: (data: Parameters<typeof api.createProject>[0]) => api.createProject(data),
     onSuccess: (created) => {
@@ -38,12 +39,13 @@ export function useCreateProject() {
         return [created, ...current];
       });
     },
-    onError: (err) => pushError(err instanceof Error ? err.message : "Project creation failed"),
+    onError: (err) => pushError(err instanceof Error ? err.message : t({ zh: "项目没能建成", en: "Project creation failed" })),
   });
 }
 
 export function useDeleteProject() {
   const qc = useQueryClient();
+  const t = useT();
   return useMutation({
     mutationFn: (id: string) => api.deleteProject(id),
     onSuccess: (_, id) => {
@@ -53,17 +55,13 @@ export function useDeleteProject() {
       });
     },
     onError: (err) =>
-      pushError(err instanceof Error ? err.message : "Delete failed"),
+      pushError(err instanceof Error ? err.message : t({ zh: "删除失败", en: "Delete failed" })),
   });
 }
 
 export function useProjectArtifacts(projectId: string | undefined) {
   return useQuery({
     queryKey: projectId ? qk.artifacts(projectId) : ["artifacts", "none"],
-    queryFn: () =>
-      projectId
-        ? api.listArtifacts(projectId)
-        : Promise.reject(new Error("No id")),
-    enabled: !!projectId,
+    queryFn: projectId ? () => api.listArtifacts(projectId) : skipToken,
   });
 }

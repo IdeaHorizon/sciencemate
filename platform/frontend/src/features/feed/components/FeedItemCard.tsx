@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Bookmark, BookmarkCheck, ExternalLink, X } from "lucide-react";
 import { Badge } from "@/shared/ui";
 import type { FeedItem } from "@/lib/api";
-import { useLanguage } from "@/shared/i18n";
+import { say, useLanguage } from "@/shared/i18n";
 import { fc } from "../lib/feed-copy";
 import {
   KIND_BADGE,
@@ -12,11 +12,11 @@ import {
   kindLabel,
   deadlineCountdown,
   hasExternalLink,
-  relativeTime,
+  feedDate,
   visibleDomainTags,
 } from "../lib/feed-presentation";
 import { useFeedEngagement, useFeedImpression } from "../hooks/useFeed";
-import { useFeedImage } from "../hooks/useFeedImage";
+import { useFeedImageAsset } from "../hooks/useFeedImage";
 import { HandoffAction } from "./HandoffAction";
 
 /**
@@ -48,7 +48,7 @@ export function FeedItemCard({
   compact?: boolean;
   /** `grid` 才显示配图 —— 一行一条的高度里塞图，图小到没有信息量。 */
   layout?: "list" | "grid";
-  /** 摘要最多显示几行（瀑布流按列动态裁剪；不传用 CSS 默认）。 */
+  /** 摘要最多显示几行（不传用 CSS 默认）。 */
   summaryClamp?: number;
   now: Date;
   /** 点整张卡打开详情。不传就是不可点（收藏页那种简单列表）。 */
@@ -72,8 +72,7 @@ export function FeedItemCard({
     observer.observe(element);
     return () => { if (timer) clearTimeout(timer); observer.disconnect(); };
   }, [item.id, recordImpression]);
-  // 语言在组件里读一次，往下当参数传 —— 纯函数不该自己去够上下文
-  // （同 `now`：一屏所有相对时间用同一个时刻，见 feed-presentation）。
+  // 语言在组件里读一次，往下当参数传。
   const lang = useLanguage();
   // 图取不回来（网络断了、后端在重启）就当没有图。**不显示碎图标**：
   // 那会让用户以为是平台坏了。正常情况下这不会发生 —— 每条都给得出图，
@@ -82,7 +81,8 @@ export function FeedItemCard({
   const wantsImage = layout === "grid" && !imageBroken;
   // 代理端点要鉴权，而 `<img>` 带不了 Authorization 头 —— 必须自己取。
   // 见 useFeedImage 的 docstring（第一版直接 src=代理地址，一张都不显示）。
-  const imageSrc = useFeedImage(item.id, wantsImage);
+  const imageAsset = useFeedImageAsset(item.id, wantsImage);
+  const imageSrc = imageAsset?.src ?? null;
   const showImage = wantsImage && imageSrc !== null;
   const external = hasExternalLink(item);
   const countdown = item.kind === "deadline" ? deadlineCountdown(item, now, lang) : "";
@@ -106,6 +106,7 @@ export function FeedItemCard({
   const onCardClick = (event: React.MouseEvent<HTMLElement>) => {
     if (!onOpenDetail) return;
     if ((event.target as HTMLElement).closest("button, a, input, select, textarea")) return;
+    record.mutate({ itemId: item.id, action: "open" });
     onOpenDetail();
   };
 
@@ -123,6 +124,7 @@ export function FeedItemCard({
               if (event.key === "Enter" || event.key === " ") {
                 if ((event.target as HTMLElement).closest("button, a")) return;
                 event.preventDefault();
+                record.mutate({ itemId: item.id, action: "open" });
                 onOpenDetail();
               }
             }
@@ -155,7 +157,9 @@ export function FeedItemCard({
       )}
       <div className="feed-card-head">
         {todayPick && <Badge kind="accent">{fc("badge.today_pick", lang)}</Badge>}
-        <Badge kind={KIND_BADGE[item.kind]}>{kindLabel(item.kind, lang)}</Badge>
+        {item.viewed && <Badge kind="muted">{fc("badge.viewed", lang)}</Badge>}
+        <Badge kind={KIND_BADGE[item.kind]}>{item.extra.web_search_backend ? (say({ zh: "网络来源", en: "Web source" }, lang)) : kindLabel(item.kind, lang)}</Badge>
+        {Boolean(item.extra.school_library) && <Badge kind="muted">{say({ zh: "学校馆藏", en: "School library" }, lang)}</Badge>}
         {countdown && <Badge kind="warning">{countdown}</Badge>}
         {visibleDomainTags(item, 2).map((tag) => (
           // key 取 slug 不取标签：`cs.LG` 与 `stat.ML` 的人读名都是
@@ -164,7 +168,7 @@ export function FeedItemCard({
             {tag.label}
           </Badge>
         ))}
-        <span className="feed-card-time">{relativeTime(item.published_at, now, lang)}</span>
+        <span className="feed-card-time">{feedDate(item, lang)}</span>
       </div>
 
       {external ? (
@@ -188,7 +192,7 @@ export function FeedItemCard({
 
       {(summaryZh || item.summary) && (
         <p
-          className="feed-card-summary"
+          className={summaryZh ? "feed-card-summary feed-card-summary-zh" : "feed-card-summary"}
           style={summaryClamp ? { WebkitLineClamp: summaryClamp } : undefined}
         >
           {summaryZh || item.summary}

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.user_interface import Language, language_on_screen, say
 from app.auth import get_current_user
 from app.config import settings
 from app.database import get_db
@@ -259,18 +260,19 @@ class _GrantWrite(BaseModel):
 
 
 @compute_router.get("/grants")
-async def read_compute_grants(user: User = Depends(get_current_user)) -> dict[str, Any]:
+async def read_compute_grants(user: User = Depends(get_current_user),
+                              lang: Language = Depends(language_on_screen)) -> dict[str, Any]:
     """整份授权 + 每条此刻探到的现状。"""
     try:
         return await compute_grants.read(user)
     except compute_grants.ComputeGrantsError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from None
+        raise HTTPException(status_code=503, detail=exc.said_in(lang)) from None
 
 
 @compute_router.put("/grants")
 async def write_compute_grants(
     body: _GrantWrite,
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user), lang: Language = Depends(language_on_screen),
 ) -> dict[str, Any]:
     """改授权 —— 只有机构管理员改得动。
 
@@ -278,7 +280,9 @@ async def write_compute_grants(
     自己改，等于没有这件事。
     """
     if user.role != UserRole.INSTITUTION_ADMIN.value:
-        raise HTTPException(status_code=403, detail="只有机构管理员能改算力授权")
+        raise HTTPException(status_code=403, detail=say(
+            {"zh": "只有机构管理员能改算力授权", "en": "Only an institution administrator can change compute grants"},
+            lang))
     # `probe_cmd` 是一条**服务器上用 shell 执行**的命令（`core.capabilities._probe`），每次
     # 有人看这一页、每个 agent 开一轮都会跑。网页上加一条，等于让浏览器里的人在服务器上跑
     # 任意命令（2026-09-24 读出来的）。文件里原本就有的（登到服务器上手写的）照样留着、照样
@@ -289,16 +293,18 @@ async def write_compute_grants(
         try:
             current = (await compute_grants.read(user)).get("grants") or {}
         except compute_grants.ComputeGrantsError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from None
+            raise HTTPException(status_code=503, detail=exc.said_in(lang)) from None
         there = {str(g.get("probe_cmd")) for entries in current.values() if isinstance(entries, list)
                  for g in entries if isinstance(g, dict) and g.get("probe_cmd")}
         if wanted - there:
             raise HTTPException(
                 status_code=422,
-                detail="probe_cmd 是一条会在服务器上执行的命令，网页上加不了、改不了 —— "
-                       "要写就登到服务器上手改 grants.yaml")
+                detail=say({"zh": "probe_cmd 是一条会在服务器上执行的命令，网页上加不了、改不了 —— "
+                                  "要写就登到服务器上手改 grants.yaml",
+                            "en": "probe_cmd is a command the server executes, so it cannot be added or changed "
+                                  "from the web — sign in to the server and edit grants.yaml by hand"}, lang))
     try:
         return await compute_grants.write(user, body.grants)
     except compute_grants.ComputeGrantsError as exc:
         # 格式不合规由 harness 那边判（那里是格式的主人），它的话原样递出去。
-        raise HTTPException(status_code=422, detail=str(exc)) from None
+        raise HTTPException(status_code=422, detail=exc.said_in(lang)) from None

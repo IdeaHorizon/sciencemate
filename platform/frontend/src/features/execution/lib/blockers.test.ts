@@ -47,6 +47,7 @@ test("retryableAfterChange 缺省视为 true（保守：假定还能救）", () 
 });
 
 test("类别标签：认识的翻译，不认识的也读得通", () => {
-  assert.equal(blockerCategoryLabel("missing_resource"), "Missing resource");
-  assert.equal(blockerCategoryLabel("brand_new_category"), "Brand New Category");
+  assert.equal(blockerCategoryLabel("missing_resource", "en"), "Missing resource");
+  assert.equal(blockerCategoryLabel("missing_resource", "zh"), "缺资源");
+  assert.equal(blockerCategoryLabel("brand_new_category", "zh"), "Brand New Category");
 });

@@ -28,7 +28,7 @@ export type ProbeFreshness =
 export function probeFreshness(
   backend: Pick<ModelBackend, "last_probe_at">,
   now: number = Date.now(),
-  lang: Language = "zh",
+  lang: Language,
 ): ProbeFreshness {
   const raw = backend.last_probe_at;
   if (!raw) return { kind: "never" };
@@ -52,7 +52,7 @@ export function probeFreshness(
 export function probeSummary(
   backend: Pick<ModelBackend, "last_probe_at" | "last_probe_ok" | "last_probe_detail">,
   now: number = Date.now(),
-  lang: Language = "zh",
+  lang: Language,
 ): string {
   const freshness = probeFreshness(backend, now, lang);
   if (freshness.kind === "never") return say({ zh: "从未检测", en: "Never probed" }, lang);

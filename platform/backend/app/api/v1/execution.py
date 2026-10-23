@@ -17,7 +17,7 @@ from sqlalchemy import String, and_, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.auth import get_current_user
-from app.services.user_interface import language_for
+from app.services.user_interface import Language, language_for, language_on_screen, say
 from app.config import settings
 from app.database import get_db
 from app.models.execution import (
@@ -542,6 +542,7 @@ async def get_session_observation(
     user: User = Depends(get_current_user),
     tenant_id: str = Depends(get_runtime_tenant_id),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> dict | JSONResponse:
     """这次跑到底发生了什么 —— 让它可以被**机械证明**（#941）。
 
@@ -620,15 +621,19 @@ async def get_session_observation(
             ledger = ledger_module()
             contracts = task_contract_module()
         except HarnessContractUnavailable as exc:
-            return _error(503, "harness_unavailable",
-                          f"产物与任务绑定这两维需要 harness checkout（HARNESS_ROOT）：{exc}")
+            return _error(503, "harness_unavailable", say(
+                {"zh": "产物与任务绑定这两维需要 harness checkout（HARNESS_ROOT）：{why}",
+                 "en": "Deliverables and task bindings need a harness checkout (HARNESS_ROOT): {why}"},
+                lang, why=exc))
         try:
             workspace = await run_in_repository_thread(
                 get_project_repository().session_status, str(project_id), session_id)
             root = workspace.path
         except ProjectRepositoryError as exc:
             # **显式报错，不降成空**：空列表会被读成"这次什么都没产出"。
-            return _error(503, "workspace_unavailable", f"读不到这个会话的工作区：{exc}")
+            return _error(503, "workspace_unavailable", say(
+                {"zh": "读不到这个会话的工作区：{why}", "en": "Could not read this session's workspace: {why}"},
+                lang, why=exc))
         deliverables = await run_in_repository_thread(
             obs.deliverables_view, ledger, root)
         tasks_dir = root / "tasks"

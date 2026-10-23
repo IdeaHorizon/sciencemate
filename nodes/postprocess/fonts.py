@@ -25,11 +25,26 @@
 
 扫描每进程一次（`lru_cache`）。实测 465 个字体文件全扫 1.78s（macOS 开发机，
 上限），Linux 容器几十个字体在 0.2s 量级。
+
+## 为什么不走 matplotlib.font_manager 列字体
+
+matplotlib 的 `__init__` 链（rcsetup → colors → `from PIL import Image`）在
+PIL 残缺的部署机上整个起不来（2026-10-16 实机：phantom PIL 目录让
+`import matplotlib` 直接 ImportError，SVG 轨的缺字形检查被它连带打死）。
+而"列字体"这件事根本不需要一个绘图库 —— 这里直接用 fontTools 扫标准字体
+目录；matplotlib 自带的 mpl-data 字体目录用 `find_spec` 按包路径推，只定位、
+不触发包初始化。扫出的 family 名与 matplotlib.fontManager.ttflist 同口径
+（name 表 ID 16 优先、ID 1 兜底，ttc 逐 face 展开；实测全部落在其名字集内），
+所以给 matplotlib 的字体栈语义不变。
 """
 from __future__ import annotations
 
+import importlib.util
 import logging
+import os
+import sys
 from functools import lru_cache
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +101,99 @@ def _covers_cjk(path: str) -> bool:
             pass
 
 
+_FONT_EXTS = (".ttf", ".otf", ".ttc", ".otc")
+#: 可缩放字形轮廓所在的表；一个 face 一张都没有就是位图字体，渲染器用不了。
+_OUTLINE_TABLES = frozenset({"glyf", "CFF ", "CFF2"})
+
+
+def _font_dirs() -> tuple[Path, ...]:
+    """字体扫描目录：OS 标准位置 + matplotlib 自带字体目录（只定位、不 import）。"""
+    dirs: list[Path] = []
+    home = Path.home()
+    if sys.platform == "darwin":
+        dirs += [Path("/System/Library/Fonts"),
+                 Path("/System/Library/Fonts/Supplemental"),
+                 Path("/Library/Fonts"),
+                 home / "Library" / "Fonts"]
+    elif os.name == "nt":
+        windir = os.environ.get("WINDIR") or r"C:\Windows"
+        dirs.append(Path(windir) / "Fonts")
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            dirs.append(Path(local) / "Microsoft" / "Windows" / "Fonts")
+    else:
+        xdg = os.environ.get("XDG_DATA_HOME") or str(home / ".local" / "share")
+        dirs += [Path("/usr/share/fonts"), Path("/usr/local/share/fonts"),
+                 Path(xdg) / "fonts", home / ".fonts"]
+    try:
+        spec = importlib.util.find_spec("matplotlib")
+    except Exception:
+        spec = None
+    if spec and spec.submodule_search_locations:
+        dirs.append(Path(spec.submodule_search_locations[0]) / "mpl-data" / "fonts" / "ttf")
+    return tuple(d for d in dirs if d.is_dir())
+
+
+@lru_cache(maxsize=1)
+def _all_faces() -> tuple[tuple[str, str], ...]:
+    """全机字体 (family_name, 文件路径) 清单 —— 每进程扫一次，两处消费共用。
+
+    ttc/otc 逐 face 展开（与 matplotlib ttflist 同粒度：一个 Noto CJK 合集里
+    SC/TC/JP 是不同 face、不同 family 名）。family 名取 name 表 ID 16
+    （Preferred Family）优先、ID 1 兜底，与 FreeType/matplotlib 的口径一致。
+    """
+    from fontTools.ttLib import TTCollection, TTFont
+
+    faces: list[tuple[str, str]] = []
+    seen_files: set[str] = set()
+    for directory in _font_dirs():
+        try:
+            candidates = sorted(directory.rglob("*"))
+        except OSError:
+            continue
+        for path in candidates:
+            if path.suffix.lower() not in _FONT_EXTS:
+                continue
+            fname = str(path)
+            if fname in seen_files:
+                continue
+            seen_files.add(fname)
+            fonts: list = []
+            try:
+                if fname.lower().endswith((".ttc", ".otc")):
+                    fonts = list(TTCollection(fname, lazy=True).fonts)
+                else:
+                    fonts = [TTFont(fname, lazy=True, fontNumber=0)]
+                for font in fonts:
+                    try:
+                        # 只收有轮廓的 face。位图字体（sbix/bdat 这类，没有 glyf /
+                        # CFF / CFF2 表）FreeType 不当可缩放字体用，matplotlib 的
+                        # fontManager 直接跳过、cairo 也画不出 —— 可它的 cmap 却
+                        # 覆盖 CJK，不滤的话会被 cjk_families 收进字体栈，交给渲染器
+                        # 后静默回退成豆腐，正是这个模块要拦的事。2026-10-22 实测：
+                        # macOS /System/Library/Fonts/Supplemental/NISC18030.ttf
+                        # （"GB18030 Bitmap"，表只有 bdat/bhed/bloc/cmap/…）被扫进来，
+                        # test_scan_decides_membership_and_the_list_only_orders 当场红。
+                        tables = set(getattr(font, "reader", None).keys()) if getattr(font, "reader", None) else set()
+                        if not tables & _OUTLINE_TABLES:
+                            continue
+                        names = font["name"]
+                        family = names.getDebugName(16) or names.getDebugName(1)
+                        if family:
+                            faces.append((family, fname))
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+            finally:
+                for font in fonts:
+                    try:
+                        font.close()
+                    except Exception:
+                        pass
+    return tuple(faces)
+
+
 @lru_cache(maxsize=1)
 def cjk_families() -> tuple[str, ...]:
     """当前机器上**字形真的覆盖汉字**的字体族，按排版质量排序。
@@ -93,11 +201,8 @@ def cjk_families() -> tuple[str, ...]:
     找不到任何一个时返回空元组，并 warning 一次 —— 这时中文一定是豆腐块，
     该让人看见，而不是继续静默降级。
     """
-    import matplotlib.font_manager as fm
-
     found: set[str] = set()
-    for entry in fm.fontManager.ttflist:
-        name = entry.name
+    for name, fname in _all_faces():
         # 点开头的是 macOS 的内部字体（.Aqua Kana 之类），matplotlib 选不稳。
         if not name or name.startswith("."):
             continue
@@ -105,7 +210,7 @@ def cjk_families() -> tuple[str, ...]:
             continue
         if name in found:
             continue
-        if _covers_cjk(entry.fname):
+        if _covers_cjk(fname):
             found.add(name)
 
     ordered = [n for n in PREFERRED_ORDER if n in found]
@@ -136,19 +241,18 @@ def sans_stack(*preferred: str | None) -> list[str]:
 @lru_cache(maxsize=64)
 def _covered_codepoints(family: str) -> frozenset[int]:
     """这个字体族**真的**能画出哪些码位 —— 还是读 cmap，不看名字。"""
-    import matplotlib.font_manager as fm
     from fontTools.ttLib import TTCollection, TTFont
 
     covered: set[int] = set()
-    for entry in fm.fontManager.ttflist:
-        if entry.name != family:
+    for name, fname in _all_faces():
+        if name != family:
             continue
         font = None
         try:
-            if entry.fname.lower().endswith((".ttc", ".otc")):
-                font = TTCollection(entry.fname, lazy=True).fonts[0]
+            if fname.lower().endswith((".ttc", ".otc")):
+                font = TTCollection(fname, lazy=True).fonts[0]
             else:
-                font = TTFont(entry.fname, lazy=True, fontNumber=0)
+                font = TTFont(fname, lazy=True, fontNumber=0)
             covered.update(font.getBestCmap())
         except Exception:
             continue

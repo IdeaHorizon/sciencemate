@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
 
 
 class FeedModel(BaseModel):
@@ -16,6 +16,8 @@ class FeedItemOut(FeedModel):
     title: str
     url: str | None = None
     summary: str | None = None
+    title_zh: str | None = None
+    abstract_zh: str | None = None
     authors: list[str] = Field(default_factory=list)
     venue: str | None = None
     published_at: datetime | None = None
@@ -28,6 +30,7 @@ class FeedItemOut(FeedModel):
     #: 这条有没有配图。**不给外链**：前端拿到 URL 就会有人直接渲染它，而那
     #: 等于每次打开首页都向出版商广播一次。要图走 /feed/items/{id}/image。
     saved: bool = False
+    viewed: bool = False
     extra: dict = Field(default_factory=dict)
 
 
@@ -43,12 +46,36 @@ class FeedCard(FeedModel):
     project_id: str | None = None
     project_name: str | None = None
     is_today_pick: bool = False
+    recommendation_sources: list[str] = Field(default_factory=list)
+
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def decode_reason_entities(cls, value: str) -> str:
+        # Daily picks may still contain reasons generated before name decoding.
+        from app.services.feed.profile import journal_display_name
+        return journal_display_name(value)
+
+
+class FeedProgressOut(FeedModel):
+    phase: Literal["searching", "preparing", "queued", "settled", "failed"] = "settled"
+    collected: int = 0
+    prepared: int = 0
+    pending: int = 0
+    recommendable: int = 0
+    translated: int = 0
+    translation_pending: int = 0
+    source_groups: list[dict] = Field(default_factory=list)
+    project_error: bool = False
+    domain_progress: list[dict] = Field(default_factory=list)
+    source_progress: list[dict] = Field(default_factory=list)
 
 
 class FeedTodayOut(FeedModel):
     """打开平台第一眼看到的一条流。"""
 
     feed: list[FeedCard] = Field(default_factory=list)
+    has_more: bool = False
     onboarded: bool = False
     #: 没有任何个性化依据时为 true —— 界面据此说实话（"还没有你的方向，
     #: 先按最新给你看"），而不是假装这是为你挑的。
@@ -58,6 +85,7 @@ class FeedTodayOut(FeedModel):
     #: 当前是否正在按这个用户所选学科在线获取。前端仅在 true 时短轮询，
     #: 完成后自动停止，避免把“在线即时”变成永久轮询。
     refreshing: bool = False
+    progress: FeedProgressOut = Field(default_factory=FeedProgressOut)
 
 
 class DomainOption(FeedModel):
@@ -103,7 +131,32 @@ class JournalSubscription(FeedModel):
 class ScholarSubscription(FeedModel):
     key: str
     name: str
-    source: Literal["kb", "literature"] = "literature"
+    source: Literal["kb", "literature", "openalex"] = "literature"
+    author_id: str = ""
+    orcid: str = ""
+    institution: str = ""
+    topics: list[str] = Field(default_factory=list)
+    works_count: int = 0
+    identity_status: Literal["resolved", "unresolved", "ambiguous", "unavailable"] = "unresolved"
+    identity_candidates: list[dict] = Field(default_factory=list)
+    identity_message: str = ""
+    search_complete: bool = True
+
+    @model_validator(mode="after")
+    def normalize_identity(self):
+        from app.services.feed.author_identity import openalex_id
+        aid = openalex_id(self.author_id or self.key)
+        self.identity_status = "resolved" if aid else (self.identity_status if self.identity_status in {"ambiguous", "unavailable"} else "unresolved")
+        if aid:
+            key_id = openalex_id(self.key)
+            if key_id and key_id != aid:
+                raise ValueError("Scholar key and author ID disagree")
+            self.author_id = aid
+            self.key = "openalex:" + aid
+            self.source = "openalex"
+        elif self.author_id or self.source == "openalex":
+            raise ValueError("Invalid OpenAlex author ID")
+        return self
 
 
 class SubscriptionsOut(FeedModel):

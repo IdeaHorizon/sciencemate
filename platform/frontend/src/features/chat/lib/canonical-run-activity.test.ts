@@ -65,7 +65,7 @@ test("被打断的一轮是「接着跑」，不是「失败」", () => {
   setStatus(stale, "stale_unknown");
   // 后端的 view 把两件事分开答：问题还在（waitingOn），但运行时没了（phase）。
   stale.run.view = { ...stale.run.view, waitingOn: { kind: "permission" } };
-  const staleAttention = canonicalRunAttention(stale);
+  const staleAttention = canonicalRunAttention(stale, undefined, "zh");
   assert.equal(staleAttention?.tone, "continue");
   assert.match(staleAttention?.recovery ?? "", /接着跑/);
   assert.doesNotMatch(staleAttention?.title ?? "", /失败|stopped/i);
@@ -77,7 +77,7 @@ test("被打断的一轮是「接着跑」，不是「失败」", () => {
     title: "Paper classification was not saved",
     message: "The generated classification could not be read.",
     recovery: "Ask the agent to regenerate and save the classification.",
-  });
+  }, "zh");
   assert.equal(failure?.title, "Paper classification was not saved");
   assert.match(failure?.recovery ?? "", /regenerate/);
 });
@@ -96,7 +96,7 @@ test("a persisted Run failure takes precedence over an earlier tool failure", ()
     title: "Search literature did not complete",
     message: "Semantic Scholar HTTP 429",
     recovery: "Adjust the source access.",
-  });
+  }, "zh");
   // 这条测试的本意（也是它的标题）：**run 级失败盖过工具级失败**，且工具那边的
   // 细节不泄露到这里来。这两点原样保留。
   assert.equal(JSON.stringify(attention).includes("Semantic Scholar"), false);
@@ -212,7 +212,7 @@ test("前端的猜测不许盖住后端记录的原因", () => {
       retryable: true,
     },
   };
-  const attention = canonicalRunAttention(interrupted);
+  const attention = canonicalRunAttention(interrupted, undefined, "zh");
   assert.match(attention?.title ?? "", /执行进程中途退出/);
   assert.equal((attention?.title ?? "").includes("没有收到完成记录"), false,
     "前端的通用兜底盖住了后端记录的具体原因");
@@ -224,7 +224,7 @@ test("a stale run with no recorded reason still says something", () => {
   const unknown = detail();
   setStatus(unknown, "stale_unknown");
   unknown.run.summary = {};
-  const attention = canonicalRunAttention(unknown);
+  const attention = canonicalRunAttention(unknown, undefined, "zh");
   assert.match(attention?.title ?? "", /这一轮没跑完/);
   assert.equal(attention?.tone, "continue");
 });
@@ -242,14 +242,14 @@ test("重发一定还是同样结果的那类才要人动手（retryable === fal
       retryable: false,
     },
   };
-  assert.equal(canonicalRunAttention(blocked)?.tone, "action");
+  assert.equal(canonicalRunAttention(blocked, undefined, "zh")?.tone, "action");
 
   const transient = detail();
   setStatus(transient, "failed");
   transient.run.summary = {
     failure: { title: "平台内部错误", body: "记录这次运行时出错。", retryable: true },
   };
-  assert.equal(canonicalRunAttention(transient)?.tone, "continue");
+  assert.equal(canonicalRunAttention(transient, undefined, "zh")?.tone, "continue");
 
   const unknownRetryable = detail();
   setStatus(unknownRetryable, "failed");
@@ -257,7 +257,7 @@ test("重发一定还是同样结果的那类才要人动手（retryable === fal
     failure: { title: "老记录", body: "没写 retryable。" },
   };
   assert.equal(
-    canonicalRunAttention(unknownRetryable)?.tone, "continue",
+    canonicalRunAttention(unknownRetryable, undefined, "zh")?.tone, "continue",
     "不确定时按可续处理 —— 说错的代价是让人多发一条，反过来是把人吓停在能继续的地方",
   );
 });
@@ -282,7 +282,7 @@ test("平台重启打断、又没自愈：显示'被重启打断/从断点接着
       retryable: true,
     },
   };
-  const attention = canonicalRunAttention(restarted);
+  const attention = canonicalRunAttention(restarted, undefined, "zh");
   assert.ok(attention, "被重启打断且没自愈的 run 必须有可见提示");
   assert.equal(attention?.title, "这一轮被平台重启打断了");
   assert.equal(attention?.tone, "continue", "重启可续 → 接着跑，不是要用户动手");

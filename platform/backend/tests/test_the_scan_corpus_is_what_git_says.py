@@ -50,21 +50,31 @@ def test_nothing_git_ignores_is_in_the_corpus():
     )
 
 
-def test_a_brand_new_file_is_already_in_the_corpus():
-    """还没 `git add` 的源码也算我们的 —— 否则新文件里的违规能一路绿到 add 为止。"""
-    from tests.repository_sources import _ours
+def test_a_brand_new_file_is_already_in_the_corpus(tmp_path, monkeypatch):
+    """还没 `git add` 的源码也算我们的 —— 否则新文件里的违规能一路绿到 add 为止。
 
-    probe = REPO_ROOT / "platform" / "backend" / "app" / "_scan_corpus_probe.py"
-    probe.write_text("# transient probe\n", encoding="utf-8")
-    _ours.cache_clear()
+    在一个临时仓库里验，不往真仓库里写探针：这条曾把 `_scan_corpus_probe.py`
+    写进真的 `app/` 再删掉，`-n 6` 下另一个 worker 上遍历 `app/` 的闸刚好列到它、
+    读时已经没了 → FileNotFoundError（2026-10-20，PR#1241 的 public-tree 红）。
+    要验的是口径（tracked ∪ untracked − ignored），口径在哪个仓库里都一样。
+    """
+    from tests import repository_sources
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text("dist/\n", encoding="utf-8")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "brand_new.py").write_text("# not added yet\n", encoding="utf-8")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "copy.py").write_text("# build output\n", encoding="utf-8")
+
+    monkeypatch.setattr(repository_sources, "REPO_ROOT", tmp_path)
+    repository_sources._ours.cache_clear()
     try:
-        seen = {str(rel) for rel, _text in source_files("*.py")}
-        assert str(probe.relative_to(REPO_ROOT)) in seen, (
-            "新写的、未 add 的源码不在语料里 —— 闸看不见它"
-        )
+        seen = {rel.as_posix() for rel, _text in repository_sources.source_files("*.py")}
     finally:
-        probe.unlink(missing_ok=True)
-        _ours.cache_clear()
+        repository_sources._ours.cache_clear()
+    assert "app/brand_new.py" in seen, "新写的、未 add 的源码不在语料里 —— 闸看不见它"
+    assert "dist/copy.py" not in seen, "被 ignore 的东西混进了语料"
 
 
 def test_the_corpus_is_not_empty():

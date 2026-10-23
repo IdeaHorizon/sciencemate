@@ -44,7 +44,12 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import VisualContractError, VisualTruncationError
-from .figure_contract import COMPILED_FAMILIES, role_colors
+from .figure_contract import (
+    COMPILED_FAMILIES,
+    ILLUSTRATION_FAMILIES,
+    _group_member_ids,
+    role_colors,
+)
 
 #: 一次抽取最多问多少个节点的度数。问全部节点会把 prompt 撑爆，也超出小模型
 #: 一次能可靠数清的量；按度数从高到低取 —— 度数高的那几个正是结构的关节。
@@ -113,15 +118,25 @@ def _colour_name(hex_colour: str) -> str:
 def build_questions(contract: dict[str, Any]) -> dict[str, Any]:
     """合同 → 封闭问题集。纯函数，可测，也可原样进记录备查。"""
 
-    if contract["family"] in COMPILED_FAMILIES:
+    if contract["family"] in COMPILED_FAMILIES or contract["family"] in ILLUSTRATION_FAMILIES:
         colours = role_colors(contract)
         role_counts = {role: 0 for role in colours}
         for node in contract["nodes"]:
             role_counts[node["role"]] += 1
         degree: dict[str, int] = {node["id"]: 0 for node in contract["nodes"]}
         for edge in contract["edges"]:
-            degree[edge["from"]] += 1
-            degree[edge["to"]] += 1
+            for end in ("from", "to"):
+                target = edge[end]
+                if target.startswith("group:"):
+                    # 组端点 = 连到全体成员（与 figure_contract 结构校验同一语义）。
+                    # 2026-10-16 e2e 实测：1024 卡拓扑的 128 条组级上联在这里
+                    # KeyError —— declare/trial 都过，mint 的证人问题生成才炸。
+                    for member in _group_member_ids(contract, target[len("group:"):]):
+                        if member in degree:
+                            degree[member] += 1
+                    continue
+                if target in degree:
+                    degree[target] += 1
         label_of = {node["id"]: node["label"] for node in contract["nodes"]}
         busiest = sorted(degree, key=lambda nid: (-degree[nid], nid))[:MAX_DEGREE_QUESTIONS]
         return {
@@ -154,7 +169,9 @@ def extraction_prompt(questions: dict[str, Any]) -> str:
 
     if questions["family"] == "schematic":
         roles = ", ".join(
-            f"{item['colour']} boxes (these are labelled like \"{item['role']}\" in the legend)"
+            # SVG 轨（illustration 家族）的节点不一定是矩形：措辞说「形状」，
+            # 颜色可能由 fill 或 stroke 承载（补丁 5 软化）。
+            f"shapes marked in {item['colour']} (these are labelled like \"{item['role']}\" in the legend)"
             for item in questions["roles"]
         )
         degree_labels = json.dumps(
@@ -165,10 +182,10 @@ def extraction_prompt(questions: dict[str, Any]) -> str:
             "task, not a review: do not judge quality, do not suggest improvements, do "
             "not report defects. Report only what you can literally see.\n\n"
             "Count carefully, one category at a time:\n"
-            f"1. For each of these box categories, how many such boxes are in the image: {roles}.\n"
-            f"2. For each of these labelled boxes, how many separate lines touch it: "
+            f"1. For each of these shape categories, how many such shapes are in the image: {roles}.\n"
+            f"2. For each of these labelled shapes, how many separate lines touch it: "
             f"{degree_labels}.\n"
-            "3. List the text label of every box that has NO line touching it at all.\n\n"
+            "3. List the text label of every shape that has NO line touching it at all.\n\n"
             "Count a line once even if it bends. If a category is absent, answer 0. "
             "If you genuinely cannot tell, use -1 for that number rather than guessing.\n\n"
             'Return ONLY compact JSON: {"role_counts":{"<role name>":<int>},'

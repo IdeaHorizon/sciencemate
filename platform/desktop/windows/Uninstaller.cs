@@ -30,7 +30,7 @@ using System.Windows.Forms;
 
 internal static class Uninstaller
 {
-    private const string Caption = "卸载 ScienceMate";
+    private static string Caption { get { return Speech.T("卸载 ScienceMate", "Uninstall ScienceMate"); } }
 
     private static int Say(string message, bool interactive, int code, uint icon)
     {
@@ -90,7 +90,9 @@ internal static class Uninstaller
             paths.Add(Path.Combine(Footprint.DesktopDir(null), Footprint.ProductName + ".lnk"));
             string startMenu = Footprint.StartMenuDir(null);
             paths.Add(Path.Combine(startMenu, Footprint.ProductName + ".lnk"));
-            paths.Add(Path.Combine(startMenu, "卸载 " + Footprint.ProductName + ".lnk"));
+            // 没有清单就不知道当初装的是哪种语言 —— 两种名字都找（RemoveShortcuts 只删指向这份安装的）。
+            foreach (string name in Footprint.EveryUninstallShortcutName())
+                paths.Add(Path.Combine(startMenu, name));
         }
         return paths;
     }
@@ -111,14 +113,15 @@ internal static class Uninstaller
                         || Footprint.SamePath(target, Path.Combine(installDir, Footprint.UninstallerExeName)));
                 if (!mine)
                 {
-                    notes.Add("留下了 " + lnk + "（它指向的不是这份安装）");
+                    notes.Add(string.Format(Speech.T("留下了 {0}（它指向的不是这份安装）",
+                                                     "Left {0} in place (it does not point to this installation)"), lnk));
                     continue;
                 }
                 File.Delete(Footprint.IoPath(lnk));
                 string folder = Path.GetDirectoryName(lnk);
                 if (!folders.Contains(folder)) folders.Add(folder);
             }
-            catch (Exception ex) { notes.Add("删不掉 " + lnk + "：" + ex.Message); }
+            catch (Exception ex) { notes.Add(string.Format(Speech.T("删不掉 {0}：{1}", "Could not delete {0}: {1}"), lnk, ex.Message)); }
         }
         // 开始菜单里那个产品文件夹：空了才删 —— 里面要是还有别人的东西，那就不是我的文件夹。
         foreach (string folder in folders)
@@ -164,14 +167,17 @@ internal static class Uninstaller
         Thread.Sleep(500);
         var notes = new List<string>();
         if (!DeleteTree(installDir, TimeSpan.FromSeconds(20)))
-            notes.Add("安装目录没能完全删掉：" + installDir);
+            notes.Add(Speech.T("安装目录没能完全删掉：", "The install folder could not be removed completely: ") + installDir);
         if (!string.IsNullOrEmpty(purgeDataRoot) && !DeleteTree(purgeDataRoot, TimeSpan.FromSeconds(20)))
-            notes.Add("数据目录没能完全删掉：" + purgeDataRoot);
+            notes.Add(Speech.T("数据目录没能完全删掉：", "The data folder could not be removed completely: ") + purgeDataRoot);
 
         if (notes.Count > 0)
-            return Say("ScienceMate 已卸载，但有东西没删干净：\n\n· " + string.Join("\n· ", notes.ToArray())
-                       + "\n\n关掉可能占用它的程序后手动删除即可。", interactive, 8, 0x30);
-        return Say("ScienceMate 已卸载。", interactive, 0, 0x40);
+            return Say(Speech.T("ScienceMate 已卸载，但有东西没删干净：", "ScienceMate was uninstalled, but some things were not removed:")
+                       + "\n\n· " + string.Join("\n· ", notes.ToArray()) + "\n\n"
+                       + Speech.T("关掉可能占用它的程序后手动删除即可。",
+                                  "Close any program that may be using them, then delete them by hand."),
+                       interactive, 8, 0x30);
+        return Say(Speech.T("ScienceMate 已卸载。", "ScienceMate was uninstalled."), interactive, 0, 0x40);
     }
 
     /// <summary>把自己拷到 %TEMP% 并让副本接手删目录这件事。</summary>
@@ -185,6 +191,8 @@ internal static class Uninstaller
         if (!string.IsNullOrEmpty(purgeDataRoot))
             args.Append(" --purge-data \"").Append(purgeDataRoot).Append("\"");
         if (!interactive) args.Append(" /S");
+        // 第二阶段在 %TEMP% 里跑，那时安装目录（连同清单）正在被删 —— 语言由这里带过去。
+        args.Append(" --language ").Append(Speech.Language);
         Process.Start(new ProcessStartInfo(copy, args.ToString()) { UseShellExecute = false });
         return 0;
     }
@@ -211,12 +219,17 @@ internal static class Uninstaller
                         purgeDataRoot = args[++i];
                     purgeData = true;
                     break;
+                case "--language":
+                    if (i + 1 < args.Length && Speech.Known(args[i + 1])) Speech.Language = args[++i];
+                    break;
                 case "--second-stage":
-                    if (++i >= args.Length) return Say("用法：Uninstall.exe [/S] [--purge-data]", true, 2, 0x10);
+                    if (++i >= args.Length) return Say(Speech.T("用法：Uninstall.exe [/S] [--purge-data]",
+                                                                "Usage: Uninstall.exe [/S] [--purge-data]"), true, 2, 0x10);
                     secondStage = args[i];
                     break;
                 default:
-                    return Say("不认识的参数：" + args[i] + "\n\n用法：Uninstall.exe [/S] [--purge-data]",
+                    return Say(Speech.T("不认识的参数：", "Unknown argument: ") + args[i] + "\n\n"
+                               + Speech.T("用法：Uninstall.exe [/S] [--purge-data]", "Usage: Uninstall.exe [/S] [--purge-data]"),
                                interactive, 2, 0x10);
             }
         }
@@ -227,13 +240,16 @@ internal static class Uninstaller
         string installDir = Path.GetDirectoryName(
             Path.GetFullPath(Assembly.GetExecutingAssembly().Location)).TrimEnd(Path.DirectorySeparatorChar);
         InstallRecord record = InstallRecord.Load(installDir);
+        // 装的时候用哪种语言，卸的时候就说哪种（老清单没记 → 英文，同安装器的默认）。
+        if (record != null && Speech.Known(record.language)) Speech.Language = record.language;
         string dataRoot = record != null && !string.IsNullOrWhiteSpace(record.dataRoot)
             ? record.dataRoot : Footprint.DataRoot();
 
         int running = RunningPidIn(installDir);
         if (running != 0)
-            return Say("ScienceMate 正在运行（pid " + running + "）。\n\n请先关掉它，再卸载。\n"
-                       + "现在什么都没有改动。", interactive, 4, 0x10);
+            return Say(string.Format(Speech.T("ScienceMate 正在运行（pid {0}）。\n\n请先关掉它，再卸载。\n现在什么都没有改动。",
+                                              "ScienceMate is running (pid {0}).\n\nClose it first, then uninstall.\nNothing has been changed."),
+                                     running), interactive, 4, 0x10);
 
         if (interactive)
         {
@@ -249,7 +265,7 @@ internal static class Uninstaller
         string key = record != null && !string.IsNullOrWhiteSpace(record.uninstallKey)
             ? record.uninstallKey : Footprint.DefaultUninstallKey;
         try { Footprint.RemoveUninstallEntry(key, installDir); }
-        catch (Exception ex) { notes.Add("「应用和功能」里的那一条没删掉：" + ex.Message); }
+        catch (Exception ex) { notes.Add(Speech.T("「应用和功能」里的那一条没删掉：", "The \"Apps & features\" entry was not removed: ") + ex.Message); }
         foreach (string note in notes) Console.Error.WriteLine(note);
 
         // 数据默认留着。用户点了「连数据一起删」才把它交给第二阶段。
@@ -265,54 +281,57 @@ internal sealed class ConfirmUninstall : Form
 
     public ConfirmUninstall(string installDir, string dataRoot)
     {
-        Text = "卸载 ScienceMate";
+        // 坐标按 100% 缩放写；EndLayoutAt96Dpi 按本机 DPI 放大（见 Footprint.BeginLayoutAt96Dpi）。
+        Footprint.BeginLayoutAt96Dpi(this);
+        Text = Speech.T("卸载 ScienceMate", "Uninstall ScienceMate");
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(520, 230);
+        ClientSize = new Size(520, 246);   // 英文那句说明折两行，比中文多一行高
         BackColor = Color.White;
-        Font = Footprint.UiFont(9f, FontStyle.Regular);
 
         Controls.Add(new Label
         {
-            Text = "要卸载 ScienceMate 吗？",
+            Text = Speech.T("要卸载 ScienceMate 吗？", "Uninstall ScienceMate?"),
             AutoSize = true,
             Font = Footprint.UiFont(13f, FontStyle.Regular),
             Location = new Point(24, 22),
         });
         Controls.Add(new Label
         {
-            Text = "将删除：" + installDir + "\r\n以及桌面和开始菜单里的快捷方式。",
+            Text = Speech.T("将删除：", "This removes: ") + installDir + "\r\n"
+                   + Speech.T("以及桌面和开始菜单里的快捷方式。", "and the shortcuts on the desktop and in the Start menu."),
             Location = new Point(26, 62),
             Size = new Size(470, 44),
             ForeColor = Color.FromArgb(96, 96, 96),
         });
 
-        _purge.Text = "同时删除研究数据（" + dataRoot + "）";
+        _purge.Text = string.Format(Speech.T("同时删除研究数据（{0}）", "Also delete the research data ({0})"), dataRoot);
         _purge.Location = new Point(26, 118);
-        _purge.Size = new Size(470, 36);
+        _purge.Size = new Size(470, 34);   // 两行高：数据目录长了会折行
         Controls.Add(_purge);
         Controls.Add(new Label
         {
-            Text = "不勾选＝课题、产出和配置都留着，重新安装后还在。",
-            Location = new Point(44, 150),
-            Size = new Size(452, 20),
+            Text = Speech.T("不勾选＝课题、产出和配置都留着，重新安装后还在。",
+                            "Leave it unticked to keep projects, outputs and settings; they are still there after reinstalling."),
+            Location = new Point(44, 154),
+            Size = new Size(452, 36),
             ForeColor = Color.FromArgb(96, 96, 96),
         });
 
         var ok = new Button
         {
-            Text = "卸载",
-            Location = new Point(396, 184),
+            Text = Speech.T("卸载", "Uninstall"),
+            Location = new Point(396, 200),
             Size = new Size(100, 30),
             DialogResult = DialogResult.OK,
             UseVisualStyleBackColor = true,
         };
         var cancel = new Button
         {
-            Text = "取消",
-            Location = new Point(288, 184),
+            Text = Speech.T("取消", "Cancel"),
+            Location = new Point(288, 200),
             Size = new Size(100, 30),
             DialogResult = DialogResult.Cancel,
             UseVisualStyleBackColor = true,
@@ -321,5 +340,6 @@ internal sealed class ConfirmUninstall : Form
         Controls.Add(cancel);
         AcceptButton = cancel;   // 默认落在「取消」上：回车不该把人的安装删掉
         CancelButton = cancel;
+        Footprint.EndLayoutAt96Dpi(this, Footprint.UiFont(9f, FontStyle.Regular));
     }
 }

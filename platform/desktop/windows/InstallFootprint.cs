@@ -102,6 +102,8 @@ internal sealed class InstallRecord
     public string uninstallKey;
     /// <summary>研究数据放哪（卸载时问用户留不留）。</summary>
     public string dataRoot;
+    /// <summary>装的时候用的语言 —— 卸载器照它说话（"zh" / "en"；老清单没有，按英文）。</summary>
+    public string language;
 
     public const string FileName = "install-record.json";
 
@@ -119,6 +121,7 @@ internal sealed class InstallRecord
             { "shortcuts", shortcuts },
             { "uninstallKey", uninstallKey },
             { "dataRoot", dataRoot },
+            { "language", language },
         });
         File.WriteAllText(Footprint.IoPath(PathIn(dir)), json, new UTF8Encoding(false));
     }
@@ -139,6 +142,7 @@ internal sealed class InstallRecord
                 version = Text(parsed, "version"),
                 uninstallKey = Text(parsed, "uninstallKey"),
                 dataRoot = Text(parsed, "dataRoot"),
+                language = Text(parsed, "language"),
             };
             object list;
             if (parsed.TryGetValue("shortcuts", out list) && list is System.Collections.IEnumerable)
@@ -179,12 +183,47 @@ internal static class Footprint
     /// 安装器和卸载器共用 —— 漏在一边的话，两个窗口在同一台机器上长得不一样：
     /// 没 `EnableVisualStyles` 的那个是 Windows 经典外观的按钮，没 `SetProcessDPIAware`
     /// 的那个在高 DPI 屏上是被系统拉伸出来的糊图。用户看到的是同一个产品的两个界面。
+    ///
+    /// `SetProcessDPIAware` 是一句承诺：「别替我拉伸，我自己按 DPI 画」。字号是磅，
+    /// 自然跟着 DPI 变大；而窗口里每个坐标和尺寸是**按 96 DPI 写的像素**，不会自己变。
+    /// 只许了这句诺、不兑现的话，150% 的屏上字放大了 1.5 倍、格子还是原来那么大 ——
+    /// 2026-10-19 真机截图上标题压着副标题、「浏览…」被截掉一半，就是这样来的。
+    /// 兑现它的是每个窗口自己的 <see cref="BeginLayoutAt96Dpi"/> / <see cref="EndLayoutAt96Dpi"/>。
     /// </remarks>
     public static void PrepareUi()
     {
         try { if (Environment.OSVersion.Version.Major >= 6) SetProcessDPIAware(); } catch { }
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
+    }
+
+    /// <summary>开始摆一个坐标按 96 DPI（100% 缩放）写的窗口。和 <see cref="EndLayoutAt96Dpi"/> 成对，控件加在两者之间。</summary>
+    /// <remarks>
+    /// 顺序不是随便排的，三条都在 150% 的真机上量过（2026-10-19，9800x3d，DPI 144）：
+    ///
+    ///   · **不挂起布局**就设 AutoScaleMode：WinForms 当场对一个空窗口放大一次，
+    ///     之后加进来的控件全按原像素摆 —— 什么都没放大，和没设一样；
+    ///   · 界面字体在**放大之前**设（哪怕早在任何控件加进来之前）：每个固定尺寸的
+    ///     Label 被放大**两次**（100 → 225），CheckBox / TextBox 却只放大一次 ——
+    ///     说明文字撑出窗口、压在按钮上；
+    ///   · 字体在放大**之后**设：全部恰好放大一次。
+    ///
+    /// 所以挂起、声明 96 DPI 在这里；放大、换字体在 <see cref="EndLayoutAt96Dpi"/>。
+    /// 两个窗口都只经这一对走 —— 顺序写在一处，就不会有哪个窗口排错。
+    /// </remarks>
+    public static void BeginLayoutAt96Dpi(Form form)
+    {
+        form.SuspendLayout();
+        form.AutoScaleDimensions = new SizeF(96F, 96F);
+        form.AutoScaleMode = AutoScaleMode.Dpi;
+    }
+
+    /// <summary>控件都加完了：按本机 DPI 一次放大全部（含隐藏的页），再换上界面字体。</summary>
+    public static void EndLayoutAt96Dpi(Form form, Font font)
+    {
+        form.ResumeLayout(false);   // 放大发生在这一刻
+        form.Font = font;           // 必须在放大之后，见 BeginLayoutAt96Dpi
+        form.PerformLayout();
     }
 
     /// <summary>界面字体：有雅黑用雅黑（中文界面），没有就用系统消息框的字体。</summary>
@@ -208,6 +247,35 @@ internal static class Footprint
     public const string ProductName = "ScienceMate";
     public const string ShellExeName = "ScienceMate.exe";
     public const string UninstallerExeName = "Uninstall.exe";
+
+    /// <summary>人在安装器上选过语言，就写一笔给应用；没选过就删掉旧的那一笔（上一次安装留下的不算这一次的）。</summary>
+    public static void TellTheAppTheLanguage(string dataRoot)
+    {
+        try
+        {
+            string path = Path.Combine(dataRoot, Speech.ChoiceFileName);
+            if (!Speech.ChosenByThePerson)
+            {
+                if (File.Exists(IoPath(path))) File.Delete(IoPath(path));
+                return;
+            }
+            Directory.CreateDirectory(IoPath(dataRoot));
+            File.WriteAllText(IoPath(path), Speech.Language, new UTF8Encoding(false));
+        }
+        catch { }   // 写不进只是应用第一次打开时按系统语言定 —— 不值得让安装失败
+    }
+
+    /// <summary>开始菜单里卸载那一项的文件名 —— 跟着装的时候的语言。</summary>
+    public static string UninstallShortcutName(string language)
+    {
+        return Speech.In(language, "卸载 ", "Uninstall ") + ProductName + ".lnk";
+    }
+
+    /// <summary>没有清单时卸载器去找的名字：两种语言的都认（装的时候用的哪种它不知道）。</summary>
+    public static string[] EveryUninstallShortcutName()
+    {
+        return new[] { UninstallShortcutName(Speech.English), UninstallShortcutName(Speech.Chinese) };
+    }
 
     // 和 InstallerStub/Shell 同一条规矩：System.IO 走扩展路径，不受 MAX_PATH 策略摆布。
     public static string IoPath(string path)
@@ -289,7 +357,8 @@ internal static class Footprint
     {
         using (RegistryKey key = Registry.CurrentUser.CreateSubKey(keyPath))
         {
-            if (key == null) throw new InvalidOperationException("写不了注册表项 HKCU\\" + keyPath);
+            if (key == null)
+                throw new InvalidOperationException(Speech.T("写不了注册表项 HKCU\\", "Cannot write the registry key HKCU\\") + keyPath);
             string uninstaller = Path.Combine(installDir, UninstallerExeName);
             key.SetValue("DisplayName", ProductName);
             if (!string.IsNullOrWhiteSpace(version)) key.SetValue("DisplayVersion", version);

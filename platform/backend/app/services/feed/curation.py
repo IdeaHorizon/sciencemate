@@ -27,28 +27,71 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.feed import FeedEngagement, FeedEngagementAction, FeedItem
 from app.models.project import Project, ProjectStatus
 from app.models.user import User
 from app.services.feed import bridge, domains as domain_service
+from app.services.feed.profile import extract_terms
 from app.services.feed.bridge import BridgeUnavailable
 from app.services.harness_contract import HarnessContractUnavailable
+from app.services.user_interface import language_for, say
 
 logger = logging.getLogger(__name__)
 
 #: 每个活跃课题最多配几个论文/资讯检索词。这是 prompt 约束 + 解析层截断的
 #: 双重上限：词要真正属于"这个"课题，而不是一个课题吐出五六个词挤掉别人。
-PER_PROJECT_QUERY_CAP = 2
+PER_PROJECT_QUERY_CAP = 3
 
 #: 合并后全局检索词上限。对齐 `discovery.MAX_QUERIES_PER_USER`（检索侧每轮
 #: 最多几组）—— floor（每个活跃课题至少 1 词）在这个上限之内才成立。课题数
 #: 超过它时，按活跃度优先保留，最不活跃的课题可能拿不到词（有界的退化）。
-MAX_MERGED_QUERIES = 5
+MAX_MERGED_QUERIES = 8
+
+
+async def saved_project_examples(
+    db: AsyncSession, user: User, projects: list[Project], *, limit: int = 6,
+) -> list[str]:
+    """Use recent saves only when their titles overlap an active project.
+
+    A stray saved paper must not steer acquisition into an unrelated field.
+    These titles guide query generation; normal retrieval and ranking gates
+    still decide which results can enter the feed.
+    """
+    if not projects:
+        return []
+    rows = await db.execute(
+        select(FeedItem.title)
+        .join(FeedEngagement, FeedEngagement.item_id == FeedItem.id)
+        .where(
+            FeedEngagement.user_id == user.id,
+            FeedEngagement.action == FeedEngagementAction.SAVE,
+            FeedEngagement.created_at >= datetime.now(UTC) - timedelta(days=180),
+        )
+        .order_by(FeedEngagement.created_at.desc())
+        .limit(40)
+    )
+    project_terms = [
+        extract_terms(project.name, project.research_domain, project.description)
+        for project in projects
+    ]
+    examples: list[str] = []
+    for title in rows.scalars():
+        title = " ".join(str(title or "").split())[:200]
+        if not title or title in examples:
+            continue
+        terms = extract_terms(title)
+        if any(len(terms & own) >= 2 and any(len(term) >= 5 for term in terms & own)
+               for own in project_terms):
+            examples.append(title)
+            if len(examples) >= limit:
+                break
+    return examples
 
 
 def stored(user: User) -> dict:
@@ -79,21 +122,13 @@ def inferred_queries(user: User) -> tuple[str, ...]:
 
 
 def effective_domains(user: User) -> tuple[str, ...]:
-    """真正用于送达匹配的方向：手选的 ∪（推断的 − 删掉的）。
-
-    手选的排在前面，且不会被推断结果挤掉 —— 顺序本身也是一种表达。
-    """
+    """手动订阅学科独立于课题推断；课题继续使用自己的检索词。"""
     from app.services.feed.profile import stored_domains
 
-    out: list[str] = list(stored_domains(user))
-    rejected = rejected_domains(user)
-    for slug in inferred_domains(user):
-        if slug not in out and slug not in rejected:
-            out.append(slug)
-    return tuple(out)
+    return domain_service.expand_cas_domains(list(stored_domains(user)))
 
 
-def project_fingerprint(projects: list[Project]) -> str:
+def project_fingerprint(projects: list[Project], saved_examples: list[str] | None = None) -> str:
     """课题文本的指纹 —— 用来判断"有没有实质变化，值不值得重算"。
 
     只算进真正会影响推断的三个字段。改标题里的一个错别字确实会让指纹变，
@@ -104,6 +139,9 @@ def project_fingerprint(projects: list[Project]) -> str:
         for part in (project.name, project.research_domain, project.description):
             digest.update((part or "").encode("utf-8"))
             digest.update(b"\x1f")
+    for title in sorted(saved_examples or []):
+        digest.update(title.encode("utf-8"))
+        digest.update(b"\x1f")
     return digest.hexdigest()[:32]
 
 
@@ -259,6 +297,8 @@ async def curate(
     projects = await user_projects(db, user)
     if not projects:
         # 一个课题都没有时没什么可推断的。这不是失败，别记成失败。
+        _remember(user, queries=[], news_queries=[])
+        await db.flush()
         return None
 
     # 每个课题的真实活跃度（最近用户消息时间），喂给 prompt 让模型感知、并在
@@ -266,20 +306,26 @@ async def curate(
     project_ids = [p.id for p in projects]
     last_active_map = await projects_last_active(db, project_ids)
 
-    fingerprint = project_fingerprint(projects)
+    saved_examples = await saved_project_examples(db, user, projects)
+    fingerprint = project_fingerprint(projects, saved_examples)
     if not force and not needs_refresh(user, fingerprint):
         return None
 
     backend = await bridge.curation_backend(db, user)
     if backend is None:
-        _remember(user, error="没有配资讯挖掘模型（设置 → 模型 → 资讯挖掘模型）")
+        # 这一句存进他的偏好、在开关下面显示：按他此刻的界面语言写。
+        _remember(user, error=say({"zh": "没有配资讯挖掘模型（设置 → 模型 → 资讯挖掘模型）",
+                                   "en": "No feed curation model is configured (Settings → Models → "
+                                         "Feed curation model)"}, language_for(user)))
         await db.flush()
         return None
 
     try:
         candidates = list(domain_service.domain_registry().spine_categories())
     except HarnessContractUnavailable as exc:
-        _remember(user, error=f"域词表暂时不可用（平台侧）：{exc}")
+        _remember(user, error=say({"zh": "域词表暂时不可用（平台侧）：{why}",
+                                   "en": "The domain vocabulary is unavailable for now (platform side): {why}"},
+                                  language_for(user), why=exc))
         await db.flush()
         return None
 
@@ -303,6 +349,7 @@ async def curate(
             backend=backend,
             payload={
                 "projects": project_payloads,
+                "saved_project_examples": saved_examples,
                 "candidate_domains": candidates,
                 "selected_domains": [
                     f"{code}: {domain_service.label(code)}"
@@ -347,6 +394,12 @@ async def curate(
         per_project, last_active_list, field="news_queries", cap=MAX_MERGED_QUERIES
     )
 
+    if not queries and not news_queries:
+        _remember(user, error="资讯挖掘模型未返回有效检索词，本轮未执行检索")
+        await db.flush()
+        logger.warning("Feed curation returned no search queries for %s", user.id)
+        return None
+
     result = {
         "domains": [str(d) for d in (event.get("domains") or [])],
         "queries": queries,
@@ -386,6 +439,7 @@ def _remember(
     preferences = dict(user.preferences) if isinstance(user.preferences, dict) else {}
     feed = dict(preferences.get("feed") or {})
     feed["curated_at"] = datetime.now(UTC).isoformat()
+    feed["curation_result_version"] = 2
     if error is not None:
         feed["curated_error"] = error[:500]
     else:

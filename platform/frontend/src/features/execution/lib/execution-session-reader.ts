@@ -7,6 +7,7 @@ import {
   LiveEventReconciler,
   type ReconcilerSnapshot,
 } from "./live-event-reconciler.ts";
+import { ContractViolation } from "../../../shared/contract-violation.ts";
 
 export type ExecutionSessionRead = {
   snapshot: ReconcilerSnapshot;
@@ -74,8 +75,11 @@ export class ExecutionSessionReader {
       }
     });
 
+    // 没有 pullFailure = 取页本身没出错，是 reconciler 拒了取回来的页（游标没往前走、
+    // 同一序号两个事件…）—— 对面违约。仍是 ContractViolation 而不是
+    // ExecutionReadContractError：后者会让 describeApiProblem 换一句话、换一种状态。
     if (snapshot.phase === "error") {
-      throw pullFailure ?? new Error(snapshot.error ?? "Execution event sync failed");
+      throw pullFailure ?? new ContractViolation(snapshot.error ?? "Execution event sync failed");
     }
 
     const decisions = await this.client.listCurrentDecisions(this.sessionId);

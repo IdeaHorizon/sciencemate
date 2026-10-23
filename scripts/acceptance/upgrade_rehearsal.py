@@ -43,9 +43,34 @@ RECEIPT_NAME = "windows-upgrade-rehearsal.json"
 #: 夹具里带哪些顶层项。载荷 / 更新缓存 / WebView2 用户数据 / socket 不是数据；凭据主密钥是秘密。
 CARRIED = ("db.sqlite", "harness-state", "project-repositories", "project-worktrees", "projects", "org", "user", "shell.json")
 CARRIED_LOGS = ("permissions-snapshot.json", "permissions.jsonl")
+#: 搬根之后、新版起来之前，在**这台机器、这个位置**上记的权限基线。夹具里那份快照记的是采集时的位置
+#: 和沙箱打过的 ACE —— 抄过来的文件按新上级目录重新继承 ACL，那些 ACE 本来就带不过来，拿它比只会全红。
+BASELINE_NAME = "permissions-before-upgrade.json"
 #: 单个文件超过这个就不带（记进 manifest.skipped_large）：夹具是结构，不是产物仓库。
 FILE_CAP = 4 * 1024 * 1024
 TOTAL_CAP = 96 * 1024 * 1024
+
+
+def _snapshots(tree: Path | None = None):
+    """后端的权限快照模块（只用标准库）：基线和事后用同一个函数采、同一条规则比 —— 不在这里抄一份。"""
+    backend = str((tree or HERE.parents[1]) / "platform" / "backend")
+    if backend not in sys.path:
+        sys.path.insert(0, backend)
+    from app.services import permissions_snapshot
+
+    return permissions_snapshot
+
+
+def _write_baseline(to: Path, previous_version: str | None, tree: Path | None) -> dict[str, Any]:
+    snap = _snapshots(tree)
+    baseline = snap.take_snapshot(to, app_version=previous_version)
+    logs = to / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(baseline, ensure_ascii=False, indent=1)
+    (logs / BASELINE_NAME).write_text(text, encoding="utf-8")
+    # 新版启动时拿 logs/ 里那份和自己比（版本号变了才比）：让它比的也是这台机器上的基线。
+    (logs / snap.SNAPSHOT_NAME).write_text(text, encoding="utf-8")
+    return baseline
 
 
 def _smoke():
@@ -301,6 +326,8 @@ def restore(fixture: Path, to: Path, *, python: str | None = None, tree: Path | 
     print((done.stdout or "").strip())
     if done.returncode != 0:
         raise SystemExit(f"搬根没成（rc={done.returncode}）：{(done.stderr or '').strip()[-2000:]}")
+    baseline = _write_baseline(to, manifest.get("previous_version"), tree)
+    print(f"权限基线：{len(baseline['entries'])} 条（{to / 'logs' / BASELINE_NAME}）")
     return manifest
 
 
@@ -318,15 +345,22 @@ def _items(payload: Any) -> list[Any]:
     return []
 
 
-def _compare_snapshots(previous: dict[str, Any], current: dict[str, Any]) -> list[dict[str, Any]]:
-    """与 app.services.permissions_snapshot.compare 同一条规则（这里不能 import 后端）。"""
-    diffs: list[dict[str, Any]] = []
-    before, after = previous.get("entries") or {}, current.get("entries") or {}
-    for key in sorted(set(before) & set(after)):
-        for field in ("owner", "mode", "acl_sha256", "label", "error"):
-            if before[key].get(field) != after[key].get(field):
-                diffs.append({"path": key, "field": field, "before": before[key].get(field), "after": after[key].get(field)})
-    return diffs
+def permission_diffs(data_root: Path) -> tuple[list[dict[str, Any]], int]:
+    """restore 记的基线 vs 现在：差异，以及这次比了几条。比不了就抛 —— 比不了不是零差异。"""
+    baseline_path = data_root / "logs" / BASELINE_NAME
+    if not baseline_path.is_file():
+        raise RehearsalFailed(f"没有权限基线 {baseline_path} —— 这个数据根不是 restore 摆出来的，权限没法比")
+    snap = _snapshots()
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    after = snap.take_snapshot(data_root, app_version=None)
+    reason = snap.not_comparable(baseline, after)
+    if reason:
+        raise RehearsalFailed(f"权限基线和现在的快照比不了：{reason}")
+    return snap.compare(baseline, after), len(after["entries"])
+
+
+class RehearsalFailed(Exception):
+    """彩排里不靠 HTTP 的那几步（权限比对）失败时抛；check 把它和 smoke.Failed 一样落成 REHEARSAL FAILED。"""
 
 
 def check(url: str, fixture: Path, data_root: Path, *, receipt: Path | None, installer: Path | None,
@@ -407,26 +441,22 @@ def check(url: str, fixture: Path, data_root: Path, *, receipt: Path | None, ins
         if not checks["kb_readable"]:
             raise smoke.Failed(f"上一版的 KB 读不回：期望 ≥{expected_claims}，读到 {got_claims}（HTTP {status}）")
 
-        # 5. 权限快照零差异（夹具里有上一版的快照才比；新版启动时写了自己的那份）
-        previous = fixture / "logs" / "permissions-snapshot.json"
-        current = data_root / "logs" / "permissions-snapshot.json"
-        if previous.is_file() and current.is_file():
-            diffs = _compare_snapshots(json.loads(previous.read_text(encoding="utf-8")),
-                                       json.loads(current.read_text(encoding="utf-8")))
-            checks["permissions_unchanged"] = not diffs
-            checks["permission_diffs"] = diffs[:20]
-            if diffs:
-                raise smoke.Failed("升级前后数据根的权限变了：" + "；".join(f"{d['path']}.{d['field']} {d['before']}→{d['after']}" for d in diffs[:5]))
-        else:
-            checks["permissions_unchanged"] = None   # 上一版还没有快照（0.5.6 及之前）：如实说没比
-            checks["permission_diffs"] = None
+        # 5. 权限零差异：restore 在新版起来之前记的基线 vs 现在（新版装好、起来、跑完一轮之后），
+        #    同一个函数采、同一条规则比。问的就是「装新版、起新版这件事有没有动数据根的权限」——
+        #    lujy 那类问题要是我们自己造得出来，这里当场红。
+        diffs, entries = permission_diffs(data_root)
+        checks["permissions_unchanged"] = not diffs
+        checks["permission_diffs"] = diffs[:20]
+        if diffs:
+            raise smoke.Failed("装新版、起新版之后数据根的权限变了：" + "；".join(
+                f"{d['path']} 的 {d['field']} {d['before']} → {d['after']}" for d in diffs[:5]))
         print(f"REHEARSAL OK: {manifest.get('previous_version')} → 新版，旧会话一轮回复 {reply[:60]!r}；"
               f"run {len(runs_by_session[session_id])} 条都在；KB {got_claims} 条；权限 "
-              f"{'零差异' if checks['permissions_unchanged'] else '没比（上一版没有快照）'}")
+              f"零差异（{entries} 条）")
         if receipt is not None:
             _write_receipt(receipt, url, installer, manifest, checks, time.monotonic() - started)
         return 0
-    except smoke.Failed as exc:
+    except (smoke.Failed, RehearsalFailed) as exc:
         print(f"REHEARSAL FAILED: {exc}", file=sys.stderr)
         print(json.dumps(checks, ensure_ascii=False, indent=1), file=sys.stderr)
         return 1

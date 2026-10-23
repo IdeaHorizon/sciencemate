@@ -25,10 +25,13 @@ M2 可以加一层模型 re-rank，但它排的是候选顺序，理由里点名
 from __future__ import annotations
 
 import math
+import re
+import sys
+from pathlib import Path
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 
-from sqlalchemy import String, and_, cast, func, or_, select
+from sqlalchemy import String, and_, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.feed import (
@@ -39,13 +42,14 @@ from app.models.feed import (
     FeedItemKind,
 )
 from app.services.feed import domains as domain_service
-from app.services.feed.profile import Profile, author_matches, extract_terms, journal_key
+from app.services.feed import windows
+from app.services.feed.profile import Profile, author_matches, extract_terms, journal_key, journal_display_name
 
 #: 每天的选摘条数。三条是"读得完"和"有得挑"之间的位置。
 DAILY_PICK_COUNT = 3
 
 #: 参与排序的候选窗口。再往前的东西不叫资讯。
-CANDIDATE_WINDOW_DAYS = 14
+CANDIDATE_WINDOW_DAYS = windows.ACADEMIC_WINDOW_DAYS
 
 #: 时效半衰期（天）：一条内容每过这么久，时效分打对折。
 RECENCY_HALF_LIFE_DAYS = 3.0
@@ -63,6 +67,9 @@ MIN_PROJECT_TERM_HITS = 2
 #: 命中强度下限（归一化罕见度之和）。低于它不算命中 —— 两个到处都是的词
 #: 凑在一起不构成关联。0.8 大致等于"两个各出现在一成内容里的术语"。
 MIN_PROJECT_MATCH_STRENGTH = 0.8
+# 中文课题检索出英文论文时，原检索词提供第二种可核对的关联证据。
+MIN_PROJECT_QUERY_RELEVANCE = 0.5
+MIN_PROJECT_QUERY_STRENGTH = 0.6
 
 # 方法/过程词不能单独证明领域相关性；必须和至少一个非泛化领域锚点共同出现。
 GENERIC_PROJECT_TERMS = frozenset({
@@ -73,6 +80,153 @@ GENERIC_PROJECT_TERMS = frozenset({
     "simulations", "investigation", "investigations", "method", "methods",
     "design", "designs",
 })
+GENERIC_QUERY_TERMS = GENERIC_PROJECT_TERMS | frozenset({
+    "control", "study", "research", "parameter", "parameters",
+    "identification", "trajectory", "tracking", "lateral", "vertical",
+    "fault-tolerant",
+})
+VEHICLE_CONTEXT_TERMS = frozenset({
+    "vehicle", "vehicles", "automotive", "automobile", "car", "cars",
+    "wheel", "wheels", "robot", "robots", "robotic", "steering",
+    "brake", "braking", "suspension", "locomotion", "tire", "tyre",
+    "brake-by-wire", "steer-by-wire",
+})
+
+
+
+# 只约束明确的 MLIP 课题；保留材料/原子模拟交叉主题，不要求检索词全部出现。
+_MLIP_TOPIC = re.compile(
+    r"\bmlips?\b|interatomic[\s-]+potential|原子间势|机器学习势|(?:AI|机器学习).*势函数", re.I
+)
+_MLIP_CONTEXT = re.compile(
+    r"\b(?:mlips?|mlffs?|interatomic|atomistic|phonons?|crystals?|thermoelectrics?|dft)\b"
+    r"|molecular[\s-]+dynamics|potential[\s-]+energy[\s-]+surface"
+    r"|density[\s-]+functional|materials?[\s-]+propert"
+    r"|machine[\s-]*(?:learning|learned)[\s-]+force[\s-]*fields?"
+    r"|neural[\s-]+network[\s-]+potentials?"
+    r"|原子间势|机器学习(?:势|力场)|神经网络势|原子模拟|分子动力学|声子|晶体|材料性能|材料性质|热电", re.I
+)
+
+
+def _particle_settling_topic(topic: str) -> bool:
+    return bool(re.search(r"\b(?:lbm|boltzmann)\b|格子玻尔兹曼", topic, re.I)
+                and re.search(r"sedimentation|settling|沉降", topic, re.I))
+
+
+def _particle_physics_evidence(topic: str, title: str, summary: str | None) -> tuple[str, ...]:
+    """Precise physical concepts supplement token rarity for this project only."""
+    if not _particle_settling_topic(topic):
+        return ()
+    normalize = lambda text: re.sub(r"[‐‑‒–—−]", "-", text).casefold()
+    heading = normalize(title)
+    text = heading + " " + normalize(summary or "")
+    # These meanings share shape/lattice words but do not establish particle-fluid physics.
+    if re.search(r"interatomic|phonon|perovskite|atom\s+refinement|quantum|electrostatic|"
+                 r"optical|light\s+pressure|acoustic\s+radiation|astigmatism|"
+                 r"protoplanet|astrophys|planetary|cosmolog|warfare|robotic\s+manipulator|"
+                 r"^\s*(?:reply|comment|correction|erratum|retraction)\b|erratum\s*$", heading):
+        return ()
+    particle = re.search(r"\b(?:particles?|spheres?|spheroids?|colloids?|microplastics?|beads?)\b|颗粒|粒子|球体", heading)
+    settling = re.search(r"\b(?:settling|sediment(?:ation|ing)?|terminal[\s-]+(?:settling[\s-]+)?velocity)\b|沉降|沉速", heading)
+    fluid = re.search(r"\b(?:fluids?|flows?|hydrodynamic\w*|liquids?|viscous|newtonian|turbulen\w*|shear|water)\b|流体|流动|流固|黏性|粘性", text)
+    lbm = re.search(r"lattice[\s-]+boltzmann|\blbm\b|格子玻尔兹曼", heading)
+    ibm = re.search(r"immersed[\s-]+boundary|浸入边界", heading)
+    particle_in_text = re.search(r"\b(?:particles?|spheres?|spheroids?|colloids?|microplastics?|beads?)\b|颗粒|粒子|球体", text)
+    astrophysics = re.search(r"protoplanet|astrophys|planetary\s+(?:disk|formation)", text)
+    explicit_velocity = re.search(r"\bsettling\b|terminal[\s-]+(?:settling[\s-]+)?velocity|沉降速度|沉速", heading)
+    if settling and not astrophysics and (particle or (particle_in_text and fluid and explicit_velocity)):
+        return ((particle or particle_in_text).group(), settling.group())
+    if lbm and ibm:
+        return (lbm.group(), ibm.group())
+    method_focus = re.search(
+        r"\b(?:boundar(?:y|ies)|kernel|interface|solver|scheme|schemes|formulation|"
+        r"algorithm|parallelization|parallel|grids?|collision|subgrid|distributions?)\b|"
+        r"^\s*(?:a\s+)?(?:new\s+)?lattice[\s-]+boltzmann\s+(?:models?|methods?)\b|"
+        r"边界|核函数|界面|求解器|格式|算法|并行|网格", heading,
+    )
+    if (lbm or ibm) and fluid and method_focus:
+        return ((lbm or ibm).group(), fluid.group())
+    motion = re.search(r"\b(?:drag|lift|wakes?|torques?|migration|orientation|transport|motion|dispersion)\b|曳力|阻力|升力|尾流|力矩|取向|运动", heading)
+    if particle and motion and fluid:
+        return (particle.group(), motion.group(), fluid.group())
+    return ()
+
+
+def _project_subject_matches(topic: str, title: str, summary: str | None) -> bool:
+    text = re.sub(r"[‐‑‒–—−]", "-", f"{title} {summary or ''}")
+    # For a named battery chemistry, a passing mention in the abstract must
+    # not turn a different ion system into this project's result. The study's
+    # title must identify the target chemistry (including common Na notation).
+    if re.search(r"sodium[\s-]*ion|钠离子|钠电池", topic, re.I) and not re.search(
+        r"\bsodium\b|\bna[\s-]*ion\b|\bna\+|\bna storage\b|钠", title, re.I
+    ):
+        return False
+    if _MLIP_TOPIC.search(topic):
+        return _MLIP_CONTEXT.search(text) is not None
+    # Crystal lattices and phonon Boltzmann transport share words with LBM,
+    # but do not establish a connection to fluid–particle sedimentation.
+    if (re.search(r"\b(?:lbm|boltzmann)\b|格子玻尔兹曼", topic, re.I)
+            and re.search(r"sedimentation|settling|沉降", topic, re.I)):
+        particle = re.search(r"\b(?:particles?|spheres?|spheroids?|colloids?)\b|颗粒|粒子|球体", text, re.I)
+        settling = re.search(r"sediment|settling|terminal[\s-]+velocity|沉降|沉速", text, re.I)
+        method = re.search(r"lattice[\s-]+boltzmann|immersed[\s-]+boundary|\b(?:lbm|ibm)\b|格子玻尔兹曼|浸入边界", text, re.I)
+        fluid = re.search(r"\b(?:fluids?|flows?|hydrodynamic\w*)\b|fluid[\s-]+(?:solid|particle)|流体|流动|流固", text, re.I)
+        particle_motion = re.search(r"\b(?:drag|wakes?|non[\s-]*spherical|irregular)\b|曳力|阻力|尾流|非球形|不规则", text, re.I)
+        return bool((particle and settling) or (method and (fluid or particle or settling))
+                    or (particle and fluid and particle_motion))
+    return True
+
+
+def _current_query_title_matches(profile: Profile, title: str) -> bool:
+    """Credit a project only when the title shares a concrete curated facet.
+
+    Abstracts may mention many neighboring applications. Without a title
+    anchor, a lithium-electrolyte or carbon-nanotube paper can be labelled as
+    a sodium hard-carbon project merely because its abstract says battery or
+    efficiency. The curator's current queries provide a topic-specific guard
+    without a field-specific word blacklist.
+    """
+    queries = profile.active_project_queries
+    if not queries:
+        return True
+    title_terms = extract_terms(title)
+    return any(len(title_terms & extract_terms(query)) >= 2 for query in queries)
+
+
+def _vehicle_dynamics_title_evidence(query: str, title: str) -> tuple[str, ...]:
+    """Recover road-vehicle project matches when Chinese project text has no English terms.
+
+    Historical keyword scores often rate generic dynamics papers highly.  This
+    route requires specific evidence in the *title*: a by-wire system, or a
+    road vehicle together with a mechanical-dynamics topic.  It applies only
+    to discovery queries that explicitly ask for vehicle dynamics or by-wire.
+    """
+    query = query.casefold()
+    if not ("vehicle dynamics" in query or "steer-by-wire" in query or "brake-by-wire" in query):
+        return ()
+    title = title.casefold().replace("‐", "-").replace("–", "-").replace("‑", "-")
+    for term in ("steer-by-wire", "brake-by-wire", "x-by-wire"):
+        if term in title:
+            return (term,)
+    if re.search(r"\b(?:aerial|underwater|marine|deep-sea|orbital|interplanetary|"
+                 r"flight|routing|charging|batteries|battery|microgrids?|course)\b", title):
+        return ()
+    if not re.search(r"\b(?:vehicles?|automotive|automobile|cars?|trucks?|buses)\b", title):
+        return ()
+    for term, pattern in (
+        ("vehicle dynamics", r"\bdynamics?\b"),
+        ("vehicle chassis", r"\bchassis\b"),
+        ("vehicle suspension", r"\bsuspension\b"),
+        ("vehicle steering", r"\bsteering\b"),
+        ("vehicle braking", r"\bbrak(?:e|ing)\b"),
+        ("vehicle torque", r"\btorque\b"),
+        ("vehicle handling", r"\bhandling\b"),
+        ("vehicle longitudinal control", r"\blongitudinal\b"),
+        ("vehicle lateral control", r"\blateral\b"),
+    ):
+        if re.search(pattern, title):
+            return (term,)
+    return ()
 
 #: 命中饱和点：强度到这里就算满分。1.5 大致等于"两个各只出现在 1% 内容里
 #: 的术语"，那已经是相当确凿的关联了。
@@ -105,6 +259,7 @@ class ScoredItem:
     #: 订阅的水刊论文全部显示"本领域近期动态"，用户完全看不出为什么会推它）。
     matched_journal: str = ""
     matched_scholar: str = ""
+    matched_query_terms: tuple[str, ...] = ()
 
     def reason(self) -> str:
         """一句能被当场验证的理由。
@@ -123,9 +278,11 @@ class ScoredItem:
             )
             return f"属于你关注的 {labels}"
         if self.matched_journal:
-            return f"你订阅的期刊 {self.matched_journal} 有新文章"
+            return f"你订阅的期刊 {journal_display_name(self.matched_journal)} 有新文章"
         if self.matched_scholar:
             return f"你订阅的学者 {self.matched_scholar} 有新论文"
+        if self.matched_query_terms:
+            return f"按你的课题检索词找到：{'、'.join(self.matched_query_terms[:3])}"
         routes = acquisition_routes(self.item)
         if "web" in routes:
             return "根据你的课题画像从公开网页发现"
@@ -147,6 +304,14 @@ def _recency_score(published_at: datetime | None, *, now: datetime) -> float:
         return 0.0
     age_days = max((now - moment).total_seconds() / 86400.0, 0.0)
     return math.pow(0.5, age_days / RECENCY_HALF_LIFE_DAYS)
+
+
+def _effective_date(item: FeedItem) -> datetime | None:
+    """Month-only source dates use discovery time for ordering, not fake day one."""
+    extra = item.extra if isinstance(item.extra, dict) else {}
+    if extra.get("publication_date_precision") == "month":
+        return item.created_at or item.published_at
+    return item.published_at or item.created_at
 
 
 def _attention_score(item: FeedItem) -> float:
@@ -172,7 +337,19 @@ def _domain_hits(item: FeedItem, profile: Profile) -> tuple[str, ...]:
         return ()
     wanted = set(profile.domains)
     hits: list[str] = []
-    for slug in item.domains or ():
+    slugs = item.domains or ()
+    extra = item.extra if isinstance(item.extra, dict) else {}
+    if item.kind == FeedItemKind.PAPER and (
+        extra.get("classification_mode") in {"online_journal_mapping", "offline_journal_mapping", "offline_mapped_journal"}
+        or extra.get("journal_harvest_verified") is True
+    ):
+        from app.config import settings
+        harness_root = settings.harness_root or str(Path(__file__).resolve().parents[5])
+        if harness_root not in sys.path:
+            sys.path.insert(0, harness_root)
+        from nodes.literature.tools.journal_scope import current_domains
+        slugs = current_domains(item.venue or "", slugs, item.title or "", item.summary or "")
+    for slug in slugs:
         for ancestor in domain_service.ancestors(str(slug)):
             if ancestor in wanted and ancestor not in hits:
                 hits.append(ancestor)
@@ -247,6 +424,8 @@ def score_item(
         overlap = terms & signal.terms
         if len(overlap) < MIN_PROJECT_TERM_HITS:
             continue
+        if not _project_subject_matches(signal.name + " " + " ".join(signal.terms), item.title, item.summary):
+            continue
         # 泛词可以提高排序，但不能单独制造“和你的课题对得上”。
         specific_overlap = overlap - GENERIC_PROJECT_TERMS
         if not specific_overlap:
@@ -266,14 +445,74 @@ def score_item(
                 discrimination.most_distinctive(specific_overlap),
             )
 
+    if best is not None and not _current_query_title_matches(profile, item.title):
+        best = None
+
     domain_hits = _domain_hits(item, profile)
+
+    matched_query_terms: tuple[str, ...] = ()
+    extra = item.extra if isinstance(item.extra, dict) else {}
+    routes = acquisition_routes(item)
+    query = str(extra.get("discovery_query") or "")
+    primary_query_term = query.split()[0] if query.split() else ""
+    query_subject_matches = bool(query) and _project_subject_matches(query, item.title, item.summary)
+    # Chinese model queries often have a specific subject first, followed by a
+    # broad method. A hit on the method alone is not evidence for the subject.
+    primary_missed = bool(
+        "project_profile" in routes
+        and re.fullmatch(r"[\u4e00-\u9fff]{2,}", primary_query_term)
+        and primary_query_term not in f"{item.title} {item.summary or ''}"
+    )
+    if primary_missed:
+        best = None
+    owners = {str(value) for value in (extra.get("profile_user_ids") or [])}
+    query_is_current = profile.active_project_queries is None or query in profile.active_project_queries
+    active_project_subject = any(
+        (_project_subject_matches(signal.name + " " + " ".join(signal.terms), item.title, item.summary)
+         or _particle_physics_evidence(signal.name + " " + " ".join(signal.terms), item.title, item.summary))
+        for signal in profile.projects
+    )
+    if (query_is_current and active_project_subject and profile.projects
+            and str(profile.user_id) in owners and routes & {"project_profile", "web"}):
+        try:
+            query_relevance = float(extra.get("profile_query_relevance") or 0)
+        except (TypeError, ValueError):
+            query_relevance = 0.0
+        if query and not primary_missed and query_subject_matches and query_relevance >= MIN_PROJECT_QUERY_RELEVANCE:
+            overlap = terms & extract_terms(query)
+            specific = overlap - GENERIC_QUERY_TERMS
+            # Chassis is also a biological production host. Vehicle alone can
+            # mean a scanning platform or other unrelated transport. Require
+            # one additional mobility/vehicle clue before either authorizes a
+            # project recommendation.
+            if "chassis" in specific and not (terms & VEHICLE_CONTEXT_TERMS):
+                specific -= {"chassis"}
+            if "vehicle" in specific and not (terms & (VEHICLE_CONTEXT_TERMS - {"vehicle"})):
+                specific -= {"vehicle"}
+            if len(overlap) >= 2 and specific and sum(
+                discrimination.weight(term) for term in specific
+            ) >= MIN_PROJECT_QUERY_STRENGTH:
+                matched_query_terms = discrimination.most_distinctive(specific)
+        # A precise title is stronger evidence than the old broad search
+        # score.  Keep this independent of that score so genuinely relevant
+        # papers with low retrieval scores can still enter the project lane.
+        if query and not primary_missed and query_subject_matches and not matched_query_terms and "project_profile" in routes:
+            matched_query_terms = _vehicle_dynamics_title_evidence(query, item.title)
+        if query and not primary_missed and not matched_query_terms and "project_profile" in routes:
+            for signal in profile.projects:
+                evidence = _particle_physics_evidence(
+                    signal.name + " " + " ".join(signal.terms), item.title, item.summary,
+                )
+                if evidence:
+                    matched_query_terms = evidence
+                    break
 
     score = 0.0
     if best is not None:
         score += WEIGHT_PROJECT_MATCH * min(best[0] / PROJECT_MATCH_SATURATION, 1.0)
     if domain_hits:
         score += WEIGHT_DOMAIN_MATCH
-    score += WEIGHT_RECENCY * _recency_score(item.published_at, now=now)
+    score += WEIGHT_RECENCY * _recency_score(_effective_date(item), now=now)
     score += WEIGHT_ATTENTION * _attention_score(item)
 
     # 订阅命中也要进理由：它是用户亲自点名的依据，跟课题、学科同级。
@@ -281,7 +520,7 @@ def score_item(
     matched_scholar = ""
     if profile.journals and matches_subscribed_journal(item, profile):
         matched_journal = (item.venue or "").strip()
-    if profile.scholars:
+    if profile.scholars and matches_subscribed_scholar(item, profile):
         for author in item.authors or []:
             if any(author_matches(wanted, author) for wanted in profile.scholars):
                 matched_scholar = str(author).strip()
@@ -296,6 +535,7 @@ def score_item(
         matched_domains=domain_hits,
         matched_journal=matched_journal,
         matched_scholar=matched_scholar,
+        matched_query_terms=matched_query_terms,
     )
 
 
@@ -311,11 +551,46 @@ def recent_order():
     用 `COALESCE(published_at, created_at)` 让它们按入库时间参与竞争 —— 这正是
     `_windowed()` 里"没写日期不等于不存在"那句注释的本意。
     """
-    return func.coalesce(FeedItem.published_at, FeedItem.created_at).desc()
+    return case(
+        (FeedItem.extra["publication_date_precision"].as_string() == "month", FeedItem.created_at),
+        else_=func.coalesce(FeedItem.published_at, FeedItem.created_at),
+    ).desc()
+
+
+def publication_window_clause(now: datetime):
+    """Shared SQL window: network discovery 12 months, passive content 31 days."""
+    def date_window(start: datetime):
+        return (
+            (FeedItem.published_at.is_(None) & (FeedItem.created_at >= start))
+            | ((FeedItem.published_at >= start) & (FeedItem.published_at <= now))
+            | (
+                (FeedItem.extra["publication_date_precision"].as_string() == "month")
+                & (FeedItem.published_at >= start.replace(day=1, hour=0, minute=0, second=0, microsecond=0))
+                & (FeedItem.published_at <= now)
+            )
+        )
+
+    # Journal, scholar, project and web routes all call network search APIs.
+    # Passive imports and public feed items retain the 31-day default.
+    online_routes = or_(*(
+        cast(FeedItem.extra["feed_acquisition_routes"], String).like(f"%{route}%")
+        for route in ("journal", "scholar", "project_profile", "web")
+    ))
+    online_item = func.coalesce(
+        (FeedItem.extra["source"].as_string() == "web")
+        | (FeedItem.extra["web_search_backend"].as_string().is_not(None)
+           & (FeedItem.extra["web_search_backend"].as_string() != ""))
+        | online_routes,
+        False,
+    )
+    return (
+        (online_item & date_window(windows.web_cutoff(now)))
+        | (~online_item & date_window(windows.academic_cutoff(now)))
+    )
 
 
 async def candidate_items(
-    db: AsyncSession, *, profile: Profile, limit: int = 400
+    db: AsyncSession, *, profile: Profile, batch_size: int = 400, include_preparing: bool = False
 ) -> list[FeedItem]:
     """取候选池：窗口内、这个用户可见、还没被他处理掉的。
 
@@ -324,43 +599,29 @@ async def candidate_items(
     """
     from app.models.feed import FeedVisibility
 
+    # Retained for callers that pass batch_size; the full candidate set is
+    # deliberately uncapped and is fetched with one database query.
     now = datetime.now(UTC)
-    cutoff = now - timedelta(days=CANDIDATE_WINDOW_DAYS)
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
     def _windowed(statement):
         """窗口 + 可见性 —— 主候选池与订阅补充扫描共用同一套条件。
 
         两处各写一份的话，一边收紧一边放宽会静默分叉（比如订阅扫描放进来一条
         已经过期的条目），而症状只表现为"偶尔多一条奇怪的"。
         """
-        from app.models.feed import FeedVisibility
-
         return statement.where(
-            FeedItem.visibility == FeedVisibility.PLATFORM,
-            # published_at 缺失的条目（源没给日期）用入库时间兜底，否则它们会因为
-            # 时间比较为 NULL 被整条排除 —— 一条没写日期的内容不该等于不存在。
-            (FeedItem.published_at.is_(None) & (FeedItem.created_at >= cutoff))
-            # 出版商会提前登记未来卷期。它们不是“今天的动态”，也不能按倒序
-            # 占满有界候选池，把已经发表的当前内容挤到查询上限之外。
-            | ((FeedItem.published_at >= cutoff) & (FeedItem.published_at <= now))
-            # 只有 YYYY-MM 的来源记录会以当月 1 日落到 DateTime，但这个“1日”
-            # 只是存储占位，不是真实发表日。本月记录应在整个月内可被资讯候选召回。
-            | (
-                (FeedItem.extra["publication_date_precision"].as_string() == "month")
-                & (FeedItem.published_at >= month_start)
-                & (FeedItem.published_at <= now)
+            or_(
+                FeedItem.visibility == FeedVisibility.PLATFORM,
+                and_(FeedItem.visibility == FeedVisibility.INSTITUTION,
+                     FeedItem.organization_id == profile.institution_id),
             ),
+            publication_window_clause(now),
         )
 
+    early_order = [case((FeedItem.extra["literature_preparation"].as_string() == "ready", 1), else_=0)] if include_preparing else []
     query = _windowed(select(FeedItem)).order_by(
-        recent_order()
-    # Rejected catalog projections are filtered below.  Fetch extra rows
-    # so they cannot crowd valid news out of a bounded candidate pool.
-    ).limit(limit * 3)
-    # 六位代码是明确的二级学科选择。必须在 LIMIT 之前过滤，否则全平台其他
-    # 热门学科的最新条目会先占满候选池，目标学科明明已入库却永远到不了
-    # Python 侧的精细排序。一级/骨架域仍留给后面的层级匹配处理。
+        *early_order, recent_order(), FeedItem.id
+    )
+    # 六位代码先缩小主扫描范围；跨学科的订阅和课题由下方完整补充扫描覆盖。
     leaf_domains = {
         str(code) for code in profile.domains
         if str(code).isdigit() and len(str(code)) == 6
@@ -388,55 +649,73 @@ async def candidate_items(
             )),
         )
         query = query.where(or_(leaf_condition, owned_by_this_user))
-    items = list((await db.execute(query)).scalars().all())[:limit]
-    # ── 订阅补充扫描 ────────────────────────────────────────────────────
-    #
-    # 订阅的刊/人可以是跨学科的：用户订了某个刊，却把它归在一个他没选的
-    # 二级学科下（或者这本刊压根不在离线「期刊→学科」映射表里）。上面的学科
-    # 预过滤只看 domains，会把这类条目整批挡在候选池外 —— 症状就是"订阅了
-    # 但推荐里从来没有它"。
-    #
-    # 这里不能再靠"有订阅就不做预过滤"来兜（2026-09-21 实测踩过）：那等于
-    # 把学科边界整个撤掉，候选池变成全平台最新条目，公共期刊动态会把课题命中
-    # 挤出推荐流，用户看到的是"我的课题怎么不见了"。
-    #
-    # 所以改成单独扫一遍同窗口的最新条目，用**送达时同一套**匹配函数认领订阅
-    # 命中项，再并进候选池。学科边界不动，订阅内容照样进得来。
-    from app.services.feed.profile import journal_key as _journal_key
+    # Fetch all matching rows once. OFFSET pagination made PostgreSQL repeat
+    # the same sort and window scan for every 400 rows (27 times on the demo
+    # account) while we still retained every row in memory for ranking.
+    items = list((await db.execute(query)).scalars().all())
+    known = {str(item.id) for item in items}
+    ordering = (
+        case((FeedItem.extra["literature_preparation"].as_string() == "ready", 1 if include_preparing else 0), else_=0 if include_preparing else 1),
+        recent_order(), FeedItem.id,
+    )
 
-    if profile.journals or profile.scholars:
-        # 顺序有讲究：**先看他自己的订阅采集产物**（extra.profile_user_ids 指向他），
-        # 再退到通用窗口。通用窗口是按 published_at 截断的，订阅内容会被更新的
-        # 无关条目挤出窗口（实测 23 条订阅命中里 14 条落在窗口外）—— 先按归属取
-        # 才不会漏，通用的那次用于兜住期刊映射路线（那批内容不属于任何用户）。
-        owned_probe = _windowed(select(FeedItem)).where(
-            cast(FeedItem.extra["profile_user_ids"], String).like(
-                f'%"{profile.user_id}"%'
-            )
-        ).order_by(recent_order()).limit(limit)
-        generic_probe = _windowed(select(FeedItem)).order_by(
-            recent_order()
-        ).limit(limit)
-        probe_rows = list((await db.execute(owned_probe)).scalars().all())
-        probe_rows += list((await db.execute(generic_probe)).scalars().all())
-
-        known = {str(item.id) for item in items}
-        wanted_journals = set(profile.journals)
-        wanted_scholars = {str(value).casefold().strip() for value in profile.scholars}
-        for item in probe_rows:
-            if str(item.id) in known:
+    async def supplement(statement, matches):
+        # Without a leaf-domain prefilter the primary scan already covers all rows.
+        if not leaf_domains:
+            return
+        rows = (await db.execute(statement.order_by(*ordering))).scalars().all()
+        for item in rows:
+            extra = item.extra or {}
+            if (extra.get("literature_catalog") and (
+                extra.get("literature_eligible") is not True
+                or (not include_preparing and extra.get("literature_preparation") != "ready")
+            )) or is_journal_notice(item):
                 continue
-            venue_key = _journal_key(item.venue)
-            by_journal = bool(venue_key) and any(
-                venue_key == _journal_key(value) for value in wanted_journals
-            )
-            by_scholar = any(
-                str(author).casefold().strip() in wanted_scholars
-                for author in (item.authors or [])
-            )
-            if by_journal or by_scholar:
+            if not (show_in_feed(item, include_preparing=include_preparing) or matches_subscribed_journal(item, profile)):
+                continue
+            if not matches(item):
+                continue
+            if str(item.id) not in known:
                 items.append(item)
                 known.add(str(item.id))
+
+    if profile.projects:
+        project_probe = _windowed(select(FeedItem)).where(
+            cast(FeedItem.extra["profile_user_ids"], String).like(
+                f'%"{profile.user_id}"%'
+            ),
+            or_(*(
+                cast(FeedItem.extra["feed_acquisition_routes"], String).like(f"%{route}%")
+                for route in ("project_profile", "web")
+            )),
+        )
+        if profile.active_project_queries is not None:
+            project_probe = project_probe.where(
+                FeedItem.extra["discovery_query"].as_string().in_(profile.active_project_queries)
+            )
+        await supplement(project_probe, lambda item: True)
+
+    if profile.domains:
+        domain_condition = or_(*(
+            condition
+            for slug in profile.domains
+            for condition in (
+                cast(FeedItem.domains, String).like(f'%"{slug}"%'),
+                cast(FeedItem.domains, String).like(f'%"{slug}.%'),
+            )
+        ))
+        await supplement(
+            _windowed(select(FeedItem)).where(domain_condition),
+            lambda item: bool(_domain_hits(item, profile)),
+        )
+
+    # Journal names and verified scholar identities each receive a complete scan.
+    if profile.journals:
+        await supplement(_windowed(select(FeedItem)),
+                         lambda item: matches_subscribed_journal(item, profile))
+    if profile.scholars:
+        await supplement(_windowed(select(FeedItem)),
+                         lambda item: matches_subscribed_scholar(item, profile))
     # A catalog projection is fail-closed: rows produced under an older or
     # subsequently invalidated journal policy disappear until refreshed as
     # explicitly eligible.  Ordinary feed rows are unaffected.
@@ -467,13 +746,30 @@ async def candidate_items(
                 and "journal" in acquisition_routes(item)
             )
             or _normal_journal(item.venue) in allowed_journals
+            or matches_subscribed_scholar(item, profile)
         ]
     if profile.suppressed_item_ids:
         suppressed = {str(value) for value in profile.suppressed_item_ids}
         items = [i for i in items if str(i.id) not in suppressed]
-    # 出版商/数据库（论文形态）无摘要的不进推荐池：见 show_in_feed。
-    items = [i for i in items if show_in_feed(i)]
+    # 普通论文仍要求摘要；用户明确订阅的期刊是例外，先把索引结果展示出来，
+    # 摘要由后台资产/元数据补齐后再完善卡片。
+    items = [
+        i for i in items
+        if (
+            not (i.extra or {}).get("literature_catalog")
+            or (i.extra or {}).get("literature_preparation") == "ready"
+            or (include_preparing and (i.extra or {}).get("literature_eligible") is True)
+        )
+        and not is_journal_notice(i)
+        and (show_in_feed(i, include_preparing=include_preparing) or matches_subscribed_journal(i, profile))
+    ]
     return items
+
+
+def is_journal_notice(item: FeedItem) -> bool:
+    """Exclude journal corrections, issue guides and publication metadata."""
+    from nodes.literature.tools.publication_types import is_journal_notice_title
+    return item.kind == FeedItemKind.PAPER and is_journal_notice_title(item.title)
 
 
 def acquisition_routes(item: FeedItem) -> frozenset[str]:
@@ -491,13 +787,42 @@ def _requires_summary(item: FeedItem) -> bool:
     return item.kind == FeedItemKind.PAPER and "web" not in acquisition_routes(item)
 
 
-def show_in_feed(item: FeedItem) -> bool:
-    """是否有资格进入推荐池。
-
-    候选池（candidate_items）的过滤收口在这里，日报缓存复用等其它入口也复用，
-    避免任何一条拼装路径绕过滤出「无摘要的出版商/数据库论文」。
-    """
-    return not _requires_summary(item) or _has_summary(item)
+def show_in_feed(item: FeedItem, *, include_preparing: bool = False) -> bool:
+    """是否有资格进入推荐池。"""
+    extra = item.extra if isinstance(item.extra, dict) else {}
+    if not include_preparing and _requires_summary(item) and not _has_summary(item):
+        # A project DOI can have no abstract after PubMed, Crossref, OpenAlex
+        # and publisher lookups.  The user asked to publish after attempts are
+        # complete even when every source lacks one; its title still has to
+        # pass the project relevance gate below.
+        completed_project = (
+            bool(acquisition_routes(item) & {"project_profile", "scholar", "journal"})
+            and extra.get("literature_preparation") == "ready"
+            and (extra.get("abstract_lookup_completed") is True or extra.get("abstract_enrichment_attempted") is True)
+        )
+        if not completed_project:
+            return False
+    if "web" in acquisition_routes(item) or extra.get("web_search_backend"):
+        # Search engines also return timeless reference pages and storefronts.
+        # They can stay in the catalog, but a dated news/recommendation stream
+        # must not present them as newly published discoveries.
+        title = item.title.casefold()
+        title_date = re.search(r"\b(20\d{2})[./-](\d{1,2})[./-](\d{1,2})\b", title)
+        if title_date:
+            from app.services.feed.windows import web_cutoff
+            try:
+                published = datetime(*(int(part) for part in title_date.groups()), tzinfo=UTC)
+                now = datetime.now(UTC)
+                if published < web_cutoff(now) or published > now:
+                    return False
+            except ValueError:
+                pass
+        if any(marker in title for marker in (
+            "百度百科", "维基百科", "wikipedia", "在线购买", "立即购买",
+            "产品报价", "批发价格",
+        )):
+            return False
+    return True
 
 
 def rank_field_dynamics(
@@ -513,7 +838,10 @@ def rank_field_dynamics(
         # 订阅的刊独立于订阅学科成立：用户点名的刊，即使不属于他选的二级学科
         # （跨学科期刊），它的新文章也该出现在"本领域动态"里。
         subscribed_journal = matches_subscribed_journal(item, profile)
-        if profile.domains and not domain_hits and not subscribed_journal:
+        # An empty domain selection is not permission to show every journal
+        # in the shared catalog.  After unfollowing the last journal, the
+        # field-dynamics lane has no matching interest and must be empty.
+        if not domain_hits and not subscribed_journal:
             continue
         extra = item.extra if isinstance(item.extra, dict) else {}
         try:
@@ -527,7 +855,7 @@ def rank_field_dynamics(
             citations = 0
         citation = min(1.0, math.log2(1 + citations) / math.log2(501))
         score = 0.45 * partition + 0.45 * citation + 0.10 * _recency_score(
-            item.published_at, now=moment
+            _effective_date(item), now=moment
         )
         ranked.append(
             ScoredItem(
@@ -540,7 +868,7 @@ def rank_field_dynamics(
     ranked.sort(
         key=lambda value: (
             -value.score,
-            -(_aware(value.item.published_at) or moment).timestamp(),
+            -(_aware(_effective_date(value.item)) or moment).timestamp(),
         )
     )
     return ranked
@@ -561,7 +889,7 @@ def rank(
         score_item(item, profile, now=moment, discrimination=discrimination, item_terms=terms)
         for item, terms in zip(items, tokenized, strict=True)
     ]
-    scored.sort(key=lambda s: (-s.score, -(_aware(s.item.published_at) or moment).timestamp()))
+    scored.sort(key=lambda s: (-s.score, -(_aware(_effective_date(s.item)) or moment).timestamp()))
     return scored
 
 
@@ -621,34 +949,27 @@ def matches_subscribed_journal(item: FeedItem, profile: Profile) -> bool:
 
 
 def matches_subscribed_scholar(item: FeedItem, profile: Profile) -> bool:
-    """这条的作者里有没有用户订阅的学者（同样现算，理由同上）。
-
-    比对走 `profile.author_matches` 而不是字符串相等：同一个人的姓名在
-    Crossref / OpenAlex / PubMed 里可能是 `Shaoda Liu`、`Liu, Shaoda` 或
-    `S. Liu`，精确相等会把它们全判为"不是他"。
-    """
-    if not profile.scholars:
-        return False
-    return any(
-        author_matches(wanted, author)
-        for author in (item.authors or [])
-        for wanted in profile.scholars
-    )
+    """Only verified author entity IDs can supply scholar membership."""
+    from app.services.feed.author_identity import matches
+    return matches(item, getattr(profile, "scholar_identities", ()))
 
 
 def _route_score(
     base: ScoredItem, route: str, *, profile: Profile, now: datetime
 ) -> float | None:
     extra = base.item.extra if isinstance(base.item.extra, dict) else {}
-    freshness = _recency_score(base.item.published_at or base.item.created_at, now=now)
+    freshness = _recency_score(_effective_date(base.item), now=now)
     citation = _citation_score(extra)
 
     if route == "project_profile":
         # Historical acquisition scores cannot authorize current recommendations.
-        relevance = 1.0 if base.project_id else 0.0
+        relevance = 1.0 if base.project_id else (0.55 if base.matched_query_terms else 0.0)
         if relevance <= 0.0:
             return None
-        return 0.70 * relevance + 0.10 * _source_quality(extra) + 0.10 * freshness + 0.10 * citation
+        # A daily project harvest must surface newly published relevant work.
+        # Relevance is still the admission gate above; within that gate, a
+        # citation-heavy paper from months ago should not bury new results.
+        return 0.55 * relevance + 0.10 * _source_quality(extra) + 0.25 * freshness + 0.10 * citation
     if route == "journal":
         # 订阅期刊（用户自己点名的刊）与订阅学科同级：命中任一即可进推荐。
         subscribed = matches_subscribed_journal(base.item, profile)
@@ -673,7 +994,7 @@ def _route_score(
         authority = min(1.0, max(0.0, _number(extra.get("editorial_authority"), 0.85)))
         return 0.50 * relevance + 0.30 * freshness + 0.20 * authority
     if route == "web":
-        relevance = 1.0 if base.project_id else 0.0
+        relevance = 1.0 if base.project_id else (0.55 if base.matched_query_terms else 0.0)
         if relevance <= 0.0:
             return None
         authority = min(1.0, max(0.0, _number(extra.get("web_authority"))))
@@ -697,9 +1018,9 @@ async def apply_behavior_preferences(
 ) -> list[ScoredItem]:
     """Use recent explicit behavior as a bounded re-rank signal.
 
-    Opens and saves are positive, dismissals are strongly negative, and all
-    evidence decays with time. Impressions are deliberately neutral: merely
-    being shown something must not be mistaken for liking it.
+    Opens and saves are positive signals for related work. A recently opened
+    item itself moves down slightly so new work is easier to find. Dismissals
+    are strongly negative; impressions remain neutral.
     """
     if not scored:
         return scored
@@ -722,6 +1043,7 @@ async def apply_behavior_preferences(
     term_weights: dict[str, float] = {}
     venue_weights: dict[str, float] = {}
     author_weights: dict[str, float] = {}
+    opened_at: dict[str, datetime] = {}
     action_weights = {
         FeedEngagementAction.OPEN: 1.0,
         FeedEngagementAction.SAVE: 3.0,
@@ -730,6 +1052,8 @@ async def apply_behavior_preferences(
     for engagement, item in rows:
         created = _aware(engagement.created_at) or moment
         age_days = max(0.0, (moment - created).total_seconds() / 86400.0)
+        if engagement.action == FeedEngagementAction.OPEN:
+            opened_at[str(item.id)] = created
         decay = math.pow(0.5, age_days / 45.0)
         weight = action_weights.get(engagement.action, 0.0) * decay
         for term in extract_terms(item.title, item.summary):
@@ -750,17 +1074,22 @@ async def apply_behavior_preferences(
         venue = venue_weights.get(str(item.venue or "").casefold().strip(), 0.0)
         authors = max((author_weights.get(str(author).casefold().strip(), 0.0) for author in item.authors or []), default=0.0)
         affinity = max(-1.0, min(1.0, (topic / 10.0) + (venue / 8.0) + (authors / 8.0)))
-        adjusted.append(replace(value, score=value.score + 0.20 * affinity))
+        opened = opened_at.get(str(item.id))
+        opened_age = max(0.0, (moment - opened).total_seconds() / 86400.0) if opened else 0.0
+        # One OPEN record per user/item: repeated clicks cannot stack the
+        # penalty. It fades as the paper ages and never removes the item.
+        viewed_penalty = 0.25 * math.pow(0.5, opened_age / 14.0) if opened else 0.0
+        adjusted.append(replace(value, score=value.score + 0.20 * affinity - viewed_penalty))
     adjusted.sort(key=lambda value: (
         -value.score,
-        -(_aware(value.item.published_at or value.item.created_at) or moment).timestamp(),
+        -(_aware(_effective_date(value.item)) or moment).timestamp(),
     ))
     return adjusted
 
 
 def rank_rednote(
     items: list[FeedItem], profile: Profile, *, user_id: str,
-    now: datetime | None = None,
+    now: datetime | None = None, base_scored: list[ScoredItem] | None = None,
 ) -> list[ScoredItem]:
     """多路独立评分，再按动态配额混排并做基础来源多样性。
 
@@ -769,12 +1098,15 @@ def rank_rednote(
     进推荐流 —— 否则"订阅"只影响订阅页，推荐页看不见，等于半截功能。
     """
     moment = now or datetime.now(UTC)
-    base_scored = rank(items, profile, now=moment)
+    if base_scored is None:
+        base_scored = rank(items, profile, now=moment)
     buckets: dict[str, list[ScoredItem]] = {
         "project_profile": [], "journal": [], "scholar": [], "web": [], "bignews": [],
     }
     for base in base_scored:
         routes = acquisition_routes(base.item)
+        if matches_subscribed_scholar(base.item, profile):
+            routes = routes | {"scholar"}
         extra = base.item.extra if isinstance(base.item.extra, dict) else {}
         owners = {str(value) for value in (extra.get("profile_user_ids") or [])}
         for route in routes & set(buckets):
@@ -801,7 +1133,7 @@ def rank_rednote(
     for values in buckets.values():
         values.sort(key=lambda value: (
             -value.score,
-            -(_aware(value.item.published_at or value.item.created_at) or moment).timestamp(),
+            -(_aware(_effective_date(value.item)) or moment).timestamp(),
         ))
 
     positions = {route: 0 for route in buckets}
@@ -892,7 +1224,8 @@ async def suppressed_ids(db: AsyncSession, *, user_id: str) -> frozenset[str]:
 
 
 async def daily_picks(
-    db: AsyncSession, *, user_id: str, scored: list[ScoredItem], today: date | None = None
+    db: AsyncSession, *, user_id: str, scored: list[ScoredItem], today: date | None = None,
+    refresh: bool = False,
 ) -> list[dict]:
     """今天的选摘：有就读出来，没有就算一次并存下。
 
@@ -901,10 +1234,10 @@ async def daily_picks(
     """
     when = today or datetime.now(UTC).date()
     existing = await db.get(FeedDailyPick, (user_id, when))
-    if existing is not None and existing.picks:
+    if existing is not None and existing.picks and not refresh:
         return list(existing.picks)
 
-    # 轮换机制：新的一天优先避开用户近 14 天已经选中的论文。
+    # 轮换机制：新的一天优先避开用户在当前候选窗口已选中的论文。
     history_rows = (await db.execute(
         select(FeedDailyPick).where(
             FeedDailyPick.user_id == user_id,
@@ -931,9 +1264,19 @@ async def daily_picks(
         }
         for pick in chosen
     ]
-    if existing is None:
-        db.add(FeedDailyPick(user_id=user_id, pick_date=when, picks=payload))
+    # Browser refresh and background translation can rebuild together. Keep the
+    # composite key in place and let the database resolve the insert race.
+    if db.get_bind().dialect.name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
     else:
-        existing.picks = payload
-    await db.flush()
-    return payload
+        from sqlalchemy.dialects.sqlite import insert
+    statement = insert(FeedDailyPick).values(user_id=user_id, pick_date=when, picks=payload)
+    if refresh or existing is not None:
+        statement = statement.on_conflict_do_update(
+            index_elements=["user_id", "pick_date"], set_={"picks": payload})
+    else:
+        statement = statement.on_conflict_do_nothing(index_elements=["user_id", "pick_date"])
+    await db.execute(statement)
+    stored = await db.scalar(select(FeedDailyPick.picks).where(
+        FeedDailyPick.user_id == user_id, FeedDailyPick.pick_date == when))
+    return list(stored or [])

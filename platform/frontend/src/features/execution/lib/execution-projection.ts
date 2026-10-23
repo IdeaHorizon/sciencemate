@@ -1,4 +1,4 @@
-import type { Language } from "../../../shared/i18n/language.ts";
+import { say, type Language, type Phrase } from "../../../shared/i18n/language.ts";
 import type { ExecutionEvent } from "./execution-event.ts";
 import { readPayload, type EventPayloadView } from "./payload-view.ts";
 import {
@@ -67,13 +67,16 @@ export type SessionProjection = {
   trace: ExecutionEvent[];
 };
 
+/** 一步没有自己的标题时叫它什么。 */
+const STEP: Phrase = { zh: "研究步骤", en: "Research step" };
+
 type ProjectionOptions = {
   manualOpenIds?: ReadonlySet<string>;
   manualClosedIds?: ReadonlySet<string>;
   autoCollapseCompletedTools?: boolean;
   autoCollapseCompletedSteps?: boolean;
-  /** 界面语言。纯函数收参数，不去够 hook —— 见 shared/i18n/useT.ts。 */
-  lang?: Language;
+  /** 界面语言。纯函数收参数，不去够 hook —— 见 shared/i18n/useT.ts；不给就是编译错误，不是中文。 */
+  lang: Language;
 };
 
 function stepAssociation(event: ExecutionEvent, payload: EventPayloadView) {
@@ -170,14 +173,14 @@ function projectTool(
 
 export function projectExecution(
   events: readonly ExecutionEvent[],
-  options: ProjectionOptions = {},
+  options: ProjectionOptions,
 ): SessionProjection {
   const ordered = [...events].sort((left, right) => left.sequence - right.sequence);
   const manualOpenIds = options.manualOpenIds ?? new Set<string>();
   const manualClosedIds = options.manualClosedIds ?? new Set<string>();
   const autoCollapseCompletedTools = options.autoCollapseCompletedTools ?? true;
   const autoCollapseCompletedSteps = options.autoCollapseCompletedSteps ?? true;
-  const lang = options.lang ?? "zh";
+  const lang = options.lang;
   const completed = ordered.some((event) => event.kind === "session.completed");
   const stepEvents = new Map<string, ExecutionEvent[]>();
   const toolEvents = new Map<string, ExecutionEvent[]>();
@@ -276,12 +279,12 @@ export function projectExecution(
       return {
         id,
         title: isProducingChild
-          ? startView.title ?? "Research step"
+          ? startView.title ?? say(STEP, lang)
           : tools.length > 0
-            ? "Research tools"
+            ? say({ zh: "研究工具", en: "Research tools" }, lang)
             : status === "error"
-              ? "Research step failed"
-              : "Research step",
+              ? say({ zh: "这一步没做成", en: "Research step failed" }, lang)
+              : say(STEP, lang),
         summary: endView?.summary ?? startView.summary,
         status,
         fold: "active_open" as FoldState,

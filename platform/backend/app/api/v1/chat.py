@@ -24,7 +24,7 @@ from sqlalchemy import delete as sql_delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
-from app.services.user_interface import language_for
+from app.services.user_interface import language_for, said_of
 from app.config import settings
 from app.database import get_db
 from app.models.execution import Run, SessionMessage, SessionProjection
@@ -621,7 +621,8 @@ async def project_chat_stream(
                 status_code=409,
                 detail={
                     "code": "interject_undeliverable",
-                    "message": str(exc),
+                    "message": said_of(exc, lang, otherwise={
+                        "zh": "这句插话没送到：{why}", "en": "This interjection was not delivered: {why}"}),
                     "runId": active_run_id,
                 },
             ) from exc

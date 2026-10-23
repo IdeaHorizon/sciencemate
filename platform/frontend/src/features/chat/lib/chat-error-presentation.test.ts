@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { presentChatFailure } from "./chat-error-presentation.ts";
 
 test("能让人动手的失败，给一句人话 + 一个动作", () => {
-  const failure = presentChatFailure("Stream failed: 409");
+  const failure = presentChatFailure("Stream failed: 409", "en");
   assert.ok(failure);
   assert.equal(failure.title, "This Session changed before the request could start");
   assert.match(failure.recovery, /Refresh the Session/);
@@ -22,13 +22,13 @@ test("认不出的失败 → 什么都不显示", () => {
   //
   // 它存在的唯一理由是"兜底必须返回点什么"——判据是"我认不出这个错误"，
   // 渲染出来的却是"你的研究出问题了"。认不出是我们的无知，不是用户的事故。
-  assert.equal(presentChatFailure("internal_transport_wrapper exploded"), null);
-  assert.equal(presentChatFailure(""), null);
-  assert.equal(presentChatFailure("some brand new failure shape"), null);
+  assert.equal(presentChatFailure("internal_transport_wrapper exploded", "en"), null);
+  assert.equal(presentChatFailure("", "en"), null);
+  assert.equal(presentChatFailure("some brand new failure shape", "en"), null);
 });
 
 test("网络断了仍然要说 —— 那条用户真能动手（刷新看状态）", () => {
-  const failure = presentChatFailure("TypeError: Failed to fetch");
+  const failure = presentChatFailure("TypeError: Failed to fetch", "en");
   assert.ok(failure);
   assert.match(failure.title, /Connection/);
 });
@@ -39,9 +39,22 @@ test("留下来的每一条都必须带一个用户能做的动作", () => {
     "Stream failed: 409", "status: 401", "status: 403",
     "status: 429", "status: 503", "Failed to fetch",
   ]) {
-    const failure = presentChatFailure(raw);
+    const failure = presentChatFailure(raw, "en");
     assert.ok(failure, raw);
     assert.ok(failure.recovery.trim().length > 0, raw);
+  }
+});
+
+test("中文界面拿到的是中文 —— 失败提示跟着界面语言走", () => {
+  // 2026-10-20 之前这五条只有英文，中文界面下弹出来也是英文。
+  for (const raw of ["Stream failed: 409", "status: 401", "status: 429", "status: 503", "Failed to fetch"]) {
+    const zh = presentChatFailure(raw, "zh");
+    const en = presentChatFailure(raw, "en");
+    assert.ok(zh && en, raw);
+    for (const field of ["title", "message", "recovery"] as const) {
+      assert.match(zh[field], /[一-鿿]/, `${raw} ${field}`);
+      assert.doesNotMatch(en[field], /[一-鿿]/, `${raw} ${field}`);
+    }
   }
 });
 

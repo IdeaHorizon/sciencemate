@@ -28,6 +28,38 @@ import AppKit
 import CryptoKit
 import WebKit
 
+/// 壳说给人听的话 —— 两种语言并排写在调用点（同 Windows 那边的 `Speech.cs`）。
+///
+/// `test_the_mac_shell_speaks_both_languages.py` 扫盘守着：这份源码里每个带中文的字面量都必须是
+/// `Speech.t` / `Speech.both` / `Speech.pair` 的中文参数（写日志的 `NSLog` 除外 —— 那不是界面），
+/// 英文参数里不许有中文。
+enum Speech {
+    /// 这台 Mac 的系统语言列表里有中文就中文，否则英文 —— 同应用第一次打开的判据
+    /// （前端 `languageForASystem`）。菜单、面板标题、按钮用它：放不下两行。
+    /// `Locale.preferredLanguages` 是整张表（2026-10-19 实测 `["en-GB", "zh-Hans-CN"]`）——
+    /// 网页里的 `navigator.languages` 只有第一项，原生这边拿得到全部。
+    static let chinese: Bool = Locale.preferredLanguages.contains { tag in
+        let t = tag.lowercased()
+        return t == "zh" || t.hasPrefix("zh-") || t.hasPrefix("zh_")
+    }
+
+    static func t(_ zh: String, _ en: String) -> String { chinese ? zh : en }
+
+    /// 中英两行并列 —— 界面还没出来、不知道这个人要哪种语言时（起不来、下载失败）。
+    /// wangd 2026-10-19：「对话框中英两行并列」。中文在上；任一边是好几行，两段之间空一行。
+    static func both(_ zh: String, _ en: String) -> String {
+        zh + ((zh.contains("\n") || en.contains("\n")) ? "\n\n" : "\n") + en
+    }
+
+    /// 一句话的两种语言，交给别人去排（失败页是中文一段、英文一段）。
+    static func pair(_ zh: String, _ en: String) -> Words { Words(zh: zh, en: en) }
+}
+
+struct Words {
+    let zh: String
+    let en: String
+}
+
 // MARK: - 后端子进程
 
 /// 起后端、等它活过来、收摊。
@@ -185,15 +217,23 @@ enum ShellError: Error {
     case backendExited(code: Int32, log: String)
     case neverBecameReady(log: String)
 
-    /// 给人看的一句话 + 现场。壳自己修不了这些问题，它的职责是**不隐瞒**。
-    var message: String {
+    /// 给人看的一句话（两种语言）。壳自己修不了这些问题，它的职责是**不隐瞒**。
+    var said: Words {
         switch self {
         case .noPort:
-            return "找不到可用的本机端口。"
-        case .backendExited(let code, let log):
-            return "后端启动后退出了（exit \(code)）。\n\n\(log)"
-        case .neverBecameReady(let log):
-            return "后端起来了，但一直没有就绪。\n\n\(log)"
+            return Speech.pair("找不到可用的本机端口。", "No free local port could be found.")
+        case .backendExited(let code, _):
+            return Speech.pair("后端启动后退出了（exit \(code)）。", "The backend exited after starting (exit \(code)).")
+        case .neverBecameReady:
+            return Speech.pair("后端起来了，但一直没有就绪。", "The backend started but never became ready.")
+        }
+    }
+
+    /// 现场（日志尾巴）—— 原样给，不翻。
+    var evidence: String {
+        switch self {
+        case .noPort: return ""
+        case .backendExited(_, let log), .neverBecameReady(let log): return log
         }
     }
 }
@@ -329,7 +369,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         guard FileManager.default.fileExists(atPath: candidate.path),
               let exe = Bundle.main.executableURL,
               let theirs = sha256(of: candidate), let ours = sha256(of: exe) else { return false }
-        if theirs == ours { NSLog("SHELL-SWAP skip: 载荷里的壳就是我"); return false }
+        if theirs == ours {
+            // 壳早就换好了，Info.plist 却还写着随包那一版 —— 0.5.7 之前的壳换完不改它，
+            // 访达「显示简介」与设置页说两个数（10-19 本机 0.5.6 → 0.5.7）。补上，不用重启。
+            NSLog("SHELL-SWAP skip: 载荷里的壳就是我；版本号 %@ → %@ 补齐", mine, version)
+            alignQueue.async { [weak self] in self?.alignMyVersion(to: version) }
+            return false
+        }
 
         let old = exe.appendingPathExtension("old")
         do {
@@ -348,6 +394,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             NSLog("SHELL-SWAP failed, rolled back: %@", "\(error)"); return false
         }
         NSLog("SHELL-SWAP done: %@ → %@，拉起新的自己", mine, version)
+        // 拉起之前把版本号对齐、重签：新的自己一起来，Info.plist 说的就是它自己那一版。
+        alignMyVersion(to: version)
         // 用 open(1) 起新的自己：它走 LaunchServices，和用户双击是同一条路；
         // 等它真起来再退出，别让 Dock 上空一拍。
         let relaunch = Process()
@@ -356,6 +404,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         try? relaunch.run()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { NSApp.terminate(nil) }
         return true
+    }
+
+    /// 换壳闸有两个调用点（启动时、后端起来后），补齐可能被叫两次：排成一队，后一次进来时
+    /// Info.plist 已经对上，直接返回 —— 别让两个 codesign 同时改同一个 bundle。
+    private let alignQueue = DispatchQueue(label: "sciencemate.version-align")
+
+    /// Info.plist 的版本号跟上载荷，再按打包时同一组参数重签 bundle。
+    ///
+    /// 为什么要改：访达「显示简介」、关于本机、崩溃报告都读 Info.plist。只换二进制不改它，
+    /// 设置页说 0.5.7、访达说 0.5.6。也是换壳闸的另一半 —— `isNewer(version, than: mine)`
+    /// 读的就是这里，不改就每次启动都要去比一遍哈希。
+    ///
+    /// 为什么要重签：bundle 的签名封住了 Info.plist 和可执行文件。换过二进制的 bundle
+    /// `codesign --verify --strict` 已经不过（新壳是 linker-signed，标识也不同），再改
+    /// Info.plist 更不过。先签新壳本身，再签 bundle（外层要把内层算进去，顺序不能反）；
+    /// 内层的 python / git 等原生二进制没动，不重签。签不成只记日志：应用照样能跑
+    /// （ad-hoc、没有隔离属性），和改之前一样。
+    private func alignMyVersion(to version: String) {
+        let bundle = Bundle.main.bundleURL
+        let plistURL = bundle.appendingPathComponent("Contents/Info.plist")
+        guard let data = try? Data(contentsOf: plistURL),
+              var plist = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any]
+        else { NSLog("VERSION-ALIGN skip: 读不出 Info.plist"); return }
+        if (plist["CFBundleShortVersionString"] as? String) == version,
+           (plist["CFBundleVersion"] as? String) == version { return }
+        plist["CFBundleShortVersionString"] = version
+        plist["CFBundleVersion"] = version
+        do {
+            let out = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+            try out.write(to: plistURL, options: .atomic)
+        } catch {
+            NSLog("VERSION-ALIGN failed: 写不进 Info.plist：%@", "\(error)"); return
+        }
+        var targets: [URL] = []
+        if let exe = Bundle.main.executableURL { targets.append(exe) }
+        targets.append(bundle)
+        for target in targets {
+            let sign = Process()
+            sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+            sign.arguments = ["--force", "--sign", "-", "--timestamp=none", target.path]
+            sign.standardOutput = FileHandle.nullDevice
+            sign.standardError = FileHandle.nullDevice
+            do {
+                try sign.run()
+                sign.waitUntilExit()
+                if sign.terminationStatus != 0 {
+                    NSLog("VERSION-ALIGN: codesign %@ 退出码 %d", target.lastPathComponent, sign.terminationStatus)
+                    return
+                }
+            } catch {
+                NSLog("VERSION-ALIGN: codesign 起不来：%@", "\(error)"); return
+            }
+        }
+        NSLog("VERSION-ALIGN done: Info.plist → %@，已重签", version)
     }
 
     private func declareMyself() {
@@ -417,7 +519,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                                 if code == Backend.restartExitCode {
                                     self?.startBackend()
                                 } else {
-                                    self?.showMessage("后端退出了（code \(code)）。\n\n" + backend.tailOfLog())
+                                    self?.showMessage(Speech.pair("后端退出了（code \(code)）。",
+                                                                  "The backend stopped (code \(code))."),
+                                                      evidence: backend.tailOfLog())
                                 }
                             }
                         }
@@ -430,21 +534,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 DispatchQueue.main.async { self?.show(error) }
             } catch {
                 DispatchQueue.main.async {
-                    self?.showMessage("起不来：\(error.localizedDescription)")
+                    self?.showMessage(Speech.pair("起不来。", "Could not start."),
+                                      evidence: error.localizedDescription)
                 }
             }
         }
     }
 
-    private func show(_ error: ShellError) { showMessage(error.message) }
+    private func show(_ error: ShellError) { showMessage(error.said, evidence: error.evidence) }
 
     /// 失败也要有个界面。一个白窗口 + 一个 Dock 图标是最难查的一种失败。
-    private func showMessage(_ text: String) {
+    ///
+    /// 中文一段、英文一段（wangd 2026-10-19：「对话框中英两行并列」）—— 起不来的时候界面还没
+    /// 出来，壳不知道这个人要哪种语言。现场（日志尾巴）放在最后，只给一份。
+    private func showMessage(_ what: Words, evidence: String = "") {
         func escape(_ raw: String) -> String {
             raw.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
         }
-        let escaped = escape(text)
         let logsPath = escape(logsDirectory().path)
+        let heading = Speech.pair("没能启动", "Could not start")
+        let logs = Speech.pair("完整的日志在 <code>\(logsPath)</code>。找人帮忙时，把里面的 backend.log 一起发过去。",
+                               "The full logs are in <code>\(logsPath)</code>. When you ask for help, send backend.log from there.")
+        let open = Speech.pair("<a href=\"\(Self.openLogsURL)\">打开日志文件夹</a>（菜单栏「帮助」里也有）",
+                               "<a href=\"\(Self.openLogsURL)\">Open the logs folder</a> (also in the Help menu)")
+        func section(_ pick: (Words) -> String, _ lang: String) -> String {
+            "<section lang=\"\(lang)\"><h1>\(escape(pick(heading)))</h1><p>\(escape(pick(what)))</p>"
+                + "<p>\(pick(logs))</p><p>\(pick(open))</p></section>"
+        }
+        let body = section({ $0.zh }, "zh-CN") + "<hr>" + section({ $0.en }, "en")
+            + (evidence.isEmpty ? "" : "<pre>\(escape(evidence))</pre>")
         webView.loadHTMLString("""
         <html><head><meta charset="utf-8"><style>
           :root { color-scheme: light dark; }
@@ -453,11 +571,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
           h1 { font-size: 15px; margin: 0 0 16px; }
           pre { white-space: pre-wrap; font-size: 11px; opacity: .75;
                 border-left: 2px solid currentColor; padding-left: 12px; }
-        </style></head><body>
-          <h1>没能启动</h1><pre>\(escaped)</pre>
-          <p>完整的日志在 <code>\(logsPath)</code>。找人帮忙时，把里面的 backend.log 一起发过去。</p>
-          <p><a href="\(Self.openLogsURL)">打开日志文件夹</a>（菜单栏「帮助」里也有）</p>
-        </body></html>
+          hr { border: 0; border-top: 1px solid currentColor; opacity: .2; margin: 24px 0; }
+        </style></head><body>\(body)</body></html>
         """, baseURL: nil)
     }
 
@@ -467,22 +582,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let main = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "退出 ScienceMate", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        // 菜单项放不下两行：按这台 Mac 的系统语言说（同应用第一次打开的判据）。
+        appMenu.addItem(withTitle: Speech.t("退出 ScienceMate", "Quit ScienceMate"),
+                        action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         main.addItem(appItem)
         let editItem = NSMenuItem()
-        let edit = NSMenu(title: "编辑")
-        for (title, action, key) in [("撤销", "undo:", "z"), ("重做", "redo:", "Z"),
-                                     ("剪切", "cut:", "x"), ("复制", "copy:", "c"),
-                                     ("粘贴", "paste:", "v"), ("全选", "selectAll:", "a")] {
+        let edit = NSMenu(title: Speech.t("编辑", "Edit"))
+        for (title, action, key) in [(Speech.t("撤销", "Undo"), "undo:", "z"), (Speech.t("重做", "Redo"), "redo:", "Z"),
+                                     (Speech.t("剪切", "Cut"), "cut:", "x"), (Speech.t("复制", "Copy"), "copy:", "c"),
+                                     (Speech.t("粘贴", "Paste"), "paste:", "v"),
+                                     (Speech.t("全选", "Select All"), "selectAll:", "a")] {
             edit.addItem(withTitle: title, action: Selector(action), keyEquivalent: key)
         }
         editItem.submenu = edit
         main.addItem(editItem)
         // 「帮助」：出了事去哪找日志。放这里是因为它不依赖后端 —— 后端死了它也在。
         let helpItem = NSMenuItem()
-        let help = NSMenu(title: "帮助")
-        let openLogs = NSMenuItem(title: "打开日志文件夹", action: #selector(openLogsFolder(_:)), keyEquivalent: "")
+        let help = NSMenu(title: Speech.t("帮助", "Help"))
+        let openLogs = NSMenuItem(title: Speech.t("打开日志文件夹", "Open Logs Folder"),
+                                  action: #selector(openLogsFolder(_:)), keyEquivalent: "")
         openLogs.target = self
         help.addItem(openLogs)
         helpItem.submenu = help
@@ -551,7 +670,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func download(_ download: WKDownload, decideDestinationUsing response: URLResponse,
                   suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
         let panel = NSSavePanel()
-        panel.title = "保存研究文件"
+        panel.title = Speech.t("保存研究文件", "Save Research File")
         panel.nameFieldStringValue = (suggestedFilename as NSString).lastPathComponent
         panel.canCreateDirectories = true
         panel.beginSheetModal(for: window) { answer in
@@ -562,7 +681,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
         guard (error as NSError).code != NSURLErrorCancelled else { return }
         let alert = NSAlert()
-        alert.messageText = "文件下载失败"
+        alert.messageText = Speech.both("文件下载失败", "The download failed")
         alert.informativeText = error.localizedDescription
         alert.beginSheetModal(for: window)
     }
@@ -580,8 +699,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
         let alert = NSAlert()
         alert.messageText = message
-        alert.addButton(withTitle: "确认")
-        alert.addButton(withTitle: "取消")
+        // 按钮放不下两行：按系统语言。提示文字本身是网页按界面语言给的。
+        alert.addButton(withTitle: Speech.t("确认", "OK"))
+        alert.addButton(withTitle: Speech.t("取消", "Cancel"))
         alert.beginSheetModal(for: window) { answer in completionHandler(answer == .alertFirstButtonReturn) }
     }
 

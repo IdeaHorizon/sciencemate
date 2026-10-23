@@ -17,14 +17,16 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from app.services.say import SaidToAPerson
+
 logger = logging.getLogger(__name__)
 
 
-class ThereIsNoSuchHomeError(Exception):
-    """建不成，且**说得出为什么** —— 界面要把这句话原样显示。"""
+class ThereIsNoSuchHomeError(SaidToAPerson):
+    """建不成，且**说得出为什么** —— 界面要把这句话原样显示，两种语言都写（`said_in`）。"""
 
-    def __init__(self, message: str, status: int = 404) -> None:
-        super().__init__(message)
+    def __init__(self, message: str, *, en: str, status: int = 404) -> None:
+        super().__init__(message, en=en)
         self.message = message
         self.status = status
 
@@ -40,7 +42,8 @@ class HomeProvider:
     #: 住在它那儿、这个人看得见的项目 —— 每一行带 `home`。
     list_projects: Callable[[], Awaitable[list[dict]]]
     #: 在那个家里建一个项目；不认识 / 连不上 / 被拒都抛 `ThereIsNoSuchHomeError`。
-    create_project: Callable[[str, dict], Awaitable[dict]]
+    #: 第三个参数是发问那一屏的语言：那个家自己说的拒绝要按这一屏说（转交时带上）。
+    create_project: Callable[[str, dict, str], Awaitable[dict]]
 
 
 _PROVIDERS: list[HomeProvider] = []
@@ -80,9 +83,11 @@ async def the_ones_that_live_elsewhere() -> list[dict]:
     return everything
 
 
-async def create_it_elsewhere(home: str, payload: dict) -> dict:
+async def create_it_elsewhere(home: str, payload: dict, *, lang: str) -> dict:
     """在指名的那个家里建项目。没有提供者认识它 → 说清楚。"""
     for provider in _PROVIDERS:
         if provider.knows(home):
-            return await provider.create_project(home, payload)
-    raise ThereIsNoSuchHomeError("没有这个家 —— 它可能已经被退出了，或者这个版本装不了别处的家")
+            return await provider.create_project(home, payload, lang)
+    raise ThereIsNoSuchHomeError(
+        "没有这个家 —— 它可能已经被退出了，或者这个版本装不了别处的家",
+        en="There is no such home — it may have been left, or this edition cannot use homes elsewhere")

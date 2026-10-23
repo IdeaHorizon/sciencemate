@@ -5,12 +5,13 @@ import type {
   SessionChangeSet,
   SessionMergeConflict,
 } from "../types";
+import { ContractViolation } from "../../../shared/contract-violation.ts";
 
 type JsonRecord = Record<string, unknown>;
 
 const RESOURCE_TYPES = new Set<RevisionResourceType>(["artifact", "project_doc", "project_config"]);
 
-export class SessionRevisionContractError extends Error {
+export class SessionRevisionContractError extends ContractViolation {
   constructor(message: string) {
     super(message);
     this.name = "SessionRevisionContractError";

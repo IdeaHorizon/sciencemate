@@ -89,6 +89,30 @@ def update_source() -> str:
     return settings.update_source or read_edition().update_source
 
 
+def system_languages_of_the_person() -> list[str]:
+    """看界面的这个人电脑上的系统语言 —— 只有后端就跑在他电脑上时才答得出。
+
+    个人档（桌面）的后端就在这个人的电脑上；组织服务器不是，它装的什么系统语言与
+    看界面的人无关 —— 答空列表，前端退回浏览器给的那一项。为什么不直接让网页读，
+    见 `services/system_language.py`。
+    """
+    if settings.profile != "personal":
+        return []
+    from app.services.system_language import preferred_languages
+
+    return preferred_languages()
+
+
+def language_the_person_chose_at_install() -> str | None:
+    """这个人在 Windows 安装器上自己点过的语言。只有个人档（后端就在他电脑上）读得到。"""
+    if settings.profile != "personal":
+        return None
+    from app.config import the_data_root
+    from app.services.system_language import language_chosen_at_install
+
+    return language_chosen_at_install(the_data_root())
+
+
 def capabilities() -> frozenset[str]:
     """本档位 × 本发行提供的能力集合。"""
     features = set(_BASE_CAPABILITIES)
@@ -235,8 +259,9 @@ def weak_resource_walls_are_acceptable() -> bool:
     """跑飞的时候没有自动刹车 —— 这台机器上能不能接受。
 
     个人档能：那是用户自己的电脑，自己看着，代价只落在自己身上。组织的共享
-    执行器不能：那里跑飞会踩到别人。**这不是"个人档标准低"**，不可恢复的三条
-    （写边界 / .git / 断网）在两边都不让步（见 `services/unattended.py`）。
+    执行器不能：那里跑飞会踩到别人。**这不是"个人档标准低"**，写边界与 .git 不可写
+    在两边都不让步；断网只在个人档降为可恢复 —— 外泄的对象与承担者是同一个人
+    （#931，见 `services/unattended.py` 的 `RECOVERABLE_ON_YOUR_OWN_MACHINE`）。
     """
     return settings.profile == "personal"
 

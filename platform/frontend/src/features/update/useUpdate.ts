@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useLanguage } from "@/shared/i18n";
 
 import { api, type UpdateStatus } from "@/lib/api";
 
@@ -24,6 +25,14 @@ import { api, type UpdateStatus } from "@/lib/api";
  */
 export type UpdatePhase = "idle" | "checking" | "installing" | "restarting" | "failed";
 
+/**
+ * 下好、验过之后，先把「即将重启，窗口会自动回来」停在屏幕上这么久，再真去重启。
+ * 以前装完立刻重启：那句话只停 1 ms 窗口就被换掉，人看到的是一次没头没尾的刷新。
+ */
+export const RESTART_NOTICE_MS = 2000;
+
+const wait = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+
 export function useUpdate(options?: { checkOnMount?: boolean }) {
   const checkOnMount = options?.checkOnMount ?? true;
   const [status, setStatus] = useState<UpdateStatus | null>(null);
@@ -31,6 +40,17 @@ export function useUpdate(options?: { checkOnMount?: boolean }) {
   const [problem, setProblem] = useState<string | null>(null);
   /** 这个页面上一次问后端是什么时候。`status.checked_at` 是后端那一刻，这个是这一次。 */
   const [lastChecked, setLastChecked] = useState<Date | null>(null);
+  /** 这一次安装从什么时候开始 —— 下载校验要十几秒，界面得说出「还在动」。 */
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  useEffect(() => {
+    if (phase !== "installing" || startedAt === null) return;
+    const tick = () => setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [phase, startedAt]);
 
   const check = useCallback(async (): Promise<UpdateStatus | null> => {
     setPhase("checking");
@@ -48,6 +68,8 @@ export function useUpdate(options?: { checkOnMount?: boolean }) {
     }
   }, []);
 
+  // 状态里那几句（没查成的原因、上次没装上的原因）是后端按这一屏的语言说的：换了语言重问一次。
+  const language = useLanguage();
   useEffect(() => {
     if (!checkOnMount) return;
     let cancelled = false;
@@ -55,11 +77,13 @@ export function useUpdate(options?: { checkOnMount?: boolean }) {
       .then((next) => { if (!cancelled) { setStatus(next); setLastChecked(new Date()); } })
       .catch((error) => { if (!cancelled) setProblem(error instanceof Error ? error.message : String(error)); });
     return () => { cancelled = true; };
-  }, [checkOnMount]);
+  }, [checkOnMount, language]);
 
   /** 下载、验证、暂存，然后重启。装完才重启，顺序反过来就是重启到同一个旧版本。 */
   const install = useCallback(async (fallbackMessage: string) => {
     setPhase("installing");
+    setStartedAt(Date.now());
+    setElapsedSeconds(0);
     setProblem(null);
     try {
       const staged = await api.installUpdate();
@@ -70,10 +94,21 @@ export function useUpdate(options?: { checkOnMount?: boolean }) {
         return;
       }
       setPhase("restarting");
+      await wait(RESTART_NOTICE_MS);
       await api.restartForUpdate();
     } catch (error) {
       setPhase("failed");
       setProblem(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
+  /** 人看到「已更新到 X」了：后端记下，之后不再提。失败不打扰人 —— 下次启动再说一次而已。 */
+  const acknowledge = useCallback(async () => {
+    setStatus((current) => (current ? { ...current, just_updated: null } : current));
+    try {
+      await api.acknowledgeUpdate();
+    } catch {
+      // 记不下也不要紧：最坏是下次打开再提示一次。
     }
   }, []);
 
@@ -81,6 +116,7 @@ export function useUpdate(options?: { checkOnMount?: boolean }) {
     setPhase("restarting");
     setProblem(null);
     try {
+      await wait(RESTART_NOTICE_MS);
       await api.restartForUpdate();
     } catch (error) {
       setPhase("failed");
@@ -88,5 +124,5 @@ export function useUpdate(options?: { checkOnMount?: boolean }) {
     }
   }, []);
 
-  return { status, phase, problem, lastChecked, check, install, restart };
+  return { status, phase, problem, lastChecked, elapsedSeconds, check, install, restart, acknowledge };
 }

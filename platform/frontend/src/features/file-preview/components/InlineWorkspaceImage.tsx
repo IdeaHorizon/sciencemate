@@ -49,7 +49,7 @@ export function InlineWorkspaceImage({
   const label = alt || path.split("/").pop() || path;
 
   if (query.isLoading) {
-    return <span className="inline-workspace-image is-loading">正在读取 {label}…</span>;
+    return <span className="inline-workspace-image is-loading">{t({ zh: "正在读取 {label}…", en: "Reading {label}…" }, { label })}</span>;
   }
   // 取不到、或者服务端说它不是图（扩展名骗人）→ 退回成可点的文件名。
   if (query.error || !url) {

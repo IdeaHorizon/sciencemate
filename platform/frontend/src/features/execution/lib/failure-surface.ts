@@ -43,7 +43,7 @@ export function shouldShowFailureDrawer({ view, hasRunFailureDetail }: {
 export function retryProgressLabel({ attempt, maxAttempts }: {
   attempt?: number;
   maxAttempts?: number;
-}, lang: Language = "zh") {
+}, lang: Language) {
   if (!attempt || !maxAttempts || maxAttempts < 1) return say({ zh: "重试中", en: "retrying" }, lang);
   return say({ zh: "第 {attempt}/{max} 次重试", en: "retry {attempt}/{max}" }, lang, { attempt, max: maxAttempts });
 }

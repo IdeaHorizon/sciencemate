@@ -432,3 +432,58 @@ def test_one_log_record_bigger_than_the_cap_keeps_its_tail(tmp_path) -> None:
         log, since_local=now - timedelta(minutes=1), naming=None, cap_bytes=300)
     assert len(data) <= 300
     assert "结尾在这" in data.decode("utf-8", errors="replace")
+
+
+@pytest.mark.asyncio
+async def test_the_bundle_carries_the_environment_report_and_the_permission_records(
+    runtime_client, tmp_path, monkeypatch
+) -> None:
+    """窄单 B #1217 判据 4 + G #1222 判据 4：条幅读的那份环境报告原文在 logs/、摘要在 manifest 的
+    environment 节；icacls 账本与权限快照跟着 logs/ 进包。"""
+    from app.services import permissions_snapshot
+
+    client, _factory = runtime_client
+    token = await _token(client, "researcher@atrium.local")
+    project_id, session_id = await _open_session(client, token)
+
+    changed = {
+        "type": "environment_warning", "code": "data_root_permissions_changed", "severity": "degraded",
+        "path": str(the_data_root() / "harness-state"), "error": "DACL 变了", "changed_by_us": False,
+    }
+    monkeypatch.setattr(permissions_snapshot, "_latest_change", changed)
+    logs = the_data_root() / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "permissions.jsonl").write_text('{"path": "x", "before": "a", "after": "b", "rc": 0}\n', encoding="utf-8")
+    (logs / "permissions-snapshot.json").write_text('{"app_version": "0.5.7", "entries": {}}', encoding="utf-8")
+
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    response = await client.get(
+        f"/api/v1/projects/{project_id}/sessions/{session_id}/diagnostics", headers=_headers(token)
+    )
+    assert response.status_code == 200, response.text
+    members = _members(response.content)
+    for name in ("logs/environment.json", "logs/permissions.jsonl", "logs/permissions-snapshot.json"):
+        assert name in members, f"{name} 应当在包里；实际：{sorted(members)}"
+    report = json.loads(members["logs/environment.json"])
+    assert [w["code"] for w in report["warnings"]] == ["data_root_permissions_changed"]
+    section = json.loads(members["manifest.json"])["environment"]
+    assert section["file"] == "logs/environment.json"
+    assert section["warnings"] == [{"code": "data_root_permissions_changed", "severity": "degraded",
+                                    "path": changed["path"]}]
+
+
+def test_a_bundle_without_an_environment_report_says_so(tmp_path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    bundle = write_diagnostics_bundle(
+        project_id="p", session_id="s" * 8, session_facts={}, session_created_at=None,
+        runs_root=None, logs_dir=logs, secrets=[], shared_log=False, profile_label="personal",
+        app_version=None, destination_dir=tmp_path,
+    )
+    try:
+        assert "unavailable" in bundle.manifest["environment"]
+        assert "logs/environment.json" in _members(bundle.path.read_bytes())
+    finally:
+        bundle.path.unlink(missing_ok=True)

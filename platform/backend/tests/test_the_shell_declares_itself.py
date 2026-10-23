@@ -63,7 +63,7 @@ def test_every_update_status_carries_the_declaration(tmp_path: Path, monkeypatch
     def unreachable(_url):
         raise OSError("离线")
 
-    status, *_ = su.check_for_update(tmp_path, harness, "https://h/x/manifest.json", unreachable, unreachable)
+    status, *_ = su.check_for_update(tmp_path, harness, "https://h/x/manifest.json", unreachable, unreachable, lang="zh")
     assert status.shell == GOOD, "更新源不通时状态里也该有壳的家门 —— 它和更新源无关"
     assert status.as_dict()["shell"] == GOOD, "as_dict 漏了 shell —— 接口上看不见等于没有"
 

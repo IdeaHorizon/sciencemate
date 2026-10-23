@@ -149,6 +149,22 @@ _FALLS_TO_GENERIC: dict[str, str] = {
 #: `execution_failed` 一模一样，那就别加 —— 多一个条目只是多一句同义的话，
 #: 不会让任何人多做对一件事。
 _COPY: dict[str, _Copy] = {
+    "strategy_translation_failed": _Copy(
+        title={"zh": "未能生成检索词", "en": "Search terms could not be generated"},
+        body={"zh": "模型没有返回通过校验的英文检索词，本次检索未继续。",
+              "en": "The model did not return valid English search terms, so this search did not continue."},
+        recovery={"zh": "请重试检索；若持续失败，检查学术检索所用模型的连接与额度，也可直接输入英文检索词。",
+                  "en": "Retry the search. If it keeps failing, check the search model connection and quota, or enter English search terms directly."},
+        retryable=True,
+    ),
+    "empty_curation": _Copy(
+        title={"zh": "未能生成课题检索词", "en": "Project search terms could not be generated"},
+        body={"zh": "资讯挖掘模型未返回有效的课题检索词。",
+              "en": "The discovery model did not return valid search terms for the project."},
+        recovery={"zh": "请检查课题名称与描述是否具体，并检查资讯挖掘模型的连接与额度后重试。",
+                  "en": "Check that the project title and description are specific, then check the discovery model connection and quota before retrying."},
+        retryable=True,
+    ),
     "execution_failed": _Copy(
         # 「研究停止了」这个说法是错的（wangd 2026-08-18）：停的是**这一轮**，
         # 研究是磁盘上那份记录，它没有"停"这个状态。措辞按事实来。
@@ -896,6 +912,8 @@ class UserFacingFailure:
     retryable: bool | None
     reference: str
     detail: str
+    #: 底层异常原文（worker 错误事件的 `cause`）。和 `detail` 一样只进「技术细节」，不进正文。
+    cause: str = ""
 
     def as_record(self) -> dict[str, Any]:
         record: dict[str, Any] = {
@@ -910,6 +928,8 @@ class UserFacingFailure:
             # 继续存在，但装的东西已经换成对的了。
             "message": f"{self.title}. {self.body}",
         }
+        if self.cause:
+            record["cause"] = self.cause
         if self.retryable is not None:
             # 字段**在不在**本身就是信息：不在 = 我们没有结论。写一个 False
             # 进去等于把"不知道"伪装成"知道"。
@@ -980,4 +1000,14 @@ def describe(
         retryable=retryable,
         reference=reference,
         detail=detail,
+        cause=_cause_text(exc),
     )
+
+
+def _cause_text(exc: BaseException) -> str:
+    """异常带着的底层原因（`HarnessSessionError.cause`），过一遍同一个清洗、同一个上限。"""
+    cause = getattr(exc, "cause", None)
+    if not isinstance(cause, str) or not cause.strip():
+        return ""
+    text = _sanitize(cause)
+    return text if len(text) <= _DETAIL_MAX_CHARS else text[:_DETAIL_MAX_CHARS] + " …"

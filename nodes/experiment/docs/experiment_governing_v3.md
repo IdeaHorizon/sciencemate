@@ -273,7 +273,7 @@ skill、模型、命令头都不能提升权限，也不能把 missing capabilit
 | `execution_supervisor`、`execution_control`、`strategic_review_injector`、`plan_before_compile`、`provisioned_build_tracker`、`critical_rules_reminder`、`workflow_frame` | 中途提示、DAG 证据推进、战略复盘、规划脚手架 | 都是"引导"类，不保护物理不变量；v3 的引导只有事实型 delta view + skills（governing §7）。失败信号由 `generic_failure_detector` / `repeated_error_detector` 继续给 |
 | `turn_one_briefing`（含 `path_role_convention`、`prereg_binding_briefing` 两部件） | turn-1 路径角色契约与 prereg 绑定简报 | `experiment_v3_bootstrap` 的一页纸；`task_briefing` 与 `data_source_reachability_preflight` 两个事实型部件保留为独立 hook |
 
-保留的物理安全观测：`high_risk_command_audit`（高危命令对账）、`preprocessing_boundary_audit`（前处理产物边界）、`repro_snapshot`、`output_corruption_sentinel`、`generic_failure_detector`、`repeated_error_detector`、`experiment_scheduler_facts_router`、`gpu_skill_injector`、两个 ask nudge。
+保留的安全与运行观测：`high_risk_command_audit`（高危命令对账）、`preprocessing_boundary_audit`（仅本次运行的文件名/命令启发式线索，不判违规、不写长期 pitfall，不替代权限与正式输入核验）、`repro_snapshot`、`output_corruption_sentinel`、`generic_failure_detector`、`repeated_error_detector`、`experiment_scheduler_facts_router`、`gpu_skill_injector`、两个 ask nudge。
 
 **工具面复核（S1d 全量测试后）**：按"是否属于自然工作循环"重判，五个曾被机械移出的工具回到模型面——`web_fetch` / `web_search`（查官方文档是诊断的一部分）、`write_scratchpad`（白板）、`create_claim`（KB 死路沉淀，skill `hpc-build` 依赖）、`preflight_build_resources`（纯建议、从不阻塞、不问）。仍退出的是有仪式或裁决性质的工具。
 

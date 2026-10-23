@@ -159,9 +159,9 @@ subprocess_call_sites:
     argv_source: framework
     reason: "run_ok：原生后端的行为探针（sandbox-exec / bwrap / landlock / systemd-run 真跑一次）；enclosing_git_paths：GIT_UNWRITABLE 的结构判据，对每个可写根起一次只读的 git rev-parse 问 gitdir 在哪（#797 WP-01）。argv 全是框架拼的"
   - file: core/isolation/linux.py
-    sites: [_memory_wall, _probe_landlock, _probe_landlock, _probe_landlock]
+    sites: [_memory_wall, _probe_landlock, _rc]
     argv_source: framework
-    reason: "_probe_landlock 三次都在探针里：问内核 Landlock ABI（起 _landlock_exec.py abi）；ABI ≥ 4 时再起两次同一条 connect 探针做对照——--network allow 必须连得上、deny 必须 EACCES，只测 deny 会把监听器没起来当成被拒（#797 WP-01）。_memory_wall：命令失败后问 systemd 这条命令那片 slice 的 cgroup 路径（systemctl --user show -p ControlGroup），读它的 memory.events 判是不是撞了内存墙（#1179）；argv 是 which 出来的 systemctl + 后端自己起的 slice 名"
+    reason: "_probe_landlock：问内核 Landlock ABI（起 _landlock_exec.py abi）；_rc 是它的内部函数，起四次探针——同一条 TCP connect 与同一条 UDP socket 各在 --network allow / deny 下跑一遍做对照：allow 必须连得上 / 建得出，deny 必须被拒；只测 deny 会把监听器没起来当成被拒（#797 WP-01，#1180 加 UDP）。_memory_wall：命令失败后问 systemd 这条命令那片 slice 的 cgroup 路径（systemctl --user show -p ControlGroup），读它的 memory.events 判是不是撞了内存墙（#1179）；argv 是 which 出来的 systemctl + 后端自己起的 slice 名"
   - file: core/isolation/_landlock_exec.py
     sites: [main]
     argv_source: framework
@@ -233,6 +233,10 @@ subprocess_call_sites:
       经人点头的环境修复（RFC §3.4）：argv 由 environment_facts.repair_proposal 的表按 code 与数据根算出
       （icacls <数据根> /reset /T /C 或 chmod -R u+rwX <数据根>），前端只回传 code 与路径、不回传命令，
       没有任何模型给的字节；后端以用户自己的身份执行、故意不进沙箱 —— 它修的正是沙箱外的数据目录权限。
+  - file: platform/backend/app/services/developer_source.py
+    sites: [ask]
+    argv_source: framework
+    reason: "开发者模式的关于页那一行「正在从源码目录 X（分支 @ sha）跑」：git rev-parse 只读，argv 固定、路径是声明里经 inspect 验过的 checkout；读不到就 None，不拦任何事"
   - file: platform/backend/app/services/compute_inventory.py
     sites: [_gpu_inventory]
     argv_source: framework

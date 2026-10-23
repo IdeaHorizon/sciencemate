@@ -168,8 +168,8 @@ export function canonicalRunPause(detail: RunDetailResponse) {
 
 export function canonicalRunAttention(
   detail: RunDetailResponse,
-  failure?: RunActivityTool["error"],
-  lang: Language = "zh",
+  failure: RunActivityTool["error"] | undefined,
+  lang: Language,
 ): CanonicalRunAttention | undefined {
   // 局面读后端那一次现算；下面几支照旧按局面分文案。
   const view = detail.run.view;
@@ -250,9 +250,15 @@ export function canonicalRunAttention(
   // 运行记录不再重复宣布一次它管不着的事。
   if (view.outcome === "ok_with_warning") {
     return {
-      title: "Research completed with notes",
-      message: "A result was produced, but at least one recorded check needs review.",
-      recovery: "Review the result and Execution history before publishing.",
+      title: say({ zh: "跑完了，有几处要看一眼", en: "Research completed with notes" }, lang),
+      message: say({
+        zh: "结果出来了，但至少有一项记下来的检查需要你过目。",
+        en: "A result was produced, but at least one recorded check needs review.",
+      }, lang),
+      recovery: say({
+        zh: "发布之前先看一遍结果和执行历史。",
+        en: "Review the result and Execution history before publishing.",
+      }, lang),
       tone: "attention",
     };
   }

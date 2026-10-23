@@ -47,6 +47,7 @@ from app.services.model_backends import credential_is_optional, resolved_api_key
 from app.services.model_role_catalog import REASONING_ROLE
 from app.services.redaction import PROTOCOL_LINE_LIMIT_BYTES
 from app.services.harness_imports import harness_module
+from app.services.say import SaidToAPerson
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +89,12 @@ class HarnessSessionError(RuntimeError):
         code: str | None = None,
         error_type: str | None = None,
         details: dict | None = None,
+        cause: str | None = None,
     ) -> None:
         super().__init__(message)
+        #: The worker's `cause`: the underlying exception's repr (`[WinError 5] …` and the
+        #: path). `message` is what our code said; this is what actually happened.
+        self.cause = cause or ""
         # Only assign when the caller actually supplied one: a bare
         # `HarnessSessionError("...")` must keep whatever identity its class
         # declares rather than be reset to empty.
@@ -102,6 +107,14 @@ class HarnessSessionError(RuntimeError):
 
 class HarnessSessionStaleError(HarnessSessionError):
     """The process that owned a resumable pause no longer exists."""
+
+
+class ResetRefused(SaidToAPerson, HarnessSessionError):
+    """现在不能清对话（正在跑 / 停在等人答的暂停上）—— 原话显示在界面上，两种语言都写。
+
+    别的 `HarnessSessionError` 是 worker 的技术原话（英文），端点把它们当证据填进一句
+    两种语言的话里（`said_of`）；这一种是平台自己说给人听的，照它自己的说。
+    """
 
 
 class HarnessAnswerSupersededError(HarnessSessionError):
@@ -1237,7 +1250,8 @@ class _ProjectHarnessSession:
         # **全部**角色的凭据，不只是主模型那一把。单个字符串的时候，审图
         # key 出现在 stderr 里是照原样打出来的 —— 与 worker 侧那张擦除名单
         # 漏掉它是同一类缺陷：把"哪些是密钥"写成一个固定数量的东西。
-        self._provider_secrets = [item for item in provider_secrets if item]
+        # 一条规则（`shared.lib.secret_values`，#1228）：太短的值不按原值抹。
+        self._provider_secrets = harness_module("shared.lib.secret_values").secret_values(provider_secrets)
         #: 这次 spawn 的身份凭证（worker 会写进注册表）。P0-4 的 reattach
         #: 握手认它 —— pid 会复用、命令行会撞车，token 不会。
         self.spawn_token = spawn_token
@@ -1350,9 +1364,7 @@ class _ProjectHarnessSession:
 
         遍历而不是取一个：新增角色自动被覆盖，不靠"记得再加一句 replace"。
         """
-        for secret in self._provider_secrets:
-            text = text.replace(secret, "[REDACTED]")
-        return text
+        return harness_module("shared.lib.secret_values").redact_values(text, self._provider_secrets)
 
     async def _emit_progress(self, event: dict, callback: ProtocolCallback) -> None:
         progress = protocol_user_progress(event)
@@ -1582,6 +1594,7 @@ class _ProjectHarnessSession:
                         code=str(event.get("code") or ""),
                         error_type=str(event.get("error_type") or ""),
                         details=details if isinstance(details, dict) else None,
+                        cause=self._redact(str(event.get("cause") or "")),
                     )
                 if event.get("type") in terminal_types:
                     return event
@@ -1834,10 +1847,12 @@ class _ProjectHarnessSession:
         互斥也是判据 —— 拿不到就说明有活在跑，如实拒绝而不是排队等。
         """
         if self._operation_lock.locked():
-            raise HarnessSessionError("这个 Session 正在跑，跑完再重置对话")
+            raise ResetRefused("这个 Session 正在跑，跑完再重置对话",
+                               en="This Session is running; reset the conversation once it finishes")
         async with self._operation_lock:
             if self.paused:
-                raise HarnessSessionError("有等待回答的暂停，先答复再重置")
+                raise ResetRefused("有等待回答的暂停，先答复再重置",
+                                   en="A pause is waiting for an answer; answer it before resetting")
 
             async def _noop(_event: dict) -> None:
                 return None
@@ -2128,6 +2143,10 @@ class HarnessSessionManager:
             # 协议不动）。后端死了管道 EOF，worker 存盘退出，与现状一致。
             **harness_module("shared.lib.process_control").detached_spawn_kwargs(),
         )
+        # 派活落账（只存 token 的哈希）：重启后回收孤儿时靠它认亲，见 `spawn_ledger`。
+        from app.services.spawn_ledger import record_spawn
+
+        record_spawn(project_id, session_id, spawn_token, getattr(process, "pid", None))
         session = _ProjectHarnessSession(
             project_id=project_id,
             session_id=session_id,
@@ -3431,6 +3450,10 @@ def _process_is_a_runtime_worker(pid: int) -> bool:
     return bool(command) and "platform_runtime" in command and "--serve" in command
 
 
+class NotOurWorker(RuntimeError):
+    """握着会话锁的进程不是本应用派出的（派活账本对不上）。不杀，说清楚。"""
+
+
 def reap_orphaned_session_worker(project_id: str, session_id: str) -> str | None:
     """回收还攥着这个 session 的 runtime 进程。回收了就返回一句说明。
 
@@ -3471,6 +3494,16 @@ def reap_orphaned_session_worker(project_id: str, session_id: str) -> str | None
     if not _process_is_a_runtime_worker(pid):
         # 进程已经没了（锁本来就自动释放了），或者这个号被别人用了。
         return None
+    # 认亲（窄单 D #1219）：命令行像 worker 不等于是我们派的。对不上就不杀 —— 抛出来，
+    # 调用方把这句原因记进那条 run 的 staleReapError，循环继续。
+    from app.services.spawn_ledger import recognise
+
+    verdict, reason = recognise(project_id, session_id, record)
+    if verdict == "not_ours":
+        raise NotOurWorker(f"pid {pid} 还握着这个会话的锁，但{reason}；没有杀它")
+    if verdict == "unknown":
+        logger.warning("reaping pid %s for %s/%s without confirming it is ours: %s",
+                       pid, project_id, session_id, reason)
 
     process_control = harness_module("shared.lib.process_control")
     if not process_control.terminate(pid):

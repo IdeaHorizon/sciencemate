@@ -79,6 +79,7 @@ const PAUSED_VIEW = (pause: SessionPendingApproval | null) => ({
 
 test("现场那份 payload 必须产出一张能点的卡，而不是一个锁死的会话", () => {
   const plan = sessionInputPlan({
+    lang: "en",
     session: sessionWith(PAUSED_VIEW(INCIDENT_PAUSE)),
     messages: [],
     sending: false,
@@ -92,6 +93,7 @@ test("现场那份 payload 必须产出一张能点的卡，而不是一个锁�
 
 test("带身份的同一次呈递画在它自己那条消息下面", () => {
   const plan = sessionInputPlan({
+    lang: "en",
     session: sessionWith(PAUSED_VIEW(REPAIRED_PAUSE)),
     messages: [
       { id: "msg-1", offerId: null },
@@ -110,6 +112,7 @@ test("带身份的同一次呈递画在它自己那条消息下面", () => {
 
 test("在等人、却拿不到那个问题 —— 输入框还给人，并说出来", () => {
   const plan = sessionInputPlan({
+    lang: "en",
     session: sessionWith(PAUSED_VIEW(null)),
     messages: [],
     sending: false,
@@ -133,7 +136,7 @@ test("能驱动的人永远有入口；不能驱动的人拿到的是原因，�
     { phase: "alive", waitingOn: { kind: "human" }, answer: { via: "none", reason: "只读" } },
   ];
   for (const raw of cases) {
-    const plan = sessionInputPlan({ session: sessionWith(raw), messages: [], sending: false });
+    const plan = sessionInputPlan({ lang: "en", session: sessionWith(raw), messages: [], sending: false });
     assert.ok(["prompt", "composer", "locked"].includes(plan.kind));
     if (plan.kind === "locked") assert.ok(plan.reason, "拒绝必须说得出原因");
     if (plan.kind === "prompt") assert.ok(plan.pause.question, "说了走卡片就必须有卡片");
@@ -144,6 +147,7 @@ test("后端说走卡片却没给卡片 —— 降级成输入框，绝不锁人
   // 协议漂了、中间层削了字段：这是**我们的**疏忽，不该由用户用一个锁死的
   // 会话来承担。
   const plan = sessionInputPlan({
+    lang: "en",
     session: sessionWith({ phase: "alive", waitingOn: { kind: "human" }, answer: { via: "pause" } }),
     messages: [],
     sending: false,
@@ -153,6 +157,7 @@ test("后端说走卡片却没给卡片 —— 降级成输入框，绝不锁人
 
 test("认不出来的入口取值也倒向给入口，并留下痕迹", () => {
   const plan = sessionInputPlan({
+    lang: "en",
     session: sessionWith({ phase: "alive", waitingOn: null, answer: { via: "telepathy" } }),
     messages: [],
     sending: false,
@@ -164,6 +169,7 @@ test("认不出来的入口取值也倒向给入口，并留下痕迹", () => {
 test("这个标签页正在发送时不拿旧局面画卡片", () => {
   // 在飞的那一刻手里这份 view 已经是旧的：人可能会去回答一个刚被答掉的问题。
   const plan = sessionInputPlan({
+    lang: "en",
     session: sessionWith(PAUSED_VIEW(REPAIRED_PAUSE)),
     messages: [],
     sending: true,
@@ -186,6 +192,7 @@ test("高危审批的那条命令原样送到人面前", () => {
     askingNodeType: "experiment",
   };
   const plan = sessionInputPlan({
+    lang: "en",
     session: sessionWith({ ...PAUSED_VIEW(pause), waitingOn: { kind: "permission" } }),
     messages: [],
     sending: false,

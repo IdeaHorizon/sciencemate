@@ -41,8 +41,11 @@ const canonical = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+/** 下面这些用例看的是形状，不看文案 —— 语言随便定一种。 */
+const adapt = (payload: Parameters<typeof adaptCanonicalSession>[0]) => adaptCanonicalSession(payload, "en");
+
 test("a canonical session renders the backend view instead of deriving one", () => {
-  const session = adaptCanonicalSession(canonical());
+  const session = adapt(canonical());
   assert.equal(session.execution.phase, "ended");
   assert.equal(session.execution.outcome, "ok");
   assert.equal(session.runCount, 1);
@@ -55,7 +58,7 @@ test("a canonical session renders the backend view instead of deriving one", () 
 test("canonical Session carries the two git commits that bound it", () => {
   // 版本 = git 提交（RFC X1）。从前这里是 project_revisions 的 id 与自增号 ——
   // 一个只在那张表里有意义的号码；现在是能拿去 `git show` 的东西。
-  const session = adaptCanonicalSession(canonical({
+  const session = adapt(canonical({
     baseCommitSha: "a".repeat(40),
     headCommitSha: "b".repeat(40),
     aheadBy: 3,
@@ -68,7 +71,7 @@ test("canonical Session carries the two git commits that bound it", () => {
 });
 
 test("canonical Session exposes the real Git branch and immutable commit identities", () => {
-  const session = adaptCanonicalSession(canonical({
+  const session = adapt(canonical({
     gitBranch: "session/session-a",
     gitBaseCommitSha: "1111111111111111111111111111111111111111",
     gitHeadCommitSha: "2222222222222222222222222222222222222222",
@@ -80,9 +83,9 @@ test("canonical Session exposes the real Git branch and immutable commit identit
 });
 
 test("group priority keeps conflict and attention visible before running or unpublished", () => {
-  const conflicted = adaptCanonicalSession(canonical({ conflictCount: 1, executionView: view({ phase: "alive", outcome: null }) }));
-  const unpublished = adaptCanonicalSession(canonical({ unpublishedChangeCount: 2 }));
-  const archived = adaptCanonicalSession(canonical({ lifecycleStatus: "archived" as const }));
+  const conflicted = adapt(canonical({ conflictCount: 1, executionView: view({ phase: "alive", outcome: null }) }));
+  const unpublished = adapt(canonical({ unpublishedChangeCount: 2 }));
+  const archived = adapt(canonical({ lifecycleStatus: "archived" as const }));
   assert.equal(groupSession(conflicted), "needs_attention");
   assert.equal(groupSession(unpublished), "unpublished");
   assert.equal(groupSession(archived), "archived");
@@ -91,16 +94,16 @@ test("group priority keeps conflict and attention visible before running or unpu
 test("a session with no unpublished file changes stays in recent", () => {
   // 从前这里还有一个 changeSetStatus（open / publishing）参与判断 —— 那是
   // change_sets 表的状态机。现在只有一个事实：git 上有没有还没发布的改动。
-  const nothingPending = adaptCanonicalSession(canonical({ unpublishedChangeCount: 0 }));
-  const pending = adaptCanonicalSession(canonical({ unpublishedChangeCount: 2 }));
+  const nothingPending = adapt(canonical({ unpublishedChangeCount: 0 }));
+  const pending = adapt(canonical({ unpublishedChangeCount: 2 }));
 
   assert.equal(groupSession(nothingPending), "recent");
   assert.equal(groupSession(pending), "unpublished");
 });
 
 test("session groups are sorted by last activity and every session appears once", () => {
-  const older = adaptCanonicalSession(canonical({ id: "old", updatedAt: "2026-08-02T10:00:00Z" }));
-  const newer = adaptCanonicalSession(canonical({ id: "new", updatedAt: "2026-08-03T11:00:00Z" }));
+  const older = adapt(canonical({ id: "old", updatedAt: "2026-08-02T10:00:00Z" }));
+  const newer = adapt(canonical({ id: "new", updatedAt: "2026-08-03T11:00:00Z" }));
   const groups = groupSessions([older, newer]);
   assert.deepEqual(groups.recent.map((item) => item.id), ["new", "old"]);
   assert.equal(Object.values(groups).flat().length, 2);
@@ -123,3 +126,17 @@ test("canonical messages preserve runId independently from commandId", () => {
   assert.equal(message.role, "system");
 });
 
+
+test("没有标题、认不出是谁时，补的那几个字跟着界面语言走", () => {
+  // 2026-10-20 以前这几个字是写死的英文：中文界面的会话列表上会冒出
+  // "Untitled research"，开车的人显示成 "Project member"。
+  const bare = canonical({ title: "", primaryDriverUserId: "someone-else", createdByUserId: null });
+  const zh = adaptCanonicalSession(bare, "zh");
+  const en = adaptCanonicalSession(bare, "en");
+  assert.equal(zh.title, "未命名的研究");
+  assert.equal(en.title, "Untitled research");
+  assert.equal(zh.driverLabel, "项目成员");
+  assert.equal(en.driverLabel, "Project member");
+  assert.equal(zh.creatorLabel, "未指定");
+  assert.equal(en.creatorLabel, "Unassigned");
+});

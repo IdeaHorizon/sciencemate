@@ -134,16 +134,18 @@ def test_a_packed_fixture_restores_like_a_directory(tmp_path):
     assert manifest["previous_version"] == "0.5.6" and (target / "db.sqlite").is_file()
 
 
-def test_the_committed_fixture_is_small_and_carries_no_secret():
-    """入库的那份夹具（0.5.6，PC 上真跑过一条消息的数据根）：有 manifest、有 run、没有秘密、没有载荷。"""
+@pytest.mark.parametrize("version", ["0.5.6", "0.5.7"])
+def test_the_committed_fixture_is_small_and_carries_no_secret(version):
+    """入库的夹具（PC 上那一版真跑过一条消息的数据根）：有 manifest、有 run、没有秘密、没有载荷。
+    每发一版补一份（N-1 → N）；旧的留着，跳版升级的存量用户还在（N-2 → N）。"""
     import tarfile
 
-    packed = REPO / "scripts" / "acceptance" / "fixtures" / "upgrade-from-0.5.6.tgz"
+    packed = REPO / "scripts" / "acceptance" / "fixtures" / f"upgrade-from-{version}.tgz"
     assert packed.is_file() and packed.stat().st_size < 2 * 1024 * 1024
     with tarfile.open(packed, "r:gz") as archive:
         names = archive.getnames()
         manifest = json.load(archive.extractfile([n for n in names if n.endswith(rehearsal.MANIFEST)][0]))
-    assert manifest["previous_version"] == "0.5.6"
+    assert manifest["previous_version"] == version
     assert manifest["runs"] and manifest["sessions"]
     assert manifest["skipped_large"] == []
     assert not [n for n in names if "/payload/" in n or n.endswith("credential.key") or "/webview2/" in n]
@@ -193,11 +195,59 @@ def test_api_payloads_may_be_lists_or_items_envelopes():
     assert rehearsal._items({"detail": "x"}) == [] and rehearsal._items("text") == []
 
 
-def test_snapshot_compare_matches_the_backend_rule():
-    before = {"entries": {"a": {"mode": "0o700", "owner": "1"}, "gone": {"mode": "0o700"}}}
-    after = {"entries": {"a": {"mode": "0o500", "owner": "1"}, "new": {"mode": "0o700"}}}
-    assert rehearsal._compare_snapshots(before, after) == [
-        {"path": "a", "field": "mode", "before": "0o700", "after": "0o500"}]
+def test_the_rehearsal_compares_with_the_backend_rule_not_a_copy():
+    from app.services import permissions_snapshot
+
+    snap = rehearsal._snapshots(REPO)
+    assert snap.compare is permissions_snapshot.compare and snap.take_snapshot is permissions_snapshot.take_snapshot
+    assert not hasattr(rehearsal, "_compare_snapshots"), "规则只有后端那一份"
+
+
+def _restored(tmp_path, monkeypatch) -> Path:
+    root = _fake_data_root(tmp_path)
+    out = tmp_path / "fixture"
+    rehearsal.capture(root, out, version="0.5.7")
+
+    class _Done:
+        returncode = 0
+        stdout = "完成"
+        stderr = ""
+
+    import subprocess as sp
+    monkeypatch.setattr(sp, "run", lambda argv, **kwargs: _Done())
+    target = tmp_path / "fresh"
+    rehearsal.restore(out, target, python="/opt/app/python", tree=REPO)
+    return target
+
+
+def test_restore_records_the_baseline_here_and_hands_it_to_the_new_version(tmp_path, monkeypatch):
+    target = _restored(tmp_path, monkeypatch)
+    baseline = json.loads((target / "logs" / rehearsal.BASELINE_NAME).read_text(encoding="utf-8"))
+    assert baseline["data_root"] == str(target) and baseline["app_version"] == "0.5.7"
+    assert (target / "logs" / "permissions-snapshot.json").read_text(encoding="utf-8") == \
+        (target / "logs" / rehearsal.BASELINE_NAME).read_text(encoding="utf-8"), \
+        "新版启动时拿 logs/ 里那份比 —— 它比的也得是这台机器、这个位置上的基线"
+    diffs, entries = rehearsal.permission_diffs(target)
+    assert diffs == [] and entries > 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 上用 chmod 代替 icacls /deny；Windows 上真机跑")
+def test_a_permission_change_after_restore_turns_the_rehearsal_red_and_names_the_path(tmp_path, monkeypatch):
+    """窄单 H #1223 判据 2：装新版、起新版之间数据根的权限被动了 —— 闸红，说的是哪条路径哪个字段。"""
+    target = _restored(tmp_path, monkeypatch)
+    victim = next(p for p in sorted((target / "project-worktrees").iterdir()) if p.is_dir())
+    victim.chmod(0o500)
+    try:
+        diffs, _ = rehearsal.permission_diffs(target)
+    finally:
+        victim.chmod(0o700)
+    assert {"path": f"project-worktrees/{victim.name}", "field": "mode"} in [
+        {"path": d["path"], "field": d["field"]} for d in diffs]
+
+
+def test_without_a_baseline_the_rehearsal_refuses_rather_than_reporting_none(tmp_path):
+    with pytest.raises(rehearsal.RehearsalFailed, match="没有权限基线"):
+        rehearsal.permission_diffs(tmp_path)
 
 
 # ── 发布闸 ───────────────────────────────────────────────────────────────────
@@ -217,8 +267,19 @@ def _release_dir(tmp_path: Path, *, receipt: dict | None, sha: str = "a" * 64) -
 def _good_receipt(sha: str = "a" * 64) -> dict:
     return {"result": "REHEARSAL OK", "against": "http://127.0.0.1:1", "previous_version": "0.5.6",
             "checks": {"model_called": True, "environment_clean": True, "capabilities_all_true": True,
-                       "previous_runs_visible": True, "kb_readable": True, "permissions_unchanged": None},
+                       "previous_runs_visible": True, "kb_readable": True, "permissions_unchanged": True},
             "host": "pc", "ran_at": "2026-10-16T00:00:00+00:00", "installer": "ScienceMate-Setup.exe", "sha256": sha}
+
+
+def test_the_gate_refuses_a_receipt_that_never_compared_permissions(tmp_path):
+    """旧彩排写的收据：permissions_unchanged=None。缺席 / None = 没验，不是验过了。"""
+    receipt = _good_receipt()
+    receipt["checks"]["permissions_unchanged"] = None
+    with pytest.raises(SystemExit, match="没有验过"):
+        publish.refuse_a_windows_build_that_never_rehearsed_an_upgrade(_release_dir(tmp_path, receipt=receipt))
+    del receipt["checks"]["permissions_unchanged"]
+    with pytest.raises(SystemExit, match="没有验过"):
+        publish.refuse_a_windows_build_that_never_rehearsed_an_upgrade(_release_dir(tmp_path / "b", receipt=receipt))
 
 
 def test_the_gate_refuses_without_a_rehearsal_receipt(tmp_path):

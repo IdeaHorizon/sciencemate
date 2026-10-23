@@ -20,9 +20,11 @@ test("provider 选项与后端 HARNESS_COMPATIBLE_PROVIDERS 逐条相等", () =>
 });
 
 test("编辑一条 provider 不在词表里的连接，不会被下拉悄悄改成别的 provider", () => {
-  const options = providerOptions("demo");
+  const options = providerOptions("demo", "en");
   assert.ok(options.some((option) => option.value === "demo" && !option.supported));
-  assert.equal(providerOptions().some((option) => option.value === "demo"), false);
+  assert.equal(providerOptions(undefined, "en").some((option) => option.value === "demo"), false);
+  // 不在词表里的那条也跟着界面语言说「不支持」。
+  assert.match(providerOptions("demo", "zh").find((option) => option.value === "demo")!.label, /本机执行不支持/);
 });
 
 test("自定义端点要地址，托管 provider 不要", () => {

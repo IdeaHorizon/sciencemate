@@ -76,7 +76,7 @@ export function ResearchStateView({ projectId }: { projectId: string }) {
     return (
       <Empty
         title={t({ zh: "研究进展解析不出来", en: "Research state could not be parsed" })}
-        hint={`${head.path} does not carry the expected metadata.`}
+        hint={t({ zh: "{path} 里没有预期的元数据。", en: "{path} does not carry the expected metadata." }, { path: head.path })}
       />
     );
   }

@@ -74,20 +74,28 @@ class RequestBodyCapMiddleware:
         from starlette.datastructures import Headers
         from starlette.exceptions import HTTPException
 
+        from app.services.user_interface import SCREEN_LANGUAGE_HEADER, language_said_by, say
+
         maximum = settings.material_max_bytes + _MULTIPART_ENVELOPE_ALLOWANCE
+        headers = Headers(scope=scope)
+        # 这一层拿不到 `Request` 依赖，语言头直接读（同一条规则：`language_said_by`）。
+        lang = language_said_by(headers.get(SCREEN_LANGUAGE_HEADER))
 
         def detail(size: int) -> dict:
             return {
                 "code": "request_body_too_large",
-                "message": (
-                    f"请求体超过本部署上限 {maximum} 字节。更大的数据集别走上传："
-                    "让 data 节点在计算侧就地取用，或在部署上给这个项目挂一个数据集绑定。"
-                ),
+                "message": say({
+                    "zh": "请求体超过本部署上限 {limit} 字节。更大的数据集别走上传："
+                          "让 data 节点在计算侧就地取用，或在部署上给这个项目挂一个数据集绑定。",
+                    "en": "The request body is over this deployment's limit of {limit} bytes. Do not upload "
+                          "larger datasets: let the data node read them in place on the compute side, or "
+                          "bind a dataset to this project on the deployment.",
+                }, lang, limit=maximum),
                 "sizeBytes": size,
                 "maxBytes": maximum,
             }
 
-        declared = Headers(scope=scope).get("content-length", "")
+        declared = headers.get("content-length", "")
         if declared.isdigit() and int(declared) > maximum:
             logger.warning(
                 "%s %s → 413 (declared %s bytes > cap %d)",

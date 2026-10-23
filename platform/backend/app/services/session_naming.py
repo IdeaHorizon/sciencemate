@@ -35,6 +35,7 @@ from app.database import get_session_factory
 from app.models.execution import SessionMessage, SessionProjection
 from app.models.model_backend import ModelBackendConfig
 from app.services import harness_bridge_once
+from app.services.say import SaidToAPerson
 from app.services.harness_runtime import (
     _provider_base_url,
     harness_subprocess_env,
@@ -57,8 +58,12 @@ _TIMEOUT_SECONDS = 150
 assert _MODEL_TIMEOUT_SECONDS < _TIMEOUT_SECONDS
 
 
-class SessionNamingError(RuntimeError):
-    """这次命名没能完成。"""
+class SessionNamingError(SaidToAPerson, RuntimeError):
+    """这次命名没能完成。
+
+    只进日志，不到人眼前（自动命名失败照常用默认名）。仍是 `SaidToAPerson`：它的工厂
+    交给 `harness_bridge_once.ask_once`，那边按 `error(中文, en=英文)` 一种形状调。
+    """
 
 
 async def schedule_session_autoname(
@@ -170,7 +175,8 @@ async def _ask_harness_for_title(
     """`op=name_session` —— 与 KB 查询同一座桥，只是这一次要带模型凭据。"""
     root = Path(settings.harness_root).expanduser().resolve()
     if not (root / "core" / "llm.py").is_file():
-        raise SessionNamingError("HARNESS_ROOT is not a valid current harness checkout")
+        raise SessionNamingError("HARNESS_ROOT 不是一份当前的 harness checkout",
+                                 en="HARNESS_ROOT is not a valid current harness checkout")
     python = the_interpreter_that_runs_the_harness()
 
     state_root = data_root("state").resolve()

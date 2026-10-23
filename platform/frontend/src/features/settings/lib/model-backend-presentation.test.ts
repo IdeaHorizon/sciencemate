@@ -26,9 +26,10 @@ test("demo aliases with the same model collapse to one stable connection", () =>
   ]);
   assert.equal(items.length, 1);
   assert.equal(items[0].id, "local");
-  assert.equal(modelBackendDisplayName(items[0]), "Local demonstration model");
-  assert.equal(modelBackendModelLabel(items[0]), "Deterministic local runtime");
-  assert.equal(`${modelBackendDisplayName(items[0])} ${modelBackendModelLabel(items[0])}`.toLowerCase().includes("atrium"), false);
+  assert.equal(modelBackendDisplayName(items[0], "en"), "Local demonstration model");
+  assert.equal(modelBackendModelLabel(items[0], "en"), "Deterministic local runtime");
+  assert.equal(modelBackendDisplayName(items[0], "zh"), "本机演示模型");
+  assert.equal(`${modelBackendDisplayName(items[0], "en")} ${modelBackendModelLabel(items[0], "en")}`.toLowerCase().includes("atrium"), false);
 });
 
 test("real endpoints remain distinct when provider and model match", () => {

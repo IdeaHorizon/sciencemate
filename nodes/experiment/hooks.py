@@ -4928,8 +4928,8 @@ register_loop_hook(route_block_resolution)
 # preprocessing_boundary_audit —— 前处理边界机械对账（on_end）
 # ─────────────────────────────────────────────
 #
-# 前处理边界不能由 LLM 从摘要猜测：它必须对本 run 的实际工具调用机械扫描。
-# 结论先作为 transcript receipt 落地，供 closure、review 与事后诊断直接读取。
+# 扫描本 run 的工具调用，只把文件名/命令匹配作为本次诊断线索写入 transcript。
+# 命中不证明实际生成或越权，不能充当 closure 判决或长期错误经验。
 #
 # 判定口径与白名单见 tools/preprocessing_boundary.py 的模块 docstring。
 # 只观察不拦截：误判面宽，硬门禁的期望损失高于收益。
@@ -4952,22 +4952,19 @@ def _preprocessing_boundary():
 
 
 def preprocessing_boundary_audit_on_end(ctx: HookContext, loop_result: Any) -> None:
-    """机械扫描本 run 的前处理产物生成行为，结论作为 receipt 落 transcript。"""
+    """只保留 run-local 启发式线索；不判违规，也不写长期错误经验。"""
     state = ctx.state
     try:
         report = _preprocessing_boundary().scan_preprocessing_boundary(state)
     except Exception as e:
-        # 扫描失败也必须留下事件：mechanical fastpath 在事件缺席时判权威 fail，
-        # 静默返回等于把每个扫描异常变成一次"违规"判决。
+        # 扫描失败是未知，不是通过或违规；保留诊断，不影响权限与完成语义。
         log.warning("preprocessing_boundary_audit 扫描失败：%s", e)
-        report = {"verdict": "PASS", "n_scanned": 0, "n_hits": 0,
+        report = {"verdict": "UNKNOWN", "n_scanned": 0, "n_hits": 0,
                   "n_whitelisted": 0, "n_unaccounted": 0,
                   "accounting_reasons": ["audit_scan_failed"],
                   "scan_error": f"{type(e).__name__}: {e}"[:200]}
 
-    # 事件先落、memory 后写：high_risk_command_audit 把 append_transcript 放在
-    # memory 写入之后的同一个 try 里，memory 一抛异常事件就没了 → QC fail-closed。
-    # 同样的顺序在这里不能再来一次。
+    # 仅写本次运行的诊断事件；不升级为权限判定或长期记忆。
     try:
         state.append_transcript(
             "preprocessing_boundary_audit",
@@ -4978,44 +4975,15 @@ def preprocessing_boundary_audit_on_end(ctx: HookContext, loop_result: Any) -> N
             n_unaccounted=report.get("n_unaccounted", 0),
             accounting_reasons=report.get("accounting_reasons") or [],
             hits=report.get("hits") or [],
+            scan_error=report.get("scan_error"),
         )
     except Exception as e:
         log.warning("preprocessing_boundary_audit 事件写入失败：%s", e)
         return
 
-    if not report.get("n_unaccounted", 0):
-        return
-
-    parts = [
-        f"preprocessing_boundary_audit: {report.get('verdict')}。",
-        f"机械扫描 {report.get('n_scanned', 0)} 条命令/写文件调用，"
-        f"前处理生成命中 {report.get('n_hits', 0)} 处"
-        f"（另有 {report.get('n_whitelisted', 0)} 处按运行化白名单排除）。",
-    ]
-    parts.append("这些命中仅是按文件名和生成器命令做的机械匹配，"
-                 "不等于已确认的错误。")
-    if report.get("accounting_reasons"):
-        parts.append("已对账依据：" + "、".join(report["accounting_reasons"]) + "。")
-    if report.get("n_unaccounted"):
-        parts.append("未对账明细：" + "; ".join(
-            f"{h.get('label')}: {h.get('evidence', '')[:80]}"
-            for h in (report.get("hits") or [])[:5]))
-    try:
-        from core import memory as _M
-
-        _M.append_manual(
-            state, text=" ".join(parts), section=_M.SECTION_PITFALL,
-            nodes=[state.node_type], tools=["safe_run_bash", "safe_write_file"],
-            run_id=str(state.run_id or ""),
-        )
-    except Exception as e:
-        log.warning("preprocessing_boundary_audit memory 写入失败：%s", e)
-
-
 preprocessing_boundary_audit = LoopHook(
     name="preprocessing_boundary_audit",
-    description="run 结束时机械对账前处理产物生成行为（生成器命令 + 正式输入文件写入，"
-                "扣除运行化白名单），结论供 closure/review 与事后审计读取",
+    description="run 结束时记录文件名/生成器命令匹配的非约束诊断线索；不判违规，不写长期记忆",
     on_end=preprocessing_boundary_audit_on_end,
     emits=("preprocessing_boundary_audit",),
 )

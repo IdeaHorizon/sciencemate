@@ -79,7 +79,7 @@ from app.services.sessions import (
     build_platform_context_snapshot,
     set_session_title_from_first_message,
 )
-from app.services.user_interface import language_for
+from app.services.user_interface import language_for, say
 
 
 def _resource_sandbox_mounts(resource: ProjectResource) -> list[tuple[Path, str]]:
@@ -1437,10 +1437,13 @@ async def execute_local_turn(
                     {
                         "event": "workspace.checkpoint_failed",
                         "tool": "git_checkpoint",
-                        "detail": (
-                            f"这次工作区入库被拒绝：{exc}。工作本身都在磁盘上，"
-                            "没有丢失；下一次 checkpoint 会连同这次的改动一起重试。"
-                        ),
+                        "detail": say({
+                            "zh": "这次工作区入库被拒绝：{why}。工作本身都在磁盘上，"
+                                  "没有丢失；下一次 checkpoint 会连同这次的改动一起重试。",
+                            "en": "This workspace checkpoint was refused: {why}. The work itself is on "
+                                  "disk and nothing is lost; the next checkpoint retries these changes "
+                                  "together with its own.",
+                        }, language, why=exc),
                         "iteration": 1,
                     }
                 )

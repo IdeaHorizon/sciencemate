@@ -25,11 +25,11 @@ test("失败就是结论本身的时候，一定要给", () => {
 
 test("重试说第几次，不说「recorded 1」", () => {
   assert.equal(retryProgressLabel({ attempt: 2, maxAttempts: 5 }, "en"), "retry 2/5");
-  assert.equal(retryProgressLabel({ attempt: 2, maxAttempts: 5 }), "第 2/5 次重试");
+  assert.equal(retryProgressLabel({ attempt: 2, maxAttempts: 5 }, "zh"), "第 2/5 次重试");
   // 事件没带计数就别编一个 —— 只说在重试。
   assert.equal(retryProgressLabel({ attempt: 2 }, "en"), "retrying");
   assert.equal(retryProgressLabel({}, "en"), "retrying");
-  assert.equal(retryProgressLabel({}), "重试中");
+  assert.equal(retryProgressLabel({}, "zh"), "重试中");
 });
 
 test("失败/重试的显示层接线：判据真的被调用了", () => {

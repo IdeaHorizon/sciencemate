@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from app.services.feed.profile import journal_display_name
+
 import logging
+import asyncio
 import mimetypes
 import re
 import sqlite3
-from datetime import UTC, datetime, timedelta
+import httpx
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -41,6 +45,7 @@ from app.schemas.feed import (
     FeedItemOut,
     FeedStatusOut,
     FeedTodayOut,
+    FeedProgressOut,
     InterestsOut,
     InterestsWrite,
     JournalSubscription,
@@ -68,14 +73,14 @@ from app.services.feed.literature_projection import literature_papers_root
 from app.services.feed.link_preview import LinkRejected, fetch_preview
 from app.services.harness_contract import HarnessContractUnavailable
 from app.services import harness_kb
-from app.services.user_interface import language_for
+from app.services.user_interface import Language, language_for, language_on_screen, say
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-#: 首页每个分区最多几条。日报是**有界**的 —— 刷得完是特性。
-SECTION_SIZE = 20
+#: 每批推荐条数；候选池仍由 ranking.candidate_items 的窗口限制。
+FEED_PAGE_SIZE = 21
 
 
 def _local_literature_figure(item: FeedItem) -> Path | None:
@@ -183,6 +188,7 @@ def _to_out(
     source_names: dict[str, str] | None = None,
     author_names: dict[str, str] | None = None,
     saved_ids: frozenset[str] = frozenset(),
+    opened_ids: frozenset[str] = frozenset(),
     lang: str = "zh",
 ) -> FeedItemOut:
     return FeedItemOut(
@@ -192,15 +198,38 @@ def _to_out(
         url=item.url,
         summary=item.summary,
         authors=list(item.authors or []),
-        venue=item.venue,
+        venue=journal_display_name(item.venue) if item.venue else item.venue,
         published_at=item.published_at,
         domains=[str(s) for s in (item.domains or [])],
         domain_labels=_labels(item.domains, lang),
         source_name=(source_names or {}).get(item.source_id or ""),
         author_display_name=(author_names or {}).get(item.author_user_id or ""),
         saved=str(item.id) in saved_ids,
+        viewed=str(item.id) in opened_ids,
         extra=item.extra if isinstance(item.extra, dict) else {},
     )
+
+
+async def _attach_cached_translations(items: list[FeedItemOut]) -> list[FeedItemOut]:
+    """Read the shared index cache once for this response, without a model call."""
+    def load():
+        import sys
+        root = settings.harness_root or str(Path(__file__).resolve().parents[5])
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        from nodes.literature.tools.local_index import LocalPaperIndex
+        from app.services.feed.literature_projection import literature_papers_root
+        index = LocalPaperIndex(str(literature_papers_root() / "literature_catalog.sqlite3"))
+        records = [{"title": item.title[:1000], "abstract": item.summary or ""} for item in items]
+        index.hydrate_translations(records)
+        return records
+    if not items:
+        return items
+    records = await asyncio.to_thread(load)
+    for item, record in zip(items, records):
+        item.title_zh = record.get("title_zh")
+        item.abstract_zh = record.get("abstract_zh")
+    return items
 
 
 async def _lookup_names(db: AsyncSession, items: list[FeedItem]) -> tuple[dict, dict]:
@@ -234,6 +263,18 @@ async def _saved_ids(db: AsyncSession, *, user_id: str) -> frozenset[str]:
     return frozenset(rows)
 
 
+async def _opened_ids(db: AsyncSession, *, user_id: str) -> frozenset[str]:
+    rows = (
+        await db.execute(
+            select(FeedEngagement.item_id).where(
+                FeedEngagement.user_id == user_id,
+                FeedEngagement.action == FeedEngagementAction.OPEN,
+            )
+        )
+    ).scalars().all()
+    return frozenset(str(item_id) for item_id in rows)
+
+
 def _audience_id(user: User) -> str:
     """org 可见内容的受众键 —— **不用** `governance_scope_for`。
 
@@ -256,14 +297,109 @@ def _visible_clause(user: User):
     return (FeedItem.visibility == FeedVisibility.PLATFORM) | (
         (FeedItem.visibility == FeedVisibility.ORGANIZATION)
         & (FeedItem.organization_id == _audience_id(user))
+    ) | (
+        (FeedItem.visibility == FeedVisibility.INSTITUTION)
+        & (FeedItem.organization_id == user.institution_id)
     )
 
 
-@router.get("/today", response_model=FeedTodayOut)
-async def feed_today(
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> FeedTodayOut:
+def _mix_recommendation_sources(feed: list[FeedCard]) -> list[FeedCard]:
+    """Give domain, journal, scholar and project equal turns on every page."""
+    def source(card: FeedCard) -> str:
+        if card.project_id or "课题" in card.reason or "项目" in card.reason:
+            return "project"
+        if "学者" in card.reason:
+            return "scholar"
+        if "期刊" in card.reason:
+            return "journal"
+        return "domain"
+
+    # Preserve within-source ranking, rotating equally among all available
+    # sources. Today's pick badge remains, without reserving a source's turns.
+    order = ("domain", "journal", "scholar", "project")
+    buckets = {key: [] for key in order}
+    for card in feed:
+        memberships = getattr(card, "recommendation_sources", None) or [source(card)]
+        for key in memberships:
+            if key in buckets:
+                buckets[key].append(card)
+    positions = {key: 0 for key in order}
+    result: list[FeedCard] = []
+    seen: set[int] = set()
+    while len(result) < len(feed):
+        for key in order:
+            while positions[key] < len(buckets[key]) and id(buckets[key][positions[key]]) in seen:
+                positions[key] += 1
+            if positions[key] < len(buckets[key]):
+                card = buckets[key][positions[key]]
+                result.append(card)
+                seen.add(id(card))
+                positions[key] += 1
+    return result
+
+
+async def _recommendation_progress(db, user, profile, *, recommendable: int) -> FeedProgressOut:
+    """Count this user's relevant indexes before the preparation/recommendation gates."""
+    from app.services.literature_harvester import literature_index_harvester
+
+    rows = (await db.execute(select(FeedItem).where(
+        _visible_clause(user),
+        FeedItem.kind.in_([FeedItemKind.PAPER, FeedItemKind.NEWS, FeedItemKind.DIGEST]),
+        ranking.publication_window_clause(datetime.now(UTC)),
+    ))).scalars().all()
+    relevant = []
+    source_counts = {source: {"source": source, "collected": 0, "pending": 0} for source in ("domain", "journal", "scholar", "project")}
+    for item in rows:
+        if ranking.is_journal_notice(item):
+            continue
+        extra = item.extra or {}
+        routes = ranking.acquisition_routes(item)
+        owned_project = (str(user.id) in (extra.get("profile_user_ids") or [])
+                         and bool(routes & {"project_profile", "web"}) and bool(profile.projects)
+                         and (profile.active_project_queries is None
+                              or str(extra.get("discovery_query") or "") in profile.active_project_queries))
+        membership = {
+            "domain": bool(ranking._domain_hits(item, profile)),
+            "journal": ranking.matches_subscribed_journal(item, profile),
+            "scholar": ranking.matches_subscribed_scholar(item, profile),
+            "project": owned_project,
+        }
+        if any(membership.values()):
+            relevant.append(item)
+            waiting = bool(extra.get("literature_catalog")) and extra.get("literature_preparation") != "ready"
+            for source, hit in membership.items():
+                if hit:
+                    source_counts[source]["collected"] += 1
+                    source_counts[source]["pending"] += int(waiting)
+    domain_counts = {code: {"domain": code, "label": domain_service.label(code, lang=language_for(user)),
+                            "collected": 0, "prepared": 0, "pending": 0,
+                            "recommendable": 0, "translated": 0, "translation_pending": 0}
+                     for code in profile_service.stored_domains(user)}
+    from types import SimpleNamespace
+    selected_domains = SimpleNamespace(domains=tuple(domain_counts))
+    for item in relevant:
+        for code in ranking._domain_hits(item, selected_domains):
+            if code in domain_counts:
+                row = domain_counts[code]
+                row["collected"] += 1
+                waiting = bool((item.extra or {}).get("literature_catalog")) and (item.extra or {}).get("literature_preparation") != "ready"
+                row["pending" if waiting else "prepared"] += 1
+    pending = sum(bool((item.extra or {}).get("literature_catalog"))
+                  and (item.extra or {}).get("literature_preparation") != "ready"
+                  for item in relevant)
+    task_state = discovery.subscription_task_state(user.id)
+    searching = literature_index_harvester.is_online_refreshing(user.id) or task_state == "searching"
+    project_error = bool(curation.stored(user).get("curated_error")) and bool(profile.projects)
+    phase = ("searching" if searching else "preparing" if task_state == "preparing"
+             else "queued" if pending else "failed" if project_error and not recommendable else "settled")
+    return FeedProgressOut(
+        phase=phase, collected=len(relevant), prepared=len(relevant) - pending,
+        pending=pending, recommendable=recommendable, project_error=project_error,
+        domain_progress=list(domain_counts.values()), source_progress=list(source_counts.values()),
+    )
+
+
+async def _build_feed_pool(user: User, db: AsyncSession) -> FeedTodayOut:
     """打开平台第一眼 —— Top 3 + 几个分区。"""
     lang = language_for(user)
     from app.services.literature_harvester import literature_index_harvester
@@ -276,19 +412,24 @@ async def feed_today(
     # 小红书候选由期刊、Project画像和网页搜索三路汇合：各路先用自己的
     # 指标评分，再按5:3:2动态混排；不足的一路由其余路线自然递补。
     rednote_scored = ranking.rank_rednote(
-        candidates, profile, user_id=str(user.id)
+        candidates, profile, user_id=str(user.id), base_scored=scored
     )
     rednote_scored = await ranking.apply_behavior_preferences(
         db, user_id=str(user.id), scored=rednote_scored
     )
-    field_dynamics = ranking.rank_field_dynamics(candidates, profile)
+    field_dynamics = await ranking.apply_behavior_preferences(
+        db, user_id=str(user.id), scored=ranking.rank_field_dynamics(candidates, profile)
+    )
 
     # 关注方向可能由旧客户端、管理员或其他入口修改；不能只依赖设置接口
     # 是否成功清理缓存。若今日选摘中的条目全部与当前画像无命中，丢弃旧选摘
     # 并立即重算，避免用户换方向后仍看到昨天的三条。
     from app.models.feed import FeedDailyPick
+    refresh_picks = False
     cached_picks = await db.get(FeedDailyPick, (user.id, datetime.now(UTC).date()))
-    if cached_picks is not None and cached_picks.picks and (profile.domains or profile.projects):
+    if cached_picks is not None and cached_picks.picks and (
+        profile.domains or profile.projects or profile.journals or profile.scholars
+    ):
         scored_by_id = {str(item.item.id): item for item in rednote_scored}
         cached_scored = [
             scored_by_id.get(str(payload.get("item_id")))
@@ -296,17 +437,15 @@ async def feed_today(
             if isinstance(payload, dict)
         ]
         if not cached_scored or any(item is None for item in cached_scored):
-            await db.delete(cached_picks)
-            await db.flush()
+            refresh_picks = True
 
-    picks_payload = await ranking.daily_picks(db, user_id=user.id, scored=rednote_scored)
+    picks_payload = await ranking.daily_picks(db, user_id=user.id, scored=rednote_scored, refresh=refresh_picks)
     pick_ids = [p["item_id"] for p in picks_payload]
     # 日报表中的 item_id 通过 JSON 保存为字符串，而 SQLAlchemy 查询返回的
     # FeedItem.id 是 UUID。统一用字符串作为索引，否则同一条记录会在
     # “可能与你相关”中出现，却因 `str != UUID` 在“今日精选”组装时被丢掉。
     by_id = {str(item.id): item for item in candidates}
-    # 选摘是**当天定下来**的，其中某条可能已经不在今天的候选窗口里了
-    # （比如它被后来的采集挤出了 400 条上限）。按 id 补齐，别让日报缺一格。
+    # 今日选摘可能因时间窗口或设置变化退出当前候选，按 id 补齐引用。
     missing = [i for i in pick_ids if str(i) not in by_id]
     if missing:
         for item in (
@@ -316,6 +455,7 @@ async def feed_today(
 
     project_names = {p.project_id: p.name for p in profile.projects}
     saved = await _saved_ids(db, user_id=user.id)
+    opened = await _opened_ids(db, user_id=user.id)
     pick_items = [by_id[str(i)] for i in pick_ids if str(i) in by_id]
     source_names, author_names = await _lookup_names(db, [*candidates, *pick_items])
 
@@ -332,19 +472,25 @@ async def feed_today(
         return FeedCard(
             item=_to_out(
                 item, source_names=source_names, author_names=author_names,
-                saved_ids=saved, lang=lang,
+                saved_ids=saved, opened_ids=opened, lang=lang,
             ),
             reason=reason,
             project_id=project_id,
             project_name=project_name,
             is_today_pick=is_today_pick,
+            recommendation_sources=[key for key, matches in (
+                ("domain", bool(ranking._domain_hits(item, profile))),
+                ("journal", ranking.matches_subscribed_journal(item, profile)),
+                ("scholar", ranking.matches_subscribed_scholar(item, profile)),
+                ("project", bool(project_id) or "课题" in reason or "项目" in reason),
+            ) if matches],
         )
 
     # 今日必读：每天替你挑的少数几条，挂角标、排在流最前。
     seen: set[str] = set()
     for payload in picks_payload:
         item = by_id.get(payload["item_id"])
-        if item is None or not ranking.show_in_feed(item):
+        if item is None or ranking.is_journal_notice(item) or not ranking.show_in_feed(item):
             continue
         feed.append(_card(
             item,
@@ -363,11 +509,11 @@ async def feed_today(
     ]
     # “可能与你相关”的准入：课题（project_profile）与网络搜索（web）维持原样，
     # 另把用户**订阅的期刊与学者**并进来 —— 订阅是用户自己点名的信号，订了就该
-    # 在推荐里看得见。手选学科（journal）仍归“本领域动态”，不掺进来，除非那条
-    # 正是他订阅的那本刊或那位学者发的。
+    # 在推荐里看得见。手选学科命中也保留混排位置，避免统一追加到课题内容之后。
     for_you = [
         value for value in matched
         if value.project_id
+        or value.matched_domains
         or ranking.acquisition_routes(value.item)
         & {"project_profile", "web", "bignews", "scholar"}
         or ranking.matches_subscribed_journal(value.item, profile)
@@ -386,7 +532,7 @@ async def feed_today(
 
     # 一条流：今日必读 → 与你相关 → 本领域动态 → 临近截稿。不再分板块，
     # 每一条都带可验证的理由；同一份工作只出现一次（课题优先于学科）。
-    for value in for_you[:SECTION_SIZE]:
+    for value in for_you:
         feed.append(_card(
             value.item,
             reason=value.reason(),
@@ -394,7 +540,7 @@ async def feed_today(
             project_name=value.project_name,
         ))
         seen.add(str(value.item.id))
-    for value in general[:SECTION_SIZE]:
+    for value in general:
         if str(value.item.id) in seen:
             continue
         feed.append(_card(
@@ -422,15 +568,161 @@ async def feed_today(
         elif not settings.feed_collector_enabled:
             empty_reason = t("empty.scheduler_off", lang)
         else:
-            empty_reason = t("empty.first_round", lang)
+            empty_reason = ""
 
+    feed = _mix_recommendation_sources(feed)
+    # A DOI may exist in both the public index and this user's school library.
+    # Annotate only this user's response; never persist licensed holdings on a
+    # globally visible FeedItem.
+    school_by_doi = {
+        str((item.extra or {}).get("doi") or "").casefold(): item.extra
+        for item in candidates if (item.extra or {}).get("school_library")
+        and (item.extra or {}).get("doi")
+    }
+    for card in feed:
+        holding = school_by_doi.get(str(card.item.extra.get("doi") or "").casefold())
+        if holding:
+            card.item.extra = {
+                **card.item.extra,
+                "school_library": holding["school_library"],
+                "school_fulltext_url": holding.get("school_fulltext_url"),
+            }
+    # Full progress statistics scan the literature catalog. The dedicated
+    # /progress endpoint computes them; card delivery must not wait for it.
+    progress = FeedProgressOut(recommendable=len(feed))
     return FeedTodayOut(
+        progress=progress,
         feed=feed,
+        has_more=False,
         onboarded=profile.onboarded,
         personalized=profile.has_signal,
         empty_reason=empty_reason,
-        refreshing=literature_index_harvester.is_online_refreshing(user.id),
+        refreshing=(
+            literature_index_harvester.is_online_refreshing(user.id)
+            or discovery.is_subscription_refreshing(user.id)
+        ),
     )
+
+
+async def preparing_translation_pool(user: User, db: AsyncSession) -> FeedTodayOut:
+    """Private prewarming pool; incomplete articles never enter the public view."""
+    from app.services.feed.pool_cache import get_pool
+    async def build():
+        suppressed = await ranking.suppressed_ids(db, user_id=user.id)
+        profile = await profile_service.build_profile(db, user=user, suppressed_item_ids=suppressed)
+        candidates = await ranking.candidate_items(db, profile=profile, include_preparing=True)
+        matched = ranking.rank_rednote(candidates, profile, user_id=str(user.id))
+        dynamics = ranking.rank_field_dynamics(candidates, profile)
+        seen, cards = set(), []
+        for value in [*matched, *dynamics]:
+            item = value.item
+            if str(item.id) in seen or (item.extra or {}).get("literature_preparation") == "ready":
+                continue
+            if not (item.extra or {}).get("literature_catalog") or (item.extra or {}).get("literature_eligible") is not True:
+                continue
+            if not (value.project_id or value.matched_domains or ranking.matches_subscribed_journal(item, profile)
+                    or ranking.matches_subscribed_scholar(item, profile)):
+                continue
+            cards.append(FeedCard(item=_to_out(item), project_id=value.project_id, reason=value.reason(),
+                recommendation_sources=[key for key, matches in (
+                    ("domain", bool(ranking._domain_hits(item, profile))),
+                    ("journal", ranking.matches_subscribed_journal(item, profile)),
+                    ("scholar", ranking.matches_subscribed_scholar(item, profile)),
+                    ("project", bool(value.project_id))) if matches]))
+            seen.add(str(item.id))
+        return FeedTodayOut(feed=_mix_recommendation_sources(cards))
+    result = await get_pool(db, user, build, namespace="translation-preparation")
+    await _attach_cached_translations([card.item for card in result.feed])
+    return result
+
+
+async def recommendation_pool(user: User, db: AsyncSession, *, allow_stale=True) -> FeedTodayOut:
+    from app.services.feed.pool_cache import get_pool
+    from app.services.feed.translation import translation_ready
+    from app.services.literature_harvester import literature_index_harvester
+    result = await get_pool(db, user, lambda: _build_feed_pool(user, db), allow_stale=allow_stale)
+    await _attach_cached_translations([card.item for card in result.feed])
+    result.progress.translated = sum(translation_ready(card.item) for card in result.feed)
+    result.progress.translation_pending = len(result.feed) - result.progress.translated
+    groups = {}
+    for card in result.feed:
+        sources = tuple(sorted(card.recommendation_sources or ["domain"]))
+        group = groups.setdefault(sources, {"sources": list(sources), "total": 0, "translated": 0})
+        group["total"] += 1
+        group["translated"] += int(translation_ready(card.item))
+    result.progress.source_groups = list(groups.values())
+    result.refreshing = (literature_index_harvester.is_online_refreshing(user.id)
+                         or discovery.is_subscription_refreshing(user.id))
+    return result
+
+
+@router.get("/today", response_model=FeedTodayOut)
+async def feed_today(limit: int = Query(default=FEED_PAGE_SIZE, ge=1, le=100),
+                     offset: int = Query(default=0, ge=0),
+                     ready_only: bool = Query(default=True), sources: str | None = None,
+                     user: User = Depends(get_current_user),
+                     db: AsyncSession = Depends(get_db)) -> FeedTodayOut:
+    result = await recommendation_pool(user, db, allow_stale=bool(ready_only))
+    # An older snapshot may survive in another worker. Apply current dismissals
+    # before pagination so ignored cards cannot return on refresh or scrolling.
+    dismissed = await ranking.suppressed_ids(db, user_id=user.id)
+    if dismissed:
+        result.feed = [card for card in result.feed if str(card.item.id) not in dismissed]
+    from app.services.feed.translation import translation_ready
+    if ready_only:
+        result.feed = [card for card in result.feed if translation_ready(card.item)]
+    if sources is not None:
+        selected = set(sources.split(",")) & {"domain", "journal", "scholar", "project"}
+        result.feed = [card for card in result.feed if selected.intersection(card.recommendation_sources or ["domain"])]
+    total = len(result.feed)
+    result.feed = result.feed[offset:offset + limit]
+    result.has_more = total > offset + limit
+    return result
+
+
+def _attach_domain_progress(progress, pool, user):
+    from types import SimpleNamespace
+    from app.services.feed import domain_progress
+    from app.services.feed.translation import translation_ready
+    from app.services.literature_harvester import literature_index_harvester
+    states = domain_progress.read(user.id)
+    active_codes = set(literature_index_harvester._online_domains.get(str(user.id), ())) if literature_index_harvester.is_online_refreshing(user.id) else set()
+    counts = {row["domain"]: row for row in progress.domain_progress}
+    selected = SimpleNamespace(domains=tuple(counts))
+    for card in pool.feed:
+        if "domain" not in card.recommendation_sources:
+            continue
+        for code in ranking._domain_hits(card.item, selected):
+            if code in counts:
+                counts[code]["recommendable"] += 1
+                counts[code]["translated"] += int(translation_ready(card.item))
+    for code, row in counts.items():
+        row["translation_pending"] = row["recommendable"] - row["translated"]
+        saved = states.get(code, {})
+        row["updated_at"] = saved.get("updated_at")
+        row["phase"] = domain_progress.phase(active=code in active_codes,
+            acquisition=saved.get("state"), collected=row["collected"], pending=row["pending"],
+            recommendable=row["recommendable"], translation_pending=row["translation_pending"])
+
+
+@router.get("/progress", response_model=FeedProgressOut)
+async def feed_progress(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    pool = await recommendation_pool(user, db, allow_stale=False)
+    profile = await profile_service.build_profile(db, user=user)
+    progress = await _recommendation_progress(db, user, profile, recommendable=len(pool.feed))
+    progress.translated = pool.progress.translated
+    progress.translation_pending = pool.progress.translation_pending
+    progress.source_groups = pool.progress.source_groups
+    _attach_domain_progress(progress, pool, user)
+    from app.services.feed.source_progress import attach
+    attach(progress, user, profile)
+    return progress
+
+
+@router.post("/refresh", status_code=204)
+async def refresh_recommendations(user: User = Depends(get_current_user)):
+    from app.services.feed.pool_cache import clear
+    clear()
 
 
 @router.get("/items", response_model=list[FeedItemOut])
@@ -454,7 +746,10 @@ async def list_items(
         query = query.where(FeedItem.id.in_(saved_ids))
     query = query.order_by(ranking.recent_order()).limit(limit).offset(offset)
     items = list((await db.execute(query)).scalars().all())
-    items = [item for item in items if _eligible_feed_item(item)]
+    items = [
+        item for item in items
+        if _eligible_feed_item(item) and (saved or not ranking.is_journal_notice(item))
+    ]
 
     if domain:
         # 域过滤走上行链，在**取回来之后**做：`domains` 是 JSON 列，
@@ -473,11 +768,12 @@ async def list_items(
 
     source_names, author_names = await _lookup_names(db, items)
     saved_ids = await _saved_ids(db, user_id=user.id)
-    return [
+    opened_ids = await _opened_ids(db, user_id=user.id)
+    return await _attach_cached_translations([
         _to_out(i, source_names=source_names, author_names=author_names,
-                saved_ids=saved_ids, lang=language_for(user))
+                saved_ids=saved_ids, opened_ids=opened_ids, lang=language_for(user))
         for i in items
-    ]
+    ])
 
 
 @router.get("/items/{item_id}", response_model=FeedItemOut)
@@ -493,10 +789,13 @@ async def get_item(
         raise HTTPException(status_code=404, detail="Feed item not found")
     source_names, author_names = await _lookup_names(db, [item])
     saved_ids = await _saved_ids(db, user_id=user.id)
-    return _to_out(
+    opened_ids = await _opened_ids(db, user_id=user.id)
+    result = _to_out(
         item, source_names=source_names, author_names=author_names, saved_ids=saved_ids,
-        lang=language_for(user),
+        opened_ids=opened_ids, lang=language_for(user),
     )
+    await _attach_cached_translations([result])
+    return result
 
 
 @router.post("/items/{item_id}/engagement", status_code=204)
@@ -566,31 +865,7 @@ async def _interests_state(db: AsyncSession, user: User) -> InterestsOut:
     lang = language_for(user)
     stored = profile_service.stored_domains(user)
     suggested: list[DomainOption] = []
-    if not stored:
-        projects = list(
-            (
-                await db.execute(select(Project).where(Project.owner_id == user.id).limit(20))
-            )
-            .scalars()
-            .all()
-        )
-        try:
-            suggested = [
-                DomainOption(domain=slug, label=domain_service.label(slug, lang=lang))
-                for slug in profile_service.suggested_domains_for(user, projects)
-            ]
-        except HarnessContractUnavailable:
-            suggested = []
-    inferred = [
-        DomainOption(domain=slug, label=label)
-        for slug, label in zip(
-            curation.inferred_domains(user),
-            _labels(list(curation.inferred_domains(user)), lang),
-            strict=True,
-        )
-        # 被他删过的不再出现 —— 否则每次挖掘都会把它重新推回来。
-        if slug not in curation.rejected_domains(user)
-    ]
+    inferred: list[DomainOption] = []
     return InterestsOut(
         domains=list(stored),
         domain_labels=_labels(list(stored), lang),
@@ -635,6 +910,7 @@ async def put_interests(
         set(registry.spine_categories())
         | set(registry.ARXIV_SPINE)
         | set(domain_service.cas_domains())
+        | set(domain_service.cas_groups())
         | {domain_service.FEED_ARXIV_DOMAIN}
     )
     unknown = [d for d in data.domains if d not in valid]
@@ -701,7 +977,11 @@ def _stored_subscriptions(user: User) -> SubscriptionsOut:
 
 @router.get("/subscriptions", response_model=SubscriptionsOut)
 async def get_subscriptions(user: User = Depends(get_current_user)) -> SubscriptionsOut:
-    return _stored_subscriptions(user)
+    result = _stored_subscriptions(user)
+    if any(value.identity_status in {"unresolved", "unavailable"} for value in result.scholars):
+        from app.services.feed import scholar_migration
+        scholar_migration.request(user.id)
+    return result
 
 
 @router.put("/subscriptions", response_model=SubscriptionsOut)
@@ -740,11 +1020,10 @@ async def put_subscriptions(
         discovery.request_subscription_discovery(
             user_id=user.id,
             journals=[{
-                "name": value.name, "issn": value.issn, "eissn": value.eissn,
+                "key": value.key, "name": value.name, "issn": value.issn, "eissn": value.eissn,
                 "quartile": value.jcr_quartile or "",
             } for value in newly_followed],
-            scholars=[{"name": value.name, "source": value.source}
-                      for value in newly_followed_scholars],
+            scholars=[value.model_dump() for value in newly_followed_scholars],
         )
     return _stored_subscriptions(user)
 
@@ -756,6 +1035,7 @@ async def search_subscriptions(
     limit: int = Query(default=20, ge=1, le=50),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> SubscriptionSearchOut:
     needle = " ".join(q.split()).casefold()
     compact_needle = needle.replace("-", "")
@@ -778,52 +1058,35 @@ async def search_subscriptions(
         return SubscriptionSearchOut(journals=[
             JournalSubscription(
                 key=str(row["issn"] or row["eissn"] or row["journal"]).casefold(),
-                name=str(row["journal"]), issn=str(row["issn"] or ""),
+                name=journal_display_name(row["journal"]), issn=str(row["issn"] or ""),
                 eissn=str(row["eissn"] or ""), impact_factor=row["impact_factor"],
                 jcr_quartile=row["jcr_quartile"],
             ) for row in rows
         ])
 
-    found: dict[str, ScholarSubscription] = {}
+    from app.services.feed import author_identity
     try:
-        records = await harness_kb.query(user, "", "concepts", search=q, limit=limit, scope="org")
-        for record in records:
-            if str(record.get("concept_type") or "").casefold() != "person":
-                continue
-            name = str(record.get("canonical_name") or "").strip()
-            if name and needle in name.casefold():
-                key = "kb:" + str(record.get("id") or name.casefold())
-                found[key] = ScholarSubscription(key=key, name=name, source="kb")
-    except Exception:
-        logger.info("KB scholar search unavailable", exc_info=True)
-    rows = (await db.execute(
-        select(FeedItem.authors).where(
-            FeedItem.kind == FeedItemKind.PAPER,
-            cast(FeedItem.authors, String).ilike(f"%{q}%"),
-        ).order_by(FeedItem.created_at.desc()).limit(200)
-    )).scalars().all()
-    for authors in rows:
-        for raw_name in authors or []:
-            name = str(raw_name).strip()
-            if name and needle in name.casefold():
-                key = "author:" + name.casefold()
-                found.setdefault(key, ScholarSubscription(key=key, name=name, source="literature"))
-                if len(found) >= limit:
-                    break
-    return SubscriptionSearchOut(scholars=list(found.values())[:limit])
+        candidates = await author_identity.search(q, limit=limit)
+    except httpx.HTTPError:
+        raise HTTPException(status_code=503, detail=say({"zh": "学者身份检索暂不可用，请稍后重试；不会按同名合并结果。", "en": "Scholar identity lookup is unavailable right now; please retry later. Results are not merged by name."}, lang))
+    return SubscriptionSearchOut(scholars=[ScholarSubscription.model_validate(row) for row in candidates])
 
 
 @router.get("/subscriptions/items", response_model=list[FeedCard])
 async def subscription_items(
+    kind: str = "all",
     limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[FeedCard]:
+    if kind not in {"all", "domain", "journal", "scholar"}:
+        raise HTTPException(status_code=422, detail="Unknown subscription kind")
     subscriptions = _stored_subscriptions(user)
     scholar_display = {value.name.casefold(): value.name for value in subscriptions.scholars}
-    if not subscriptions.journals and not scholar_display:
+    if not subscriptions.journals and not scholar_display and not profile_service.stored_domains(user):
         return []
-    cutoff = datetime.now(UTC) - timedelta(days=30)
+    publication_window = ranking.publication_window_clause(datetime.now(UTC))
 
     # 先扫**用户自己的订阅采集产物**（extra.profile_user_ids 指向他）。
     #
@@ -836,16 +1099,16 @@ async def subscription_items(
             _visible_clause(user),
             FeedItem.kind == FeedItemKind.PAPER,
             cast(FeedItem.extra["profile_user_ids"], String).like(f'%"{user.id}"%'),
-            (FeedItem.published_at.is_(None)) | (FeedItem.published_at >= cutoff),
-        ).order_by(ranking.recent_order()).limit(1200)
+            publication_window,
+        ).order_by(ranking.recent_order()).limit(5000)
     )).scalars().all())
     seen_ids = {str(item.id) for item in my_rows}
     generic_rows = list((await db.execute(
         select(FeedItem).where(
             _visible_clause(user),
             FeedItem.kind == FeedItemKind.PAPER,
-            (FeedItem.published_at.is_(None)) | (FeedItem.published_at >= cutoff),
-        ).order_by(ranking.recent_order()).limit(1200)
+            publication_window,
+        ).order_by(ranking.recent_order()).limit(5000)
     )).scalars().all())
     candidates = my_rows + [item for item in generic_rows if str(item.id) not in seen_ids]
     # 比对用画像里那套**共享**归一化（profile.journal_key / ranking.matches_*）：
@@ -854,9 +1117,11 @@ async def subscription_items(
     profile = await profile_service.build_profile(db, user=user)
     matched: list[tuple[FeedItem, str]] = []
     for item in candidates:
-        if ranking.matches_subscribed_journal(item, profile):
+        routes = ranking.acquisition_routes(item)
+        journal_origin = not routes or "journal" in routes
+        if kind in {"all", "journal"} and journal_origin and ranking.matches_subscribed_journal(item, profile):
             matched.append((item, f"订阅期刊：{item.venue or ''}"))
-        elif ranking.matches_subscribed_scholar(item, profile):
+        elif kind in {"all", "scholar"} and ranking.matches_subscribed_scholar(item, profile):
             hit = next(
                 (scholar_display.get(str(author).casefold().strip(), "")
                  for author in (item.authors or [])
@@ -864,17 +1129,29 @@ async def subscription_items(
                 "",
             )
             matched.append((item, f"订阅学者：{hit}"))
-    matched = [(item, reason) for item, reason in matched if ranking.show_in_feed(item)]
+        elif kind in {"all", "domain"} and journal_origin and ranking._domain_hits(item, profile):
+            matched.append((item, "订阅学科"))
+    # 用户明确订阅的期刊即使摘要暂未补齐也要显示；订阅动态本身就是
+    # “这本刊最近出了什么”的索引视图，不能被普通推荐的摘要准入挡掉。
+    matched = [
+        (item, reason) for item, reason in matched
+        if not ranking.is_journal_notice(item)
+        and (ranking.show_in_feed(item) or ranking.matches_subscribed_journal(item, profile))
+    ]
     ranked = ranking.rank([item for item, _ in matched], profile)
     reasons = {str(item.id): reason for item, reason in matched}
-    chosen = [value.item for value in ranked[:limit]]
+    chosen = [value.item for value in ranked[offset:offset + limit]]
     source_names, author_names = await _lookup_names(db, chosen)
     saved = await _saved_ids(db, user_id=user.id)
+    opened = await _opened_ids(db, user_id=user.id)
     lang = language_for(user)
-    return [FeedCard(
-        item=_to_out(item, source_names=source_names, author_names=author_names, saved_ids=saved, lang=lang),
+    cards = [FeedCard(
+        item=_to_out(item, source_names=source_names, author_names=author_names,
+                     saved_ids=saved, opened_ids=opened, lang=lang),
         reason=reasons.get(str(item.id), ""),
     ) for item in chosen]
+    await _attach_cached_translations([card.item for card in cards])
+    return cards
 
 
 @router.get("/domains", response_model=DomainCatalogOut)
@@ -937,7 +1214,7 @@ async def share_link(
         preview = await fetch_preview(data.url)
     except LinkRejected as exc:
         # 拒收原因原样给用户 —— 他要能知道是链接的问题还是平台的问题。
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=exc.said_in(language_for(user))) from exc
 
     key = canonical.canonical_key(url=preview.url)
     if not key:

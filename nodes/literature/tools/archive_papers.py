@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import time
 import sqlite3
 import pickle
+from concurrent.futures import ThreadPoolExecutor
 
 from core.state import State
 from core.tool_registry import ToolDefinition, register_tool
@@ -376,14 +377,42 @@ def complete_missing_figures(
     *,
     limit: int = 20,
     budget_seconds: float = DEFAULT_FULLTEXT_BUDGET_SECONDS,
+    profile_user_id: str | None = None,
+    journal_names: list[str] | None = None,
+    project_only: bool = False,
+    catalog_keys: list[str] | None = None,
+    completed_keys: list[str] | None = None,
+    concurrency: int = 3,
 ) -> dict[str, int]:
     """Retry only real figures for feed papers; never enter the PDF chain."""
-    scanned = retry_asset_records(output_dir, limit=max(20, int(limit) * 5))
+    from .publication_types import is_journal_notice_title
+    scanned = retry_asset_records(
+        output_dir,
+        limit=max(10000, len(catalog_keys or [])) if journal_names or project_only or catalog_keys is not None else max(20, int(limit) * 5),
+        profile_user_id=profile_user_id, catalog_keys=catalog_keys,
+    )
+    from .journal_scope import journal_key as venue_key
+
+    wanted = {venue_key(name) for name in journal_names or []}
+    if catalog_keys is not None:
+        priority = {key: index for index, key in enumerate(catalog_keys)}
+        scanned = [record for record in scanned if str(record.get("doi") or "").lower() in priority]
+        scanned.sort(key=lambda record: priority[str(record.get("doi") or "").lower()])
+    elif wanted:
+        # Publish substantive papers with source abstracts before corrections
+        # and empty indexes from the same subscription batch.
+        scanned.sort(key=lambda record: not bool(str(record.get("abstract") or "").strip()))
     candidates: list[dict[str, Any]] = []
     for record in scanned:
+        if is_journal_notice_title(record.get("title") or ""):
+            continue
+        if project_only and "project_profile" not in (record.get("feed_acquisition_routes") or []):
+            continue
+        if wanted and venue_key(record.get("venue")) not in wanted:
+            continue
         image = record.get("image") if isinstance(record.get("image"), dict) else {}
         status = str(record.get("figure_status") or image.get("status") or "not_requested")
-        if status in {"", "not_requested", "failed", "unavailable"} or image.get(
+        if record.get("literature_preparation") != "ready" or status in {"", "not_requested", "failed", "unavailable"} or image.get(
             "fallback"
         ) == "title_card":
             candidates.append(record)
@@ -392,21 +421,31 @@ def complete_missing_figures(
 
     deadline = time.monotonic() + max(1.0, float(budget_seconds))
     totals = {"candidates": len(candidates), "completed": 0, "failed": 0, "deferred": 0}
-    for record in candidates:
+    def complete(record):
         if time.monotonic() >= deadline:
-            totals["deferred"] += 1
-            continue
+            return "deferred", None
+        record["abstract_enrichment_attempted"] = True
+        record["literature_preparation"] = "pending"
         try:
-            archive_index_and_figure(record, output_dir)
-            totals["completed"] += 1
+            image = record.get("image") if isinstance(record.get("image"), dict) else {}
+            # Existing assets already satisfy the attempted-enrichment contract.
+            # Repair their gate without fetching the same image again.
+            if (record.get("abstract") or record.get("abstract_lookup_completed")) and image.get("status") in {"available", "generated"}:
+                record["literature_preparation"] = "ready"
+                archive_indexes_only([record], output_dir)
+            else:
+                archive_index_and_figure(record, output_dir)
+            return "completed", str(record.get("doi") or "").lower()
         except Exception:
-            totals["failed"] += 1
-            logger.warning(
-                "Periodic literature figure completion failed for %r",
-                record.get("title", ""),
-                exc_info=True,
-            )
+            logger.warning("Periodic literature figure completion failed for %r", record.get("title", ""), exc_info=True)
+            return "failed", None
+    with ThreadPoolExecutor(max_workers=max(1, min(concurrency, 6))) as workers:
+        for status, key in workers.map(complete, candidates):
+            totals[status] += 1
+            if key and completed_keys is not None:
+                completed_keys.append(key)
     return totals
+
 
 
 def archive_indexes_only(
@@ -444,6 +483,12 @@ def archive_indexes_only(
                 record[key] = value
             elif key not in record:
                 record[key] = value
+        # The same DOI can be discovered by multiple users and source routes.
+        # Index-first acquisition must retain them just like figure archival does.
+        for field in ("feed_acquisition_routes", "profile_user_ids", "second_level_domains"):
+            if field in existing or field in incoming:
+                record[field] = list(dict.fromkeys([*(existing.get(field) or []), *(incoming.get(field) or [])]))
+        record["author_identities"] = list({str(row.get("author_id")): row for row in [*(existing.get("author_identities") or []), *(incoming.get("author_identities") or [])] if isinstance(row, dict) and row.get("author_id")}.values())
         record.setdefault("abstract", "")
         record.setdefault("authors", [])
         record.update({
@@ -548,11 +593,14 @@ def archive_index_and_figure(paper: dict[str, Any], output_dir: str) -> dict[str
         *list(existing.get("second_level_domains") or []),
         *list(incoming.get("second_level_domains") or []),
     ]))
+    record["author_identities"] = list({str(row.get("author_id")): row for row in [*(existing.get("author_identities") or []), *(incoming.get("author_identities") or [])] if isinstance(row, dict) and row.get("author_id")}.values())
     if existing.get("index_status") == "acquired" and existing_real_figure:
         # 资产可以跳过，但新发现路线、用户归属和学科映射仍必须持久化。
         # 否则一篇先被期刊路线发现的论文，之后命中Project画像时会被提前
         # return 掉，永远进不了该用户的小红书候选池。
         record["harvest_skip_reason"] = "index_and_figure_already_acquired"
+        if record.get("abstract_enrichment_attempted") is True:
+            record["literature_preparation"] = "ready"
         record["index_path"] = str((index_dir / "index.json").resolve())
         _write_article_index(record, index_dir)
         return record
@@ -582,6 +630,8 @@ def archive_index_and_figure(paper: dict[str, Any], output_dir: str) -> dict[str
             image["failure_reason"] = failure
     record["figure_attempted"] = figure_attempted
     record["figure_status"] = "acquired" if image.get("status") == "available" else "failed"
+    if record.get("abstract_enrichment_attempted") is True:
+        record["literature_preparation"] = "ready"
     record["figure_failure_reason"] = str(image.get("failure_reason") or "") if record["figure_status"] == "acquired" else str(image.get("reason") or "image_not_found")
     record["image"] = image
     record.update({"article_dir": str(article_dir.resolve()), "index_dir": str(index_dir.resolve()),

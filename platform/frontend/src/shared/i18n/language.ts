@@ -13,11 +13,23 @@
  * 一个声称"界面语言"却只改一半的开关，用户会以为它坏了，然后不再相信别的
  * 开关。现在两边都真的换了。
  *
- * ## 为什么语言从设置里读，而不是猜浏览器的
+ * ## 语言存在设置里；没选过的人，按系统语言替他定一次
  *
- * `navigator.language` 说的是这台机器装了什么，不是这个人想用什么读科研
- * 资讯。两者经常不一致（英文系统的中文研究者），而猜错的代价是他每次打开
- * 都要重新面对一屏不想要的语言，却找不到在哪改。
+ * 2026-08-23 定的是「默认中文、不猜」：`navigator.language` 说的是这台机器装了
+ * 什么，不是这个人想用什么（英文系统的中文研究者），而猜错的代价是"找不到在哪改"。
+ * 2026-10-19 wangd 指出反面：不懂中文的人打开是一屏中文，同样找不到在哪改。
+ *
+ * 两头的病是同一个：**切换钮只用当前语言写着**。所以现在是三件事一起：
+ *
+ *   1. 没选过的人，第一次打开按**系统语言列表**定一次（`languageForASystem`：
+ *      列表里有中文就中文，否则英文），并存进偏好 —— 后端的文案也读那一份；
+ *   2. 开场第一张卡片最上面就是语言，侧栏常驻一个切换钮、登录页也有一个，
+ *      **都用目标语言写**（中文界面上写 English，英文界面上写 中文）；
+ *   3. 选过之后只认他选的，不再猜。
+ *
+ * 看整张列表而不是第一项：英文系统的中文研究者，中文常排在第二位。桌面版的
+ * WKWebView 只交出第一项，所以列表由跑在他电脑上的后端读（见后端
+ * `services/system_language.py`）。
  */
 export type Language = "zh" | "en";
 
@@ -28,6 +40,16 @@ export const LANGUAGE_LABELS: Record<Language, string> = {
   zh: "中文",
   en: "English",
 };
+
+/**
+ * 一个还没选过语言的人，按他的系统语言列表该用哪种：**列表里有中文就中文，否则英文**
+ * （wangd 2026-10-19：中英之外的语言一律先给英文）。
+ *
+ * `zh`、`zh-CN`、`zh-Hans-CN`、`zh_TW` 都算中文；`zha`（壮语）不算。
+ */
+export function languageForASystem(preferred: readonly string[]): Language {
+  return preferred.some((tag) => /^zh(?:[-_]|$)/i.test(tag.trim())) ? "zh" : "en";
+}
 
 export function isLanguage(value: unknown): value is Language {
   return value === "zh" || value === "en";

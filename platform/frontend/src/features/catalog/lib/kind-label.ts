@@ -32,7 +32,7 @@ export const ARTIFACT_KIND_LABEL: Record<string, Phrase> = {
   figure: { zh: "图", en: "Figure" },
 };
 
-export function artifactKindLabel(kind: string | null | undefined, lang: Language = "zh"): string {
+export function artifactKindLabel(kind: string | null | undefined, lang: Language): string {
   if (!kind) return say({ zh: "产物", en: "Artifact" }, lang);
   const label = ARTIFACT_KIND_LABEL[kind];
   return label ? say(label, lang) : kind;

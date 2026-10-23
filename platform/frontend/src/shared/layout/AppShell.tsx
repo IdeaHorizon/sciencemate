@@ -22,6 +22,8 @@ import { ContextMenu, useContextMenu } from "@/shared/ui/ContextMenu";
 import { governanceKindLabel, roleLabel, useAuth } from "@/features/auth";
 import { useHasCapability } from "@/features/capabilities";
 import { FirstRun, MissingModelBanner, ProjectGuide } from "@/features/onboarding";
+import { AppVersion } from "@/features/update/AppVersion";
+import { LanguageSwitch } from "@/features/settings/components/LanguageSwitch";
 import { UpdateBanner } from "@/features/update/UpdateBanner";
 import { useProject } from "@/features/projects/hooks/useProjects";
 import { projectIdentity } from "@/features/projects/lib/project-identity";
@@ -200,6 +202,8 @@ function GlobalNavigation({ pathname }: { pathname: string }) {
         {secondaryNav().map((item) => <GatedNavLink key={item.href} item={item} pathname={pathname} />)}
       </nav>
       <div className="app-sidebar-bottom">
+        {/* 用目标语言写着的那个钮：不懂当前语言的人，也认得出自己那种语言的名字。 */}
+        <LanguageSwitch className="app-nav-item" />
         <Link href={GLOBAL_NAVIGATION.settings.href} aria-label={t(GLOBAL_NAVIGATION.settings.label)} title={t(GLOBAL_NAVIGATION.settings.label)} className={cn("app-nav-item", pathname.startsWith("/settings") && "app-nav-item-active")}>
           <Settings size={16}/><span>{t(GLOBAL_NAVIGATION.settings.label)}</span>
         </Link>
@@ -335,6 +339,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {projectId
           ? <ProjectNavigation pathname={pathname} projectId={projectId} />
           : <GlobalNavigation pathname={pathname} />}
+        {/* 全局与项目两种侧栏都要有：挂在 aside 里、两者之后，一处。 */}
+        <AppVersion />
       </aside>
       <section className="app-main"><UpdateBanner /><MissingModelBanner />{children}</section>
       {/* 开场浮在整个工作区上 —— 它是一层，不是一个页面。 */}

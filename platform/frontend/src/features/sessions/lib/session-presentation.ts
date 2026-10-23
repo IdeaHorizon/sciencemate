@@ -9,7 +9,7 @@ import type { ResearchSession, SessionPendingApproval } from "../types";
  * 那张表随第二份版本账一起删了（RFC X1），取代它的是 main 的短 sha：一个
  * **能拿去 `git show` 的**标识。
  */
-export function sessionRevisionLabel(session: ResearchSession, lang: Language = "zh") {
+export function sessionRevisionLabel(session: ResearchSession, lang: Language) {
   return session.headCommitSha === null
     ? say({ zh: "读不到版本信息", en: "Revision data unavailable" }, lang)
     : `main · ${session.headCommitSha.slice(0, 8)}`;
@@ -51,7 +51,7 @@ export function sessionIsDrivenBy(
  * 不是"我能不能开"，那是另一个问题。
  */
 
-export function sessionDriverLabel(session: ResearchSession, lang: Language = "zh") {
+export function sessionDriverLabel(session: ResearchSession, lang: Language) {
   if (session.lifecycleStatus === "archived") return null;
   if (!sessionHasActiveDriver(session)) return say({ zh: "没人在开车", en: "No active driver" }, lang);
   return `${session.driverLabel} · ${say({ zh: "驾驶者", en: "driver" }, lang)}`;
@@ -67,7 +67,7 @@ export function sessionDriverLabel(session: ResearchSession, lang: Language = "z
  */
 export function sessionAboutFacts(
   session: ResearchSession,
-  lang: Language = "zh",
+  lang: Language,
 ): { term: string; value: string }[] {
   const facts = [{
     term: say({ zh: "版本", en: "Revision" }, lang),
@@ -84,7 +84,7 @@ export function sessionAboutFacts(
   return facts;
 }
 
-export function sessionFrozenModelLabel(modelBackendName: string | null | undefined, lang: Language = "zh") {
+export function sessionFrozenModelLabel(modelBackendName: string | null | undefined, lang: Language) {
   const name = modelBackendName?.replace(/\s*\(environment\)\s*$/i, "").trim()
     || say({ zh: "项目模型", en: "Project model" }, lang);
   return say({ zh: "{name} · 这个会话固定用它", en: "{name} · fixed for this Session" }, lang, { name });
@@ -99,6 +99,7 @@ export function sessionFrozenModelLabel(modelBackendName: string | null | undefi
  */
 export function toChatPause(
   pending: SessionPendingApproval | null,
+  lang: Language,
 ): ChatPause | null {
   if (!pending) return null;
   const labels = pending.optionDetails.length
@@ -127,7 +128,7 @@ export function toChatPause(
   }));
   const offer = pending.offer;
   return {
-    question: pending.prompt ?? "This Run is waiting for your answer.",
+    question: pending.prompt ?? say({ zh: "这一轮在等你回答。", en: "This Run is waiting for your answer." }, lang),
     // 逐字的待执行内容。批准一个看不见内容的高危操作等于没有审批 ——
     // 这一段丢了，审批 UI 就退化成一个"确定/取消"弹窗。
     context: pending.context ?? undefined,

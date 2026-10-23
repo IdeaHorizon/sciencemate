@@ -8,6 +8,8 @@
 """
 
 import sqlite3
+import html
+import hashlib
 import json
 import re
 import os
@@ -67,6 +69,15 @@ class LocalPaperIndex:
                 )
             """)
             
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(paper_index)")}
+            for name in ("title_zh", "abstract_zh", "title_zh_source_key", "abstract_zh_source_key"):
+                if name not in columns:
+                    try:
+                        conn.execute(f"ALTER TABLE paper_index ADD COLUMN {name} TEXT")
+                    except sqlite3.OperationalError as exc:
+                        if "duplicate column" not in str(exc).lower():
+                            raise
+
             # 全文搜索索引（标题+摘要+关键词）
             conn.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS paper_index_fts USING fts5(
@@ -128,6 +139,38 @@ class LocalPaperIndex:
                     paper_count INTEGER DEFAULT 0
                 )
             """)
+            conn.commit()
+
+    def harvest_window(self, key: str, full_from: str, *, now: datetime | None = None) -> tuple[str, bool]:
+        """First/weekly full backfill; other runs overlap the last success by 14 days.
+
+        The remote lower bound is rounded to month start to retain month-only dates.
+        This controls fetching, never the retained recommendation publication window.
+        """
+        now = now or datetime.now(UTC)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS harvest_windows (query_key TEXT PRIMARY KEY, last_success_at TEXT, last_full_at TEXT)")
+            row = conn.execute("SELECT last_success_at,last_full_at FROM harvest_windows WHERE query_key=?", (key,)).fetchone()
+        if not row or not all(row):
+            return full_from, True
+        try:
+            last, full = (datetime.fromisoformat(value).replace(tzinfo=UTC) if datetime.fromisoformat(value).tzinfo is None else datetime.fromisoformat(value) for value in row)
+        except (TypeError, ValueError):
+            return full_from, True
+        if now - full >= timedelta(days=7) or last > now:
+            return full_from, True
+        overlap = (last - timedelta(days=14)).replace(day=1).date().isoformat()
+        return max(full_from, overlap), False
+
+    def mark_harvest_window(self, key: str, *, full: bool, now: datetime | None = None) -> None:
+        now = now or datetime.now(UTC)
+        value = now.isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS harvest_windows (query_key TEXT PRIMARY KEY, last_success_at TEXT, last_full_at TEXT)")
+            conn.execute("""INSERT INTO harvest_windows(query_key,last_success_at,last_full_at) VALUES(?,?,?)
+                            ON CONFLICT(query_key) DO UPDATE SET last_success_at=excluded.last_success_at,
+                              last_full_at=COALESCE(excluded.last_full_at,harvest_windows.last_full_at)""",
+                         (key, value, value if full else None))
             conn.commit()
 
     def register_harvest_query(self, query: str) -> None:
@@ -366,6 +409,7 @@ class LocalPaperIndex:
             # 同步 FTS 索引
             self._rebuild_fts(conn)
         
+        self._sync_index_translations([p.doi or f"hash:{self._title_hash(p.title)}" for p in papers])
         return added, skipped
     
     def search(self, query: str, limit: int = 200, min_year: Optional[int] = None) -> list[Paper]:
@@ -613,30 +657,87 @@ class LocalPaperIndex:
         
         return None
     
-    def get_title_translations(self, titles: list[str]) -> dict[str, str]:
-        """读取英文标题的中文译名缓存；键采用与写入一致的标题哈希。"""
-        if not titles:
-            return {}
-        keyed = {self._title_hash(title): title for title in titles if title}
-        if not keyed:
-            return {}
-        placeholders = ",".join("?" for _ in keyed)
+    @staticmethod
+    def _translation_text(value: str) -> str:
+        text = re.sub(r"<\s*(?:script|style)[^>]*>.*?<\s*/\s*(?:script|style)\s*>", " ", str(value or ""), flags=re.I | re.S)
+        return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", text)).split())
+
+    def hydrate_translations(self, papers: list[dict]) -> None:
+        """Attach shared cached translations without invoking a model."""
+        titles = self.get_title_translations([str(p.get("title") or "") for p in papers])
+        abstracts = self.get_abstract_translations([str(p.get("abstract") or "") for p in papers])
+        for paper in papers:
+            paper["title_zh"] = titles.get(str(paper.get("title") or "")) or paper.get("title_zh")
+            paper["abstract_zh"] = abstracts.get(str(paper.get("abstract") or "")) or paper.get("abstract_zh")
+
+    def _sync_index_translations(self, identities: list[str]) -> None:
+        rows = []
         with sqlite3.connect(self.db_path) as conn:
-            rows = conn.execute(
-                f"SELECT title_key, translated_title FROM title_translations "
-                f"WHERE title_key IN ({placeholders})",
-                tuple(keyed),
-            ).fetchall()
-        return {
-            keyed[key]: translated
-            for key, translated in rows
-            if translated and key in keyed
-        }
+            for offset in range(0, len(identities), 400):
+                batch = identities[offset:offset + 400]
+                if batch:
+                    marks = ",".join("?" for _ in batch)
+                    rows.extend(conn.execute(f"SELECT id,title,abstract FROM paper_index WHERE doi IN ({marks})", batch).fetchall())
+        papers = [{"title": title or "", "abstract": abstract or ""} for _, title, abstract in rows]
+        self.hydrate_translations(papers)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany("UPDATE paper_index SET title_zh=?,abstract_zh=?,title_zh_source_key=?,abstract_zh_source_key=? WHERE id=?", [
+                (paper.get("title_zh"), paper.get("abstract_zh"), self._abstract_hash(paper["title"]),
+                 self._abstract_hash(paper["abstract"]), row[0]) for row, paper in zip(rows, papers)
+            ])
+            conn.commit()
+
+    def record_paper_translations(self, papers: list[dict]) -> None:
+        """Link successful translations to DOI/title identities in the index."""
+        identities = []
+        with sqlite3.connect(self.db_path) as conn:
+            for paper in papers:
+                if not paper.get("title"):
+                    continue
+                identity = str(paper.get("doi") or "").strip().lower() or f"hash:{self._title_hash(paper['title'])}"
+                identities.append(identity)
+                inserted = conn.execute("""INSERT INTO paper_index(title,authors,abstract,doi,url,source,venue,year)
+                    VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(doi) DO NOTHING""", (
+                    paper["title"], json.dumps(paper.get("authors") or [], ensure_ascii=False),
+                    paper.get("abstract") or "", identity, paper.get("url") or "",
+                    paper.get("source") or "", paper.get("venue") or "", paper.get("year"),
+                ))
+                if inserted.rowcount:
+                    conn.execute("INSERT INTO paper_index_fts(rowid,title,abstract,keywords) VALUES(?,?,?,?)",
+                                 (inserted.lastrowid, paper["title"], paper.get("abstract") or "", "[]"))
+            conn.commit()
+        self._sync_index_translations(identities)
+
+    def get_title_translations(self, titles: list[str]) -> dict[str, str]:
+        """Read full-title keys, retaining compatible historical cache entries."""
+        result = {}
+        wanted = {key for title in titles if title for key in (self._translation_title_key(title), self._title_hash(title))}
+        if not wanted:
+            return result
+        rows = []
+        with sqlite3.connect(self.db_path) as conn:
+            keys = list(wanted)
+            for offset in range(0, len(keys), 400):
+                batch = keys[offset:offset + 400]
+                marks = ",".join("?" for _ in batch)
+                rows.extend(conn.execute(f"SELECT title_key,original_title,translated_title FROM title_translations WHERE title_key IN ({marks})", batch))
+        lookup = {key: (original, translated) for key, original, translated in rows}
+        for title in titles:
+            for key in (self._translation_title_key(title), self._title_hash(title)):
+                original, translated = lookup.get(key, ("", None))
+                if translated and self._translation_text(original).casefold() == self._translation_text(title).casefold():
+                    result[title] = translated
+                    break
+        return result
+
+    @staticmethod
+    def _translation_title_key(title: str) -> str:
+        return hashlib.sha256(LocalPaperIndex._translation_text(title).casefold().encode()).hexdigest()
 
     def save_title_translations(self, translations: dict[str, str]) -> None:
         """批量保存 {英文原题: 中文译名}，重复搜索直接复用。"""
         rows = [
-            (self._title_hash(title), title, translated)
+            (self._translation_title_key(title), title, translated)
             for title, translated in translations.items()
             if title and translated
         ]
@@ -659,7 +760,7 @@ class LocalPaperIndex:
     def _abstract_hash(abstract: str) -> str:
         """摘要内容哈希；原文变化后不会误用旧译文。"""
         import hashlib
-        normalized = " ".join(str(abstract or "").split())
+        normalized = LocalPaperIndex._translation_text(abstract)
         return hashlib.sha256(normalized.encode()).hexdigest()[:24]
 
     def get_abstract_translations(self, abstracts: list[str]) -> dict[str, str]:
@@ -778,6 +879,8 @@ class LocalPaperIndex:
             pub_type=row[13] or "journal-article",
             pub_date=row[14] or "",
             keywords=json.loads(row[15]) if row[15] else [],
+            title_zh=(row[18] if len(row) > 21 and row[20] == self._abstract_hash(row[1] or "") else None),
+            abstract_zh=(row[19] if len(row) > 21 and row[21] == self._abstract_hash(row[3] or "") else None),
         )
     
     @staticmethod

@@ -49,6 +49,11 @@ class Paper:
     nlm_id: str = ""
     journal_abbr: str = ""
     impact_factor: Optional[float] = None
+    title_zh: Optional[str] = None
+    abstract_zh: Optional[str] = None
+    author_identities: list = field(default_factory=list)
+    verified_author_ids: list = field(default_factory=list)
+    zenodo_creators: list = field(default_factory=list)
 
     def to_dict(self):
         return asdict(self)
@@ -1029,6 +1034,52 @@ class CrossrefSearch:
             # 让 SearchManager 记录 error/timeout，而不是把 API 故障伪装成零结果。
             raise
 
+    async def search_issn_window(
+        self, issn: str, *, date_from: str, date_until: str, rows: int = 1000
+    ) -> list[Paper]:
+        """Page through a journal's entire publication window by exact ISSN.
+
+        The ordinary ``search`` method intentionally returns one relevance
+        page.  Subscription backfills need every DOI in the requested year.
+        """
+        if not self.cfg["enabled"]:
+            return []
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{3}[0-9Xx]", issn.strip()):
+            raise ValueError("invalid journal ISSN")
+        page_size = max(1, min(int(rows), 1000))
+        params = {
+            "filter": (
+                f"issn:{issn.strip()},type:journal-article,"
+                f"from-pub-date:{date_from},until-pub-date:{date_until}"
+            ),
+            "rows": page_size,
+            "cursor": "*",
+        }
+        papers: dict[str, Paper] = {}
+        seen_cursors: set[str] = set()
+        while True:
+            cursor = str(params["cursor"])
+            if cursor in seen_cursors:
+                raise RuntimeError("Crossref repeated a pagination cursor")
+            seen_cursors.add(cursor)
+            resp = await self.client.get(
+                self.cfg["base_url"], params=params,
+                headers={"User-Agent": "SurveyHarness/1.0"}, timeout=45,
+            )
+            resp.raise_for_status()
+            message = resp.json().get("message") or {}
+            items = message.get("items") or []
+            for paper in self._parse({"message": {"items": items}}):
+                key = (paper.doi or "").casefold() or paper.title.casefold()
+                papers[key] = paper
+            if len(items) < page_size:
+                break
+            next_cursor = message.get("next-cursor")
+            if not next_cursor:
+                raise RuntimeError("Crossref returned a full page without next-cursor")
+            params["cursor"] = next_cursor
+        return list(papers.values())
+
     def _parse(self, data: dict) -> list[Paper]:
         papers = []
         for item in data.get("message", {}).get("items", []):
@@ -1199,6 +1250,7 @@ class OpenAlexSearch:
             papers.append(Paper(
                 title=(item.get("title") or ""), authors=authors, year=year,
                 venue=venue, doi=doi, source="openalex",
+                author_identities=[{"author_id": str((a.get("author") or {}).get("id") or ""), "name": str((a.get("author") or {}).get("display_name") or ""), "orcid": str((a.get("author") or {}).get("orcid") or "")} for a in item.get("authorships") or [] if (a.get("author") or {}).get("id")],
                 citations=item.get("cited_by_count", 0),
                 url=item.get("id", ""), abstract=abstract_text,
                 keywords=[], pub_date=pub_date,

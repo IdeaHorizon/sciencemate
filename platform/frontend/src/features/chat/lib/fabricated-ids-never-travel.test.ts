@@ -33,7 +33,7 @@ const PENDING = {
 } as never;
 
 test("平台没给 id 时（事故原样）：渲染 key 可以编，choiceId 必须缺席", () => {
-  const pause = toChatPause(PENDING)!;
+  const pause = toChatPause(PENDING, "en")!;
   assert.equal(pause.options.length, 2);
   for (const option of pause.options) {
     assert.ok(option.id, "渲染 key 要有（React 需要）");
@@ -51,7 +51,7 @@ test("呈递带真 id 时：choiceId 就是那个 id，offerId/facts 一并到�
     ],
     offer: { offer_id: "1787155777-702875:p865ce44e:oc04a2380", facts: { reviewFailed: true } },
   } as never;
-  const pause = toChatPause(pending)!;
+  const pause = toChatPause(pending, "en")!;
   assert.deepEqual(pause.options.map((o) => o.choiceId), ["retry_reviewer", "revise"]);
   assert.equal(pause.offerId, "1787155777-702875:p865ce44e:oc04a2380");
   assert.deepEqual(pause.facts, { reviewFailed: true });

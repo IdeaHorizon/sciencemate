@@ -22,14 +22,6 @@ export const ARTIFACT_ICONS: Record<string, LucideIcon> = {
   report: FileText,
 };
 
-export const ARTIFACT_CATEGORIES: Array<{ label: string; icon: LucideIcon; types: string[] }> = [
-  { label: "Research Pipeline", icon: Database, types: ["survey_report", "research_plan", "experiment_log", "analysis_report"] },
-  { label: "Paper", icon: FileText, types: ["paper_outline", "paper_draft", "paper_tex", "paper_pdf", "review_report"] },
-  { label: "Data & Code", icon: Code2, types: ["dataset", "code", "data_profile", "data_pipeline"] },
-  { label: "Tables", icon: Table2, types: ["table"] },
-  { label: "Figures", icon: ImageIcon, types: ["figure"] },
-];
-
 export function artifactIcon(type: string): LucideIcon {
   return ARTIFACT_ICONS[type] ?? FileText;
 }

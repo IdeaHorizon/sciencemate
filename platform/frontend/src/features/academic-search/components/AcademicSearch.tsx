@@ -4,6 +4,7 @@ import { FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 
 import { ArrowUpDown, Bookmark, CalendarRange, ChartBar, ChevronDown, ExternalLink, Gauge, Heart, Search, Share2, X } from "lucide-react";
 import { useAcademicSearch } from "../hooks/useAcademicSearch";
 import { AC, SORT_OPTIONS, SORT_PHRASES } from "../lib/copy";
+import { compareAcademicPapers, type AcademicSortMode as SortMode } from "../lib/academic-search-order";
 import {
   CATEGORIES,
   CATEGORY_JOURNAL,
@@ -19,7 +20,6 @@ import {
 } from "@/lib/api";
 
 type ScoreDimension = "relevance" | "cas" | "citation" | "recency";
-type SortMode = "recommendation" | "relevance" | "published";
 type JcrFilter = "all" | "Q1" | "Q2" | "Q3" | "Q4";
 type FilterControl = "year" | "jcr" | "impact" | "sort" | null;
 
@@ -81,28 +81,6 @@ function scoreValue(paper: LiteraturePaper, key: ScoreDimension): number {
   if (key === "cas" && paper.cas_quartile === null) return 0;
   const value = Number(raw[key]);
   return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
-}
-
-function publicationOrder(paper: LiteraturePaper): number {
-  const parts = String(paper.pub_date || paper.year || "").match(/\d+/g)?.map(Number) ?? [];
-  const year = parts[0];
-  if (!year || !Number.isFinite(year)) return 0;
-  const month = Math.min(12, Math.max(1, parts[1] || 12));
-  const day = Math.min(31, Math.max(1, parts[2] || 31));
-  return Date.UTC(year, month - 1, day);
-}
-
-function comparePapers(left: LiteraturePaper, right: LiteraturePaper, mode: SortMode): number {
-  const recommendationDiff = Number(right.score || 0) - Number(left.score || 0);
-  const relevanceDiff = scoreValue(right, "relevance") - scoreValue(left, "relevance");
-  const publicationDiff = publicationOrder(right) - publicationOrder(left);
-  if (mode === "relevance") {
-    return relevanceDiff || recommendationDiff || publicationDiff;
-  }
-  if (mode === "published") {
-    return publicationDiff || recommendationDiff || relevanceDiff;
-  }
-  return recommendationDiff || relevanceDiff || publicationDiff;
 }
 
 function ScoreRadar({ paper }: { paper: LiteraturePaper }) {
@@ -230,13 +208,11 @@ function AcademicPaperDialog({ paper, onClose }: { paper: LiteraturePaper; onClo
                 <strong>{t(AC.aiSummaryLabel)}</strong>{paper.ai_summary}
               </p>
             )}
-            <div className="academic-paper-identifier"><Badge>{paper.source}</Badge>{paper.doi && <small>DOI：{paper.doi}</small>}</div>
-            {(paper.local_pdf_url || paper.local_figure_urls.length > 0) && (
+            <div className="academic-paper-identifier"><Badge>{paper.source}</Badge>{paper.school_holdings?.filter((holding) => holding !== paper.source).map((holding) => <Badge key={holding}>{holding}</Badge>)}{paper.doi && <small>DOI：{paper.doi}</small>}</div>
+            {(paper.local_pdf_url || paper.school_fulltext_url) && (
               <div className="academic-paper-assets" aria-label={t(AC.localAssetsAria)} onClick={(event) => event.stopPropagation()}>
                 {paper.local_pdf_url && <LiteratureAssetLink path={paper.local_pdf_url}>{t(AC.openLocalPdf)}</LiteratureAssetLink>}
-                {paper.local_figure_urls.map((figureUrl, figureIndex) => (
-                  <LiteratureAssetLink key={figureUrl} path={figureUrl}>{t(AC.openLocalFigure, { index: figureIndex + 1 })}</LiteratureAssetLink>
-                ))}
+                {paper.school_fulltext_url && <LiteratureAssetLink path={paper.school_fulltext_url}>{t(AC.openSchoolFulltext)}</LiteratureAssetLink>}
               </div>
             )}
           </div>
@@ -372,7 +348,7 @@ export function AcademicSearch() {
       if (paper.impact_factor === null) return false;
       return paper.impact_factor >= impactMin && paper.impact_factor <= selectedImpactMax;
     }) ?? [];
-    return [...matching].sort((left, right) => comparePapers(left, right, sortMode));
+    return [...matching].sort((left, right) => compareAcademicPapers(left, right, sortMode));
   }, [category, impactFilterActive, impactMin, jcrFilter, result, selectedImpactMax, selectedYearMax, selectedYearMin, sortMode, yearFilterActive]);
   const pageCount = Math.min(10, Math.max(1, Math.ceil(visiblePapers.length / pageSize)));
   const currentPage = Math.min(page, pageCount);
@@ -389,10 +365,12 @@ export function AcademicSearch() {
         paper.abstract
         && /[A-Za-z]/.test(paper.abstract)
         && !/[\u4e00-\u9fff]/.test(paper.abstract)
-        && !translated?.abstract_zh
+        && !(translated?.abstract_zh || paper.abstract_zh)
       );
-      const needsSummary = !paper.abstract && !translated?.ai_summary;
-      return needsAbstract || needsSummary;
+      const needsTitle = /[A-Za-z]/.test(paper.title) && !/[\u4e00-\u9fff]/.test(paper.title)
+        && !(translated?.title_zh || paper.title_zh);
+      const needsSummary = !paper.abstract && !(translated?.ai_summary || paper.ai_summary);
+      return needsTitle || needsAbstract || needsSummary;
     });
     if (targets.length === 0) {
       setTranslationStatus("idle");
@@ -406,6 +384,8 @@ export function AcademicSearch() {
       // 作者列表触发输入契约 422。这里裁剪的是请求副本，不改搜索 index。
       key: paperKey(paper).slice(0, 500),
       title: paper.title.slice(0, 1000),
+      doi: paper.doi,
+      url: paper.url,
       abstract: paper.abstract,
       authors: paper.authors.slice(0, 10),
       year: paper.year,
@@ -640,13 +620,11 @@ export function AcademicSearch() {
                             <strong>{t(AC.aiSummaryLabel)}</strong>{paper.ai_summary}
                           </p>
                         )}
-                        <div className="academic-paper-identifier"><Badge>{paper.source}</Badge>{paper.doi && <small>DOI：{paper.doi}</small>}</div>
-                        {(paper.local_pdf_url || paper.local_figure_urls.length > 0) && (
+                        <div className="academic-paper-identifier"><Badge>{paper.source}</Badge>{paper.school_holdings?.filter((holding) => holding !== paper.source).map((holding) => <Badge key={holding}>{holding}</Badge>)}{paper.doi && <small>DOI：{paper.doi}</small>}</div>
+                        {(paper.local_pdf_url || paper.school_fulltext_url) && (
                           <div className="academic-paper-assets" aria-label={t(AC.localAssetsAria)} onClick={(event) => event.stopPropagation()}>
                             {paper.local_pdf_url && <LiteratureAssetLink path={paper.local_pdf_url}>{t(AC.openLocalPdf)}</LiteratureAssetLink>}
-                            {paper.local_figure_urls.map((figureUrl, figureIndex) => (
-                              <LiteratureAssetLink key={figureUrl} path={figureUrl}>{t(AC.openLocalFigure, { index: figureIndex + 1 })}</LiteratureAssetLink>
-                            ))}
+                            {paper.school_fulltext_url && <LiteratureAssetLink path={paper.school_fulltext_url}>{t(AC.openSchoolFulltext)}</LiteratureAssetLink>}
                           </div>
                         )}
                       </div>

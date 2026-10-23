@@ -9,7 +9,7 @@ import { qk } from "@/lib/query/keys";
 import { Badge, Card } from "@/shared/ui";
 
 import { adaptBlockers, blockerCategoryLabel, openBlockers } from "../lib/blockers";
-import { useT } from "@/shared/i18n";
+import { useLanguage, useT } from "@/shared/i18n";
 
 /**
  * Blocker 面板 —— "现在有什么在等我，它要我做什么"。
@@ -20,6 +20,7 @@ import { useT } from "@/shared/i18n";
  */
 export function BlockerPanel({ projectId }: { projectId: string }) {
   const t = useT();
+  const lang = useLanguage();
   const { data } = useQuery({
     queryKey: qk.projectBlockers(projectId),
     queryFn: () => api.listProjectBlockers(projectId),
@@ -33,14 +34,14 @@ export function BlockerPanel({ projectId }: { projectId: string }) {
     <section className="blocker-panel">
       <div className="platform-section-heading">
         <h2><AlertTriangle size={14} />{t({ zh: "被卡住", en: "Blocked" })}</h2>
-        <span>{blockers.length} waiting on a decision or resource</span>
+        <span>{t({ zh: "{count} 处在等一个决定或资源", en: "{count} waiting on a decision or resource" }, { count: blockers.length })}</span>
       </div>
       <div className="blocker-list">
         {blockers.map((blocker) => (
           <Card key={blocker.id}>
             <Card.Body>
               <div className="blocker-head">
-                <Badge size="sm" kind="warning">{blockerCategoryLabel(blocker.category)}</Badge>
+                <Badge size="sm" kind="warning">{blockerCategoryLabel(blocker.category, lang)}</Badge>
                 <code className="blocker-node">{blocker.reportingNode}</code>
                 {!blocker.retryableAfterChange && (
                   <Badge size="sm" kind="danger">{t({ zh: "按设计不可重试", en: "Not retryable as designed" })}</Badge>

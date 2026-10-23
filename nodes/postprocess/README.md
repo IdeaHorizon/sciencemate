@@ -42,3 +42,20 @@ staging 再逐文件核对交付字节指纹。
 盖章岗。
 
 review 细则见 [review_spec.md](review_spec.md)。
+
+## SVG 轨（illustration 家族，AutoFigure 移植）
+
+纯文字描述的示意图请求（无上游数据、无机器可读 spec；输入形态轴判定，见
+`contracts.route_track`）不走 matplotlib：`declare_figure_contract` 声明
+illustration 合同（nodes/edges/groups/assertions，无 bands —— 布局归作者），
+agent 按 `skills/svg-illustration/` 手写带 DOM 标记的 SVG（`svg_vocab.py`
+六属性词表），先 `render_illustration(trial=true)` 试渲染看审计摘要（不占
+预算），再 `trial=false` 铸造：机械审计（`svg_audit.py`）+ 断言对 SVG DOM
+求值 + cairosvg 栅格化（沙箱 requirements 装，版心×300DPI）+ 同一套证人/
+绑定/预算机制。交付只挂 PNG，SVG 作冻结渲染源进 `figure_src/`。
+
+可选美化：`enhance_figure`（`enhancer.py`，移植自 AutoFigure，MIT 署名见
+`skills/svg-illustration/references/ATTRIBUTION.md`）——只接 SVG 轨已铸
+figure，未配置图像模型时诚实返回 not_configured；产物是独立 asset
+（generative_content + evidence_bearing=false），位图文字未经机械复核，
+原 figure 永远是机械核过的交付品。

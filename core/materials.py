@@ -81,12 +81,24 @@ _REF_SCHEMA_VERSION = 1
 
 
 class MaterialError(RuntimeError):
-    """材料落盘失败。消息面向用户，说清哪里错了、该怎么办。"""
+    """材料落盘失败。消息面向用户，说清哪里错了、该怎么办 —— **两种语言都写**。
+
+    `str()` 是中文那句（agent 和日志读它）；`en` 必填、只收关键字：平台把这句话原样给
+    上传文件的人看，英文界面上从前是一句中文（2026-10-19）。平台按那一屏的语言用
+    `said_in(lang)`（同平台 `SaidToAPerson` 的形状 —— 框架不 import 平台，形状相同即可）。
+    """
+
+    def __init__(self, message: str, *, en: str):
+        super().__init__(message)
+        self.en = en
+
+    def said_in(self, lang: str) -> str:
+        return self.en if lang == "en" else str(self)
 
 
 class MaterialTooLargeError(MaterialError):
-    def __init__(self, message: str, *, size_bytes: int, max_bytes: int):
-        super().__init__(message)
+    def __init__(self, message: str, *, en: str, size_bytes: int, max_bytes: int):
+        super().__init__(message, en=en)
         self.size_bytes = size_bytes
         self.max_bytes = max_bytes
 
@@ -144,11 +156,13 @@ def _git_common_dir(worktree: Path) -> Path:
     if result.returncode != 0:
         raise MaterialError(
             f"{worktree} 不是一个 Git 工作区，材料没有可共用的字节池："
-            f"{result.stderr.strip()[:200]}"
+            f"{result.stderr.strip()[:200]}",
+            en=f"{worktree} is not a Git workspace, so materials have no shared byte pool: "
+               f"{result.stderr.strip()[:200]}",
         )
     raw = result.stdout.strip()
     if not raw:
-        raise MaterialError(f"{worktree} 的 git common dir 为空")
+        raise MaterialError(f"{worktree} 的 git common dir 为空", en=f"The git common dir of {worktree} is empty")
     candidate = Path(raw)
     return candidate if candidate.is_absolute() else (worktree / candidate).resolve()
 
@@ -175,13 +189,16 @@ def safe_name(filename: str) -> str:
     name = Path(str(filename)).name.replace("/", "_").replace("\\", "_").strip()
     name = name.lstrip(".")
     if not name:
-        raise MaterialError("材料需要一个非空文件名")
+        raise MaterialError("材料需要一个非空文件名", en="A material needs a non-empty file name")
     if name == ".gitignore":
-        raise MaterialError("`.gitignore` 由框架维护，不能作为材料名")
+        raise MaterialError("`.gitignore` 由框架维护，不能作为材料名",
+                            en="`.gitignore` is maintained by the framework and cannot be a material name")
     if name.endswith(REF_SUFFIX):
         raise MaterialError(
             f"材料名不能以 `{REF_SUFFIX}` 结尾 —— 那是指针文件的后缀。"
-            f"把文件改个名再传。"
+            f"把文件改个名再传。",
+            en=f"A material name cannot end with `{REF_SUFFIX}` — that is the pointer file suffix. "
+               f"Rename the file and upload it again.",
         )
     return name
 
@@ -207,7 +224,8 @@ def _link_or_copy(object_path: Path, target: Path) -> bool:
         with target.open("rb") as existing, object_path.open("rb") as original:
             if hashlib.file_digest(existing, "sha256").digest() == hashlib.file_digest(original, "sha256").digest():
                 return False
-        raise MaterialError(f"材料内容与已登记对象不一致，不能覆盖：{target}")
+        raise MaterialError(f"材料内容与已登记对象不一致，不能覆盖：{target}",
+                            en=f"The material differs from the registered object and cannot be overwritten: {target}")
     try:
         os.link(object_path, target)
         return True
@@ -241,6 +259,7 @@ def _absorb(pool: Path, stream: IO[bytes], *, max_bytes: int | None) -> tuple[st
                 if max_bytes is not None and size > max_bytes:
                     raise MaterialTooLargeError(
                         f"文件超过上限 {max_bytes} 字节",
+                        en=f"The file exceeds the limit of {max_bytes} bytes",
                         size_bytes=size, max_bytes=max_bytes,
                     )
                 digest.update(chunk)
@@ -294,7 +313,7 @@ def place(
     if isinstance(source, (str, Path)):
         source_path = Path(source)
         if not source_path.is_file():
-            raise MaterialError(f"找不到文件：{source_path}")
+            raise MaterialError(f"找不到文件：{source_path}", en=f"File not found: {source_path}")
         with source_path.open("rb") as handle:
             sha, size, object_path = _absorb(pool, handle, max_bytes=max_bytes)
     else:
@@ -305,12 +324,18 @@ def place(
             f"`{name}` 已经存在，而且内容不同"
             f"（在册 sha256 {str(existing.get('sha256'))[:12]}，这次 {sha[:12]}）。"
             f"换个文件名再传 —— 覆盖别人的材料、或者悄悄给你加个后缀，"
-            f"都不该由框架替你决定。"
+            f"都不该由框架替你决定。",
+            en=f"`{name}` already exists with different content "
+               f"(registered sha256 {str(existing.get('sha256'))[:12]}, this one {sha[:12]}). "
+               f"Rename the file and upload it again — overwriting someone else's material, or quietly "
+               f"adding a suffix for you, is not the framework's call.",
         )
     if existing is None and target.exists():
         raise MaterialNameConflictError(
             f"`{relative}` 已经有一个不受管理的同名文件（没有 {REF_SUFFIX} 指针）。"
-            f"换个文件名，或先把那个文件挪走。"
+            f"换个文件名，或先把那个文件挪走。",
+            en=f"`{relative}` already has an unmanaged file of the same name (no {REF_SUFFIX} pointer). "
+               f"Rename yours, or move that file away first.",
         )
 
     linked = _link_or_copy(object_path, target)

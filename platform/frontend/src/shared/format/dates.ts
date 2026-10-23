@@ -9,7 +9,7 @@ function ago(n: number, unit: Phrase, lang: Language): string {
  * 相对时间。`lang` **是参数不是全局**：这是个纯函数，它要是自己去够当前语言，
  * 就再也没法用两种语言各测一遍了。
  */
-export function formatRelativeTime(iso: string | null | undefined, lang: Language = "zh"): string {
+export function formatRelativeTime(iso: string | null | undefined, lang: Language): string {
   if (!iso) return "—";
   const date = new Date(iso);
   const now = Date.now();

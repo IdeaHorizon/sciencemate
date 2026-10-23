@@ -29,6 +29,7 @@ export const FEED_COPY = {
 
   // —— 卡片上的强调角标 ——
   "badge.today_pick": { zh: "今日必读", en: "Today's pick" },
+  "badge.viewed": { zh: "已看过", en: "Viewed" },
 
   // —— 出处与时间 ——
   "attribution.shared_by": { zh: "由 {name} 分享", en: "Shared by {name}" },
@@ -176,7 +177,7 @@ export const FEED_COPY = {
   "pane.subscriptions": { zh: "订阅", en: "Following" },
   "pane.saved": { zh: "收藏", en: "Saved" },
   "pane.interests": { zh: "关注方向", en: "Interests" },
-  "pane.search": { zh: "学术搜索", en: "Academic search" },
+  "pane.search": { zh: "搜索", en: "Search" },
   "view.list": { zh: "列表", en: "List" },
   "view.list.hint": { zh: "一行一条：一屏能扫过更多标题", en: "One per row: scan more titles at once" },
   "view.grid": { zh: "图卡", en: "Cards" },
@@ -188,6 +189,8 @@ export const FEED_COPY = {
   "pagination.page": { zh: "{current} / {total}", en: "{current} / {total}" },
   "home.tabs.label": { zh: "资讯流视图", en: "Feed views" },
   "home.layout.label": { zh: "排布方式", en: "Layout" },
+  "home.refresh": { zh: "刷新推荐", en: "Refresh recommendations" },
+  "home.refresh.hint": { zh: "清空已加载的推荐并按最新规则重新加载", en: "Clear loaded recommendations and reload with the latest rules" },
   "home.error.title": { zh: "资讯流暂时打不开", en: "The feed cannot be opened right now" },
   "home.error.hint": { zh: "稍后再试", en: "Try again shortly" },
   "home.onboarding.title": { zh: "先选几个你关心的方向", en: "Start by picking a few fields you follow" },
@@ -207,6 +210,8 @@ export const FEED_COPY = {
     en: "Save from any card and you will find it here.",
   },
   "home.empty.title": { zh: "今天还没有可挑的内容", en: "Nothing to pick from today" },
+  "home.empty.refreshing_title": { zh: "正在检索和准备内容", en: "Searching and preparing content" },
+  "home.empty.refreshing_hint": { zh: "后台正在检索你的关注方向，并补齐摘要、图片和翻译；完成后会自动进入推荐。", en: "The backend is searching your interests and preparing abstracts, images, and translations. Finished items will appear here automatically." },
   "home.empty.hint": {
     zh: "采集还在进行，稍后回来看看。",
     en: "Collection is still running \u2014 check back shortly.",
@@ -241,7 +246,7 @@ export type FeedCopyKey = keyof typeof FEED_COPY;
 /**
  * 取一句资讯流文案。
  *
- * `lang` 是**参数**，不是这个函数自己去读的全局状态 —— 同 `relativeTime`
+ * `lang` 是**参数**，不是这个函数自己去读的全局状态。
  * 收 `now` 的理由：一个自己去够上下文的纯函数就不再是纯函数，也就测不动了。
  */
 export function fc(

@@ -82,7 +82,8 @@ function ConnectionDialog({
   onSave: () => void;
 }) {
   const t = useT();
-  const options = providerOptions(form.provider);
+  const lang = useLanguage();
+  const options = providerOptions(form.provider, lang);
   const needsBaseUrl = providerNeedsBaseUrl(form.provider);
   // 「保留已存凭据」只有在**真的存着**的时候才成立。
   const keptCredential = Boolean(form.id && form.has_api_key);
@@ -380,7 +381,7 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
                 </span>
                 <span className="settings-control-stack">
                   <select
-                    aria-label={`Connection for the ${role.title} role`}
+                    aria-label={t({ zh: "「{role}」用哪条连接", en: "Connection for the {role} role" }, { role: role.title })}
                     value={bound?.id ?? ""}
                     disabled={!canSelect || candidates.length === 0 || setRoleDefault.isPending}
                     onChange={(event) => {
@@ -393,7 +394,7 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
                     </option>
                     {candidates.map((backend) => (
                       <option key={backend.id} value={backend.id}>
-                        {modelBackendDisplayName(backend)} · {modelBackendModelLabel(backend)}
+                        {modelBackendDisplayName(backend, lang)} · {modelBackendModelLabel(backend, lang)}
                       </option>
                     ))}
                   </select>
@@ -440,16 +441,16 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
             const actions = { canEdit: backend.editable };
             return (
               <div className="settings-row model-connection-row" key={backend.id}>
-                <span className={cn("model-status-dot", `status-${backend.status}`)} title={modelBackendStatusLabel(backend.status)} aria-label={modelBackendStatusLabel(backend.status)} />
-                <span className="model-connection-identity"><strong>{modelBackendDisplayName(backend)}</strong><small>{modelBackendModelLabel(backend)} · {modelBackendStatusLabel(backend.status)}</small></span>
+                <span className={cn("model-status-dot", `status-${backend.status}`)} title={modelBackendStatusLabel(backend.status, lang)} aria-label={modelBackendStatusLabel(backend.status, lang)} />
+                <span className="model-connection-identity"><strong>{modelBackendDisplayName(backend, lang)}</strong><small>{modelBackendModelLabel(backend, lang)} · {modelBackendStatusLabel(backend.status, lang)}</small></span>
                 <span className="model-connection-fact"><small>{t({ zh: "范围", en: "Scope" })}</small><strong>{managementLabel(backend, lang)}</strong></span>
                 <span className="model-connection-fact"><small>{t({ zh: "密钥", en: "Credential" })}</small><strong><KeyRound size={11} /> {backend.has_api_key ? t({ zh: "已存", en: "Stored" }) : t({ zh: "没存", en: "Not stored" })}</strong></span>
                 {/* status 是判决，这里是**证据有多旧**。两个都给，人才判断得了
                     那句 Ready 值不值得信 —— 从前只有前者，于是三周前的快照和
                     当前事实长得一模一样。 */}
-                <span className={cn("model-connection-fact", probeFreshness(backend).kind === "stale" && "is-stale")}>
+                <span className={cn("model-connection-fact", probeFreshness(backend, Date.now(), lang).kind === "stale" && "is-stale")}>
                   <small>{t({ zh: "已校验", en: "Checked" })}</small>
-                  <strong title={backend.last_probe_detail ?? undefined}>{probeSummary(backend)}</strong>
+                  <strong title={backend.last_probe_detail ?? undefined}>{probeSummary(backend, Date.now(), lang)}</strong>
                 </span>
                 {/* 能建就得能删 —— 否则一条填错的连接（provider 选错、地址
                     打错）会永远留在列表里。侧栏那边删除藏在右键里，因为误点
@@ -481,7 +482,7 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
                       className="is-danger"
                       disabled={remove.isPending}
                       onClick={() => {
-                        if (!globalThis.confirm(t({ zh: `确定删除模型连接「${modelBackendDisplayName(backend)}」吗？已经建好的会话不受影响，它们记着自己当时用的模型。`, en: `Delete the model connection "${modelBackendDisplayName(backend)}"? Existing sessions are unaffected; each records the model it actually used.` }))) return;
+                        if (!globalThis.confirm(t({ zh: `确定删除模型连接「${modelBackendDisplayName(backend, lang)}」吗？已经建好的会话不受影响，它们记着自己当时用的模型。`, en: `Delete the model connection "${modelBackendDisplayName(backend, lang)}"? Existing sessions are unaffected; each records the model it actually used.` }))) return;
                         remove.mutate(backend);
                       }}
                     >

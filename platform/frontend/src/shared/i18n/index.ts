@@ -2,6 +2,7 @@ export {
   LANGUAGES,
   LANGUAGE_LABELS,
   isLanguage,
+  languageForASystem,
   say,
   type Language,
   type Phrase,

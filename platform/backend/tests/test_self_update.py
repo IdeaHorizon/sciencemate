@@ -344,10 +344,29 @@ def test_an_unreachable_source_is_reported_not_raised(tmp_path) -> None:
     def _boom(_u):
         raise ConnectionError("no route")
 
-    status, manifest, *_ = su.check_for_update(tmp_path, harness, "https://h/x/manifest.json", _boom, _boom)
+    status, manifest, *_ = su.check_for_update(tmp_path, harness, "https://h/x/manifest.json", _boom, _boom, lang="zh")
     assert manifest is None and status.reachable is False
     assert "拿不到更新信息" in (status.error or "")
     assert status.available_version is None
+    # 界面按种类用看的人的语言说头一句；英文界面要的是不带中文前缀的那段原文。
+    assert status.error_kind == "unreachable"
+    assert status.error_cause == "ConnectionError: no route"
+
+
+def test_each_failed_check_says_which_kind_it_is(tmp_path) -> None:
+    """error 是中文诊断原文；error_kind 让英文界面不必把它原样贴出来（2026-10-19）。"""
+    harness = tmp_path / "h"; (harness / "core").mkdir(parents=True); (harness / "core" / "agent_loop.py").write_text("")
+    half_published = [{"tag_name": "v1", "assets": [{"name": "manifest.json", "browser_download_url": "u"}]}]
+    status, *_ = su.check_for_update(tmp_path, harness, "https://h/o/r", lambda _u: half_published, lambda _u: b"", lang="zh")
+    assert status.error and status.error_kind == "nothing_published"
+
+    status, *_ = su.check_for_update(tmp_path, harness, "https://h/x/manifest.json",
+                                     lambda _u: None, lambda _u: b"{not json", lang="zh")
+    assert status.error and status.error_kind == "rejected"
+
+    (harness / ".git").mkdir()
+    status, *_ = su.check_for_update(tmp_path, harness, "https://h/x/manifest.json", lambda _u: None, lambda _u: b"", lang="zh")
+    assert status.error_kind == "source_checkout"
 
 
 def test_check_offers_only_a_newer_signed_version(tmp_path, monkeypatch) -> None:
@@ -359,11 +378,11 @@ def test_check_offers_only_a_newer_signed_version(tmp_path, monkeypatch) -> None
     table = {"https://h/x/manifest.json": doc, "https://h/x/manifest.json.sig": sig.encode()}
 
     status, manifest, source, _ = su.check_for_update(tmp_path, harness, "https://h/x/manifest.json",
-                                                      lambda _u: None, lambda u: table[u])
+                                                      lambda _u: None, lambda u: table[u], lang="zh")
     assert status.reachable and status.available_version == "1.1.0" and manifest["version"] == "1.1.0"
 
     (harness / su.VERSION_MARKER).write_text("1.1.0\n")
-    status, *_ = su.check_for_update(tmp_path, harness, "https://h/x/manifest.json", lambda _u: None, lambda u: table[u])
+    status, *_ = su.check_for_update(tmp_path, harness, "https://h/x/manifest.json", lambda _u: None, lambda u: table[u], lang="zh")
     assert status.available_version is None, "已经是这一版了还在推"
 
 

@@ -4,9 +4,9 @@ import { readFileSync } from "node:fs";
 import { canManageModels, canSelectModels, governanceKindLabel, roleLabel } from "./access.ts";
 
 test("role and governance labels remain explicit", () => {
-  assert.equal(roleLabel("institution_admin"), "管理员");
-  assert.equal(roleLabel("researcher"), "成员");
-  assert.equal(governanceKindLabel("individual"), "个人");
+  assert.equal(roleLabel("institution_admin", "zh"), "管理员");
+  assert.equal(roleLabel("researcher", "zh"), "成员");
+  assert.equal(governanceKindLabel("individual", "zh"), "个人");
 });
 
 test("model management is permission-driven rather than inferred from role", () => {

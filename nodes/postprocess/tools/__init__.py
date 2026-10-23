@@ -13,3 +13,4 @@
 """
 
 from . import figure  # noqa: F401
+from . import illustration  # noqa: F401  # SVG 轨（AutoFigure 移植）：render_illustration / enhance_figure

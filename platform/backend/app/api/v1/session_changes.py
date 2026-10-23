@@ -22,6 +22,7 @@ from app.services.session_changes import (
 )
 from app.services.session_changes import resolve_conflict as _resolve_conflict
 from app.services.sessions import get_session, require_capability
+from app.services.user_interface import Language, language_on_screen
 
 router = APIRouter()
 
@@ -73,6 +74,7 @@ async def publish_session_changes(
     data: PublishRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> dict:
     project = await require_capability(db, user, project_id, "publish_changes")
     _, session = await get_session(db, user, project_id, session_id)
@@ -84,7 +86,7 @@ async def publish_session_changes(
             expected_main_commit=data.expected_head_commit_sha,
         )
     except PublishConflictsFoundError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=exc.said_in(lang)) from exc
     if commit is None:
         raise HTTPException(status_code=409, detail="Session has no Project changes")
     return {"commitSha": commit, "projectId": str(project.id), "sessionId": session_id}

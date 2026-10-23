@@ -58,6 +58,7 @@ LITERATURE_ENV_KEYS = frozenset({
 #: 真的慢的错误。
 MODEL_TIMEOUT_SECONDS = 120
 SUBPROCESS_TIMEOUT_SECONDS = 150
+LITERATURE_SEARCH_TIMEOUT_SECONDS = 270
 assert MODEL_TIMEOUT_SECONDS < SUBPROCESS_TIMEOUT_SECONDS
 
 
@@ -148,7 +149,13 @@ async def call(
         process.stdin.write((json.dumps(request, ensure_ascii=False) + "\n").encode())
         await process.stdin.drain()
         process.stdin.close()
-        deadline = asyncio.get_running_loop().time() + SUBPROCESS_TIMEOUT_SECONDS
+        # 学术检索会顺序完成策略生成、多源召回、元数据补齐和排序。
+        # 它的 100 条用户请求可能超过资讯加工的 150 秒预算；限制在
+        # benchmark/API 的 300 秒外层预算以内，其他桥操作仍用原预算。
+        deadline = asyncio.get_running_loop().time() + (
+            LITERATURE_SEARCH_TIMEOUT_SECONDS
+            if op == "literature_search" else SUBPROCESS_TIMEOUT_SECONDS
+        )
         while True:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:

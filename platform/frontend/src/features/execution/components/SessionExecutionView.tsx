@@ -255,7 +255,7 @@ function ToolRow({
           {tool.detail && <p>{tool.detail}</p>}
           {progress?.mode === "elapsed_only" && (
             <p className="execution-progress-copy">
-              Running for {formatDuration(progress.elapsedMs)} · total not reported
+              {t({ zh: "已跑 {elapsed} · 总时长未报告", en: "Running for {elapsed} · total not reported" }, { elapsed: formatDuration(progress.elapsedMs) ?? "—" })}
             </p>
           )}
           {progress && progress.mode !== "elapsed_only" && (
@@ -370,7 +370,7 @@ function DecisionSection({
         ))}
       </div>
       {readOnly ? (
-        meta && <p className="execution-decision-meta">{meta} · Read-only current Decision</p>
+        meta && <p className="execution-decision-meta">{meta} · {t({ zh: "当前决定（只读）", en: "Read-only current Decision" })}</p>
       ) : (
         <p className="execution-fixture-note">
           {selected
@@ -447,7 +447,7 @@ function ChildRunGroupSection({ group }: { group: ChildRunGroup }) {
           {group.status === "running" ? t({ zh: "进行中", en: "In progress" })
             : group.status === "failed" ? t({ zh: "失败", en: "Failed" }) : t({ zh: "完成", en: "Done" })}
         </span>
-        <span className="execution-child-count">{group.events.length} 个动作</span>
+        <span className="execution-child-count">{t({ zh: "{count} 个动作", en: "{count} actions" }, { count: group.events.length })}</span>
       </summary>
       <ol className="execution-child-actions">
         {group.events.map((event) => (
@@ -505,7 +505,7 @@ function ExecutionEventStream({
           <div className="execution-agent-narration">
             <p className="execution-agent-line">
               {typeof payload.turn === "number" && payload.turn > 0 && (
-                <span className="execution-agent-turn">第 {payload.turn} 轮</span>
+                <span className="execution-agent-turn">{t({ zh: "第 {turn} 轮", en: "Turn {turn}" }, { turn: payload.turn })}</span>
               )}
               {payload.text}
               {payload.previewOnly === true && (
@@ -758,9 +758,9 @@ function FixtureSessionExecutionView({ projectId, sessionId }: Omit<SessionExecu
     <div className="execution-page">
       <header className="execution-session-header">
         <div>
-          <span className="execution-breadcrumb">{projectId} / Research</span>
+          <span className="execution-breadcrumb">{projectId} / {t({ zh: "研究", en: "Research" })}</span>
           <h1>{fixture.label}</h1>
-          <p>{sessionId} · Local UI demo fixture · model unavailable</p>
+          <p>{sessionId} · {t({ zh: "本机界面演示数据 · 不接模型", en: "Local UI demo fixture · model unavailable" })}</p>
         </div>
         <div className="execution-session-status">
           <ConnectionStatus snapshot={snapshot} />
@@ -919,9 +919,9 @@ function ApiSessionExecutionView({
     <div className="execution-page">
       <header className="execution-session-header">
         <div>
-          <span className="execution-breadcrumb">{projectId} / Research</span>
+          <span className="execution-breadcrumb">{projectId} / {t({ zh: "研究", en: "Research" })}</span>
           <h1>{t({ zh: "会话执行", en: "Session execution" })}</h1>
-          <p>{sessionId} · Research App Server</p>
+          <p>{sessionId} · {t({ zh: "研究应用服务", en: "Research App Server" })}</p>
         </div>
         <div className="execution-session-status">
           <ApiConnectionStatus state={apiState} />

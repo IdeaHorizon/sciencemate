@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 from app.models.feed import FeedEngagement, FeedEngagementAction, FeedItem
 from app.services.feed.profile import Profile, ProjectSignal, extract_terms
 from app.services.feed.ranking import (
+    ScoredItem,
     TermDiscrimination,
     apply_behavior_preferences,
     choose_daily_picks,
@@ -85,6 +86,55 @@ def test_a_generic_word_overlap_is_not_a_match() -> None:
     ][:3]
 
 
+def test_chinese_project_can_use_specific_english_search_evidence() -> None:
+    profile = _profile(("线控底盘", "新能源汽车线控底盘控制"))
+    extra = {
+        "feed_acquisition_routes": ["project_profile"],
+        "profile_user_ids": ["u1"],
+        "discovery_query": "steer-by-wire chassis control",
+        "profile_query_relevance": 0.67,
+    }
+    relevant = _item("Design and control of a robot chassis", extra=extra)
+    generic = _item("Religious social control and consumer choice", extra=extra)
+    biology = _item("Aspergillus chassis expression control", extra=extra)
+    filler = [_item(f"Unrelated field {n}", summary="unrelated topic") for n in range(30)]
+    scored = rank([*filler, generic, biology, relevant], profile, now=NOW)
+    by_title = {item.item.title: item for item in scored}
+    assert by_title[relevant.title].matched_query_terms == ("chassis",)
+    assert "chassis" in by_title[relevant.title].reason()
+    assert by_title[generic.title].matched_query_terms == ()
+    assert by_title[biology.title].matched_query_terms == ()
+
+
+def test_project_title_evidence_recovers_low_scored_vehicle_dynamics_papers() -> None:
+    profile = _profile(("车辆动力学和线控底盘", "车辆动力学和线控底盘"))
+    extra = {
+        "feed_acquisition_routes": ["project_profile"],
+        "profile_user_ids": ["u1"],
+        "discovery_query": "vehicle dynamics modeling",
+        "profile_query_relevance": 0.25,
+    }
+    relevant = _item("Data-Driven Control of Vehicle Active Suspension", extra=extra)
+    unrelated = _item("Electric Vehicle Battery Charging Demand Forecast", extra=extra)
+    oncology = _item("Modeling Tumor Growth Dynamics", extra=extra)
+    ranked = rank_rednote([relevant, unrelated, oncology], profile, user_id="u1", now=NOW)
+    assert [value.item.title for value in ranked] == [relevant.title]
+    assert ranked[0].matched_query_terms == ("vehicle suspension",)
+
+
+def test_unsubscribed_journals_do_not_fill_field_dynamics_without_domains() -> None:
+    from app.services.feed.ranking import rank_field_dynamics
+
+    profile = _profile(("车辆动力学", "车辆动力学"))
+    journals = [
+        _item("Marine contaminants", venue="Marine Pollution Bulletin",
+              extra={"feed_acquisition_routes": ["journal"]}),
+        _item("Soil contaminants", venue="Science of The Total Environment",
+              extra={"feed_acquisition_routes": ["journal"]}),
+    ]
+    assert rank_field_dynamics(journals, profile, now=NOW) == []
+
+
 def test_term_rarity_does_not_drift_with_corpus_size() -> None:
     """罕见度按 log(N) 归一，落在 0..1 —— 不归一的话阈值就得跟着候选池条数走，
     而池子大小随采集节奏变：同一批权重在 400 条里刚好，在 40 条里全不达标。"""
@@ -111,6 +161,19 @@ def test_recency_is_a_discount_not_a_tiebreak() -> None:
     stale = _item("Ising critical exponents via Monte Carlo methods", days_old=12)
     scored = rank([stale, fresh], profile, now=NOW)
     assert scored[0].item.title == fresh.title
+
+
+def test_project_feed_surfaces_new_relevant_work_ahead_of_old_highly_cited_work() -> None:
+    profile = _profile(("钠离子电池硬碳负极", "hard carbon anode sodium ion battery"))
+    route = {"feed_acquisition_routes": ["project_profile"], "profile_user_ids": ["u1"]}
+    fresh = _item("New hard carbon anode for sodium ion batteries", extra={**route, "citations": 0})
+    old = _item("Earlier hard carbon anode for sodium ion batteries", days_old=90,
+                extra={**route, "citations": 500})
+
+    filler = [_item(f"Unrelated background {n}") for n in range(30)]
+    ranked = rank_rednote([old, fresh, *filler], profile, user_id="u1", now=NOW)
+
+    assert [value.item.title for value in ranked] == [fresh.title, old.title]
 
 
 def test_daily_picks_cover_different_projects(harness_domain_registry) -> None:
@@ -288,6 +351,34 @@ async def test_saved_topics_raise_similar_items_without_overriding_the_base_rank
     assert adjusted[0].score - old_score <= 0.200001
 
 
+@pytest.mark.asyncio
+async def test_open_moves_only_the_same_paper_down_and_promotes_related_new_work(db_session) -> None:
+    opened = FeedItem(
+        id="aaaa0000-0000-4000-8000-000000000002", canonical_key="doi:opened",
+        kind="paper", title="Quantum photonic waveguide experiment",
+        url="https://example.org/opened", summary="quantum photons optical waveguide",
+        authors=["A. Researcher"], domains=[], venue="Optics Letters", extra={},
+    )
+    db_session.add(opened)
+    db_session.add(FeedEngagement(
+        user_id="aaaa1111-1111-4111-8111-111111111111", item_id=opened.id,
+        action=FeedEngagementAction.OPEN, created_at=NOW,
+    ))
+    await db_session.flush()
+    related = _item("Photonic waveguide for quantum photons", venue="Optics Letters")
+    unrelated = _item("Medieval manuscript catalog")
+    scored = [ScoredItem(item, 0.7) for item in (opened, related, unrelated)]
+    adjusted = await apply_behavior_preferences(
+        db_session, user_id="aaaa1111-1111-4111-8111-111111111111",
+        scored=scored, now=NOW,
+    )
+    by_title = {value.item.title: value.score for value in adjusted}
+    assert by_title[related.title] > 0.7
+    assert by_title[opened.title] < by_title[related.title]
+    assert by_title[unrelated.title] == 0.7
+    assert len(adjusted) == 3  # Viewed work remains available in the feed.
+
+
 async def test_an_item_without_a_publication_date_is_not_starved_out(db_session) -> None:
     """没写日期的条目不能被"有日期的条目"挤出候选池。
 
@@ -328,6 +419,278 @@ async def test_an_item_without_a_publication_date_is_not_starved_out(db_session)
     await db_session.flush()
 
     profile = Profile(user_id="u1", domains=("070101",))
-    titles = {item.title for item in await candidate_items(db_session, profile=profile, limit=5)}
+    titles = {item.title for item in await candidate_items(db_session, profile=profile, batch_size=5)}
 
     assert "A web find with no publication date" in titles
+
+
+def test_project_paper_without_source_abstract_waits_for_lookup_completion() -> None:
+    from app.services.feed.ranking import show_in_feed
+
+    item = _item("Vehicle active suspension control", summary="", extra={
+        "feed_acquisition_routes": ["project_profile"],
+        "literature_preparation": "pending",
+        "abstract_lookup_completed": False,
+    })
+    assert not show_in_feed(item)
+    item.extra = {**item.extra, "literature_preparation": "ready",
+                  "abstract_lookup_completed": True}
+    assert show_in_feed(item)
+
+
+def test_web_reference_and_storefront_pages_do_not_enter_news_stream() -> None:
+    from app.services.feed.ranking import show_in_feed
+
+    route = {"feed_acquisition_routes": ["web"], "web_search_backend": "baidu"}
+    assert not show_in_feed(_item("线控底盘 - 百度百科", extra=route))
+    assert not show_in_feed(_item("线控底盘在线购买", extra=route))
+    assert show_in_feed(_item("同济大学发布线控底盘国家标准", extra=route))
+
+
+def test_chinese_query_requires_primary_subject_not_only_a_method() -> None:
+    profile = _profile(("智能网联新能源汽车的动力学建模与线控底盘控制",
+                        "智能网联新能源汽车的动力学建模与线控底盘控制 稳定性 协同"))
+    extra = {
+        "feed_acquisition_routes": ["project_profile"],
+        "profile_user_ids": ["u1"],
+        "discovery_query": "线控底盘 动力学建模",
+        "profile_query_relevance": 0.5,
+    }
+    false_hit = _item("土木工程伦理培养的系统动力学建模与协同稳定性", extra=extra)
+    true_hit = _item("智能网联线控底盘的动力学建模与控制", extra=extra)
+    filler = [_item(f"Unrelated field {n}") for n in range(30)]
+    scored = rank([*filler, false_hit, true_hit], profile, now=NOW)
+    by_title = {value.item.title: value for value in scored}
+    assert by_title[false_hit.title].project_id is None
+    assert not by_title[false_hit.title].matched_query_terms
+    assert by_title[true_hit.title].project_id is not None
+
+
+def test_historical_journal_tags_follow_the_repaired_subject_rules(monkeypatch):
+    from app.services.feed.ranking import _domain_hits
+    monkeypatch.delenv('HARNESS_JOURNAL_DOMAIN_MAP', raising=False)
+    profile = _profile(domains=('050103',))
+    unrelated = _item('Syntax of Central Javanese', venue='Language', domains=('050103',),
+                      extra={'classification_mode': 'offline_journal_mapping'})
+    relevant = _item('Ellipsis mismatch', summary='We study Mandarin Chinese.', venue='Language',
+                     domains=('050103',), extra={'classification_mode': 'offline_journal_mapping'})
+    assert _domain_hits(unrelated, profile) == ()
+    assert _domain_hits(relevant, profile) == ('050103',)
+
+
+@pytest.mark.parametrize('title,summary', [
+    ('Visual foundation models robustness', 'Foundation models and AI robustness in computer vision.'),
+    ('Clinical data machine learning robustness', 'Foundation models for clinical datasets and emergency care.'),
+    ('Forecasting urbanization in Istanbul', 'Project robustness and deep learning extrapolation.'),
+    ('Adversarial machine learning in cybersecurity', 'An AI survey of malware detection and robustness.'),
+    ('Text-to-SQL on oncology data', 'Execution and robustness of language models.'),
+    ('Tabular machine learning robustness', 'Machine learning robustness across tabular datasets.'),
+])
+def test_mlip_project_does_not_admit_generic_matches_from_other_fields(title, summary):
+    profile = _profile(('Foundation MLIP Robustness Survey',
+                        'foundation mlip robustness survey ai project execution'))
+    extra = {'feed_acquisition_routes': ['project_profile'], 'profile_user_ids': ['u1'],
+             'discovery_query': 'machine learning interatomic potential robustness',
+             'profile_query_relevance': 0.6}
+    item = _item(title, summary=summary, extra=extra)
+    filler = [_item(f'Unrelated background {n}') for n in range(30)]
+    assert not rank_rednote([*filler, item], profile, user_id='u1', now=NOW)
+
+
+@pytest.mark.parametrize('title,summary', [
+    ('MLIP robustness evaluation', 'Foundation models and robustness for interatomic potentials.'),
+    ('Neural network potentials', 'Foundation models and robustness in molecular dynamics.'),
+    ('MLFF transferability', 'Foundation models and robustness for atomic force fields.'),
+    ('Materials property prediction under extrapolation', 'Foundation models and robustness with uncertainty.'),
+    ('AI 生成晶体的声子基准', 'Foundation models and robustness for crystal stability.'),
+])
+def test_mlip_project_retains_aliases_and_nearby_physics_research(title, summary):
+    profile = _profile(('Foundation MLIP Robustness Survey', 'foundation mlip robustness survey'))
+    extra = {'feed_acquisition_routes': ['project_profile'], 'profile_user_ids': ['u1'],
+             'discovery_query': 'MLIP benchmark uncertainty extrapolation',
+             'profile_query_relevance': 0.5}
+    item = _item(title, summary=summary, extra=extra)
+    filler = [_item(f'Unrelated background {n}') for n in range(30)]
+    assert any(value.item.id == item.id for value in rank_rednote([*filler, item], profile, user_id='u1', now=NOW))
+
+
+def test_visual_foundation_project_retains_its_own_robustness_papers():
+    profile = _profile(('Visual Foundation Robustness', 'visual foundation robustness vision'))
+    item = _item('Visual foundation models robustness', summary='Vision robustness for foundation models.',
+                 extra={'feed_acquisition_routes': ['project_profile'], 'profile_user_ids': ['u1']})
+    filler = [_item(f'Unrelated background {n}') for n in range(30)]
+    assert any(value.item.id == item.id for value in rank_rednote([*filler, item], profile, user_id='u1', now=NOW))
+
+
+def test_replaced_project_cannot_reuse_old_query_evidence() -> None:
+    profile = _profile(("颗粒沉降", "irregular particle sedimentation LBM IBM"))
+    profile.active_project_queries = frozenset({"lattice Boltzmann immersed boundary sedimentation"})
+    old = _item("Interatomic potential robustness benchmark", extra={
+        "feed_acquisition_routes": ["project_profile"],
+        "profile_user_ids": ["u1"],
+        "discovery_query": "interatomic potential robustness",
+        "profile_query_relevance": 0.9,
+    })
+    assert not rank_rednote([old], profile, user_id="u1", now=NOW)
+    current = _item("Lattice Boltzmann immersed boundary sedimentation", extra={
+        "feed_acquisition_routes": ["project_profile"],
+        "profile_user_ids": ["u1"],
+        "discovery_query": "lattice Boltzmann immersed boundary sedimentation",
+        "profile_query_relevance": 0.9,
+    })
+    filler = [_item(f"Unrelated field {n}", summary="unrelated topic") for n in range(30)]
+    assert any(value.item.id == current.id for value in rank_rednote([current, *filler], profile, user_id="u1", now=NOW))
+
+
+@pytest.mark.parametrize('title,summary', [
+    ('Probing Lattice Anharmonicity and Thermal Transport in Ultralow-κ Materials Using Machine Learning Interatomic Potentials',
+     'Lattice thermal conductivity and Boltzmann transport equation in crystalline solids.'),
+    ('A machine-learned interatomic potential for defects investigation in lead-free double perovskite Cs2NaYbCl6',
+     'Chebyshev Interaction Model and lattice thermal conductivity.'),
+])
+def test_particle_settling_project_rejects_crystal_lattice_word_overlap(title, summary):
+    profile = _profile(('LBM IBM 颗粒沉降', 'lattice Boltzmann immersed boundary irregular particle sedimentation fluid interaction'))
+    item = _item(title, summary=summary)
+    filler = [_item(f'Unrelated subject {n}') for n in range(30)]
+    assert not any(s.item.id == item.id for s in rank_rednote([item, *filler], profile, user_id='u1', now=NOW))
+
+
+@pytest.mark.parametrize('title', [
+    'Lattice Boltzmann immersed boundary simulation of irregular particle sedimentation',
+    'Settling of non-spherical particles in a viscous fluid',
+    'An immersed boundary method for fluid-solid interaction',
+    'Lattice Boltzmann simulations of incompressible flow',
+    'Hydrodynamic drag on irregular particles',
+])
+def test_particle_settling_subject_keeps_relevant_methods_and_physics(title):
+    from app.services.feed.ranking import _project_subject_matches
+    assert _project_subject_matches('lattice Boltzmann immersed boundary particle sedimentation', title, '')
+
+
+@pytest.mark.parametrize('title,summary', [
+    ('Thermal behaviour of settling heavy inertial particles in turbulent natural convection', 'Direct numerical simulations investigate settling particles in thermal convection.'),
+    ('Experimental investigation on settling behavior and inter-particle interaction of dual cubic particles released side-by-side in quiescent fluids', 'Experiments measure settling trajectories and wake interactions.'),
+    ('Physics-Constrained Neural Network Framework for Predicting Terminal Settling Velocity', 'Terminal velocity of particles in non-Newtonian fluids.'),
+    ('Collision efficiency of rapidly settling particle pairs in a turbulent flow', 'Hydrodynamic interactions of sedimenting spheres.'),
+    ('An efficient sharp-interface immersed boundary method for complex moving boundary flows', 'An incompressible flow solver with adaptive Cartesian grids.'),
+    ('A new conservative formulation of solid boundary conditions for hybrid Lattice–Boltzmann modeling of compressible flows', 'A fluid boundary scheme.'),
+    ('On kernel functions for the immersed boundary method in lattice Boltzmann methods', 'Kernel accuracy and stability.'),
+    ('Hydrodynamic drag on irregular particles', 'Viscous fluid forces depend on particle shape.'),
+])
+def test_particle_physics_evidence_recovers_precise_matches_with_low_retrieval_score(title, summary):
+    profile = _profile(('格子玻尔兹曼与IBM模拟不规则颗粒沉降', 'lattice Boltzmann immersed boundary particle sedimentation'))
+    query = 'irregular non-spherical particle settling'
+    profile.active_project_queries = frozenset({query})
+    item = _item(title, summary=summary, extra={'feed_acquisition_routes': ['project_profile'],
+                 'profile_user_ids': ['u1'], 'discovery_query': query, 'profile_query_relevance': 0.25})
+    scored = rank_rednote([item], profile, user_id='u1', now=NOW)
+    assert scored and scored[0].item.id == item.id
+    assert scored[0].matched_query_terms or scored[0].project_id
+
+
+@pytest.mark.parametrize('title,summary', [
+    ('Non-spherical atom refinement applied in crystal structure determination', 'A structure refinement of crystals and atoms.'),
+    ('Low-Fraction Irregular Inclusions Trigger Large Compression Stiffening in Biopolymer Hydrogels', 'Mechanical strength of a material with irregular inclusions.'),
+    ('A novel method for inverse kinematics analysis of non-spherical wrist robotic manipulators', 'Robotic wrist motion and inverse kinematics.'),
+    ('Exact analytical treatment of thermodynamic signatures in non-spherical quantum dots', 'Quantum particle confinement.'),
+    ('Finite-Point Electrostatic Representation of Spherical and Non-Spherical Charged Particles', 'Discrete charge distributions and electrostatic fields.'),
+    ('Non-linear evolution of the unstratified polydisperse dust settling instability', 'Astrophysical protoplanetary disks and planetary formation.'),
+    ('Lattice thermal conductivity from machine learning interatomic potentials', 'Phonon transport in perovskite crystals.'),
+    ('A construction of F-irregular graphs', 'Combinatorial graph degrees.'),
+    ('Optimization of Immersed Membrane Integrated in Sedimentation Tank', 'Treatment of Escherichia coli in drinking water.'),
+])
+def test_new_particle_evidence_does_not_admit_shape_or_lattice_word_collisions(title, summary):
+    from app.services.feed.ranking import _particle_physics_evidence
+    assert not _particle_physics_evidence('lattice Boltzmann immersed boundary particle sedimentation', title, summary)
+
+
+def test_particle_physics_evidence_cannot_reuse_an_old_project_query():
+    profile = _profile(('格子玻尔兹曼颗粒沉降', 'lattice Boltzmann particle sedimentation'))
+    profile.active_project_queries = frozenset({'current query'})
+    item = _item('Thermal behaviour of settling heavy inertial particles', summary='Particles settling in viscous fluids.',
+                 extra={'feed_acquisition_routes': ['project_profile'], 'profile_user_ids': ['u1'],
+                        'discovery_query': 'old query', 'profile_query_relevance': 0.25})
+    assert not rank_rednote([item], profile, user_id='u1', now=NOW)
+
+
+@pytest.mark.parametrize('title,summary', [
+    ('Bubble curtains for aquatic pollution control: A lattice Boltzmann study', 'An air-water flow simulation for pollution control.'),
+    ('The lattice Boltzmann method for wind farm simulations: a review', 'Fluid flows in large wind farms.'),
+    ('Lattice Boltzmann Simulation of Acoustic Liners', 'Compressible flow and acoustic response of perforated liners.'),
+])
+def test_a_different_application_using_lbm_alone_is_not_sufficient_new_evidence(title, summary):
+    from app.services.feed.ranking import _particle_physics_evidence
+    assert not _particle_physics_evidence('lattice Boltzmann particle sedimentation', title, summary)
+
+
+def test_sedimentation_tank_equipment_is_not_particle_physics_evidence():
+    from app.services.feed.ranking import _particle_physics_evidence
+    assert not _particle_physics_evidence('lattice Boltzmann particle sedimentation',
+        'Optimization of Immersed Membrane Integrated in Sedimentation Tank',
+        'The water treatment plant removes suspended particles using immersed membranes.')
+
+
+def test_current_project_title_anchor_rejects_neighboring_battery_topics() -> None:
+    """A broad abstract overlap cannot label unrelated chemistry as this project."""
+    profile = Profile(
+        user_id="u1",
+        projects=(ProjectSignal(
+            project_id="sodium-project", name="Sodium hard carbon anodes",
+            terms=extract_terms("sodium-ion batteries hard carbon anodes initial Coulombic efficiency"),
+        ),),
+        active_project_queries=frozenset({
+            "hard carbon anode sodium-ion battery",
+            "solid electrolyte interphase sodium solvation",
+            "initial Coulombic efficiency hard carbon",
+        }),
+    )
+    unrelated = _item(
+        "Collective optical response of carbon nanotubes",
+        summary="The initial efficiency of sodium-ion batteries is discussed as a neighboring application.",
+    )
+    relevant = _item(
+        "Engineering closed pores in hard carbon for enhanced sodium storage",
+        summary="Hard carbon anodes improve initial Coulombic efficiency in sodium-ion batteries.",
+    )
+    fillers = [_item(f"Unrelated optics experiment {index}") for index in range(30)]
+    scored = {entry.item.title: entry for entry in rank([*fillers, unrelated, relevant], profile, now=NOW)}
+    assert scored[unrelated.title].project_id is None
+    assert scored[relevant.title].project_id == "sodium-project"
+
+
+def test_sodium_ion_project_does_not_claim_lithium_or_potassium_batteries() -> None:
+    from app.services.feed.ranking import _project_subject_matches
+
+    topic = "钠离子电池 hard carbon sodium-ion batteries initial Coulombic efficiency"
+    assert not _project_subject_matches(topic,
+        "High initial Coulombic efficiency in lithium metal batteries",
+        "The method may inform sodium-ion batteries in future work.")
+    assert not _project_subject_matches(topic,
+        "Hard carbon anodes for potassium-ion batteries",
+        "Compared with sodium storage materials.")
+    assert _project_subject_matches(topic,
+        "Hard carbon anodes for Na-ion batteries",
+        "Improved initial Coulombic efficiency and stable sodium storage.")
+
+
+def test_project_discovery_query_cannot_override_current_subject_guard() -> None:
+    profile = Profile(
+        user_id="u1",
+        projects=(ProjectSignal(
+            project_id="sodium-project", name="钠离子电池硬碳负极",
+            terms=extract_terms("sodium-ion batteries hard carbon anodes initial Coulombic efficiency"),
+        ),),
+        active_project_queries=frozenset({"initial Coulombic efficiency hard carbon"}),
+    )
+    extra = {"feed_acquisition_routes": ["project_profile"],
+             "profile_user_ids": ["u1"], "discovery_query": "initial Coulombic efficiency hard carbon",
+             "profile_query_relevance": 0.6}
+    lithium = _item("High initial Coulombic efficiency in lithium metal anodes",
+                    summary="Sodium-ion batteries are mentioned for comparison.", extra=extra)
+    sodium = _item("Hard carbon anodes improve sodium-ion battery efficiency",
+                   summary="Initial Coulombic efficiency of sodium storage is measured.", extra=extra)
+    fillers = [_item(f"Unrelated optics experiment {index}") for index in range(30)]
+    scored = {entry.item.title: entry for entry in rank([*fillers, lithium, sodium], profile, now=NOW)}
+    assert scored[lithium.title].project_id is None
+    assert not scored[lithium.title].matched_query_terms
+    assert scored[sodium.title].project_id or scored[sodium.title].matched_query_terms

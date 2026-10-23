@@ -86,7 +86,7 @@ export function ProjectFileTree({
   return (
     <section className="project-files-panel" aria-label={t({ zh: "项目 Git 文件", en: "Project Git files" })}>
       <p className="project-files-count">
-        {root.data?.totalFiles ?? 0} Project files
+        {t({ zh: "项目里共 {count} 个文件", en: "{count} Project files" }, { count: root.data?.totalFiles ?? 0 })}
       </p>
       <div className="project-files-tree">
         <Level
@@ -154,7 +154,7 @@ function Level({
         <details className="project-files-bookkeeping">
           <summary>
             <span>{t({ zh: "平台记账", en: "Platform bookkeeping" })}</span>
-            <small>{bookkeeping.length} 个（`.history/` 等，不是研究产出）</small>
+            <small>{t({ zh: "{count} 个（`.history/` 等，不是研究产出）", en: "{count} (`.history/` and the like; not research outputs)" }, { count: bookkeeping.length })}</small>
           </summary>
           <EntryList
             entries={bookkeeping}
@@ -176,10 +176,11 @@ function Level({
  * 用户和 agent 都只能猜界面是不是折叠了。
  */
 function LevelNotice({ listing }: { listing: ProjectFileTreeData }) {
+  const t = useT();
   if (!listing.truncated) return null;
   return (
     <p className="project-files-truncated">
-      这一层共 {listing.totalEntries} 项，只列出了前 {listing.entries.length} 项。
+      {t({ zh: "这一层共 {total} 项，只列出了前 {shown} 项。", en: "This level has {total} entries; only the first {shown} are listed." }, { total: listing.totalEntries, shown: listing.entries.length })}
     </p>
   );
 }
@@ -206,7 +207,7 @@ function EntryList({
                 <Folder size={12} />
                 <code>{entry.name}</code>
                 <small>
-                  {entry.fileCount} 个文件 · {formatBytes(entry.sizeBytes)}
+                  {t({ zh: "{count} 个文件", en: "{count} files" }, { count: entry.fileCount ?? 0 })} · {formatBytes(entry.sizeBytes)}
                   {entry.changedCount ? ` · ${entry.changedCount} live` : ""}
                 </small>
               </summary>

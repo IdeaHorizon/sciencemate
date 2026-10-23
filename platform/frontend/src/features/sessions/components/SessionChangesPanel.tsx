@@ -16,6 +16,7 @@ import {
   visibleSessionChangePaths,
 } from "../lib/session-change-projection";
 import { GitDiffViewer } from "@/shared/ui";
+import { ContractViolation } from "@/shared/contract-violation";
 import { useT, useLanguage, say, type Language, type Phrase } from "@/shared/i18n";
 
 const resourceLabels: Record<RevisionResourceType, Phrase> = {
@@ -44,7 +45,8 @@ function shortSha(value: string | null | undefined) {
 }
 
 function errorMessage(error: unknown, lang: Language) {
-  return error instanceof Error
+  // 对面违约（变更集的形状不对、身份串了）的 message 是写给排查的人的诊断，不照念。
+  return error instanceof Error && !(error instanceof ContractViolation)
     ? error.message
     : say({ zh: "刷新不到这次提交的状态。", en: "Revision state could not be refreshed." }, lang);
 }
@@ -188,7 +190,7 @@ export function SessionChangesPanel({
               <GitCompareArrows size={13} />
               <span>
                 <strong>{t({ zh: "没有未发布的改动", en: "No unpublished changes" })}</strong>
-                <small>{changeSet?.gitBranch ?? session.gitBranch ?? "Session branch"} · 工作区与项目 head 一致</small>
+                <small>{changeSet?.gitBranch ?? session.gitBranch ?? t({ zh: "会话分支", en: "Session branch" })} · {t({ zh: "工作区与项目 head 一致", en: "workspace matches the project head" })}</small>
               </span>
             </span>
           </div>

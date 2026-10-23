@@ -457,7 +457,7 @@ def _with_windows(release_dir, receipt: dict | None, *, rehearsed: bool = True):
             (release_dir / pr.WINDOWS_REHEARSAL).write_text(json.dumps({
                 "result": "REHEARSAL OK", "against": receipt.get("against"), "previous_version": "0.5.6",
                 "checks": {"model_called": True, "environment_clean": True, "previous_runs_visible": True,
-                           "kb_readable": True, "permissions_unchanged": None},
+                           "kb_readable": True, "permissions_unchanged": True},
                 "host": "pc", "ran_at": "2026-10-16T00:00:00+00:00", "sha256": receipt.get("sha256"),
             }), encoding="utf-8")
     return _FakeForgejo(sums=WIN_SUMS.encode())

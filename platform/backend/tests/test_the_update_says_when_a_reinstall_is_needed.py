@@ -73,7 +73,7 @@ def test_the_status_carries_the_verdict_and_the_reinstall_url(tmp_path: Path, mo
     (harness / su.VERSION_MARKER).write_text("1.0.0\n")
     get_json, get_bytes = _reachable(tmp_path, doc, signature, "https://h/o/r/releases/tag/v2.0.0")
 
-    status, *_ = su.check_for_update(tmp_path, harness, "https://h/o/r", get_json, get_bytes)
+    status, *_ = su.check_for_update(tmp_path, harness, "https://h/o/r", get_json, get_bytes, lang="zh")
     assert status.available_version == "2.0.0", status.error
     assert status.shell_update == {"changed": True, "needs_reinstall": True}
     assert status.reinstall_url == "https://h/o/r/releases/tag/v2.0.0", "需要重装却没给地址 —— 等于没提示"
@@ -90,7 +90,7 @@ def test_an_old_format_manifest_yields_unknown_and_no_url(tmp_path: Path, monkey
     harness = tmp_path / "h"; (harness / "core").mkdir(parents=True)
     (harness / su.VERSION_MARKER).write_text("1.0.0\n")
     get_json, get_bytes = _reachable(tmp_path, doc, signature, "https://h/o/r/releases/tag/v2.0.0")
-    status, *_ = su.check_for_update(tmp_path, harness, "https://h/o/r", get_json, get_bytes)
+    status, *_ = su.check_for_update(tmp_path, harness, "https://h/o/r", get_json, get_bytes, lang="zh")
     assert status.available_version == "2.0.0", status.error
     assert status.shell_update == {"changed": None, "needs_reinstall": False}
     assert status.reinstall_url is None

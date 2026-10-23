@@ -32,6 +32,7 @@ import yaml
 from app.config import data_root, settings
 from app.services import frozen_register
 from app.services.harness_contract import HarnessContractUnavailable, materials_module
+from app.services.say import SaidToAPerson
 
 
 log = logging.getLogger(__name__)
@@ -404,10 +405,14 @@ def _the_file_lock():
 
 
 class ProjectRepositoryError(RuntimeError):
-    """A repository invariant or Git operation failed."""
+    """A repository invariant or Git operation failed.
+
+    消息是**技术原话**（英文：Git 输出、不变量名）。端点把它当证据 `{why}` 填进一句
+    两种语言的话里（`said_of`）；子类里说给人听的那几种（`SaidToAPerson`）照它自己的说。
+    """
 
 
-class ProjectFileTooLargeError(ProjectRepositoryError):
+class ProjectFileTooLargeError(SaidToAPerson, ProjectRepositoryError):
     """The file exists but is too big to hand to a browser in one response.
 
     分出一个子类是因为调用方要能把它和"文件不存在"分开：两者都是
@@ -415,13 +420,13 @@ class ProjectFileTooLargeError(ProjectRepositoryError):
     合成一种错误的话，界面只能说"打不开"，而用户下一步该做什么完全不同。
     """
 
-    def __init__(self, message: str, *, size_bytes: int, max_bytes: int) -> None:
-        super().__init__(message)
+    def __init__(self, message: str, *, en: str, size_bytes: int, max_bytes: int) -> None:
+        super().__init__(message, en=en)
         self.size_bytes = size_bytes
         self.max_bytes = max_bytes
 
 
-class ChildLaneConflictError(ProjectRepositoryError):
+class ChildLaneConflictError(SaidToAPerson, ProjectRepositoryError):
     """两条 lane 改了同一个文件 —— **不自动解**（RFC D5）。
 
     六节点目录所有制保证正常情况下零冲突，所以真冲突是"所有制被破坏了"的
@@ -433,10 +438,21 @@ class ChildLaneConflictError(ProjectRepositoryError):
     由调度器决定。
     """
 
-    def __init__(self, message: str, *, lane_id: str, paths: Sequence[str]) -> None:
-        super().__init__(message)
+    def __init__(self, message: str, *, en: str, lane_id: str, paths: Sequence[str]) -> None:
+        super().__init__(message, en=en)
         self.lane_id = lane_id
         self.paths = tuple(paths)
+
+
+class LaneAlreadyRunning(SaidToAPerson, ProjectRepositoryError):
+    """同一个节点已经有一条在跑的 lane —— 第二条合回来必然冲突，开之前就拒。"""
+
+
+class UndoRefused(SaidToAPerson, ValueError):
+    """这次撤销做不了，且说得出为什么（没有可撤销的、动了冻结产物、工作区不干净）。
+
+    `ValueError` 子类：撤销端点原来按 `except ValueError` 接，这一条不改它的接法。
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -826,10 +842,13 @@ class GitProjectRepository:
                         )
                     return existing
                 if existing.node_type == node:
-                    raise ProjectRepositoryError(
+                    raise LaneAlreadyRunning(
                         f"{node} 已经有一条在跑的 lane（{existing.lane_id}）——"
                         "同一个节点不能并行两条：两条都会改同一个节点目录，"
-                        "合第二条必然冲突。等它落地，或者先放弃它。"
+                        "合第二条必然冲突。等它落地，或者先放弃它。",
+                        en=f"{node} already has a running lane ({existing.lane_id}) — one node cannot "
+                           "run two in parallel: both would change the same node directory, so merging "
+                           "the second is bound to conflict. Wait for it to land, or abandon it first.",
                     )
             base = session.head_commit
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -917,6 +936,11 @@ class GitProjectRepository:
                     + ", ".join(shared)
                     + " —— 这些文件不属于任何节点目录，所有制保证不了零冲突。"
                     "改动要随完成回报交 proposal，由调度器单写落盘。",
+                    en=f"Lane {lane_id} changed shared single-writer file(s): "
+                       + ", ".join(shared)
+                       + " — these files belong to no node directory, so ownership cannot guarantee "
+                       "zero conflicts. Changes have to come back as a proposal with the completion "
+                       "report, and the scheduler writes them alone.",
                     lane_id=lane_id, paths=shared,
                 )
             if self._git(root, "status", "--porcelain=v1"):
@@ -952,6 +976,11 @@ class GitProjectRepository:
                     + ", ".join(conflicted or ("<unknown>",))
                     + " —— 六节点目录所有制保证正常情况下零冲突，所以这是"
                     "所有制被破坏了的信号。不自动解：重跑、放弃还是上报，由调度器定。",
+                    en=f"Lane {lane_id} conflicts with the Session branch on: "
+                       + ", ".join(conflicted or ("<unknown>",))
+                       + " — node-directory ownership guarantees zero conflicts in normal operation, "
+                       "so this signals that ownership was broken. Not resolved automatically: the "
+                       "scheduler decides whether to rerun, abandon or escalate.",
                     lane_id=lane_id, paths=conflicted,
                 )
             return LaneMerge(
@@ -1644,7 +1673,8 @@ class GitProjectRepository:
         size = candidate.stat().st_size
         if size > max_bytes:
             raise ProjectFileTooLargeError(
-                f"Project file is too large to preview: {safe} ({size} bytes)",
+                f"文件太大，预览不了：{safe}（{size} 字节）",
+                en=f"Project file is too large to preview: {safe} ({size} bytes)",
                 size_bytes=size,
                 max_bytes=max_bytes,
             )
@@ -2405,10 +2435,12 @@ class GitProjectRepository:
             head = self._git(root, "rev-parse", "HEAD").strip()
             base = (workspace.base_commit or "").strip()
             if not head or head == base:
-                raise ValueError("这个 Session 还没有可撤销的提交")
+                raise UndoRefused("这个 Session 还没有可撤销的提交",
+                                  en="This Session has no commit to undo yet")
             parents = self._git(root, "rev-list", "--parents", "-n", "1", head).split()
             if len(parents) < 2:
-                raise ValueError("最近一次提交没有父提交，无法撤销")
+                raise UndoRefused("最近一次提交没有父提交，无法撤销",
+                                  en="The latest commit has no parent, so it cannot be undone")
             changed = [
                 path
                 for path in self._git(
@@ -2419,9 +2451,11 @@ class GitProjectRepository:
             frozen = self._frozen_register(root)
             blocked = sorted(path for path in changed if path in frozen)
             if blocked:
-                raise ValueError(
+                raise UndoRefused(
                     "这次提交动了已冻结的产物，不能撤销（预注册防篡改语义）："
-                    + "、".join(blocked[:5])
+                    + "、".join(blocked[:5]),
+                    en="This commit touched frozen artifacts, so it cannot be undone (pre-registration "
+                       "is tamper-proof): " + ", ".join(blocked[:5]),
                 )
             # 工作区脏就不能 revert（git 自己会拒，但它抛的是 128 + 一段英文）。
             # 提前检查，把它变成一句能照做的话 —— 报错不给下一步，等于只告诉
@@ -2435,11 +2469,14 @@ class GitProjectRepository:
                 if line.strip()
             ]
             if dirty:
-                raise ValueError(
+                raise UndoRefused(
                     "工作区还有未提交的改动，撤销会覆盖它们。先等这一轮跑完"
                     "（它结束时会自动 checkpoint），或手动处理这些文件："
                     + "、".join(dirty[:5])
-                    + ("…" if len(dirty) > 5 else "")
+                    + ("…" if len(dirty) > 5 else ""),
+                    en="The workspace has uncommitted changes that an undo would overwrite. Wait for "
+                       "this turn to finish (it checkpoints automatically when it ends), or deal with "
+                       "these files by hand: " + ", ".join(dirty[:5]) + ("…" if len(dirty) > 5 else ""),
                 )
             subject = self._git(root, "log", "-1", "--format=%s", head).strip()
             self._configure_identity(root)

@@ -117,9 +117,9 @@ function projectedStatus(activity: ChatActivity, lang: Language) {
  */
 export function projectLiveActivity(
   activities: readonly ChatActivity[],
-  options: { running: boolean; view?: SessionExecutionView | null; lang?: Language },
+  options: { running: boolean; view?: SessionExecutionView | null; lang: Language },
 ): LiveActivityProjection {
-  const lang = options.lang ?? "zh";
+  const lang = options.lang;
   const view = options.view ?? null;
   if (view?.waitingOn?.kind === "human") {
     return { statusText: say({ zh: "在等你回话", en: "Waiting for your input" }, lang), tone: "attention" };

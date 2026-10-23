@@ -20,6 +20,7 @@
 // 真中途杀掉，留下的是一个换到一半的目录。装完之前唯一诚实的答案是「等它装完」。
 
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Threading;
@@ -81,13 +82,14 @@ internal sealed class WizardForm : Form
     {
         _options = options;
 
-        Text = "安装 ScienceMate";
+        // 下面所有坐标都是 100% 缩放下的像素；EndLayoutAt96Dpi 按本机 DPI 一起放大。
+        Footprint.BeginLayoutAt96Dpi(this);
+        Speak(() => Text = Speech.T("安装 ScienceMate", "Install ScienceMate"));
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = true;
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(560, 340);
-        Font = Footprint.UiFont(9f, FontStyle.Regular);
         BackColor = Color.White;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
@@ -98,6 +100,61 @@ internal sealed class WizardForm : Form
         Controls.Add(_pageProgress);
         Controls.Add(_pageDone);
         Show(_pageChoose);
+        Footprint.EndLayoutAt96Dpi(this, Footprint.UiFont(9f, FontStyle.Regular));
+    }
+
+    /// <summary>界面上每一句话都登记在这里 —— 换语言时整页重说一遍。</summary>
+    /// <remarks>
+    /// 控件只建一次（坐标按 96 DPI 摆好、放大过一次，见 BeginLayoutAt96Dpi），换语言只换字。
+    /// 每句话写成一个"再说一遍"的动作：`Speak(() => x.Text = Speech.T("…", "…"))`。
+    /// </remarks>
+    private readonly List<Action> _speech = new List<Action>();
+
+    private void Speak(Action say)
+    {
+        _speech.Add(say);
+        say();
+    }
+
+    /// <summary>第一页顶上的「中文 | English」—— 名字用各自的文字写，认得它的人一眼就认得。</summary>
+    private readonly Button _chinese = new Button();
+    private readonly Button _english = new Button();
+
+    private void SwitchTo(string language)
+    {
+        if (Speech.Language == language) return;
+        Speech.Language = language;
+        Speech.ChosenByThePerson = true;
+        SuspendLayout();
+        foreach (Action say in _speech) say();
+        ShowWhichLanguage();
+        // 这两句是现算的（空间、装不装得进），按新语言再算一遍。
+        ReportSpace();
+        RecheckTheFolder();
+        ResumeLayout(true);
+    }
+
+    private void ShowWhichLanguage()
+    {
+        foreach (Button b in new[] { _chinese, _english })
+        {
+            bool current = (b == _chinese) == (Speech.Language == Speech.Chinese);
+            b.FlatAppearance.BorderSize = current ? 1 : 0;
+            b.ForeColor = current ? Color.FromArgb(32, 32, 32) : Color.FromArgb(96, 96, 96);
+        }
+    }
+
+    private Button LanguageButton(Button b, string language, string name, int x)
+    {
+        b.Text = name;
+        b.Location = new Point(x, 18);
+        b.Size = new Size(64, 28);   // 同「浏览…」：雅黑 9pt 带边框的按钮在 100% 下要 27 高
+        b.FlatStyle = FlatStyle.Flat;
+        b.FlatAppearance.BorderColor = Color.FromArgb(160, 160, 160);
+        b.BackColor = Color.White;
+        b.Cursor = Cursors.Hand;
+        b.Click += delegate { SwitchTo(language); };
+        return b;
     }
 
     private void Show(Panel page)
@@ -108,11 +165,10 @@ internal sealed class WizardForm : Form
         page.BringToFront();
     }
 
-    private static Label Heading(string text)
+    private static Label Heading()
     {
         return new Label
         {
-            Text = text,
             AutoSize = true,
             Location = new Point(24, 20),
             Font = Footprint.UiFont(14f, FontStyle.Regular),
@@ -122,23 +178,30 @@ internal sealed class WizardForm : Form
     private void BuildChoosePage()
     {
         _pageChoose.Dock = DockStyle.Fill;
-        _pageChoose.Controls.Add(Heading("安装 ScienceMate"));
+        var heading = Heading();
+        Speak(() => heading.Text = Speech.T("安装 ScienceMate", "Install ScienceMate"));
+        _pageChoose.Controls.Add(heading);
+
+        // 语言：默认英文（wangd 2026-10-19），第一页顶上就能换。
+        _pageChoose.Controls.Add(LanguageButton(_chinese, Speech.Chinese, Speech.NameOf(Speech.Chinese), 404));
+        _pageChoose.Controls.Add(LanguageButton(_english, Speech.English, Speech.NameOf(Speech.English), 472));
+        ShowWhichLanguage();
 
         string version = InstallerVersion.Value;
-        _pageChoose.Controls.Add(new Label
+        var subtitle = new Label
         {
-            Text = string.IsNullOrWhiteSpace(version) ? "选择安装位置。" : "版本 " + version + "　·　选择安装位置。",
             AutoSize = true,
             ForeColor = Color.FromArgb(96, 96, 96),
             Location = new Point(26, 54),
-        });
+        };
+        Speak(() => subtitle.Text = string.IsNullOrWhiteSpace(version)
+            ? Speech.T("选择安装位置。", "Choose where to install.")
+            : string.Format(Speech.T("版本 {0}　·　选择安装位置。", "Version {0}  ·  Choose where to install."), version));
+        _pageChoose.Controls.Add(subtitle);
 
-        _pageChoose.Controls.Add(new Label
-        {
-            Text = "安装到：",
-            AutoSize = true,
-            Location = new Point(24, 96),
-        });
+        var installTo = new Label { AutoSize = true, Location = new Point(24, 96) };
+        Speak(() => installTo.Text = Speech.T("安装到：", "Install to:"));
+        _pageChoose.Controls.Add(installTo);
 
         _dir.Text = _options.InstallDir;
         _dir.Location = new Point(24, 118);
@@ -147,11 +210,11 @@ internal sealed class WizardForm : Form
 
         var browse = new Button
         {
-            Text = "浏览…",
-            Location = new Point(452, 117),
-            Size = new Size(84, 25),
+            Location = new Point(452, 116),
+            Size = new Size(84, 28),   // 雅黑 9pt 的按钮在 100% 下要 27 高，25 会切掉字脚
             UseVisualStyleBackColor = true,
         };
+        Speak(() => browse.Text = Speech.T("浏览…", "Browse…"));
         browse.Click += OnBrowse;
         _pageChoose.Controls.Add(browse);
 
@@ -160,25 +223,28 @@ internal sealed class WizardForm : Form
         _space.ForeColor = Color.FromArgb(96, 96, 96);
         _pageChoose.Controls.Add(_space);
 
-        _desktop.Text = "在桌面创建快捷方式";
+        Speak(() => _desktop.Text = Speech.T("在桌面创建快捷方式", "Create a desktop shortcut"));
         _desktop.Checked = true;
         _desktop.AutoSize = true;
         _desktop.Location = new Point(24, 184);
         _pageChoose.Controls.Add(_desktop);
 
-        _startMenu.Text = "添加到开始菜单（含卸载入口）";
+        Speak(() => _startMenu.Text = Speech.T("添加到开始菜单（含卸载入口）", "Add to the Start menu (with an uninstall entry)"));
         _startMenu.Checked = true;
         _startMenu.AutoSize = true;
         _startMenu.Location = new Point(24, 212);
         _pageChoose.Controls.Add(_startMenu);
 
-        _complaint.Location = new Point(24, 242);
-        _complaint.Size = new Size(512, 40);
+        // 三行高（雅黑 9pt 在 100% 下一行 17）：最长的那句（要管理员权限、换成哪个位置、
+        // 或者以管理员身份重开）里带着默认安装路径，用户名一长就是三行。只给两行的话，
+        // 第三行压在下面那个链接上。下沿正好到按钮那一行（y=292）。
+        _complaint.Location = new Point(24, 240);
+        _complaint.Size = new Size(512, 52);
         _complaint.ForeColor = Color.FromArgb(176, 32, 32);
         _pageChoose.Controls.Add(_complaint);
 
-        _useDefault.Text = "换成不需要管理员权限的位置";
-        _useDefault.Location = new Point(24, 284);
+        Speak(() => _useDefault.Text = Speech.T("换成不需要管理员权限的位置", "Use a folder that needs no admin rights"));
+        _useDefault.Location = new Point(24, 298);   // 与按钮同一行，落在「取消」左边
         _useDefault.Size = new Size(300, 20);
         _useDefault.Visible = false;
         _useDefault.LinkClicked += delegate { _dir.Text = InstallOptions.DefaultInstallDir(); };
@@ -187,7 +253,7 @@ internal sealed class WizardForm : Form
         _recheck.Interval = 400;
         _recheck.Tick += delegate { _recheck.Stop(); RecheckTheFolder(); };
 
-        _install.Text = "安装";
+        Speak(() => _install.Text = Speech.T("安装", "Install"));
         _install.Location = new Point(436, 292);
         _install.Size = new Size(100, 30);
         _install.UseVisualStyleBackColor = true;
@@ -195,7 +261,7 @@ internal sealed class WizardForm : Form
         _pageChoose.Controls.Add(_install);
         AcceptButton = _install;
 
-        _cancel.Text = "取消";
+        Speak(() => _cancel.Text = Speech.T("取消", "Cancel"));
         _cancel.Location = new Point(328, 292);
         _cancel.Size = new Size(100, 30);
         _cancel.UseVisualStyleBackColor = true;
@@ -258,7 +324,9 @@ internal sealed class WizardForm : Form
             var drive = new DriveInfo(root);
             double freeGb = drive.AvailableFreeSpace / 1024.0 / 1024 / 1024;
             double needGb = InstallerVersion.InstalledBytes / 1024.0 / 1024 / 1024;
-            _space.Text = string.Format("需要约 {0:0.0} GB，{1} 可用 {2:0.0} GB", needGb, drive.Name, freeGb);
+            _space.Text = string.Format(Speech.T("需要约 {0:0.0} GB，{1} 可用 {2:0.0} GB",
+                                                 "About {0:0.0} GB needed; {2:0.0} GB free on {1}"),
+                                        needGb, drive.Name, freeGb);
             _space.ForeColor = freeGb < needGb
                 ? Color.FromArgb(176, 32, 32) : Color.FromArgb(96, 96, 96);
         }
@@ -269,7 +337,8 @@ internal sealed class WizardForm : Form
     {
         using (var picker = new FolderBrowserDialog())
         {
-            picker.Description = "选择一个文件夹，ScienceMate 会装在它下面";
+            picker.Description = Speech.T("选择一个文件夹，ScienceMate 会装在它下面",
+                                          "Choose a folder; ScienceMate will be installed inside it");
             picker.ShowNewFolderButton = true;
             try
             {
@@ -300,7 +369,7 @@ internal sealed class WizardForm : Form
         _options.RegisterUninstall = true;   // 装了就该在「应用和功能」里找得到
 
         _installing = true;
-        _step.Text = "正在准备…";
+        _step.Text = Speech.T("正在准备…", "Getting ready…");
         _bar.Style = ProgressBarStyle.Marquee;
         Show(_pageProgress);
 
@@ -317,7 +386,7 @@ internal sealed class WizardForm : Form
             }
             catch (Exception ex)
             {
-                BeginInvoke((MethodInvoker)delegate { Failed("安装失败：" + ex.Message, 1); });
+                BeginInvoke((MethodInvoker)delegate { Failed(Speech.T("安装失败：", "Installation failed: ") + ex.Message, 1); });
             }
         });
         worker.IsBackground = true;
@@ -346,7 +415,9 @@ internal sealed class WizardForm : Form
     private void BuildProgressPage()
     {
         _pageProgress.Dock = DockStyle.Fill;
-        _pageProgress.Controls.Add(Heading("正在安装"));
+        var heading = Heading();
+        Speak(() => heading.Text = Speech.T("正在安装", "Installing"));
+        _pageProgress.Controls.Add(heading);
 
         _step.Location = new Point(26, 140);
         _step.Size = new Size(510, 22);
@@ -357,19 +428,23 @@ internal sealed class WizardForm : Form
         _bar.Style = ProgressBarStyle.Marquee;
         _pageProgress.Controls.Add(_bar);
 
-        _pageProgress.Controls.Add(new Label
+        var patience = new Label
         {
-            Text = "首次安装要解压约 1 GB 文件，请稍候。",
             AutoSize = true,
             ForeColor = Color.FromArgb(96, 96, 96),
             Location = new Point(26, 196),
-        });
+        };
+        Speak(() => patience.Text = Speech.T("首次安装要解压约 1 GB 文件，请稍候。",
+                                             "A first install unpacks about 1 GB of files — please wait."));
+        _pageProgress.Controls.Add(patience);
     }
 
     private void BuildDonePage()
     {
         _pageDone.Dock = DockStyle.Fill;
-        _pageDone.Controls.Add(Heading("安装完成"));
+        var heading = Heading();
+        Speak(() => heading.Text = Speech.T("安装完成", "Installed"));
+        _pageDone.Controls.Add(heading);
 
         _doneWhere.Location = new Point(26, 64);
         _doneWhere.Size = new Size(510, 40);
@@ -386,13 +461,13 @@ internal sealed class WizardForm : Form
         _doneNotes.Visible = false;
         _pageDone.Controls.Add(_doneNotes);
 
-        _launch.Text = "立即运行 ScienceMate";
+        Speak(() => _launch.Text = Speech.T("立即运行 ScienceMate", "Run ScienceMate now"));
         _launch.Checked = true;
         _launch.AutoSize = true;
         _launch.Location = new Point(26, 250);
         _pageDone.Controls.Add(_launch);
 
-        _finish.Text = "完成";
+        Speak(() => _finish.Text = Speech.T("完成", "Finish"));
         _finish.Location = new Point(436, 292);
         _finish.Size = new Size(100, 30);
         _finish.UseVisualStyleBackColor = true;
@@ -404,10 +479,11 @@ internal sealed class WizardForm : Form
     {
         _installing = false;
         _outcome = outcome;
-        _doneWhere.Text = "已安装到：" + outcome.InstallDir;
+        _doneWhere.Text = Speech.T("已安装到：", "Installed to: ") + outcome.InstallDir;
         if (outcome.Warnings.Count > 0)
         {
-            _doneNotes.Text = "有几件事没做成（不影响使用）：\r\n\r\n· "
+            _doneNotes.Text = Speech.T("有几件事没做成（不影响使用）：", "A few things did not work out (ScienceMate still works):")
+                              + "\r\n\r\n· "
                               + string.Join("\r\n· ", outcome.Warnings.ToArray());
             _doneNotes.Visible = true;
         }
@@ -426,7 +502,7 @@ internal sealed class WizardForm : Form
         _complaint.Text = message.Split('\n')[0];
         AcceptButton = _install;
         Show(_pageChoose);
-        Footprint.MessageBoxW(Handle, message, "ScienceMate 安装", Footprint.IconError);
+        Footprint.MessageBoxW(Handle, message, Speech.T("ScienceMate 安装", "ScienceMate Setup"), Footprint.IconError);
     }
 
     private void OnFinish(object sender, EventArgs e)
@@ -441,8 +517,11 @@ internal sealed class WizardForm : Form
             }
             catch (Exception ex)
             {
-                Footprint.MessageBoxW(Handle, "装好了，但没能启动：" + ex.Message + "\n\n"
-                                      + "可以到桌面或开始菜单里点它。", "ScienceMate", Footprint.IconWarning);
+                Footprint.MessageBoxW(Handle, Speech.T("装好了，但没能启动：", "Installed, but it could not be started: ")
+                                      + ex.Message + "\n\n"
+                                      + Speech.T("可以到桌面或开始菜单里点它。",
+                                                 "You can open it from the desktop or the Start menu."),
+                                      "ScienceMate", Footprint.IconWarning);
             }
         }
         Close();

@@ -1314,19 +1314,25 @@ def _child_obligation_effect(delivery: dict[str, Any]) -> tuple[str, str]:
     return EFFECT_OPERATIONAL, CONTRIBUTION_NONE
 
 
-def _record_child_obligation_effect(state: Any, result: dict[str, Any]) -> None:
-    """把封存的交付派生成 Core 的 child obligation effect，让它跟着 summary 过河（#1099）。
+def _record_core_delivery(state: Any, result: dict[str, Any]) -> None:
+    """从同一封存 C 派生 Core 的任务结局与 child obligation effect。
 
-    此前 core.obligation_effect.record_obligation_effect 生产代码零调用方：executor
-    写进 summary 的 child_obligation_effect 恒为 None，父侧永远读不到「这一趟只是
-    operational_subtask_only」，decision package 那句「批准它不等于研究问题有了答案」
-    也永远不出现。只认已封存的 C（fresh 与重放读回同一份），不认本次请求实参。
+    任务是否完成（#1086）与对上游科学目标的贡献（#1099）是不同轴。
+    fresh、恢复重放和修订都只读实际封存结果，不认本次请求实参。
     """
     if not isinstance(result, dict) or result.get("status") != "success":
         return
     delivery = result.get("delivery")
     if not isinstance(delivery, dict):
         return
+    from core.task_outcome import record_task_outcome
+
+    # 此投影参与 Core 的完成判定，不能静默漏记。异常时保留已封存 C，
+    # 下次 finish 重放即可补记；不改证据、不重跑载荷、不清除其他 blocker。
+    record_task_outcome(
+        state, delivery["outcome"], detail=delivery.get("summary", ""),
+        reported_by="experiment.finish",
+    )
     effect, contribution = _child_obligation_effect(delivery)
     try:
         from core.obligation_effect import record_obligation_effect
@@ -1362,7 +1368,7 @@ async def _finish(
         limitations=limitations, next_step=next_step, blocker=blocker,
         verification=verification, **kwargs,
     )
-    _record_child_obligation_effect(state, result)
+    _record_core_delivery(state, result)
     return result
 
 

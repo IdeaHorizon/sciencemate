@@ -66,7 +66,7 @@ async def test_unreadable_catalog_yields_no_bindings_instead_of_raising(
 ):
     """目录读不到 → 返回空绑定（调用方照旧给 reasoning 兜底），并且吵在日志里。"""
     def _boom():
-        raise ModelRoleCatalogError("HARNESS_ROOT 未配置")
+        raise ModelRoleCatalogError("HARNESS_ROOT 未配置", en="HARNESS_ROOT is not set")
 
     monkeypatch.setattr("app.services.model_backends.catalog", _boom)
     _visible(monkeypatch, [_backend("b", ["reasoning"])])

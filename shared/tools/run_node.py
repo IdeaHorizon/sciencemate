@@ -367,19 +367,13 @@ def run_has_live_executor(run_id: str) -> bool:
     return find_child_state(run_id) is not None or has_driver(run_id)
 
 
-def scan_interrupted_child_runs(state: State, *, scope: str = "lineage") -> list[dict]:
-    """扫出本会话血缘内**被打断**的子 run（有 run_start、没 run_end、且没人在跑）。
-
-    判据全机械，来源是盘上的 transcript 加本进程的执行者登记。
-    `brief_interrupted_child_runs`（告知调度器）与 `_resumable_run_for`
-    （派发时自动转续跑）共用这一份 —— 两处各写一遍判据，迟早分叉。
-
-    "没人在跑"那一条见 :func:`run_has_live_executor`：还有执行者的 run 不是
-    被打断，是还在干活（#1164）。
-    """
+def _scan_child_runs(state: State) -> dict[str, dict]:
+    """读盘：runs 根下每条有 run_start 的子 run 的机械事实（身份、有没有 run_end、
+    checkpoint、会话……）。只读，不判。两个消费者各取所需：
+    :func:`scan_interrupted_child_runs`（被打断的）、:func:`live_same_task_children`（还活着的）。"""
     runs_root = state.root.parent
     if not runs_root.is_dir():
-        return []
+        return {}
     scanned: dict[str, dict] = {}
     for run_dir in runs_root.iterdir():
         transcript = run_dir / "transcript.jsonl"
@@ -440,6 +434,20 @@ def scan_interrupted_child_runs(state: State, *, scope: str = "lineage") -> list
             continue
         if info["node_type"]:
             scanned[run_dir.name] = info
+    return scanned
+
+
+def scan_interrupted_child_runs(state: State, *, scope: str = "lineage") -> list[dict]:
+    """扫出本会话血缘内**被打断**的子 run（有 run_start、没 run_end、且没人在跑）。
+
+    判据全机械，来源是盘上的 transcript 加本进程的执行者登记。
+    `brief_interrupted_child_runs`（告知调度器）与 `_resumable_run_for`
+    （派发时自动转续跑）共用这一份 —— 两处各写一遍判据，迟早分叉。
+
+    "没人在跑"那一条见 :func:`run_has_live_executor`：还有执行者的 run 不是
+    被打断，是还在干活（#1164）。
+    """
+    scanned = _scan_child_runs(state)
 
     def _descends_from_me(run_id: str) -> bool:
         seen: set[str] = set()
@@ -457,6 +465,33 @@ def scan_interrupted_child_runs(state: State, *, scope: str = "lineage") -> list
         and (scope == "all" or _descends_from_me(run_id))
         and not run_has_live_executor(run_id)
     ]
+
+
+def live_same_task_children(state: State, node_type: str, task_identity: dict | None) -> list[dict]:
+    """同一任务身份、**还有执行者**的子 run（#1199，#1052 验收 4）。
+
+    `fresh` 的意思是「放弃续跑，另起一条」—— 不是「在旧的还活着的时候并排再起一条」：
+    两个执行者为同一件事各写一份结果，正是 #1052 里两份互相矛盾的交付的来路。
+    判据三条逐字机械：task_instance_uuid 与 task_contract_digest 都相等、没有 run_end、
+    :func:`run_has_live_executor` 为真。没带身份的派发（CLI、老 run）判不了，返回空。
+    「终态」以 finalize 写完为准：run_end 是 finalize 的最后一笔，没有它就不算拿到终态。
+    """
+    if not task_identity:
+        return []
+    want_uuid = str(task_identity.get("task_instance_uuid") or "")
+    want_digest = str(task_identity.get("task_contract_digest") or "")
+    if not want_uuid:
+        return []
+    live: list[dict] = []
+    for run_id, info in sorted(_scan_child_runs(state).items()):
+        if info["node_type"] != node_type or info["has_end"]:
+            continue
+        if (str(info.get("task_instance_uuid") or "") != want_uuid
+                or str(info.get("task_contract_digest") or "") != want_digest):
+            continue
+        if run_has_live_executor(run_id):
+            live.append(info)
+    return live
 
 
 #: 这些节点的派发**必须**带任务身份（#1080 第 3 条）。
@@ -2181,6 +2216,23 @@ async def _run_node_tool(
     # 模型要真想放弃重来，显式传 resume_run_id="fresh"。
     _resume_run_id: str | None = None
     if resume_run_id == "fresh":
+        # fresh = 放弃续跑另起一条，不是在旧的还活着时并排再起一条（#1199，#1052 验收 4）。
+        # 同任务身份还有执行者的 child 在 → 拒，给出 cancel 出口；不替模型自动 cancel
+        # （取消不可逆，要它显式做），也不允许并存记一笔（两个执行者会为同一件事各写一份结果）。
+        _live = live_same_task_children(state, node_type, _identity)
+        if _live:
+            _live_ids = [info["run_id"] for info in _live]
+            return {
+                "status": "error",
+                "error_code": "fresh_target_still_running",
+                "error": (
+                    f"同一任务还有在跑的 child {_live_ids}（或正停在等人答复）。fresh 不会在它"
+                    "还活着时并排再起一个 —— 两个执行者会为同一件事各写一份结果。\n"
+                    "要看它到哪了用 runtime_control(action='progress', child_run_id=...)；"
+                    "确实要放弃它，先 runtime_control(action='cancel', child_run_id=...) 停掉，"
+                    "等它拿到终态（run_end 落盘）再 fresh。"),
+                "live_child_run_ids": _live_ids,
+            }
         state.append_transcript(
             "run_node_fresh_requested", node_type=node_type)
     elif resume_run_id:

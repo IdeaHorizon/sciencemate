@@ -70,8 +70,9 @@ test("the update row really says what the check found", () => {
 const zh = (p: { zh: string }) => p.zh;
 const checked = (over: Partial<UpdateStatus> = {}): UpdateStatus => ({
   installed_version: "0.5.4", installed_from: "payload", self_updatable: true, available_version: null,
-  staged_version: null, source: "https://h/m", reachable: true, error: null, apply_error: null,
-  checked_at: "", notes: "", shell: null, shell_update: null, reinstall_url: null, still_publishing: [], ...over,
+  staged_version: null, source: "https://h/m", reachable: true, error: null, error_kind: null, error_cause: null,
+  apply_error: null,
+  checked_at: "", notes: "", shell: null, shell_update: null, reinstall_url: null, still_publishing: [], just_updated: null, ...over,
 });
 
 test("a newer release that is still uploading is said after 'up to date' and after 'available'", () => {
@@ -93,4 +94,29 @@ test("the busy states disable the buttons, so a second click cannot start a seco
   assert.match(PANEL, /const busy = phase === "checking" \|\| phase === "installing" \|\| phase === "restarting";/,
     "没有一个统一的「正在忙」判据");
   assert.ok((PANEL.match(/disabled=\{busy\}/g) || []).length >= 2, "按钮在忙的时候还能点");
+});
+
+/**
+ * 2026-10-19：英文界面上一离线，「更新」那一行写着 `Check failed: 拿不到更新信息：…` ——
+ * 那句是后端的中文诊断原文，两种语言都原样插了进去。人最常撞见的两种（离线、源上还没
+ * 发完）英文界面上必须是一句英文；验不过的那种把原文留着当证据。
+ */
+const en = (p: { en: string }) => p.en;
+const HAN = /[一-鿿]/;
+
+test("offline and nothing-published are said in English on an English screen", () => {
+  const offline = sayWhatTheCheckFound(checked({
+    reachable: false, error: "拿不到更新信息：ConnectError: [Errno 8] nodename nor servname provided",
+    error_kind: "unreachable", error_cause: "ConnectError: [Errno 8] nodename nor servname provided",
+  }), "idle", null, en);
+  assert.doesNotMatch(offline, HAN, `离线那一下英文界面上写着中文：${offline}`);
+  assert.match(offline, /ConnectError/, "异常原文丢了 —— 人拿什么去查");
+  const nothing = sayWhatTheCheckFound(checked({
+    reachable: false, error: "最近 5 个 release 都还没传完：v0.5.8（缺 manifest.json）",
+    error_kind: "nothing_published",
+  }), "idle", null, en);
+  assert.doesNotMatch(nothing, HAN, `「还没发完」英文界面上写着中文：${nothing}`);
+  // 中文界面照旧给后端那句原文。
+  assert.match(sayWhatTheCheckFound(checked({ reachable: false, error: "拿不到更新信息：X", error_kind: "unreachable",
+    error_cause: "X" }), "idle", null, zh), /^没查成：拿不到更新信息：X$/);
 });

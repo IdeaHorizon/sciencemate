@@ -61,7 +61,8 @@ class Invariant(str, Enum):
        镜像一遍后端的绑定次序去猜 —— 而镜像本身就是下一个会悄悄过期的假设。
        判定不必再猜：``WriteLayers.grants_write(path)`` 是公开的。
     I2 网络与数据不同框 = NET_DENY（取物段是 NET_ALLOWLIST）。口径进记账
-       ``net_scope``：``all``（bwrap/seatbelt 整个网络）| ``tcp``（Landlock ABI 4 只管
+       ``net_scope``：``all``（bwrap/seatbelt 整个网络）| ``inet``（Landlock + seccomp：
+       TCP/UDP/DNS 都断，unix socket 仍通，#1180）| ``tcp``（Landlock ABI 4 只管
        TCP bind/connect）| ``none``。一个 Linux 上没有 bwrap 的机器守到的是 tcp，不是 all。
     I3 拖不垮宿主 = MEM_CAP + PIDS_CAP + CPU_CAP + WALLTIME + GROUP_KILL
        DISK_CAP 曾经也在这里，**已删**：容器年代由 ``--storage-opt`` 提供，Docker 拆除

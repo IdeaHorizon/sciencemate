@@ -9,9 +9,14 @@
   node20、HPC 作业里 userns 常被禁 —— node20 就是 ``apparmor_restrict_unprivileged_userns=1``）。
   纯放行清单：``.git`` 不靠它挡，靠**结构判据**（可写根不含 gitdir / 指针文件，含了就在
   ``prepare`` 拒绝派发，见 ``_native.git_paths_inside_writable``）→ GIT_UNWRITABLE。
-  **ABI ≥ 4（内核 ≥ 6.7）管 TCP**：探针证明 connect 被拒才声明 NET_DENY，记账
-  ``net_scope: tcp``（只管 TCP bind/connect；UDP / ICMP 不在内，bwrap 才是 ``all``）。
-* **systemd-run --user --scope**：MemoryMax / TasksMax / CPUQuota，也就是 cgroup v2。
+  **断网两层**：Landlock ABI ≥ 4（内核 ≥ 6.7）拒 TCP bind/connect；启动器再装一层 seccomp
+  禁建 AF_INET / AF_INET6 socket（UDP、DNS、老内核上的 TCP 一起断，unix socket 不动，#1180）。
+  探针真连一次、真建一个 UDP socket，被拒才声明 NET_DENY，记账 ``net_scope: inet``（两层都在）
+  / ``tcp``（只有 Landlock 那层）；bwrap 整个网络命名空间才是 ``all``。
+* **systemd-run --user --scope**：MemoryMax（+ ``MemorySwapMax=0``）/ TasksMax / CPUQuota，
+  也就是 cgroup v2。只设 MemoryMax 的话，有大 swap 的机器（node20：160 GB swapfile）上超限的
+  内存只会被换出、不触发 OOM —— 内存墙拦不住失控命令，它慢慢换页直到墙钟超时（#1207）。
+  声明了上限就当场 OOM 并记原因，不靠换页"慢慢跑完"。
   探针成功才声明 MEM_CAP / PIDS_CAP；每条命令的 scope 放进**它自己的 slice**
   （``app-hf<id>.slice``），cleanup 时 ``systemctl --user stop`` 那个 slice（连同 scope），
   比 PID 快照差集更准（``setsid`` 逃逸也逃不出 cgroup）。为什么要多一层 slice 见
@@ -68,10 +73,22 @@ def _probe_bwrap() -> tuple[str | None, str]:
 #: 网络探针：连本机一个真在听的端口。被拒 = EACCES/EPERM → 0；连上 → 4；别的 → 3。
 #: 目标必须是**真在听**的端口 —— 127.0.0.1 上没人听时不加沙箱也 ECONNREFUSED，
 #: 分不出真假。
+#: ``socket()`` 本身也在 try 里：seccomp 那一层在**建**socket 时就 EPERM（#1180），Landlock 那一层
+#: 在 connect 时 EACCES —— 两种都是"被拒"，哪一步拒的不是这个探针要分的事。
 _PROBE_CONNECT = (
     "import errno, socket, sys\n"
-    "s = socket.socket(); s.settimeout(3)\n"
-    "try:\n    s.connect(('127.0.0.1', int(sys.argv[1])))\n"
+    "try:\n    s = socket.socket(); s.settimeout(3)\n"
+    "    s.connect(('127.0.0.1', int(sys.argv[1])))\n"
+    "except PermissionError:\n    sys.exit(0)\n"
+    "except OSError as e:\n"
+    "    sys.exit(0 if e.errno in (errno.EACCES, errno.EPERM) else 3)\n"
+    "sys.exit(4)\n"
+)
+#: 建一个 UDP socket：被拒 → 0，建成 → 4，其它 → 3。Landlock 管不到它，seccomp 才管（#1180）。
+#: 不用连，建得出就是漏 —— UDP 没有连接，DNS 查询就是这么发出去的。
+_PROBE_UDP = (
+    "import errno, socket, sys\n"
+    "try:\n    socket.socket(socket.AF_INET, socket.SOCK_DGRAM).close()\n"
     "except PermissionError:\n    sys.exit(0)\n"
     "except OSError as e:\n"
     "    sys.exit(0 if e.errno in (errno.EACCES, errno.EPERM) else 3)\n"
@@ -84,15 +101,18 @@ def _landlock_argv(roots: list[str], *, network: bool) -> list[str]:
             "--network", "allow" if network else "deny", json.dumps(roots), "--"]
 
 
-def _probe_landlock() -> tuple[int, bool, str]:
-    """→ (abi, 网络是否真拒, 原因)。abi=0 = 写墙不可用；网络那一位只在 abi ≥ 4 时才可能 True。
+def _probe_landlock() -> tuple[int, bool, str, str]:
+    """→ (abi, 网络是否真拒, 口径, 原因)。abi=0 = 写墙不可用。
 
-    网络探针带**对照**：同一个监听端口，``--network allow`` 必须连得上、``deny`` 必须被拒。
-    只测 deny 的话，监听器没起来 / 端口错了也会"被拒"，那是假阳性
-    （[[feedback_baseline_can_vanish]]）。
+    口径 ``inet`` / ``tcp`` / ``none`` 是**探出来的**，不是按内核版本推的：
+    ``--network deny`` 下真连一次本机在听的端口（TCP）、真建一个 UDP socket。TCP 被拒才算
+    守到（Landlock ABI ≥ 4，或 seccomp 把 AF_INET socket 整个禁了 —— 老内核上也行，#1180）；
+    UDP 也建不出来才是 ``inet``，建得出就只有 ``tcp``（seccomp 没装上：架构不认识 / 内核不给）。
+    两个探针都带**对照**：同一段代码在 ``allow`` 下必须连得上 / 建得出。只测 deny 的话，
+    监听器没起来 / 端口错了也会"被拒"，那是假阳性（[[feedback_baseline_can_vanish]]）。
     """
     if not _LANDLOCK_EXEC.exists():
-        return 0, False, "landlock launcher missing"
+        return 0, False, "none", "landlock launcher missing"
     import socket
     import subprocess
 
@@ -101,9 +121,9 @@ def _probe_landlock() -> tuple[int, bool, str]:
                              capture_output=True, text=True, timeout=10, check=False)
         abi = int((out.stdout or "0").strip() or 0)
     except (OSError, ValueError, subprocess.TimeoutExpired):
-        return 0, False, "landlock abi probe failed"
+        return 0, False, "none", "landlock abi probe failed"
     if abi < 1:
-        return 0, False, "kernel has no Landlock (need >= 5.13, or seccomp blocks it)"
+        return 0, False, "none", "kernel has no Landlock (need >= 5.13, or seccomp blocks it)"
     with tempfile.TemporaryDirectory(prefix="hf-landlock-probe-") as tmp:
         allowed = Path(tmp).resolve() / "allowed"
         allowed.mkdir()
@@ -111,33 +131,38 @@ def _probe_landlock() -> tuple[int, bool, str]:
         roots = [str(allowed), "/dev"]
         if run_ok([*_landlock_argv(roots, network=True), "/bin/sh", "-c",
                    f"echo x > '{outside}'"]) or outside.exists():
-            return 0, False, "landlock did not deny a write outside the allowed root"
+            return 0, False, "none", "landlock did not deny a write outside the allowed root"
         if not run_ok([*_landlock_argv(roots, network=True), "/bin/sh", "-c",
                        f"echo x > '{allowed / 'ok'}'"]):
-            return 0, False, "landlock denied an allowed write"
-        if abi < 4:
-            return abi, False, ""
+            return 0, False, "none", "landlock denied an allowed write"
         listener = socket.socket()
         try:
             listener.bind(("127.0.0.1", 0))
             listener.listen(1)
             port = str(listener.getsockname()[1])
-            probe = [sys.executable, "-I", "-B", "-c", _PROBE_CONNECT, port]
-            control = subprocess.run([*_landlock_argv(roots, network=True), *probe],
-                                     capture_output=True, timeout=15, check=False)
-            if control.returncode != 4:
-                return abi, False, (
-                    "landlock network probe has no control (allow could not connect)"
-                )
-            denied = subprocess.run([*_landlock_argv(roots, network=False), *probe],
-                                    capture_output=True, timeout=15, check=False)
-            if denied.returncode != 0:
-                return abi, False, "landlock abi>=4 present but did not deny a TCP connect"
+            tcp = [sys.executable, "-I", "-B", "-c", _PROBE_CONNECT, port]
+            udp = [sys.executable, "-I", "-B", "-c", _PROBE_UDP]
+
+            def _rc(argv: list[str]) -> int:
+                return subprocess.run(argv, capture_output=True, timeout=15, check=False).returncode
+
+            if _rc([*_landlock_argv(roots, network=True), *tcp]) != 4:
+                return abi, False, "none", (
+                    "landlock network probe has no control (allow could not connect)")
+            if _rc([*_landlock_argv(roots, network=False), *tcp]) != 0:
+                why = ("landlock abi>=4 present but did not deny a TCP connect" if abi >= 4
+                       else f"landlock abi {abi} has no network rules and seccomp did not deny inet sockets")
+                return abi, False, "none", why
+            if _rc([*_landlock_argv(roots, network=True), *udp]) != 4:
+                # TCP 已经证明拒得住；UDP 的对照建不出来说明这台机器连 allow 都建不了 UDP，
+                # 不能据此宣称 inet 口径 —— 如实退回 tcp。
+                return abi, True, "tcp", ""
+            scope = "inet" if _rc([*_landlock_argv(roots, network=False), *udp]) == 0 else "tcp"
         except (OSError, subprocess.TimeoutExpired):
-            return abi, False, "landlock network probe failed"
+            return abi, False, "none", "landlock network probe failed"
         finally:
             listener.close()
-    return abi, True, ""
+    return abi, True, scope, ""
 
 
 def _systemd_run_argv(exe: str, ident: str) -> tuple[list[str], str, str]:
@@ -210,13 +235,42 @@ def _memory_wall(systemctl: str, slice_unit: str, memory_max: int,
     return "memory", f"{detail} memory_max={memory_max}"
 
 
+#: 探针跑的 cgroup 属性 —— 每条命令会设的每一种属性都必须在这里出现过：探针成功才证明
+#: 这台机器的 systemd 吃得下它们（``MemorySwapMax`` 是 systemd 232 起的事）。
+#: :func:`_cgroup_properties` 只许用这里出现过的属性名，`tests/test_the_memory_wall_has_no_swap_escape.py`
+#: 钉着这一条。
+_PROBE_PROPERTIES: tuple[str, ...] = (
+    "MemoryMax=64M", "MemorySwapMax=0", "TasksMax=16", "CPUQuota=50%",
+)
+
+
+def _cgroup_properties(limits: Any) -> list[str]:
+    """把 ``SandboxLimits`` 翻成 ``systemd-run -p`` 参数。
+
+    内存上限成对出现：``MemoryMax`` 之外一律 ``MemorySwapMax=0``。否则有 swap 的机器上超限
+    的内存被换出而不是被杀，"内存墙"退化成"慢慢换页直到墙钟超时"（#1207，node20 实测）。
+    会被杀的是本来就超了声明的作业；它们该多申请内存，而不是靠 swap 隐瞒超支还拖慢别人。
+    """
+    props: list[str] = []
+    memory = int(getattr(limits, "memory_bytes", 0) or 0)
+    pids = int(getattr(limits, "pids", 0) or 0)
+    cpus = float(getattr(limits, "cpus", 0) or 0)
+    if memory:
+        props += ["-p", f"MemoryMax={memory}", "-p", "MemorySwapMax=0"]
+    if pids:
+        props += ["-p", f"TasksMax={pids}"]
+    if cpus:
+        props += ["-p", f"CPUQuota={int(cpus * 100)}%"]
+    return props
+
+
 def _probe_systemd() -> tuple[str | None, str]:
     exe = shutil.which("systemd-run")
     if not exe:
         return None, "systemd-run not installed"
     argv, _unit, slice_unit = _systemd_run_argv(exe, f"probe{uuid.uuid4().hex[:8]}")
-    ok = run_ok([*argv, "-p", "MemoryMax=64M", "-p", "TasksMax=16", "-p", "CPUQuota=50%",
-                 "/bin/true"])
+    probe_props = [arg for prop in _PROBE_PROPERTIES for arg in ("-p", prop)]
+    ok = run_ok([*argv, *probe_props, "/bin/true"])
     systemctl = shutil.which("systemctl")
     if systemctl:
         run_ok([systemctl, "--user", "stop", slice_unit])
@@ -234,6 +288,8 @@ class LinuxBackend:
         self._landlock = False
         self._landlock_abi = 0
         self._landlock_net = False
+        #: 探出来的断网口径：inet（Landlock + seccomp，TCP/UDP/DNS 都断）| tcp | none。
+        self._landlock_net_scope = "none"
         self._systemd: str | None = None
         self._reasons: dict[str, str] = {}
         #: 结构判据按可写根缓存：一条 run 的根是固定的，别每条命令都起一次 git。
@@ -249,14 +305,14 @@ class LinuxBackend:
         self._bwrap, why = _probe_bwrap()
         if why:
             self._reasons["bwrap"] = why
-        self._landlock_abi, self._landlock_net, why = _probe_landlock()
+        self._landlock_abi, self._landlock_net, self._landlock_net_scope, why = _probe_landlock()
         self._landlock = self._landlock_abi >= 1
         if why:
             self._reasons["landlock"] = why
         elif self._landlock and not self._landlock_net:
             self._reasons["landlock"] = (
                 f"landlock abi {self._landlock_abi} has no network rules "
-                "(need >= 4, kernel >= 6.7)"
+                "(need >= 4, kernel >= 6.7) and seccomp did not deny inet sockets"
             )
         self._systemd, why = _probe_systemd()
         if why:
@@ -279,8 +335,8 @@ class LinuxBackend:
         if self._bwrap or self._landlock_net:
             caps.add(Invariant.NET_DENY)
         if self._systemd:
-            # 探针跑的正是 `-p MemoryMax=64M -p TasksMax=16 -p CPUQuota=50%` —— 它成功
-            # 就意味着这三条 cgroup 限额这台机器都吃得下。CPU 此前没有名字，于是
+            # 探针跑的正是 `_PROBE_PROPERTIES`（MemoryMax / MemorySwapMax / TasksMax /
+            # CPUQuota）—— 它成功就意味着这几条 cgroup 限额这台机器都吃得下。CPU 此前没有名字，于是
             # sandbox_contract.cpus 没有任何东西能对上（#841）。
             caps.update({Invariant.MEM_CAP, Invariant.PIDS_CAP, Invariant.CPU_CAP})
         if Invariant.WRITE_BOUNDARY not in caps:
@@ -295,14 +351,16 @@ class LinuxBackend:
     def net_scope(self) -> str:
         """NET_DENY 的口径，进记账（``isolation_enforcement.net_scope``）。
 
-        ``all`` = bwrap 整个网络命名空间；``tcp`` = Landlock ABI 4 只管 TCP bind/connect，
-        UDP / ICMP / unix socket 不在内；``none`` = 没守到。UI 原样带出，不许圆。
+        ``all`` = bwrap 整个网络命名空间；``inet`` = Landlock（TCP bind/connect）+ seccomp
+        （禁建 AF_INET / AF_INET6 socket：UDP、DNS、老内核上的 TCP 一起断），unix socket 仍通；
+        ``tcp`` = 只有 Landlock ABI 4 那一层，UDP / ICMP 不在内；``none`` = 没守到。
+        哪一档是**探出来的**（:func:`_probe_landlock`），UI 原样带出，不许圆。
         """
         self._probe()
         if self._bwrap:
             return "all"
         if self._landlock_net:
-            return "tcp"
+            return self._landlock_net_scope
         return "none"
 
     @property
@@ -470,17 +528,8 @@ class LinuxBackend:
         if self._systemd:
             limits = spec.limits
             systemd_argv, unit, slice_unit = _systemd_run_argv(self._systemd, uuid.uuid4().hex[:12])
-            props = []
             memory = int(getattr(limits, "memory_bytes", 0) or 0)
-            pids = int(getattr(limits, "pids", 0) or 0)
-            cpus = float(getattr(limits, "cpus", 0) or 0)
-            if memory:
-                props += ["-p", f"MemoryMax={memory}"]
-            if pids:
-                props += ["-p", f"TasksMax={pids}"]
-            if cpus:
-                props += ["-p", f"CPUQuota={int(cpus * 100)}%"]
-            inner = [*systemd_argv, *props, "--", *inner]
+            inner = [*systemd_argv, *_cgroup_properties(limits), "--", *inner]
             systemctl = shutil.which("systemctl")
             if systemctl:
                 # 停 slice = 连同里面的 scope 一起停；只停 scope 会把 slice 留在用户 manager 里。

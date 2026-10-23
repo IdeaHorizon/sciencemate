@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.services.user_interface import Language, language_on_screen, said_of, say
 from app.auth import get_current_user
 from app.config import settings
 from app.database import get_db
@@ -86,6 +87,7 @@ async def create_project(
     data: ProjectCreate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> dict:
     """建一个项目 —— 在本机，或者在某个组织里。
 
@@ -98,9 +100,9 @@ async def create_project(
 
         try:
             return await other_homes.create_it_elsewhere(
-                data.home, data.model_dump(exclude={"home"}, mode="json"))
+                data.home, data.model_dump(exclude={"home"}, mode="json"), lang=lang)
         except other_homes.ThereIsNoSuchHomeError as refused:
-            raise HTTPException(status_code=refused.status, detail=refused.message) from refused
+            raise HTTPException(status_code=refused.status, detail=refused.said_in(lang)) from refused
 
     from app.services.project_service import create_project
 
@@ -177,6 +179,7 @@ async def get_project_repository_status(
     project_id: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> dict:
     project = await db.get(Project, project_id)
     if not project:
@@ -195,7 +198,8 @@ async def get_project_repository_status(
     except ProjectRepositoryError as exc:
         raise HTTPException(
             status_code=409,
-            detail={"code": "project_repository_unavailable", "message": str(exc)},
+            detail={"code": "project_repository_unavailable", "message": said_of(exc, lang, otherwise={
+                "zh": "项目仓库读不了：{why}", "en": "The project repository cannot be read: {why}"})},
         ) from exc
     return {
         "projectId": project_id,
@@ -241,7 +245,7 @@ async def get_project_catalog(
     project_id: str,
     session_id: str | None = Query(default=None, alias="sessionId"),
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db), lang: Language = Depends(language_on_screen),
 ) -> dict:
     """这个项目产出了什么 —— **一个问题，一个答案**。
 
@@ -281,7 +285,8 @@ async def get_project_catalog(
         else:
             root = (await run_in_repository_thread(repository.status, project_id)).path
     except ProjectRepositoryError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=said_of(exc, lang, otherwise={
+            "zh": "读不到这个工作区：{why}", "en": "This workspace cannot be read: {why}"})) from exc
 
     try:
         from app.services.harness_contract import catalog_module
@@ -292,7 +297,8 @@ async def get_project_catalog(
         # 空目录看起来和"这个项目还没产出东西"一模一样。
         raise HTTPException(
             status_code=503,
-            detail=f"研究产出这一层需要 harness checkout（HARNESS_ROOT）：{exc}",
+            detail=say({"zh": "研究产出这一层需要 harness checkout（HARNESS_ROOT）：{why}",
+                        "en": "Research outputs need a harness checkout (HARNESS_ROOT): {why}"}, lang, why=exc),
         ) from exc
 
     entries = await run_in_repository_thread(catalog.build, root)
@@ -311,7 +317,7 @@ async def get_project_records(
     session_id: str | None = Query(default=None, alias="sessionId"),
     artifact_type: str | None = Query(default=None, alias="type"),
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db), lang: Language = Depends(language_on_screen),
 ) -> dict:
     """账本上的记录 head（类型 / 名字 / 路径 / 版本 / 冻结 / metadata）。
 
@@ -342,7 +348,8 @@ async def get_project_records(
         else:
             root = (await run_in_repository_thread(repository.status, project_id)).path
     except ProjectRepositoryError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=said_of(exc, lang, otherwise={
+            "zh": "读不到这个工作区：{why}", "en": "This workspace cannot be read: {why}"})) from exc
 
     try:
         from app.services.harness_contract import ledger_module
@@ -351,7 +358,8 @@ async def get_project_records(
     except HarnessContractUnavailable as exc:
         raise HTTPException(
             status_code=503,
-            detail=f"研究记录这一层需要 harness checkout（HARNESS_ROOT）：{exc}",
+            detail=say({"zh": "研究记录这一层需要 harness checkout（HARNESS_ROOT）：{why}",
+                        "en": "Research records need a harness checkout (HARNESS_ROOT): {why}"}, lang, why=exc),
         ) from exc
 
     def _read() -> dict:
@@ -389,6 +397,7 @@ async def get_project_repository_tree(
     path: str = Query(default="", max_length=1_000),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> dict:
     """列举工作区里 `path` 那一层 —— 不传 path 就是根。
 
@@ -411,7 +420,8 @@ async def get_project_repository_tree(
             path=path,
         )
     except ProjectRepositoryError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=said_of(exc, lang, otherwise={
+            "zh": "列不出这个目录：{why}", "en": "This folder cannot be listed: {why}"})) from exc
     return {"schemaVersion": 3, "sessionId": session_id, **listing}
 
 
@@ -422,6 +432,7 @@ async def get_project_repository_file(
     session_id: str | None = Query(default=None, alias="sessionId"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> dict:
     await _authorize_repository_read(db, user, project_id, session_id)
     from app.services.project_repository import (
@@ -435,7 +446,8 @@ async def get_project_repository_file(
             get_project_repository().read_worktree_file, project_id, path, session_id=session_id
         )
     except ProjectRepositoryError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=said_of(exc, lang, otherwise={
+            "zh": "打不开这个文件：{why}", "en": "This file cannot be opened: {why}"})) from exc
 
 
 @router.get(
@@ -449,6 +461,7 @@ async def get_project_repository_raw(
     session_id: str | None = Query(default=None, alias="sessionId"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> Response:
     """工作区文件的**字节**出口 —— 图、PDF、以及任何非文本产出。
 
@@ -492,13 +505,14 @@ async def get_project_repository_raw(
             status_code=413,
             detail={
                 "code": "project_file_too_large",
-                "message": str(exc),
+                "message": exc.said_in(lang),
                 "sizeBytes": exc.size_bytes,
                 "maxBytes": exc.max_bytes,
             },
         ) from exc
     except ProjectRepositoryError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=said_of(exc, lang, otherwise={
+            "zh": "打不开这个文件：{why}", "en": "This file cannot be opened: {why}"})) from exc
 
     filename = PurePosixPath(safe).name
     return Response(
@@ -740,7 +754,7 @@ async def get_project_jobs(
     project_id: str,
     session_id: str | None = Query(default=None, alias="sessionId"),
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db), lang: Language = Depends(language_on_screen),
 ) -> dict:
     """这个项目跑过哪些受管作业、各自怎么结束的（#941）。
 
@@ -785,7 +799,8 @@ async def get_project_jobs(
     except HarnessContractUnavailable as exc:
         raise HTTPException(
             status_code=503,
-            detail=f"作业观测面需要 harness checkout（HARNESS_ROOT）：{exc}",
+            detail=say({"zh": "作业观测面需要 harness checkout（HARNESS_ROOT）：{why}",
+                        "en": "The jobs view needs a harness checkout (HARNESS_ROOT): {why}"}, lang, why=exc),
         ) from exc
 
     def read_them() -> list:
@@ -797,7 +812,8 @@ async def get_project_jobs(
         # 读不动就说读不动。降级成空清单等于告诉调用方"没跑过作业"。
         raise HTTPException(
             status_code=503,
-            detail=f"作业登记表读不出来（不是「没有作业」）：{exc}",
+            detail=say({"zh": "作业登记表读不出来（不是「没有作业」）：{why}",
+                        "en": "The job ledger cannot be read (this is not \"no jobs\"): {why}"}, lang, why=exc),
         ) from exc
 
     return {

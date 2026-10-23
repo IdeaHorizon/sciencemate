@@ -27,7 +27,7 @@ export const AC = {
   },
   localAssetsAria: { zh: "本地文献资产", en: "Local paper assets" },
   openLocalPdf: { zh: "打开本地 PDF", en: "Open local PDF" },
-  openLocalFigure: { zh: "打开本地图 {index}", en: "Open local figure {index}" },
+  openSchoolFulltext: { zh: "查看学校馆藏全文（模拟）", en: "Open school full text (demo)" },
 
   // ── 论文条目 ────────────────────────────────────────────────────────────
   untitledPaper: { zh: "未命名论文", en: "Untitled paper" },

@@ -53,6 +53,10 @@ class NotificationSettings(SettingsModel):
 
     decision_required: bool = True
     run_failed: bool = True
+    #: 没有读者了：「执行完成」提醒 2026-10-20 删掉（跑完那一刻人正看着回复落下来）。
+    #: 字段还留着，只因为删一个请求字段是破坏性改动（app/pro/org_protocol.py）——
+    #: 旧桌面 PUT 时还带着它，extra="forbid" 下删掉就是 422。协议号下次因为
+    #: 别的事加一时一起删。
     run_completed: bool = True
     budget_warning: bool = True
 

@@ -39,7 +39,7 @@ def test_clean_run_reports_zero_unaccounted(tmp_path: Path):
 
     report = scan_preprocessing_boundary(state)
 
-    assert report["verdict"] == "PASS"
+    assert report["verdict"] == "OBSERVATION"
     assert report["n_unaccounted"] == 0
     assert report["n_hits"] == 0
 
@@ -50,7 +50,7 @@ def test_mesh_generation_without_any_data_route_is_unaccounted(tmp_path: Path):
 
     report = scan_preprocessing_boundary(state)
 
-    assert report["verdict"] == "VIOLATION"
+    assert report["verdict"] == "OBSERVATION"
     assert report["n_unaccounted"] == 1
     assert report["hits"][0]["label"] == "mesh_generator"
 
@@ -153,7 +153,7 @@ def test_verified_authorized_experiment_fallback_accounts_for_the_hits(tmp_path:
 
     report = scan_preprocessing_boundary(state)
 
-    assert report["verdict"] == "PASS"
+    assert report["verdict"] == "OBSERVATION"
     assert report["n_unaccounted"] == 0
     assert "verified_experiment_fallback" in report["accounting_reasons"]
 
@@ -167,7 +167,7 @@ def test_recorded_data_blocker_does_not_authorize_generated_inputs(tmp_path: Pat
 
     report = scan_preprocessing_boundary(state)
 
-    assert report["verdict"] == "VIOLATION"
+    assert report["verdict"] == "OBSERVATION"
     assert report["n_unaccounted"] == 1
     assert "data_terminal_blocker" not in report["accounting_reasons"]
 
@@ -181,7 +181,7 @@ def test_preprocessing_needed_section_does_not_authorize_generated_inputs(tmp_pa
 
     report = scan_preprocessing_boundary(state)
 
-    assert report["verdict"] == "VIOLATION"
+    assert report["verdict"] == "OBSERVATION"
     assert report["n_unaccounted"] == 1
     assert report["observations"] == ["preprocessing_needed_declared"]
 
@@ -220,7 +220,7 @@ def test_hook_always_emits_the_event_even_on_a_clean_run(tmp_path: Path, monkeyp
     events = _events(state, "preprocessing_boundary_audit")
     assert len(events) == 1
     assert events[0]["n_unaccounted"] == 0
-    assert events[0]["verdict"] == "PASS"
+    assert events[0]["verdict"] == "OBSERVATION"
     assert memory_writes == []
 
 
@@ -241,6 +241,8 @@ def test_hook_emits_the_event_even_when_the_scan_raises(tmp_path: Path, monkeypa
     assert len(events) == 1
     assert events[0]["n_unaccounted"] == 0
     assert events[0]["accounting_reasons"] == ["audit_scan_failed"]
+    assert events[0]["verdict"] == "UNKNOWN"
+    assert events[0]["scan_error"] == "RuntimeError: boom"
     assert memory_writes == []
 
 
@@ -263,7 +265,7 @@ def test_hook_does_not_write_pitfall_when_all_hits_are_accounted(
     assert memory_writes == []
 
 
-def test_hook_records_unaccounted_hits_as_uncertain_mechanical_pitfall(
+def test_legal_generation_is_only_a_run_observation_not_long_term_pitfall(
         tmp_path: Path, monkeypatch):
     state = State.new("experiment", tmp_path)
     _tool_call(state, "safe_run_bash", command="gmsh -3 channel.geo -o channel.msh")
@@ -272,20 +274,21 @@ def test_hook_records_unaccounted_hits_as_uncertain_mechanical_pitfall(
     preprocessing_boundary_audit_on_end(
         HookContext(harness=None, state=state, messages=[], turn=0), None)
 
-    assert len(memory_writes) == 1
-    text = memory_writes[0]["text"]
-    assert "按文件名和生成器命令做的机械匹配" in text
-    assert "不等于已确认的错误" in text
+    assert memory_writes == []
+    event = _events(state, "preprocessing_boundary_audit")[-1]
+    assert event["verdict"] == "OBSERVATION"
+    assert event["n_unaccounted"] == 1
+    assert event["hits"]
 
 
-def test_hook_records_the_violation_count_for_the_quality_check(tmp_path: Path):
+def test_hook_retains_unaccounted_hits_without_a_violation_verdict(tmp_path: Path):
     state = State.new("experiment", tmp_path)
     _tool_call(state, "safe_run_bash", command="gmsh -3 channel.geo -o channel.msh")
 
     preprocessing_boundary_audit_on_end(HookContext(harness=None, state=state, messages=[], turn=0), None)
 
     event = _events(state, "preprocessing_boundary_audit")[-1]
-    assert event["verdict"] == "VIOLATION"
+    assert event["verdict"] == "OBSERVATION"
     assert event["n_unaccounted"] == 1
 
 

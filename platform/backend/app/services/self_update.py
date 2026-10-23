@@ -62,6 +62,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from app.release_pubkey import RELEASE_PUBLIC_KEY_B64
+from app.services.say import SaidToAPerson, say
 
 #: 后端用这个码退出 = 「壳，请重新拉起我」。Swift / C# 壳都认它。
 RESTART_EXIT_CODE = 3
@@ -91,8 +92,13 @@ MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
-class UpdateError(Exception):
-    """任何一步不成立都用它 —— 消息是给人看的一句话。"""
+class UpdateError(SaidToAPerson):
+    """任何一步不成立都用它 —— 消息是给人看的一句话，**两种语言都写**。
+
+    `str()` 是中文那句（日志、老调用方、测试的 match 都读它）；`en` 必填、只收关键字 ——
+    漏写英文就是一个 TypeError，而不是英文界面上冒出一句中文（2026-10-19：「关于」页上
+    验签失败、下载失败的原话都只有中文）。说给哪一屏听，用 `said_in(lang)`（`SaidToAPerson`）。
+    """
 
 
 # ───────────────────────────────────────────────────────────── 布局
@@ -111,6 +117,15 @@ def staged_pointer_path(data_root: Path) -> Path:
 
 def apply_error_path(data_root: Path) -> Path:
     return payload_root(data_root) / "apply_error.txt"
+
+
+def said_by_the_record(text: str, lang: str) -> str:
+    """`apply_error.txt` 里记的那句：新写法是 `{"zh": …, "en": …}`，老文件是一行原话。"""
+    try:
+        record = json.loads(text)
+    except ValueError:
+        return text
+    return say(record, lang) if isinstance(record, dict) and "zh" in record else text
 
 
 @dataclass(frozen=True)
@@ -219,24 +234,27 @@ def parse_manifest(data: bytes, signature_b64: str,
                    public_b64: str | None = None) -> dict:
     """先验签，再解析。签名验的是**精确字节** —— 解析之后再验就给了改写的空间。"""
     if not verify_signature(data, signature_b64, public_b64):
-        raise UpdateError("manifest 的签名对不上应用里的发布公钥 —— 拒收")
+        raise UpdateError("manifest 的签名对不上应用里的发布公钥 —— 拒收",
+                          en="the manifest signature does not match the release key built into the app — rejected")
     try:
         manifest = json.loads(data.decode("utf-8"))
     except ValueError as exc:
-        raise UpdateError(f"manifest 不是合法 JSON：{exc}") from exc
+        raise UpdateError(f"manifest 不是合法 JSON：{exc}", en=f"the manifest is not valid JSON: {exc}") from exc
     if not isinstance(manifest, dict) or manifest.get("schema") != MANIFEST_SCHEMA:
-        raise UpdateError(f"manifest schema 不是 {MANIFEST_SCHEMA}")
+        raise UpdateError(f"manifest schema 不是 {MANIFEST_SCHEMA}", en=f"the manifest schema is not {MANIFEST_SCHEMA}")
     for key, kind in (("version", str), ("archive", str), ("sha256", str), ("size", int)):
         if not isinstance(manifest.get(key), kind) or isinstance(manifest.get(key), bool):
-            raise UpdateError(f"manifest.{key} 缺失或类型不对")
+            raise UpdateError(f"manifest.{key} 缺失或类型不对", en=f"manifest.{key} is missing or has the wrong type")
     if not _SHA256.fullmatch(manifest["sha256"]):
-        raise UpdateError("manifest.sha256 不是 64 位十六进制")
+        raise UpdateError("manifest.sha256 不是 64 位十六进制", en="manifest.sha256 is not 64 hex digits")
     if manifest["size"] <= 0 or manifest["size"] > MAX_ARCHIVE_BYTES:
-        raise UpdateError(f"manifest.size={manifest['size']} 超出允许范围")
+        raise UpdateError(f"manifest.size={manifest['size']} 超出允许范围",
+                          en=f"manifest.size={manifest['size']} is out of the allowed range")
     if list(manifest.get("unit") or []) != list(UNIT):
-        raise UpdateError(f"manifest.unit={manifest.get('unit')} 不是更新单元 {list(UNIT)}")
+        raise UpdateError(f"manifest.unit={manifest.get('unit')} 不是更新单元 {list(UNIT)}",
+                          en=f"manifest.unit={manifest.get('unit')} is not the update unit {list(UNIT)}")
     if "/" in manifest["archive"] or "\\" in manifest["archive"] or manifest["archive"].startswith("."):
-        raise UpdateError("manifest.archive 必须是一个纯文件名")
+        raise UpdateError("manifest.archive 必须是一个纯文件名", en="manifest.archive must be a bare file name")
     if "extras" in manifest:
         _validate_extras(manifest["extras"])
     if "server" in manifest:
@@ -252,17 +270,20 @@ def _validate_server(server: object) -> None:
     远程执行通道（和桌面同一条理由）。
     """
     if not isinstance(server, dict):
-        raise UpdateError("manifest.server 不是对象")
+        raise UpdateError("manifest.server 不是对象", en="manifest.server is not an object")
     for key, kind in (("archive", str), ("sha256", str), ("size", int), ("version", str),
                       ("org_protocol", int)):
         if not isinstance(server.get(key), kind) or isinstance(server.get(key), bool):
-            raise UpdateError(f"manifest.server.{key} 缺失或类型不对")
+            raise UpdateError(f"manifest.server.{key} 缺失或类型不对",
+                              en=f"manifest.server.{key} is missing or has the wrong type")
     if not _SHA256.fullmatch(server["sha256"]):
-        raise UpdateError("manifest.server.sha256 不是 64 位十六进制")
+        raise UpdateError("manifest.server.sha256 不是 64 位十六进制", en="manifest.server.sha256 is not 64 hex digits")
     if server["size"] <= 0 or server["size"] > MAX_ARCHIVE_BYTES:
-        raise UpdateError(f"manifest.server.size={server['size']} 超出允许范围")
+        raise UpdateError(f"manifest.server.size={server['size']} 超出允许范围",
+                          en=f"manifest.server.size={server['size']} is out of the allowed range")
     if server["archive"] != f"sciencemate-server-{server['version']}.tar.gz":
-        raise UpdateError(f"manifest.server.archive={server['archive']!r} 与版本 {server['version']} 对不上")
+        raise UpdateError(f"manifest.server.archive={server['archive']!r} 与版本 {server['version']} 对不上",
+                          en=f"manifest.server.archive={server['archive']!r} does not match version {server['version']}")
 
 
 def _validate_extras(extras: object) -> None:
@@ -273,28 +294,31 @@ def _validate_extras(extras: object) -> None:
     `EXTRA_UNITS`，壳表只许 `SHELL_PLATFORMS`。manifest 整体签名，这块也在签名之内。
     """
     if not isinstance(extras, dict):
-        raise UpdateError("manifest.extras 不是对象")
+        raise UpdateError("manifest.extras 不是对象", en="manifest.extras is not an object")
     for key, kind in (("archive", str), ("sha256", str), ("size", int)):
         if not isinstance(extras.get(key), kind) or isinstance(extras.get(key), bool):
-            raise UpdateError(f"manifest.extras.{key} 缺失或类型不对")
+            raise UpdateError(f"manifest.extras.{key} 缺失或类型不对",
+                              en=f"manifest.extras.{key} is missing or has the wrong type")
     if not _SHA256.fullmatch(extras["sha256"]):
-        raise UpdateError("manifest.extras.sha256 不是 64 位十六进制")
+        raise UpdateError("manifest.extras.sha256 不是 64 位十六进制", en="manifest.extras.sha256 is not 64 hex digits")
     if extras["size"] <= 0 or extras["size"] > MAX_ARCHIVE_BYTES:
-        raise UpdateError(f"manifest.extras.size={extras['size']} 超出允许范围")
+        raise UpdateError(f"manifest.extras.size={extras['size']} 超出允许范围",
+                          en=f"manifest.extras.size={extras['size']} is out of the allowed range")
     if "/" in extras["archive"] or "\\" in extras["archive"] or extras["archive"].startswith("."):
-        raise UpdateError("manifest.extras.archive 必须是一个纯文件名")
+        raise UpdateError("manifest.extras.archive 必须是一个纯文件名", en="manifest.extras.archive must be a bare file name")
     units = extras.get("units")
     if not isinstance(units, list) or not units:
-        raise UpdateError("manifest.extras.units 缺失或为空")
+        raise UpdateError("manifest.extras.units 缺失或为空", en="manifest.extras.units is missing or empty")
     for unit in units:
         if not isinstance(unit, str) or unit.split("/", 1)[0] not in EXTRA_UNITS:
-            raise UpdateError(f"manifest.extras.units 里的 {unit!r} 顶层不在 {list(EXTRA_UNITS)}")
+            raise UpdateError(f"manifest.extras.units 里的 {unit!r} 顶层不在 {list(EXTRA_UNITS)}",
+                              en=f"{unit!r} in manifest.extras.units is not under {list(EXTRA_UNITS)}")
     shell = extras.get("shell", {})
     if not isinstance(shell, dict):
-        raise UpdateError("manifest.extras.shell 不是对象")
+        raise UpdateError("manifest.extras.shell 不是对象", en="manifest.extras.shell is not an object")
     for platform, digest in shell.items():
         if platform not in SHELL_PLATFORMS or not isinstance(digest, str) or not _SHA256.fullmatch(digest):
-            raise UpdateError(f"manifest.extras.shell[{platform!r}] 不合法")
+            raise UpdateError(f"manifest.extras.shell[{platform!r}] 不合法", en=f"manifest.extras.shell[{platform!r}] is invalid")
 
 
 # ───────────────────────────────────────────────────────────── 来源
@@ -315,7 +339,7 @@ class Source:
             return self.archive_url.rsplit("/", 1)[0] + "/" + name
         if assets and name in assets:
             return assets[name]
-        raise UpdateError(f"release 资产里没有 {name}")
+        raise UpdateError(f"release 资产里没有 {name}", en=f"the release has no asset named {name}")
 
 
 class NothingPublishedYet(UpdateError):
@@ -412,7 +436,8 @@ def find_the_newest_installable(configured: str, get_json: Callable[[str], Any],
     parts = urlsplit(url)
     segments = [s for s in parts.path.split("/") if s]
     if not parts.scheme or not parts.netloc or len(segments) < 2:
-        raise UpdateError(f"update_source={configured!r} 既不是 manifest.json 的 URL，也不是仓库网址")
+        raise UpdateError(f"update_source={configured!r} 既不是 manifest.json 的 URL，也不是仓库网址",
+                          en=f"update_source={configured!r} is neither a manifest.json URL nor a repository address")
     owner, repo = segments[-2], segments[-1]
     host = f"{parts.scheme}://{parts.netloc}"
     listed = get_json(the_release_listing_url(host, owner, repo))
@@ -437,9 +462,12 @@ def find_the_newest_installable(configured: str, get_json: Callable[[str], Any],
                              assets, manifest, tag, tuple(still_publishing))
         still_publishing.append(StillPublishing(tag, tuple(missing)))
     if not still_publishing:
-        raise NothingPublishedYet(f"{host}/{owner}/{repo} 上还没有正式发布的 release")
+        raise NothingPublishedYet(f"{host}/{owner}/{repo} 上还没有正式发布的 release",
+                                  en=f"{host}/{owner}/{repo} has no published release yet")
     raise NothingPublishedYet(f"最近 {LOOK_BACK} 个 release 都还没传完："
-                              + "；".join(str(s) for s in still_publishing))
+                              + "；".join(str(s) for s in still_publishing),
+                              en=f"none of the last {LOOK_BACK} releases has finished uploading: "
+                              + "; ".join(str(s) for s in still_publishing))
 
 
 def newer_than(still_publishing: tuple[StillPublishing, ...], installed: str | None) -> list[str]:
@@ -459,6 +487,13 @@ class UpdateStatus:
     source: str = ""
     reachable: bool = False
     error: str | None = None
+    #: `error` 是哪一种：unreachable（网络 / 超时 / 404）、nothing_published（源上还没有
+    #: 发完的版本）、rejected（拉到了但验不过）、source_checkout（源码目录不自更新）。
+    #: `error` 那句是后端的诊断原文（中文）；界面按这个种类用看的人的语言说头一句 ——
+    #: 只给原文的话，英文界面上离线那一下就是一句中文（2026-10-19）。
+    error_kind: str | None = None
+    #: unreachable 时的异常原文（`ConnectError: …`）—— 不带中文前缀，哪种语言都能直接贴。
+    error_cause: str | None = None
     apply_error: str | None = None
     checked_at: str = ""
     notes: str = ""
@@ -472,6 +507,9 @@ class UpdateStatus:
     #: 比装着的新、还没传完的 release（tag，新的在前）。这时答的是「现在能装的最新一版」，
     #: 不说这一句，「已是最新」就把「更新的那版还在路上」藏掉了。
     still_publishing: list[str] = field(default_factory=list)
+    #: 刚刚从哪一版升到了哪一版（`{"from", "to", "applied_at", "notes_url"}`），人还没点「知道了」。
+    #: 重启之后窗口整个换掉，不说一句「已经更新到 X」，人只看到一次没头没尾的刷新。
+    just_updated: dict | None = None
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -535,29 +573,46 @@ def staged_version(data_root: Path) -> str | None:
 
 def check_for_update(data_root: Path, harness_dir: Path | None, configured_source: str,
                      http_get_json: Callable[[str], Any],
-                     http_get_bytes: Callable[[str], bytes]) -> tuple[UpdateStatus, dict | None, Source | None, dict[str, str]]:
+                     http_get_bytes: Callable[[str], bytes], *, lang: str,
+                     ) -> tuple[UpdateStatus, dict | None, Source | None, dict[str, str]]:
+    """`lang`：状态里那几句说给哪一屏听（`error`、`apply_error`）。不给默认值 —— 漏传就是
+    英文界面上一句中文，类型检查不吭声。"""
     installed, installed_from = describe_installed(data_root, harness_dir)
     status = UpdateStatus(installed_version=installed, installed_from=installed_from,
                           self_updatable=is_self_updatable(harness_dir),
                           staged_version=staged_version(data_root),
                           checked_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                           # 壳自报的家门跟着每一份状态走：没报就是 None，上层按「不知道」处理。
-                          shell=read_shell_declaration(data_root))
+                          shell=read_shell_declaration(data_root),
+                          # 离线也要说：这件事发生在本机，不取决于更新源够不够得着。
+                          just_updated=just_updated(data_root))
     try:
-        status.apply_error = apply_error_path(data_root).read_text(encoding="utf-8").strip() or None
+        status.apply_error = said_by_the_record(
+            apply_error_path(data_root).read_text(encoding="utf-8").strip(), lang) or None
     except OSError:
         status.apply_error = None
     if not status.self_updatable:
-        status.error = "这份 harness 是源码 checkout（有 .git），版本归 git 管，不自更新"
+        status.error = say({"zh": "这份 harness 是源码 checkout（有 .git），版本归 git 管，不自更新",
+                            "en": "This harness is a source checkout (it has .git); git manages its version, "
+                                  "so it does not update itself"}, lang)
+        status.error_kind = "source_checkout"
         return status, None, None, {}
     try:
         found = find_the_newest_installable(configured_source, http_get_json, http_get_bytes,
                                             what_a_desktop_installs)
+    except NothingPublishedYet as exc:
+        status.error = exc.said_in(lang)
+        status.error_kind = "nothing_published"
+        return status, None, None, {}
     except UpdateError as exc:
-        status.error = str(exc)
+        status.error = exc.said_in(lang)
+        status.error_kind = "rejected"
         return status, None, None, {}
     except Exception as exc:  # 网络、超时、404 —— 拉不到就是拉不到，不影响使用
-        status.error = f"拿不到更新信息：{type(exc).__name__}: {exc}"
+        status.error_cause = f"{type(exc).__name__}: {exc}"
+        status.error = say({"zh": "拿不到更新信息：{cause}", "en": "Could not fetch update information: {cause}"},
+                           lang, cause=status.error_cause)
+        status.error_kind = "unreachable"
         return status, None, None, {}
     source, assets, manifest = found.source, found.assets, found.manifest
     status.source = source.manifest_url
@@ -607,21 +662,24 @@ def _reject_unsafe_members(tar: tarfile.TarFile, allowed: tuple[str, ...] = UNIT
     for member in tar.getmembers():
         name = member.name
         if name.startswith("/") or name.startswith("\\") or ".." in Path(name).parts:
-            raise UpdateError(f"载荷里有越界路径：{name}")
+            raise UpdateError(f"载荷里有越界路径：{name}", en=f"the payload has a path outside its root: {name}")
         if member.issym() or member.islnk():
-            raise UpdateError(f"载荷里有链接：{name} —— 更新单元里不该有")
+            raise UpdateError(f"载荷里有链接：{name} —— 更新单元里不该有",
+                              en=f"the payload has a link: {name} — an update unit must not contain links")
         if member.isdev() or member.isfifo():
-            raise UpdateError(f"载荷里有设备/管道文件：{name}")
+            raise UpdateError(f"载荷里有设备/管道文件：{name}", en=f"the payload has a device or pipe file: {name}")
         tops.add(name.split("/", 1)[0])
     if allowed is UNIT:
         if tops != set(UNIT):
-            raise UpdateError(f"载荷顶层目录 {sorted(tops)} ≠ 更新单元 {list(UNIT)}")
+            raise UpdateError(f"载荷顶层目录 {sorted(tops)} ≠ 更新单元 {list(UNIT)}",
+                              en=f"the payload top-level directories {sorted(tops)} are not the update unit {list(UNIT)}")
     elif not tops or not tops <= set(allowed):
-        raise UpdateError(f"附加归档顶层目录 {sorted(tops)} 不在 {list(allowed)} 之内")
+        raise UpdateError(f"附加归档顶层目录 {sorted(tops)} 不在 {list(allowed)} 之内",
+                          en=f"the extras archive top-level directories {sorted(tops)} are not within {list(allowed)}")
 
 
 def fetch_verified(target: Path, url: str, expected: dict,
-                    http_stream: Callable[[str, Callable[[bytes], None]], None], what: str) -> None:
+                    http_stream: Callable[[str, Callable[[bytes], None]], None], what: str, what_en: str) -> None:
     """流式下到 `target`，边下边算摘要；大小、sha256 都得和签过名的 manifest 一致。"""
     digest = hashlib.sha256()
     received = 0
@@ -630,19 +688,23 @@ def fetch_verified(target: Path, url: str, expected: dict,
             nonlocal received
             received += len(chunk)
             if received > expected["size"]:
-                raise UpdateError(f"{what}下载超过 manifest 声明的大小 {expected['size']}")
+                raise UpdateError(f"{what}下载超过 manifest 声明的大小 {expected['size']}",
+                                  en=f"the {what_en} download exceeded the size the manifest declared ({expected['size']})")
             digest.update(chunk)
             out.write(chunk)
         http_stream(url, _sink)
     if received != expected["size"]:
-        raise UpdateError(f"{what}下载 {received} 字节，manifest 说 {expected['size']}")
+        raise UpdateError(f"{what}下载 {received} 字节，manifest 说 {expected['size']}",
+                          en=f"the {what_en} download was {received} bytes; the manifest says {expected['size']}")
     if digest.hexdigest() != expected["sha256"]:
-        raise UpdateError(f"{what}的 sha256 与签过名的 manifest 不一致 —— 拒收")
+        raise UpdateError(f"{what}的 sha256 与签过名的 manifest 不一致 —— 拒收",
+                          en=f"the {what_en} sha256 does not match the signed manifest — rejected")
 
 
 def download_and_stage(data_root: Path, manifest: dict, archive_url: str,
                        http_stream: Callable[[str, Callable[[bytes], None]], None],
-                       extras_url: str | None = None) -> Path:
+                       extras_url: str | None = None, *,
+                       from_version: str | None = None, notes_url: str | None = None) -> Path:
     """下载 → 摘要 → 安全解压 → 校验标记 → 暂存。任何一步失败：清干净、不动现网。
 
     manifest 带 `extras` 且给了 `extras_url` 时，第二个归档一起下、一起验、解到
@@ -656,7 +718,7 @@ def download_and_stage(data_root: Path, manifest: dict, archive_url: str,
     extras = manifest.get("extras") if extras_url else None
     extras_archive = updates / extras["archive"] if extras else None
     try:
-        fetch_verified(archive, archive_url, manifest, http_stream, "载荷")
+        fetch_verified(archive, archive_url, manifest, http_stream, "载荷", "payload")
 
         staging = payload_root(data_root) / "staging" / version
         shutil.rmtree(staging, ignore_errors=True)
@@ -665,13 +727,15 @@ def download_and_stage(data_root: Path, manifest: dict, archive_url: str,
             _reject_unsafe_members(tar)
             tar.extractall(staging, filter="data")
         if not _looks_like_a_payload(staging):
-            raise UpdateError("解出来的载荷缺 core/agent_loop.py 或 PAYLOAD_VERSION")
+            raise UpdateError("解出来的载荷缺 core/agent_loop.py 或 PAYLOAD_VERSION",
+                              en="the unpacked payload lacks core/agent_loop.py or PAYLOAD_VERSION")
         marked = version_of(staging / "harness")
         if marked != version:
-            raise UpdateError(f"载荷里的版本标记 {marked!r} ≠ manifest 的 {version!r}")
+            raise UpdateError(f"载荷里的版本标记 {marked!r} ≠ manifest 的 {version!r}",
+                              en=f"the payload is marked {marked!r} but the manifest says {version!r}")
 
         if extras is not None:
-            fetch_verified(extras_archive, extras_url, extras, http_stream, "附加归档")
+            fetch_verified(extras_archive, extras_url, extras, http_stream, "附加归档", "extras archive")
             extras_dir = staging / "extras"
             extras_dir.mkdir()
             with tarfile.open(extras_archive, "r:gz") as tar:
@@ -680,20 +744,26 @@ def download_and_stage(data_root: Path, manifest: dict, archive_url: str,
             for platform, digest in (extras.get("shell") or {}).items():
                 binary = extras_dir / "shell" / platform / SHELL_BINARY[platform]
                 if not binary.is_file():
-                    raise UpdateError(f"附加归档说带了 {platform} 的壳，解出来却没有 {binary.name}")
+                    raise UpdateError(f"附加归档说带了 {platform} 的壳，解出来却没有 {binary.name}",
+                                      en=f"the extras archive claims a {platform} shell, but {binary.name} is not in it")
                 if hashlib.sha256(binary.read_bytes()).hexdigest() != digest:
-                    raise UpdateError(f"{platform} 壳的 sha256 与 manifest.extras.shell 不一致 —— 拒收")
+                    raise UpdateError(f"{platform} 壳的 sha256 与 manifest.extras.shell 不一致 —— 拒收",
+                                      en=f"the {platform} shell sha256 does not match manifest.extras.shell — rejected")
             # 带了后端 app/ 就得是启动器接得过去的那种（launcher.hand_over_to_the_payload_app
             # 认 `app/launcher.py`）：半个 app 包比没有更糟 —— 起不来的后端没人能重装。
             if "app" in (extras.get("units") or []) and not (extras_dir / "app" / "launcher.py").is_file():
-                raise UpdateError("附加归档说带了后端 app/，解出来却没有 app/launcher.py —— 拒收")
+                raise UpdateError("附加归档说带了后端 app/，解出来却没有 app/launcher.py —— 拒收",
+                                  en="the extras archive claims a backend app/, but app/launcher.py is not in it — rejected")
 
         staged = payload_root(data_root) / "staged" / version
         shutil.rmtree(staged, ignore_errors=True)
         staged.parent.mkdir(parents=True, exist_ok=True)
         os.replace(staging, staged)
+        # 从哪一版升上来、发布说明在哪：只有暂存这一刻知道（第一次从随包版本升级时
+        # current.json 还不存在，切换那一刻已经说不出「原来是哪一版」）。
         _write_json_atomically(staged_pointer_path(data_root),
-                               {"version": version, "staged_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+                               {"version": version, "staged_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                "from_version": from_version, "notes_url": notes_url})
         return staged
     finally:
         archive.unlink(missing_ok=True)
@@ -713,26 +783,36 @@ def apply_staged_at_launch(data_root: Path) -> str | None:
     data_root = Path(data_root)
     data = _read_json(staged_pointer_path(data_root))
     version = (data or {}).get("version")
+    staged_from = (data or {}).get("from_version")
+    notes_url = (data or {}).get("notes_url")
     if not isinstance(version, str) or not version:
         return None
     staged = payload_root(data_root) / "staged" / version
     try:
         if not _looks_like_a_payload(staged):
-            raise UpdateError(f"暂存的 {version} 不完整（缺 agent_loop.py 或版本标记）")
+            raise UpdateError(f"暂存的 {version} 不完整（缺 agent_loop.py 或版本标记）",
+                              en=f"the staged {version} is incomplete (agent_loop.py or the version marker is missing)")
         problem = why_the_payload_cannot_start(staged)
         if problem:
             raise UpdateError(
                 f"{version} 的后端在这份安装上起不来（{problem}）—— 没有切过去，"
-                "当前版本原样继续。这一版要重新下载安装包。")
+                "当前版本原样继续。这一版要重新下载安装包。",
+                en=f"the {version} backend cannot start on this installation ({problem}); it was not switched "
+                   "in and the current version carries on. This version needs a fresh installer download.")
         target = payload_root(data_root) / version
         if target.exists():
             shutil.rmtree(target)
         os.replace(staged, target)
         current = read_pointer(data_root)
         previous = current.version if current and current.version != version else (current.previous if current else None)
+        updated_from = staged_from if isinstance(staged_from, str) and staged_from else (current.version if current else None)
         _write_json_atomically(pointer_path(data_root), {
             "version": version, "previous": previous,
             "applied_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            # 重启后的第一屏要说一句「已更新到 X」：说过（人点了「知道了」）就把 announced 翻成 true。
+            "updated_from": updated_from if updated_from != version else None,
+            "notes_url": notes_url if isinstance(notes_url, str) and notes_url else None,
+            "announced": False,
         })
         staged_pointer_path(data_root).unlink(missing_ok=True)
         apply_error_path(data_root).unlink(missing_ok=True)
@@ -740,7 +820,13 @@ def apply_staged_at_launch(data_root: Path) -> str | None:
         return version
     except Exception as exc:
         try:
-            apply_error_path(data_root).write_text(f"{type(exc).__name__}: {exc}", encoding="utf-8")
+            # 两种语言都记下：读它的是「关于」页，而写它的这一刻（启动器里）不知道那一屏
+            # 会是哪种语言。不是 UpdateError 的（代码出错）只有一种原话，照原样记。
+            record = ({"zh": f"{type(exc).__name__}: {exc}", "en": f"{type(exc).__name__}: {exc.en}"}
+                      if isinstance(exc, UpdateError) else f"{type(exc).__name__}: {exc}")
+            apply_error_path(data_root).write_text(
+                json.dumps(record, ensure_ascii=False) if isinstance(record, dict) else record,
+                encoding="utf-8")
         except OSError:
             pass
         return None
@@ -822,6 +908,32 @@ def rollback(data_root: Path) -> str | None:
         "applied_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     })
     return current.previous
+
+
+def just_updated(data_root: Path) -> dict | None:
+    """刚切过去、还没告诉人的那次更新。没有就 None。
+
+    只认切换时写下的 `announced: false`：老指针（没有这个字段）、回滚（不写 updated_from）
+    都不算 —— 它们不是「刚刚更新了」。
+    """
+    data = _read_json(pointer_path(data_root)) or {}
+    if data.get("announced") is not False:
+        return None
+    version, updated_from = data.get("version"), data.get("updated_from")
+    if not isinstance(version, str) or not isinstance(updated_from, str) or not updated_from:
+        return None
+    return {"from": updated_from, "to": version, "applied_at": data.get("applied_at"),
+            "notes_url": data.get("notes_url")}
+
+
+def acknowledge_update(data_root: Path) -> bool:
+    """人看到了「已更新到 X」：翻 announced。没有要确认的就返回 False。"""
+    path = pointer_path(data_root)
+    data = _read_json(path)
+    if not data or data.get("announced") is not False:
+        return False
+    _write_json_atomically(path, {**data, "announced": True})
+    return True
 
 
 # ───────────────────────────────────────────────────────────── 重启

@@ -132,7 +132,7 @@ function PreviewBody({ payload }: { payload: FilePreviewPayload }) {
 
   return (
     <div className="file-preview-fallback">
-      <p>这个格式没法在浏览器里直接看（{payload.mediaType}）。</p>
+      <p>{t({ zh: "这个格式没法在浏览器里直接看（{type}）。", en: "This format cannot be shown in the browser ({type})." }, { type: payload.mediaType })}</p>
       <p className="muted">{t({ zh: "下载下来用本机的程序打开。", en: "Download it and open with an app on this machine." })}</p>
     </div>
   );
@@ -143,7 +143,7 @@ function PreviewError({ error }: { error: unknown }) {
   if (error instanceof FileTooLargeError) {
     return (
       <div className="file-preview-fallback">
-        <p>文件太大，不在浏览器里打开（{formatBytes(error.sizeBytes)}，上限 {formatBytes(error.maxBytes)}）。</p>
+        <p>{t({ zh: "文件太大，不在浏览器里打开（{size}，上限 {max}）。", en: "The file is too large to open in the browser ({size}; the limit is {max})." }, { size: formatBytes(error.sizeBytes), max: formatBytes(error.maxBytes) })}</p>
       </div>
     );
   }

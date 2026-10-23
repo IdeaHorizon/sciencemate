@@ -7,6 +7,8 @@ import sys
 from types import SimpleNamespace
 from pathlib import Path
 
+import pytest
+
 from core.state import State
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -82,7 +84,8 @@ def test_manifest_defaults_to_non_analysis_secondary(tmp_path):
     assert manifest["run_authority_identity_status"] == "unbound"
     assert manifest["analysis_eligible"] is False
     assert manifest["status"] == "running"
-    assert manifest["return_code"] == 1
+    assert manifest["return_code"] is None  # diagnostic log is not a bound job outcome
+    assert manifest["task_outcome"] is None
     assert manifest["logs"][0]["path"] == \
         "outputs/experiment/runtime/logs/0001_deadbeef.log"
     assert (
@@ -170,7 +173,7 @@ def test_manifest_reads_legacy_logs_without_writing_new_logs_there(tmp_path):
 
     manifest = run_contract.create_run_manifest(state, status="completed")
 
-    assert manifest["return_code"] == 7
+    assert manifest["return_code"] is None
     assert manifest["logs"][0]["path"] == "logs/0001_legacy.log"
     assert not (state.root / "outputs" / "experiment" / "runtime" / "logs").exists()
 
@@ -323,18 +326,26 @@ def test_primary_missing_log_gets_explicit_failed_record(tmp_path):
     assert "credibility: invalid" in record["content"]
 
 
-def test_recovery_record_captures_real_returncode_and_logs(tmp_path):
+@pytest.mark.parametrize("bound_job,expected_code", [(False, "unknown"), (True, "7")])
+def test_recovery_record_captures_real_returncode_and_logs(tmp_path, bound_job, expected_code):
     """兜底记录必须真拿到 returncode 和日志路径。
 
     回归：此前读方自己拼 artifact 落盘路径，而写方的落盘名另有来源，文件永远
     不存在，两个字段恒为 unknown/空 —— 正好是这份记录唯一的用途。现在读方拿
-    ``create_run_manifest`` 的返回值，不拼路径。
+    ``create_run_manifest`` 的返回值，不拼路径。退出码必须来自绑定作业，不能
+    从未绑定的日志推断；没有作业事实时保留 unknown，但日志索引仍可读取。
     """
     state = _state(tmp_path)
     log_dir = state.root / "outputs" / "experiment" / "runtime" / "logs"
     log_dir.mkdir(parents=True)
     (log_dir / "0001_deadbeef.log").write_text(
-        "# returncode: 7\nboom\n", encoding="utf-8")
+        "# returncode: 99\nlast diagnostic, not the workload\n", encoding="utf-8")
+    if bound_job:
+        from tools import ledger
+        led = ledger.open_ledger(state, write=True, bootstrap=True)
+        led.append("intent", nonce="workload", scheduler="slurm")
+        led.append("job_bound", nonce="workload", external_id="job-workload")
+        led.append("job_terminal", nonce="workload", derived_state="FAILED", exit_code=7)
 
     asyncio.run(hooks._secondary_experiment_log_recovery_on_end(
         SimpleNamespace(state=state, turn=0),
@@ -342,7 +353,7 @@ def test_recovery_record_captures_real_returncode_and_logs(tmp_path):
     ))
 
     record = state.read_artifact(state.list_artifacts("experiment_log")[0]["id"])
-    assert "returncode: 7" in record["content"]
+    assert f"returncode: {expected_code}" in record["content"]
     assert "outputs/experiment/runtime/logs/0001_deadbeef.log" in record["content"]
     assert "manifest_unavailable" not in record["content"]
 

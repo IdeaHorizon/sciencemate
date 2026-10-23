@@ -6,6 +6,7 @@
  */
 
 import type { ChatRequest } from "./generated/chat-request";
+import { say, type Phrase } from "../shared/i18n/language.ts";
 import type { PublicationCategory } from "@/lib/publication-categories";
 
 export const API_BASE_URL =
@@ -74,7 +75,8 @@ export class ApiError extends Error {
 
   static fromBody(body: unknown, status: number): ApiError {
     const detail = (body as { detail?: unknown } | null)?.detail;
-    const fallback = `API error: ${status}`;
+    // 后端没说为什么时只剩状态码 —— 写成 HTTP 500，两种语言里读起来一样。
+    const fallback = `HTTP ${status}`;
 
     if (detail && typeof detail === "object") {
       const { message, violations, who_must_update: who } =
@@ -86,7 +88,7 @@ export class ApiError extends Error {
         who === "server" || who === "desktop" ? who : "",
       );
     }
-    return new ApiError(typeof detail === "string" ? detail : fallback, status);
+    return new ApiError(typeof detail === "string" && detail ? detail : fallback, status);
   }
 }
 
@@ -98,6 +100,21 @@ export class ApiClient {
 
   constructor(fetchImpl: typeof fetch = globalThis.fetch.bind(globalThis)) {
     this.fetchImpl = fetchImpl;
+  }
+
+  /** 这一屏正在显示的语言 —— 每一问都带上，后端的报错照它说（`language_on_screen`）。 */
+  private screenLanguage: string | null = null;
+
+  speaking(language: string) {
+    this.screenLanguage = language;
+  }
+
+  /**
+   * 不经后端、由这里自己说给人听的话（会被 `pushError(error.message)` 原样弹出来），
+   * 也按这一屏的语言说。中文之外一律英文 —— 与界面默认语言同一条规则。
+   */
+  private said(phrase: Phrase): string {
+    return say(phrase, this.screenLanguage === "zh" ? "zh" : "en");
   }
 
   setToken(token: string | null) {
@@ -167,6 +184,9 @@ export class ApiClient {
   async fetchWithAuth(input: string, options: RequestInit = {}, about = this.whoThisIsAbout()) {
     const headers = new Headers(options.headers);
     if (this.token) headers.set("Authorization", `Bearer ${this.token}`);
+    if (this.screenLanguage && !headers.has("X-Interface-Language")) {
+      headers.set("X-Interface-Language", this.screenLanguage);
+    }
     for (const [key, value] of Object.entries(about)) {
       if (!headers.has(key)) headers.set(key, value);
     }
@@ -208,6 +228,7 @@ export class ApiClient {
     if (this.token) {
       headers["Authorization"] = `Bearer ${this.token}`;
     }
+    if (this.screenLanguage) headers["X-Interface-Language"] = this.screenLanguage;
     const res = await fetch(`${API_BASE}${path}`, {
       method: "POST",
       headers,
@@ -215,7 +236,7 @@ export class ApiClient {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || `API error: ${res.status}`);
+      throw new Error(body.detail || `HTTP ${res.status}`);
     }
     return res.json();
   }
@@ -225,6 +246,11 @@ export class ApiClient {
   }
 
   // ── 自更新：查 / 装（下载+验证+暂存）/ 重启（后端退出码 3，壳重新拉起） ──
+  /** 装着的是哪一版（不联网）。侧栏底部用；查更新走 getUpdateStatus。 */
+  async getInstalledVersion() {
+    return this.request<{ version: string | null; installed_from: UpdateStatus["installed_from"] }>("/version");
+  }
+
   async getUpdateStatus() {
     return this.request<UpdateStatus>("/update");
   }
@@ -233,9 +259,30 @@ export class ApiClient {
     return this.request<UpdateStatus & { staged_version: string | null }>("/update/install", { method: "POST" });
   }
 
+  async acknowledgeUpdate() {
+    return this.request<{ acknowledged: boolean }>("/update/acknowledge", { method: "POST" });
+  }
+
   async restartForUpdate() {
-    return this.request<{ restarting: boolean; staged_version: string; exit_code: number }>(
+    return this.request<{ restarting: boolean; staged_version: string | null; exit_code: number }>(
       "/update/restart", { method: "POST" });
+  }
+
+  // ── 开发者模式：桌面版从自己的源码 checkout 跑（后端 api/v1/update.py 下半段） ──
+  async getDeveloperSource() {
+    return this.request<DeveloperSource>("/update/developer");
+  }
+
+  /** 先验目录合不合格再写；不合格 400，message 已按这一屏的语言说。重启后生效。 */
+  async setDeveloperSource(sourceRoot: string) {
+    return this.request<DeveloperSource>("/update/developer", {
+      method: "PUT",
+      body: JSON.stringify({ source_root: sourceRoot }),
+    });
+  }
+
+  async clearDeveloperSource() {
+    return this.request<DeveloperSource>("/update/developer", { method: "DELETE" });
   }
 
   async updateCurrentUser(data: { display_name: string }) {
@@ -324,11 +371,11 @@ export class ApiClient {
 
   async deleteProject(id: string) {
     // 走 `fetchWithAuth`：它管着 401 的落地，也带上"这一刻在看谁的东西"那两个头。
-    // 裸 fetch 两样都没有 —— 凭据过期时这里会静静地抛一个 "API error: 401"。
+    // 裸 fetch 两样都没有 —— 凭据过期时这里会静静地抛一个 "HTTP 401"。
     const res = await this.fetchWithAuth(`${API_BASE}/projects/${id}`, { method: "DELETE" });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || `API error: ${res.status}`);
+      throw new Error(body.detail || `HTTP ${res.status}`);
     }
   }
 
@@ -424,11 +471,11 @@ export class ApiClient {
 
   async deleteLibraryItem(artifactId: string) {
     // 走 `fetchWithAuth`：它管着 401 的落地，也带上"这一刻在看谁的东西"那两个头。
-    // 裸 fetch 两样都没有 —— 凭据过期时这里会静静地抛一个 "API error: 401"。
+    // 裸 fetch 两样都没有 —— 凭据过期时这里会静静地抛一个 "HTTP 401"。
     const res = await this.fetchWithAuth(`${API_BASE}/library/${artifactId}`, { method: "DELETE" });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || `API error: ${res.status}`);
+      throw new Error(body.detail || `HTTP ${res.status}`);
     }
   }
 
@@ -635,7 +682,9 @@ export class ApiClient {
                 // 结构化失败（title/body/recovery/retryable），在这里压成一个
                 // message 字符串就全没了（2026-08-20 实测：模型服务读超时的
                 // 真实说法被压扁，用户读到的是笼统的"这一轮没跑完"）。
-                else if (evt.type === "error") { onError?.(evt.message || "Unknown error", evt); return; }
+                // 没带 message 就给空串：调用方按字符串认失败（presentChatFailure），
+                // 认不出就不显示 —— 从前填的 "Unknown error" 从没被认出过，只是个占位。
+                else if (evt.type === "error") { onError?.(evt.message || "", evt); return; }
               } catch { /* skip malformed */ }
             }
           }
@@ -685,10 +734,10 @@ export class ApiClient {
     });
   }
 
-  async translateLiteraturePage(papers: LiteratureTranslatePaperInput[]) {
+  async translateLiteraturePage(papers: LiteratureTranslatePaperInput[], generateSummaries = true, fields: { translate_titles?: boolean; translate_abstracts?: boolean } = {}) {
     return this.request<LiteratureTranslateResponse>("/literature/translate", {
       method: "POST",
-      body: JSON.stringify({ papers }),
+      body: JSON.stringify({ papers, generate_summaries: generateSummaries, ...fields }),
     });
   }
 
@@ -710,7 +759,7 @@ export class ApiClient {
         });
         if (!response.ok || !response.body) {
           const body = await response.json().catch(() => ({}));
-          onError((body as { detail?: string }).detail ?? `API error: ${response.status}`);
+          onError((body as { detail?: string }).detail ?? `HTTP ${response.status}`);
           return;
         }
         // 进度文案由界面按 `stage` 决定：这一层不该知道用户看的是哪种语言
@@ -744,8 +793,20 @@ export class ApiClient {
   }
 
   // ── Research feed ────────────────────────────────────────────
-  async getFeedToday() {
-    return this.request<FeedToday>("/feed/today");
+  async getFeedProgress(): Promise<FeedProgress> {
+    return this.request<FeedProgress>("/feed/progress");
+  }
+  async refreshFeedRecommendations() {
+    return this.request<void>("/feed/refresh", { method: "POST" });
+  }
+  async getFeedToday(opts?: { limit?: number; offset?: number; ready_only?: boolean; sources?: string }) {
+    const params = new URLSearchParams();
+    if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+    if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+    if (opts?.ready_only !== undefined) params.set("ready_only", String(opts.ready_only));
+    if (opts?.sources !== undefined) params.set("sources", opts.sources);
+    const query = params.size ? `?${params.toString()}` : "";
+    return this.request<FeedToday>(`/feed/today${query}`);
   }
 
   async listFeedItems(opts?: {
@@ -805,8 +866,9 @@ export class ApiClient {
     return this.request<FeedSubscriptionSearch>(`/feed/subscriptions/search?${params}`);
   }
 
-  async getFeedSubscriptionItems() {
-    return this.request<FeedCard[]>("/feed/subscriptions/items?limit=50");
+  async getFeedSubscriptionItems(offset = 0, limit = 100, kind: "domain" | "journal" | "scholar" | "all" = "all") {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset), kind });
+    return this.request<FeedCard[]>(`/feed/subscriptions/items?${params}`);
   }
 
   async getFeedDomainCatalog() {
@@ -874,6 +936,11 @@ export class ApiClient {
 
   async getInterfaceSettings() {
     return this.onThisMachine<InterfaceSettings>("/settings/interface");
+  }
+
+  /** 界面语言选过没有 + 这个人电脑上的系统语言（只有桌面版答得出，组织服务器给空列表）。 */
+  async getInterfaceLanguageHint() {
+    return this.onThisMachine<InterfaceLanguageHint>("/settings/interface/language");
   }
 
   async saveInterfaceSettings(data: InterfaceSettings) {
@@ -951,7 +1018,10 @@ export class ApiClient {
     } catch (error) {
       if (!(error instanceof ApiError) || error.status !== 404) throw error;
       if (!data.api_key) {
-        throw new Error("Enter a new API key to save this backend.");
+        throw new Error(this.said({
+          zh: "要存下这条连接，得填一个新的 API key。",
+          en: "Enter a new API key to save this backend.",
+        }));
       }
       await this.addCustomProvider({
         name: data.provider,
@@ -1255,7 +1325,11 @@ export interface UpdateStatus {
   staged_version: string | null;
   source: string;
   reachable: boolean;
+  /** 后端的诊断原文（中文）。界面先按 `error_kind` 用看的人的语言说头一句。 */
   error: string | null;
+  error_kind: "unreachable" | "nothing_published" | "rejected" | "source_checkout" | null;
+  /** unreachable 时的异常原文（`ConnectError: …`），不带中文前缀。 */
+  error_cause: string | null;
   apply_error: string | null;
   checked_at: string;
   notes: string;
@@ -1272,8 +1346,29 @@ export interface UpdateStatus {
   shell_update: { changed: boolean | null; needs_reinstall: boolean } | null;
   /** needs_reinstall 时人该去哪下安装包；没有就只能说「请重新安装」。 */
   reinstall_url: string | null;
+  /** 刚从哪一版升到哪一版，人还没点「知道了」；null = 没有要说的。 */
+  just_updated: { from: string; to: string; applied_at: string | null; notes_url: string | null } | null;
   /** 比装着的新、还没传完的 release（tag，新的在前）：`available_version` 答的是现在装得上的那版。 */
   still_publishing: string[];
+}
+
+/** GET/PUT/DELETE /update/developer 的样子（后端 services/developer_source.describe）。 */
+export interface DeveloperSource {
+  /** 声明里写的源码目录；null = 没开。 */
+  declared: string | null;
+  /** 现在这个后端进程就是从声明的目录跑的 —— 开发者模式真的在跑。 */
+  active: boolean;
+  /** 声明和正在跑的对不上（刚设、刚撤、换了目录）：重启才生效。 */
+  restart_needed: boolean;
+  /** 声明了但目录不合格时的那一句（这一屏的语言）。 */
+  problem: string | null;
+  harness: string | null;
+  backend_app: string | null;
+  /** 目录里构建过的界面；null = 没构建过，界面用安装的那份。 */
+  static_ui: string | null;
+  git: { branch: string; commit: string } | null;
+  /** 这个进程现在是从哪个源码目录跑的；不在任何源码目录里（安装的那份）= null。 */
+  running_from: string | null;
 }
 
 export interface CurrentUser {
@@ -1312,6 +1407,15 @@ export type InterfaceTheme = "system" | "light" | "dark";
 export type InterfaceDensity = "comfortable" | "compact";
 export type InterfaceFontScale = 90 | 100 | 110 | 120;
 export type DefaultLanding = "feed" | "last_session" | "projects" | "new_research";
+
+export interface InterfaceLanguageHint {
+  /** 偏好里存着 language 这一项（存过任何一项界面偏好都算 —— 前端整份写）。 */
+  chosen: boolean;
+  /** 系统语言列表，按用户排的先后；后端不在这个人电脑上时为空。 */
+  system_languages: string[];
+  /** 在 Windows 安装器上自己点过的语言（没点过 / 不是桌面版 = null）。 */
+  chosen_at_install: "zh" | "en" | null;
+}
 
 export interface InterfaceSettings {
   theme: InterfaceTheme;
@@ -1363,7 +1467,6 @@ export interface UsageSettings {
 export interface NotificationSettingsPayload {
   decision_required: boolean;
   run_failed: boolean;
-  run_completed: boolean;
   budget_warning: boolean;
 }
 
@@ -2075,6 +2178,7 @@ export interface LiteraturePaper {
   score_breakdown: Record<string, unknown>;
   intent_coverage: number;
   ranking_score: number;
+  federated_rank: number | null;
   cas_quartile: number | null;
   cas_top: boolean;
   impact_factor: number | null;
@@ -2088,6 +2192,8 @@ export interface LiteraturePaper {
   exact_title_match: boolean;
   local_pdf_url: string | null;
   local_figure_urls: string[];
+  school_holdings: string[];
+  school_fulltext_url: string | null;
 }
 
 export interface LiteratureTranslatePaperInput {
@@ -2097,6 +2203,8 @@ export interface LiteratureTranslatePaperInput {
   authors: string[];
   year: number | string | null;
   venue: string | null;
+  doi?: string | null;
+  url?: string | null;
 }
 
 export interface LiteratureTranslation {
@@ -2139,6 +2247,8 @@ export interface FeedItem {
   title: string;
   url: string | null;
   summary: string | null;
+  title_zh?: string | null;
+  abstract_zh?: string | null;
   authors: string[];
   venue: string | null;
   published_at: string | null;
@@ -2149,6 +2259,7 @@ export interface FeedItem {
   author_display_name: string | null;
   /** 这条有没有配图。**没有外链** —— 要图走 feedImageUrl(id)，由后端代取。 */
   saved: boolean;
+  viewed: boolean;
   extra: Record<string, unknown>;
 }
 
@@ -2160,10 +2271,33 @@ export interface FeedCard {
   project_name: string | null;
   /** 今日必读：每天替你挑的少数几条，排在流最前、挂角标。 */
   is_today_pick: boolean;
+  recommendation_sources?: ("domain" | "journal" | "scholar" | "project")[];
+}
+
+export interface FeedDomainProgress {
+  domain: string; label: string; phase: string; collected: number; prepared: number;
+  pending: number; recommendable: number; translated: number; translation_pending: number;
+  updated_at?: string | null;
+}
+
+export interface FeedProgress {
+  domain_progress?: FeedDomainProgress[];
+  source_progress?: { source: string; phase: string; collected: number; ready: number; pending: number; translation_pending: number; configured: boolean; identity_pending: number }[];
+  phase: "searching" | "preparing" | "queued" | "settled" | "failed";
+  collected: number;
+  prepared: number;
+  pending: number;
+  recommendable: number;
+  translated: number;
+  translation_pending: number;
+  source_groups: { sources: string[]; total: number; translated: number }[];
+  project_error: boolean;
 }
 
 export interface FeedToday {
+  progress?: FeedProgress;
   feed: FeedCard[];
+  has_more: boolean;
   onboarded: boolean;
   /** false = 还没有任何个性化依据。界面据此说实话，而不是假装这是为你挑的。 */
   personalized: boolean;
@@ -2213,7 +2347,16 @@ export interface FeedJournalSubscription {
 export interface FeedScholarSubscription {
   key: string;
   name: string;
-  source: "kb" | "literature";
+  source: "kb" | "literature" | "openalex";
+  author_id?: string;
+  orcid?: string;
+  institution?: string;
+  topics?: string[];
+  works_count?: number;
+  identity_status?: "resolved" | "unresolved" | "ambiguous" | "unavailable";
+  identity_candidates?: FeedScholarSubscription[];
+  identity_message?: string;
+  search_complete?: boolean;
   /** 学者头像。同 `cover_url`：现在是空的，界面留空白头像占位。 */
   avatar_url?: string | null;
 }

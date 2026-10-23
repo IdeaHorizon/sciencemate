@@ -213,8 +213,14 @@ async def spawn_and_wait(
         args, shell = tuple(sandbox_launch.argv), False
         cwd = getattr(sandbox_launch, "cwd", None)
         spawn_env = getattr(sandbox_launch, "env", None)
+        # 本次命令独有的环境标记（#1094）：后代 —— 哪怕 setsid 出去 —— 都继承它，调用结束
+        # 时没有 cgroup 可停的机器按它收尾。env 为 None 时原本是继承本进程环境，这里显式拷一份再加。
+        launch_marker = process_control.new_launch_marker()
+        spawn_env = {**(spawn_env if spawn_env is not None else os.environ),
+                     process_control.LAUNCH_MARKER: launch_marker}
     else:
         spawn_env = None
+        launch_marker = None
 
     out_f = tempfile.NamedTemporaryFile(prefix="hf_out_", suffix=".log", delete=False)
     err_f = tempfile.NamedTemporaryFile(prefix="hf_err_", suffix=".log", delete=False)
@@ -347,6 +353,20 @@ async def spawn_and_wait(
         return status, returncode, _out_b, _err_b
     finally:
         if sandbox_launch is not None:
+            if launch_marker and not getattr(sandbox_launch, "stop_argv", None):
+                # 没有 cgroup 可停（无 systemd --user scope 的 Linux、macOS）：进程组杀不到
+                # setsid 出去的后代，按环境标记收尾（#1094）。有 scope 的机器下面的 cleanup
+                # 停 slice 已经整片收掉，不必再扫一遍进程表。记账层永不杀轮。
+                try:
+                    reaped = await asyncio.to_thread(process_control.kill_marked, launch_marker)
+                except Exception as exc:  # noqa: BLE001
+                    reaped = []
+                    log.warning("orphan sweep failed: %s", exc)
+                if reaped:
+                    try:
+                        state.append_transcript("orphans_reaped", count=len(reaped), pids=reaped[:20])
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("orphans_reaped record failed: %s", exc)
             sandbox_launch.cleanup()
         for f, p in ((out_f, out_path), (err_f, err_path)):
             try:

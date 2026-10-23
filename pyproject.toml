@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "harness-framework"
-version = "0.5.7"
+version = "0.5.8"
 description = "Minimal teaching scaffold for the AI4S research platform's node harness layer."
 requires-python = ">=3.11"
 dependencies = [
@@ -21,6 +21,12 @@ dependencies = [
     # 一直走 matplotlib。这是用「省一个依赖」换掉了这个节点存在的意义。
     # pypdfium2 是纯 wheel（自带 pdfium），无系统依赖。
     "pypdfium2>=4.0",
+    # postprocess 的 SVG 插画轨（nodes/postprocess/svg_audit.py）在**框架进程内**顶层
+    # import defusedxml 解析模型写的 SVG —— 外部文本进 XML 解析器就得防实体炸弹 / 外部
+    # 实体，标准库的 ElementTree 不防。纯 Python 轮子，无系统依赖。必须是 base dep：
+    # 缺了整个 nodes.postprocess.tools 都 import 不起来，节点一个工具都注册不上
+    # （#1251 首轮 CI：24 条红全是「节点 postprocess 的代码没有加载成功」）。
+    "defusedxml>=0.7",
     "ase>=3.23",
     # 推导验证四件套（shared/tools/library/derivation_check.py）的引擎。
     # 它们**必须是 base deps**，不是 optional：check_step / dimensional_check

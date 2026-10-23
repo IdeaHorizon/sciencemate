@@ -26,8 +26,8 @@ import { api } from "@/lib/api";
  * 代理响应带 `Cache-Control: private, max-age=86400`，所以第二次 `fetch`
  * 命中浏览器缓存，不会再打后端、更不会再打出版商。
  */
-export function useFeedImage(itemId: string, enabled = true): string | null {
-  const [objectUrl, setObjectUrl] = useState<string | null>(null);
+export function useFeedImageAsset(itemId: string, enabled = true): { src: string; generated: boolean } | null {
+  const [asset, setAsset] = useState<{ src: string; generated: boolean } | null>(null);
 
   useEffect(() => {
     if (!enabled) {
@@ -35,7 +35,7 @@ export function useFeedImage(itemId: string, enabled = true): string | null {
       // 在上一次的 cleanup 里被 revoke 掉了，切回图卡的那一瞬间 <img> 会去
       // 加载一个已失效的 URL、触发 onError，把 imageBroken 永久点成 true，
       // 图就再也回不来了。清空让它先不渲染 <img>，等这次 fetch 拿到新 blob。
-      setObjectUrl(null);
+      setAsset(null);
       return;
     }
     let revoked = false;
@@ -43,12 +43,12 @@ export function useFeedImage(itemId: string, enabled = true): string | null {
 
     void (async () => {
       try {
-        const response = await api.fetchWithAuth(api.feedImageUrl(itemId));
+        const response = await api.fetchWithAuth(`${api.feedImageUrl(itemId)}?presentation=journal-name-20260929`);
         if (!response.ok) return;
         const blob = await response.blob();
         if (revoked) return;
         created = URL.createObjectURL(blob);
-        setObjectUrl(created);
+        setAsset({ src: created, generated: response.headers.get("content-type")?.startsWith("image/svg+xml") ?? false });
       } catch {
         // 取不回来就当没有图。**不显示碎图标** —— 大多数条目本来就没有配图，
         // 一个碎图会让用户以为是平台坏了。
@@ -62,5 +62,9 @@ export function useFeedImage(itemId: string, enabled = true): string | null {
     };
   }, [itemId, enabled]);
 
-  return objectUrl;
+  return asset;
+}
+
+export function useFeedImage(itemId: string, enabled = true): string | null {
+  return useFeedImageAsset(itemId, enabled)?.src ?? null;
 }

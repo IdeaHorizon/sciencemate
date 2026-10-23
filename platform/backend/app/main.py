@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
 from app.config import settings
+from app.services.say import in_both_languages
 from app.core.logging import get_logger, setup_logging
 from app.middleware import RequestBodyCapMiddleware, RequestLoggingMiddleware
 from app import assembly
@@ -129,13 +130,19 @@ async def _refuse_to_serve_a_schema_we_were_not_written_for() -> None:
     expected = _expected_alembic_heads()
     if applied == expected:
         return
+    # 起不来的这一刻还没有界面（壳把日志尾巴弹成对话框）：两种语言并排说。
     raise RuntimeError(
-        "Database schema is not the one this build expects — refusing to start.\n"
+        in_both_languages({"zh": "库的 schema 不是这一版要的 —— 拒绝启动。",
+                           "en": "Database schema is not the one this build expects — refusing to start."})
+        + "\n"
         f"  expected: {', '.join(sorted(expected)) or '(none)'}\n"
         f"  applied : {', '.join(sorted(applied)) or '(none)'}\n"
         "  fix     : cd platform/backend && alembic upgrade head\n"
-        "带病启动的代价是错误指不到病因（2026-08-10：漏跑一个迁移，症状是"
-        "几层之外的 InFailedSQLTransactionError）。"
+        + in_both_languages({
+            "zh": "带病启动的代价是错误指不到病因（2026-08-10：漏跑一个迁移，症状是"
+                  "几层之外的 InFailedSQLTransactionError）。",
+            "en": "Starting anyway would leave errors pointing away from their cause (2026-08-10: one "
+                  "missed migration surfaced as an InFailedSQLTransactionError several layers away)."})
     )
 
 
@@ -226,19 +233,30 @@ async def _refuse_to_serve_where_the_data_is_not() -> None:
     if not stranded:
         return  # 空库（全新部署）也走这条：配的根就是将来的根。
 
-    lines = "\n".join(
-        f"    {count:>4} 个会话的数据在 {root}" for root, count in sorted(stranded.items())
-    )
-    raise RuntimeError(
-        "Session worktree 根与库里记录的不一致 —— 拒绝启动。\n"
-        f"  配置指向: {configured}\n"
-        f"{lines}\n"
-        "  这多半是启动方式变了（相对路径的根会跟着 cwd 走），而不是数据丢了。\n"
-        "  fix: 指回记录里的那个根（PLATFORM_DATA_ROOT / PROJECT_WORKTREE_ROOT），\n"
-        "       或者真要搬就走 python scripts/relocate_project_data.py --to <新根>\n"
-        "  带着错的根服务下去 = 旧会话全报 'worktree is not initialized'，"
-        "同时在新根下建第二套数据。"
-    )
+    # 起不来的这一刻还没有界面（壳把日志尾巴弹成对话框）：两种语言整段各说一遍。
+    raise RuntimeError(in_both_languages({
+        "zh": "Session worktree 根与库里记录的不一致 —— 拒绝启动。\n"
+              "  配置指向: {configured}\n"
+              "{lines_zh}\n"
+              "  这多半是启动方式变了（相对路径的根会跟着 cwd 走），而不是数据丢了。\n"
+              "  fix: 指回记录里的那个根（PLATFORM_DATA_ROOT / PROJECT_WORKTREE_ROOT），\n"
+              "       或者真要搬就走 python scripts/relocate_project_data.py --to <新根>\n"
+              "  带着错的根服务下去 = 旧会话全报 'worktree is not initialized'，"
+              "同时在新根下建第二套数据。",
+        "en": "The Session worktree root does not match the one recorded in the database — refusing "
+              "to start.\n"
+              "  configured: {configured}\n"
+              "{lines_en}\n"
+              "  Most likely the way the backend is started has changed (a relative root follows the "
+              "cwd); the data is not lost.\n"
+              "  fix: point back at the recorded root (PLATFORM_DATA_ROOT / PROJECT_WORKTREE_ROOT),\n"
+              "       or, to really move it, run python scripts/relocate_project_data.py --to <new root>\n"
+              "  Serving with the wrong root = every old session reports 'worktree is not "
+              "initialized', while a second copy of the data is built under the new root.",
+    }, configured=configured,
+       lines_zh="\n".join(f"    {count:>4} 个会话的数据在 {root}" for root, count in sorted(stranded.items())),
+       lines_en="\n".join(f"    {count:>4} session(s) have their data in {root}"
+                          for root, count in sorted(stranded.items()))))
 
 
 async def _refuse_to_serve_with_a_broken_runtime() -> None:
@@ -562,6 +580,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if assembly.background_collection_enabled():
         feed_collector.start()
         literature_index_harvester.start()
+        from app.services.feed import scholar_migration
+        scholar_migration.start()
     else:
         # 个人档不做后台爬取：一个刚装好的软件不该在用户还没说要什么之前
         # 就开始连外网。资讯流功能本身没删，用户点开时按需采（RFC X8）。
@@ -599,6 +619,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await feed_collector.stop()
         from app.services.literature_harvester import literature_index_harvester
         await literature_index_harvester.stop()  # 没起过也安全
+        from app.services.feed import scholar_migration
+        await scholar_migration.stop()
         # 交付对账同理：它每轮持一条 DB 事务，让它在自己的节拍边界退出。
         await delivery_reconciler.stop()
 

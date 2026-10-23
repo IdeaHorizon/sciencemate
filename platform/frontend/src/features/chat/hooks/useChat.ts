@@ -7,8 +7,8 @@ import { api, type ConceptAnnotation } from "@/lib/api";
 import { answerBubbleText, buildChatRequest, composeText, type Answer } from "../lib/answer";
 import { qk } from "@/lib/query/keys";
 import { useNotificationSettings } from "@/features/settings/useNotificationSettings";
-import { pushError, pushFailure, pushInfo, pushSuccess } from "@/stores/notification";
-import { say, useLanguage, useT, type Phrase } from "@/shared/i18n";
+import { pushError, pushFailure, pushInfo } from "@/stores/notification";
+import { say, useLanguage, useT, type Language, type Phrase } from "@/shared/i18n";
 import type { ChatMessage } from "../types";
 import type { ChatActivity } from "../types";
 import { authoritativeReplyText } from "../lib/authoritative-reply";
@@ -42,14 +42,14 @@ export type SendDispatch =
  */
 const CONTINUE_ANSWER: Phrase = { zh: "继续", en: "Continue" };
 
-function activityFromEvent(event: Record<string, unknown>, index: number): ChatActivity {
+function activityFromEvent(event: Record<string, unknown>, index: number, lang: Language): ChatActivity {
   const label = [event.label, event.message, event.tool_name, event.action, event.kind, event.type]
     .find((value) => typeof value === "string" && value.trim()) as string | undefined;
   const output = [event.detail, event.output, event.summary]
     .find((value) => typeof value === "string" && value.trim()) as string | undefined;
   return {
     id: String(event.id ?? event.sequence ?? `${Date.now()}-${index}`),
-    label: label ?? "Execution update",
+    label: label ?? say({ zh: "执行进展", en: "Execution update" }, lang),
     detail: output?.slice(0, 280),
     status: typeof event.status === "string" ? event.status : undefined,
     raw: event,
@@ -173,7 +173,7 @@ export function useChat({
         // 此刻在干什么"，掺进另一条流的事件就成了两件事挤在一行。
         if (secondary) return;
         setActivities((current) => {
-          const next = activityFromEvent(event, current.length);
+          const next = activityFromEvent(event, current.length, lang);
           const existing = current.findIndex((item) => item.id === next.id);
           if (existing < 0) return [...current, next];
           return current.map((item, index) => index === existing ? next : item);
@@ -187,7 +187,7 @@ export function useChat({
         // 会话没死：磁盘上的记录一个字没变，下一条消息照常从断点接着跑。
         // 见 presentChatFailure 的说明（wangd 2026-08-18 第三次指着同一条）。
         const structured = presentStructuredChatFailure(detail);
-        const presented = structured ?? presentChatFailure(err || "Chat failed");
+        const presented = structured ?? presentChatFailure(err, lang);
         // 入口 409：这张卡背后已经没有停着的 pause，或呈递换了。屏幕上那张卡
         // 是旧的 —— 让会话那一次现算重新回答"现在停在哪"，别让人对着旧卡再点。
         const code = typeof detail?.code === "string" ? detail.code : "";
@@ -299,20 +299,24 @@ export function useChat({
         // 最后几处 run 状态词表，而名单必然漏新写法。
         const doneView = nextTerminal.view;
         if (doneView?.waitingOn?.kind === "human" && notificationSettings.data?.decision_required) {
-          pushInfo("This Session is waiting for your response.", "Research decision required");
+          pushInfo(
+            t({ zh: "这个会话在等你回答。", en: "This Session is waiting for your response." }),
+            t({ zh: "需要你拍板", en: "Research decision required" }),
+          );
         } else if (
           (doneView?.phase === "interrupted"
             || doneView?.outcome === "failed"
             || doneView?.outcome === "cancelled")
           && notificationSettings.data?.run_failed
         ) {
-          pushError("Open the Session to inspect the recorded failure and recovery options.", "Run needs attention");
-        } else if (
-          (doneView?.outcome === "ok" || doneView?.outcome === "ok_with_warning")
-          && notificationSettings.data?.run_completed
-        ) {
-          pushSuccess("The latest research Run finished and its result is recorded.", "Run completed");
+          pushError(
+            t({ zh: "打开会话看失败记录和恢复办法。", en: "Open the Session to inspect the recorded failure and recovery options." }),
+            t({ zh: "这一轮没跑完", en: "Run needs attention" }),
+          );
         }
+        // 跑完了不弹（wangd 2026-10-20 删掉「执行完成」）：这条流只活在这个会话页上，
+        // 它收尾的那一刻你正看着回复落下来 —— 弹一句"跑完了"是在复述屏幕。
+        // 人不在跟前时该有的提醒是系统通知，不是这里。
         if (
           scope.kind === "global" &&
           meta.created_project &&
@@ -321,9 +325,11 @@ export function useChat({
           onProjectCreated(meta.created_project as Record<string, unknown>);
           // Append a confirmation suffix to the assistant message
           const cp = meta.created_project as Record<string, unknown>;
-          const suffix = `\n\nCreated project: ${cp.name} (${cp.start_node_type}). ${
-            cp.auto_started ? "Scheduler started." : "Ready to start."
-          }`;
+          const suffix = `\n\n${t({ zh: "已创建项目：{name}（{node}）。", en: "Created project: {name} ({node}). " }, {
+            name: String(cp.name), node: String(cp.start_node_type),
+          })}${cp.auto_started
+            ? t({ zh: "调度器已启动。", en: "Scheduler started." })
+            : t({ zh: "可以开始了。", en: "Ready to start." })}`;
           appendToken(suffix);
           queryClient.invalidateQueries({ queryKey: qk.projects() });
         }
@@ -346,7 +352,7 @@ export function useChat({
       if (!secondary) abortRef.current = abort;
       return { kind: secondary ? "interjecting" : "streaming" };
     },
-    [conversationId, messages, scope, sending, queryClient, onProjectCreated, onStreamDone, notificationSettings.data],
+    [conversationId, messages, scope, sending, queryClient, onProjectCreated, onStreamDone, notificationSettings.data, t, lang],
   );
   sendRef.current = send;
 

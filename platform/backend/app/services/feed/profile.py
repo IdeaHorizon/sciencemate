@@ -33,12 +33,14 @@ DFT、Transformer）本来就是英文，它们照样抽得出来。中文部分
 from __future__ import annotations
 
 import re
+import html
+import unicodedata
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.project import Project
+from app.models.project import Project, ProjectStatus
 from app.models.user import User
 
 #: 词面匹配里没有区分度的词。只列**技术写作里高频且不携带主题**的那些 ——
@@ -81,6 +83,7 @@ class Profile:
     """一个用户此刻的画像。"""
 
     user_id: str
+    institution_id: str = ""
     #: 显式选的域（骨架分类或 archive 名，archive 名表示"整个大类都要"）。
     domains: tuple[str, ...] = ()
     projects: tuple[ProjectSignal, ...] = ()
@@ -91,9 +94,12 @@ class Profile:
     #: 可靠度同级，所以放在同一个画像里，而不是各自出去开一条独立管线。
     journals: frozenset[str] = field(default_factory=frozenset)
     scholars: frozenset[str] = field(default_factory=frozenset)
+    scholar_identities: tuple[dict, ...] = ()
     #: 已经露过面 / 被忽略的条目，排序时要避开。
     suppressed_item_ids: frozenset[str] = field(default_factory=frozenset)
     onboarded: bool = False
+    # Only queries curated for the current project texts can supply fallback evidence.
+    active_project_queries: frozenset[str] | None = None
 
     @property
     def has_signal(self) -> bool:
@@ -156,13 +162,26 @@ def stored_domains(user: User) -> tuple[str, ...]:
     return tuple(out)
 
 
+def journal_display_name(value: object) -> str:
+    text = str(value or "")
+    for _ in range(4):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    return " ".join(text.split())
+
+
 def journal_key(value: object) -> str:
     """期刊名比对键：去掉一切非字母数字再 casefold。
 
     与 `/feed/subscriptions/items` 用的是同一套归一化 —— 两边各写一份的话，
     同一本刊会出现"订阅页认得出、推荐池认不出"的分歧（而且没有任何症状）。
     """
-    return re.sub(r"[^a-z0-9]", "", str(value or "").casefold())
+    text = unicodedata.normalize("NFKD", journal_display_name(value).lower())
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    text = re.sub(r"^the\b[\s\W_]*", "", text)
+    return re.sub(r"[^a-z0-9]", "", text)
 
 
 def _name_tokens(value: object) -> list[str]:
@@ -263,7 +282,7 @@ async def build_profile(
         (
             await db.execute(
                 select(Project)
-                .where(Project.owner_id == user.id)
+                .where(Project.owner_id == user.id, Project.status == ProjectStatus.ACTIVE)
                 .order_by(Project.updated_at.desc())
             )
         )
@@ -280,14 +299,24 @@ async def build_profile(
     )
     # 手选的 ∪（推断的 − 删掉的）。推断那部分只有开了自动挖掘才会有内容 ——
     # 关着时 `effective_domains` 退化成 `stored_domains`，行为逐字不变。
-    from app.services.feed.curation import effective_domains
+    from app.services.feed.curation import effective_domains, project_fingerprint, saved_project_examples, stored
+
+    state = stored(user)
+    saved_examples = await saved_project_examples(db, user, projects)
+    active_queries = frozenset(
+        str(query) for query in (state.get("inferred_queries") or [])
+        + (state.get("inferred_news_queries") or [])
+    ) if state.get("curated_fingerprint") == project_fingerprint(projects, saved_examples) else frozenset()
 
     return Profile(
         user_id=user.id,
+        institution_id=user.institution_id,
         domains=effective_domains(user),
         projects=signals,
+        active_project_queries=active_queries,
         journals=stored_subscription_journals(user),
         scholars=stored_subscription_scholars(user),
+        scholar_identities=tuple(entry for entry in (stored_interests(user).get("subscriptions") or {}).get("scholars", []) if isinstance(entry, dict)),
         suppressed_item_ids=suppressed_item_ids or frozenset(),
         onboarded=is_onboarded(user),
     )

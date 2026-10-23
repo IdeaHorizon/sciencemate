@@ -40,6 +40,8 @@ from app.models.execution import SessionProjection
 from app.models.project import Project
 from app.models.user import User
 from app.policies import has_project_capability
+from app.services.say import SaidToAPerson
+from app.services.user_interface import language_for, said_of
 
 logger = logging.getLogger(__name__)
 
@@ -192,8 +194,8 @@ async def changes_payload(project_id: str, session: SessionProjection) -> dict:
     }
 
 
-class PublishConflictsFoundError(RuntimeError):
-    """两边动了同一个文件 —— 先决定用谁那一版。"""
+class PublishConflictsFoundError(SaidToAPerson, RuntimeError):
+    """两边动了同一个文件 —— 先决定用谁那一版。发布按钮旁原话显示，两种语言都写。"""
 
 
 async def publish_session(
@@ -225,7 +227,8 @@ async def publish_session(
     changes = await read_session_changes(str(project.id), session)
     if changes.has_conflicts:
         raise PublishConflictsFoundError(
-            "Resolve conflicts before publishing: " + ", ".join(changes.conflicting_paths)
+            "发布之前先解决这几处冲突：" + "、".join(changes.conflicting_paths),
+            en="Resolve conflicts before publishing: " + ", ".join(changes.conflicting_paths),
         )
     if not changes.changed_paths:
         return None
@@ -247,7 +250,9 @@ async def publish_session(
             actor_id=str(user.id),
         )
     except ProjectRepositoryError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=said_of(exc, language_for(user), otherwise={
+            "zh": "改动没能发布到项目：{why}", "en": "The changes could not be published to the project: {why}"},
+        )) from exc
 
     # 这个会话暂存的产物随这次发布转正。从前这一步是「把 ChangeItem 指到的
     # 版本翻成 published」；现在按会话找 —— 同一个事实，少一张中间表。
@@ -305,7 +310,9 @@ async def resolve_conflict(
             repository.take_main_version, str(project.id), session.session_id, path
         )
     except ProjectRepositoryError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=said_of(exc, language_for(user), otherwise={
+            "zh": "没能取回项目那一版：{why}", "en": "The project's version could not be taken: {why}"},
+        )) from exc
     session.git_head_commit_sha = head
     await db.flush()
     return {"path": path, "choice": choice, "headCommitSha": head}
@@ -489,7 +496,9 @@ async def stage_artifact_candidate(
     except ProjectRepositoryError as exc:
         raise HTTPException(
             status_code=503,
-            detail={"code": "project_repository_write_failed", "message": str(exc)},
+            detail={"code": "project_repository_write_failed", "message": said_of(
+                exc, language_for(user), otherwise={
+                    "zh": "项目仓库没能写进去：{why}", "en": "The project repository could not be written: {why}"})},
         ) from exc
     version.git_commit_sha = git_revision.commit_sha
     version.repository_path = git_revision.repository_path

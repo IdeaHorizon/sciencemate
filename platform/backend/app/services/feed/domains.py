@@ -100,6 +100,24 @@ def is_known_domain(slug: str) -> bool:
     return value in _spine_set()
 
 
+
+def cas_groups() -> dict[str, tuple[str, ...]]:
+    """Selectable parent codes and their authoritative catalog children."""
+    return {
+        str(group["archive"]): tuple(str(option["domain"]) for option in group.get("categories", ()))
+        for group in catalog()
+        if str(group.get("archive") or "").startswith("cas:")
+    }
+
+
+def expand_cas_domains(values) -> tuple[str, ...]:
+    """Expand selected parents for acquisition/matching, preserving other codes."""
+    groups = cas_groups()
+    return tuple(dict.fromkeys(
+        child for value in values for child in groups.get(str(value), (str(value),))
+    ))
+
+
 def cas_domains() -> frozenset[str]:
     """The actual CAS leaf codes exposed by the checked-in catalog."""
     global _cas_domains
@@ -127,6 +145,10 @@ def label(slug: str, *, lang: str = FEED_LABEL_LANG) -> str:
     value = (slug or "").strip()
     if value == FEED_ARXIV_DOMAIN:
         return "arXiv 预印本" if str(lang).lower().startswith("zh") else "arXiv Preprints"
+    if value.startswith("cas:"):
+        for group in catalog(lang=lang):
+            if group.get("archive") == value:
+                return str(group.get("label") or value)
     if value.isdigit() and len(value) == 6:
         for group in catalog(lang=lang):
             for option in group.get("categories", ()):
@@ -143,7 +165,7 @@ def ancestors(slug: str) -> tuple[str, ...]:
     """
     value = (slug or "").strip()
     if value.isdigit() and len(value) == 6:
-        return (value, value[:4])
+        return (value, f"cas:{value[:4]}", value[:4])
     return tuple(domain_registry().ancestors(value))
 
 

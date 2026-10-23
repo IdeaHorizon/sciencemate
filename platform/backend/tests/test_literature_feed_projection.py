@@ -70,6 +70,64 @@ def _write_fixture_jpeg(path: Path) -> None:
 _ME = "aaaa1111-1111-4111-8111-111111111111"
 
 
+@pytest.mark.asyncio
+async def test_month_only_catalog_date_keeps_month_precision(db_session, tmp_path, monkeypatch) -> None:
+    literature_home = tmp_path / "literature"
+    papers_root = literature_home / "papers"
+    monkeypatch.setenv("HARNESS_LITERATURE_HOME", str(literature_home))
+    upsert_paper(
+        papers_root,
+        {
+            "doi": "10.1234/month-only",
+            "title": "A paper with a month-only publication date",
+            "source": "crossref",
+            "year": 2026,
+            "venue": "Water Research",
+            "pub_type": "journal-article",
+            "pub_date": "2026-9",
+            "url": "https://doi.org/10.1234/month-only",
+            "abstract": "A source-provided summary.",
+            "subscription_requested": True,
+            "feed_acquisition_routes": ["journal"],
+            "article_dir": str(papers_root / "10.1234__month-only"),
+        },
+    )
+
+    report = await project_literature_catalog(db_session, limit=1)
+    assert report.stored == 1
+    item = await db_session.scalar(
+        select(FeedItem).where(FeedItem.canonical_key == "doi:10.1234/month-only")
+    )
+    assert item is not None
+    assert item.published_at == datetime(2026, 9, 1, tzinfo=UTC)
+    assert item.extra["publication_date_precision"] == "month"
+
+    upsert_paper(
+        papers_root,
+        {
+            "doi": "10.1234/day-correction",
+            "title": "A paper whose source supplied the eighth",
+            "source": "crossref",
+            "year": 2026,
+            "venue": "Water Research",
+            "pub_type": "journal-article",
+            "pub_date": "2026-09-08",
+            "publication_date_precision": "month",
+            "url": "https://doi.org/10.1234/day-correction",
+            "abstract": "A source-provided summary.",
+            "subscription_requested": True,
+            "feed_acquisition_routes": ["journal"],
+            "article_dir": str(papers_root / "10.1234__day-correction"),
+        },
+    )
+    await project_literature_catalog(db_session, limit=2)
+    corrected = await db_session.scalar(
+        select(FeedItem).where(FeedItem.canonical_key == "doi:10.1234/day-correction")
+    )
+    assert corrected is not None
+    assert corrected.extra["publication_date_precision"] == "day"
+
+
 def test_source_dates_keep_real_precision_instead_of_becoming_harvest_time() -> None:
     assert publication_datetime("2026-8-5") == datetime(2026, 8, 5, tzinfo=UTC)
     assert publication_datetime("2026/08") == datetime(2026, 8, 1, tzinfo=UTC)
@@ -322,6 +380,39 @@ async def test_project_profile_items_enter_the_candidate_pool_without_a_domain(
 
 
 @pytest.mark.asyncio
+async def test_legacy_project_paper_with_abstract_and_figure_is_ready(
+    db_session, tmp_path, monkeypatch
+) -> None:
+    """Old project indexes predate the preparation flag but have completed assets."""
+    literature_home = tmp_path / "literature"
+    papers_root = literature_home / "papers"
+    monkeypatch.setenv("HARNESS_LITERATURE_HOME", str(literature_home))
+    reset_cache()
+    upsert_paper(
+        papers_root,
+        {
+            "doi": "10.1234/legacy-project-ready",
+            "title": "Steer-by-wire chassis control",
+            "source": "crossref",
+            "year": datetime.now(UTC).year,
+            "venue": "Vehicle Dynamics",
+            "pub_type": "journal-article",
+            "pub_date": datetime.now(UTC).date().isoformat(),
+            "abstract": "A completed source abstract.",
+            "image": {"status": "generated", "fallback": "title_card"},
+            "feed_acquisition_routes": ["project_profile"],
+            "profile_user_ids": [_ME],
+        },
+    )
+    await project_literature_catalog(db_session, limit=20)
+    item = await db_session.scalar(
+        select(FeedItem).where(FeedItem.canonical_key == "doi:10.1234/legacy-project-ready")
+    )
+    assert item is not None
+    assert item.extra["literature_preparation"] == "ready"
+
+
+@pytest.mark.asyncio
 async def test_web_routed_items_are_projected_not_rejected_as_non_journal(
     db_session, tmp_path, monkeypatch
 ) -> None:
@@ -373,3 +464,50 @@ async def test_web_routed_items_are_projected_not_rejected_as_non_journal(
     assert item.domains == []
     assert item.kind == "news"  # 网页发现是「资讯」，不是「论文」
     reset_cache()
+
+
+def test_chinese_language_specialist_is_selected_before_general_linguistics(monkeypatch):
+    monkeypatch.delenv('HARNESS_JOURNAL_DOMAIN_MAP', raising=False)
+    journals = [target['journal'].casefold() for target in _journal_targets({'050103'}).values()]
+    assert journals[0] == 'journal of chinese linguistics'
+    assert len(journals) <= 10
+
+
+@pytest.mark.asyncio
+async def test_verified_harvest_records_recheck_old_subject_tags(db_session, tmp_path, monkeypatch):
+    papers_root = tmp_path / 'literature' / 'papers'
+    monkeypatch.setenv('HARNESS_LITERATURE_HOME', str(tmp_path / 'literature'))
+    monkeypatch.delenv('HARNESS_JOURNAL_DOMAIN_MAP', raising=False)
+    for number, (venue, title, abstract, code) in enumerate([
+        ('Language', 'Ellipsis mismatch', 'Mandarin Chinese syntax.', '050103'),
+        ('Language', 'Syntax of Central Javanese', 'Javanese grammatical analysis.', '050103'),
+        ('Aerospace Science and Technology', 'Aircraft aerodynamic design', 'Airframe optimization.', '100107'),
+    ]):
+        upsert_paper(papers_root, {
+            'doi': f'10.1234/scope-{number}', 'title': title, 'abstract': abstract,
+            'source': 'crossref', 'year': 2026, 'venue': venue, 'pub_type': 'journal-article',
+            'pub_date': '2026-09-20', 'article_dir': str(papers_root / f'scope-{number}'),
+            'feed_acquisition_routes': ['journal'], 'journal_harvest_verified': True,
+            'second_level_domains': [code], 'classification_mode': 'offline_journal_mapping',
+            'subscription_requested': True,
+        })
+    await project_literature_catalog(db_session, limit=10)
+    for number, expected in enumerate([['050103'], [], []]):
+        item = await db_session.scalar(select(FeedItem).where(FeedItem.canonical_key == f'doi:10.1234/scope-{number}'))
+        assert item is not None
+        assert item.domains == expected
+
+
+def test_legacy_completed_lookup_without_abstract_is_prepared():
+    from app.services.feed.literature_projection import preparation_status
+    record = {'abstract_lookup_completed': True, 'image': {'status': 'available'}}
+    assert preparation_status(record) == 'ready'
+    assert preparation_status({**record, 'abstract_lookup_completed': False}) == 'pending'
+    assert preparation_status({**record, 'image': {'status': 'not_requested'}}) == 'pending'
+    assert preparation_status({**record, 'literature_preparation': 'pending'}) == 'pending'
+
+
+def test_legacy_scholar_with_source_abstract_and_figure_is_prepared():
+    from app.services.feed.literature_projection import preparation_status
+    assert preparation_status({'abstract': 'Source abstract', 'feed_acquisition_routes': ['scholar'],
+                               'image': {'status': 'generated'}}) == 'ready'

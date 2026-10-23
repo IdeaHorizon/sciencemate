@@ -6,6 +6,7 @@
  */
 import type { UpdateStatus } from "@/lib/api";
 import type { Phrase } from "@/shared/i18n";
+import { sayWhatIsHappening } from "./say-what-is-happening.ts";
 import type { UpdatePhase } from "./useUpdate";
 
 type Translate = (phrase: Phrase, fields?: Record<string, string | number>) => string;
@@ -15,8 +16,9 @@ export function sayWhatTheCheckFound(status: UpdateStatus | null, phase: UpdateP
   const available = status?.available_version;
   const staged = status?.staged_version;
   const needsReinstall = Boolean(available && status?.shell_update?.needs_reinstall);
-  if (phase === "restarting") return t({ zh: "正在重启以完成更新，窗口会自动回来。", en: "Restarting to finish the update; the window comes back on its own." });
-  if (phase === "installing") return t({ zh: `正在下载并验证 ${available}…`, en: `Downloading and verifying ${available}…` });
+  // 装与重启时说什么只有一份（和横幅同一个函数）；这里不带秒数 —— 关于页那时画的是 UpdateProgress。
+  const happening = sayWhatIsHappening(phase, available ?? staged, 0, t);
+  if (happening) return happening;
   if (phase === "checking") return t({ zh: "正在检查…", en: "Checking…" });
   if (!status) return t({ zh: "还没问过。", en: "Not checked yet." });
   if (status.self_updatable === false) {
@@ -33,7 +35,23 @@ export function sayWhatTheCheckFound(status: UpdateStatus | null, phase: UpdateP
           en: ` ${status.still_publishing.join(", ")} is still being published — check again in a while.` }) : "";
   if (available) return t({ zh: `有新版本 ${available}。`, en: `Version ${available} is available.` }) + onItsWay;
   if (staged) return t({ zh: `更新 ${staged} 已经下好，重启后生效。`, en: `Update ${staged} is staged and applies on the next restart.` });
-  if (status.error) return t({ zh: `没查成：${status.error}`, en: `Check failed: ${status.error}` });
+  if (status.error) {
+    // `error` 是后端的诊断原文（中文）。中文界面照旧给原文；英文界面按种类说一句英文 ——
+    // 原来两种语言都直接插原文，英文界面上一离线就是「Check failed: 拿不到更新信息：…」。
+    const said = status.error;
+    if (status.error_kind === "unreachable") {
+      const cause = status.error_cause ?? "";
+      return t({ zh: `没查成：${said}`,
+                 en: `Check failed: cannot reach the update source — offline, or this machine cannot get there (${cause}).` });
+    }
+    if (status.error_kind === "nothing_published") {
+      return t({ zh: `没查成：${said}`,
+                 en: "Check failed: the update source has no fully published release yet — check again in a while." });
+    }
+    // rejected：拉到了但验不过（签名、清单、大小）。那句诊断只有中文，英文界面上先说清是
+    // 哪一种，原文跟在后面当证据 —— 报 bug 时要的正是它。
+    return t({ zh: `没查成：${said}`, en: `Check failed: the update on offer did not pass verification (${said}).` });
+  }
   if (!status.reachable) {
     // 可选的那一截**先各自翻好**再拼。内联三元里再套一层模板字符串，会把「这句话
     // 中英都写了」这件事从扫盘闸眼里藏掉（它按行看），于是英文界面上漏出一句中文；

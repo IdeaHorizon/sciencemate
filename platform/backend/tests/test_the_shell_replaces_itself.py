@@ -123,8 +123,36 @@ def test_the_mac_shell_checks_again_after_the_backend_restarts() -> None:
         "先记下后端再换壳 —— 不然 applicationWillTerminate 收不掉这个后端")
 
 
+def _mac_swap() -> str:
+    """换壳那一个函数（到下一个成员为止）。补齐版本号的函数紧跟其后，别把它的字算进来。"""
+    start = MAC.index("private func replaceMyselfIfANewerShellIsStaged")
+    return MAC[start:MAC.index("private let alignQueue", start)]
+
+
+def _mac_align() -> str:
+    start = MAC.index("private func alignMyVersion")
+    return MAC[start:MAC.index("private func declareMyself", start)]
+
+
+def test_the_mac_shell_keeps_info_plist_and_the_signature_in_step_with_the_shell() -> None:
+    """10-19 本机 0.5.6 → 0.5.7：换完壳 Info.plist 还写 0.5.6（访达与设置页两个数），
+    bundle 签名也不再成立。换壳之后、拉起新的自己之前对齐；早就换好却没对齐的，在后台补。"""
+    swap = _mac_swap()
+    after_swap = swap[swap.index('NSLog("SHELL-SWAP done'):swap.index('relaunch.arguments = ["-n"')]
+    assert "alignMyVersion(to: version)" in after_swap, "换完壳、拉起新的自己之前没对齐 Info.plist —— 新的那个读到的还是旧号"
+    same = swap[swap.index("if theirs == ours {"):]
+    assert "alignQueue.async" in same[:same.index("return false")], "壳早就换好、版本号没跟上的那种不补"
+    align = _mac_align()
+    assert 'plist["CFBundleShortVersionString"] = version' in align and 'plist["CFBundleVersion"] = version' in align
+    assert '["--force", "--sign", "-", "--timestamp=none", target.path]' in align, "重签参数和打包时不是同一组"
+    exe, bundle = align.index("targets.append(exe)"), align.index("targets.append(bundle)")
+    assert exe < bundle, "先签 bundle 再签里面的二进制 —— 外层签名立刻失效"
+    packager = (REPO / "scripts/package/build_mac_app.py").read_text(encoding="utf-8")
+    assert 'common = ["codesign", "--force", "--sign", "-", "--timestamp=none"]' in packager, "打包的签名参数变了，壳里那份要跟着改"
+
+
 def test_the_mac_shell_has_both_gates_and_a_rollback() -> None:
-    fn = MAC[MAC.index("private func replaceMyselfIfANewerShellIsStaged"):MAC.index("private func declareMyself")]
+    fn = _mac_swap()
     assert "isNewer(version, than: mine)" in fn, "没有版本闸"
     assert "CFBundleShortVersionString" in fn, "版本不是从 Info.plist 读的"
     assert "theirs == ours" in fn, "没有哈希闸"

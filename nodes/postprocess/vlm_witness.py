@@ -51,7 +51,7 @@ class ReviewerConfig:
     role: str = "visual_review"
     calibrated_model: str = "minimax-m3"
     temperature: float = 0.0
-    timeout_s: float = 150.0
+    timeout_s: float = 600.0  # reasoning 型 VLM（glm-5.3-flash 实测）单次要几分钟；150s 必超时
     max_retries: int = 4
     retry_backoff_s: float = 0.75
     max_tokens: int = 4800
@@ -195,7 +195,9 @@ def _detail_montage_data_url(path: Path) -> str | None:
         buffer = io.BytesIO()
         board.save(buffer, format="PNG", optimize=True)
         return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
-    except (OSError, ValueError):
+    except (ImportError, OSError, ValueError):
+        # ImportError：部署机的 PIL 可能是坏的幻影目录（2026-10-16 实机），
+        # 此时没有拼图板不等于没有证人 —— 降级回只看原图。
         return None
 
 
@@ -537,14 +539,6 @@ def _replicated_observations(
         if matched:
             replicated.append(observation)
     return replicated
-
-
-def _observations_replicate(
-    primary: list[dict[str, Any]], confirmation: list[dict[str, Any]]
-) -> bool:
-    if not primary or not confirmation:
-        return not primary and not confirmation
-    return bool(_replicated_observations(primary, confirmation))
 
 
 def _regions_correspond(left: dict[str, Any], right: dict[str, Any]) -> bool:

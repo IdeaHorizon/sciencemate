@@ -2,7 +2,9 @@
 
 import { RefreshCw } from "lucide-react";
 
+import { DeveloperSourcePanel } from "@/features/update/DeveloperSourcePanel";
 import { sayWhatTheCheckFound } from "@/features/update/say-what-the-check-found";
+import { UpdateProgress } from "@/features/update/UpdateProgress";
 import { useUpdate } from "@/features/update/useUpdate";
 import { PRODUCT_NAME } from "@/shared/brand";
 import { useT, type Phrase } from "@/shared/i18n";
@@ -35,9 +37,11 @@ const WHERE_IT_CAME_FROM: Record<UpdateStatus["installed_from"], Phrase> = {
 
 export function AboutPanel() {
   const t = useT();
-  const { status, phase, problem, lastChecked, check, install, restart } = useUpdate();
+  const { status, phase, problem, lastChecked, elapsedSeconds, check, install, restart } = useUpdate();
 
   const busy = phase === "checking" || phase === "installing" || phase === "restarting";
+  // 装与重启的那十几秒：按钮变灰不算反馈（10-19「点一下什么反应没有」）—— 换成转圈和一句话。
+  const updating = phase === "installing" || phase === "restarting";
   const available = status?.available_version;
   const staged = status?.staged_version;
   const needsReinstall = Boolean(available && status?.shell_update?.needs_reinstall);
@@ -54,8 +58,11 @@ export function AboutPanel() {
           <div>
             <h2>{PRODUCT_NAME}</h2>
             <p>
-              {status?.installed_version
-                ? <>{t({ zh: "版本", en: "Version" })} <strong>{status.installed_version}</strong>
+              {status
+                ? <>{status.installed_version
+                      ? <>{t({ zh: "版本", en: "Version" })} <strong>{status.installed_version}</strong></>
+                      // 源码目录直接跑的没有版本标记（开发者模式就是这样）：说清，别一直「正在读」。
+                      : t({ zh: "没有版本标记", en: "No version marker" })}
                     <small>　·　{t(WHERE_IT_CAME_FROM[status.installed_from] ?? WHERE_IT_CAME_FROM.unknown)}</small></>
                 : t({ zh: "正在读版本…", en: "Reading version…" })}
             </p>
@@ -66,10 +73,12 @@ export function AboutPanel() {
           <div className="settings-row about-update-row">
             <span>
               <strong>{t({ zh: "更新", en: "Updates" })}</strong>
-              <small>{sayWhatTheCheckFound(status, phase, lastChecked, t)}</small>
+              {updating
+                ? <small><UpdateProgress phase={phase} version={available ?? staged} elapsedSeconds={elapsedSeconds} /></small>
+                : <small>{sayWhatTheCheckFound(status, phase, lastChecked, t)}</small>}
             </span>
             <div className="about-update-actions">
-              {staged && !available ? (
+              {updating ? null : staged && !available ? (
                 <button type="button" className="settings-primary-action" disabled={busy} onClick={() => void restart()}>
                   {t({ zh: "现在重启", en: "Restart now" })}
                 </button>
@@ -111,6 +120,9 @@ export function AboutPanel() {
           </p>
         ) : null}
       </section>
+
+      {/* 开发者模式和更新用同一个 restart：一条路，「即将重启」那句话也只写一次。 */}
+      <DeveloperSourcePanel phase={phase} restart={restart} />
     </div>
   );
 }

@@ -151,7 +151,7 @@ loop_hooks:
   - repeated_error_detector
   - output_corruption_sentinel
   - high_risk_command_audit          # run 结束机械对账高危命令：物理安全，保留
-  - preprocessing_boundary_audit     # 前处理产物生成行为对账：数据边界，保留
+  - preprocessing_boundary_audit     # 本次运行的非约束诊断线索，不判违规或写长期记忆
   - repro_snapshot
   - callee_contracts
 context_config:

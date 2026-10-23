@@ -398,6 +398,22 @@ async def test_interface_settings_defaults_save_and_preserve_other_preferences(
 
 
 @pytest.mark.asyncio
+async def test_notification_preferences_save_without_the_retired_run_completed_switch(
+    runtime_client,
+) -> None:
+    """现在的桌面不再发 run_completed（「执行完成」提醒已删）；服务器照收不误。"""
+    client, _factory = runtime_client
+    researcher = await _token(client, "researcher@atrium.local")
+    saved = await client.put(
+        "/api/v1/settings/notifications",
+        headers=_headers(researcher),
+        json={"decision_required": False, "run_failed": True, "budget_warning": True},
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["decision_required"] is False
+
+
+@pytest.mark.asyncio
 async def test_notification_preferences_are_in_app_only_persistent_and_isolated(
     runtime_client,
 ) -> None:

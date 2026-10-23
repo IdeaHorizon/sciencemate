@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import sqlite3
 import time
+from pathlib import Path
+from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
-from pathlib import Path
-import sqlite3
-from urllib.parse import unquote
+from fastapi.responses import FileResponse, PlainTextResponse
 
 from app.auth import get_current_user
 from app.database import get_db
@@ -20,30 +21,88 @@ from app.schemas.literature import (
     LiteratureTranslateIn,
     LiteratureTranslateOut,
 )
+from app.services import school_library
 from app.services.feed import bridge
 from app.services.feed.literature_projection import literature_papers_root
 from app.services.model_backends import select_effective_backend
 from app.services.sse import sse_response
+from app.services.user_interface import Language, language_on_screen, said_of, say
 import os
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+async def _school_search(query: str, user: User, limit: int) -> list[dict]:
+    try:
+        return await asyncio.to_thread(
+            school_library.search, query,
+            institution_id=str(user.institution_id), limit=limit,
+        )
+    except (OSError, sqlite3.Error, ValueError):
+        logger.exception("Institutional catalogue search failed")
+        return []
+
+#: 三个端点同一句，写一份。
+_NO_REASONING_MODEL = {"zh": "没有可用的 reasoning 模型后端", "en": "No reasoning model backend is available"}
 
 
 @router.post("/search", response_model=LiteratureSearchOut)
-async def search_literature(payload: LiteratureSearchIn, user: User = Depends(get_current_user), db=Depends(get_db)) -> LiteratureSearchOut:
+async def search_literature(payload: LiteratureSearchIn, user: User = Depends(get_current_user), db=Depends(get_db),
+                            lang: Language = Depends(language_on_screen)) -> LiteratureSearchOut:
     backend = await select_effective_backend(db, user, role=bridge.REASONING_ROLE)
     if backend is None:
-        raise HTTPException(status_code=503, detail="没有可用的 reasoning 模型后端")
+        raise HTTPException(status_code=503, detail=say(_NO_REASONING_MODEL, lang))
+    # 学校馆藏检索与平台索引并行（#1235）；平台那边失败时把它收掉，别留下孤儿任务。
+    school_task = asyncio.create_task(_school_search(payload.query, user, payload.limit))
     try:
         result = await bridge.call(op="literature_search", payload={"query": payload.query, "limit": payload.limit, "remote_refresh": payload.remote_refresh}, result_type="literature_search_result", backend=backend)
     except (bridge.BridgeUnavailable, RuntimeError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        school_task.cancel()
+        raise HTTPException(status_code=503, detail=said_of(exc, lang, otherwise={
+            "zh": "学术搜索这次没做成：{why}", "en": "The literature search did not go through: {why}"})) from exc
     result.pop("type", None)
     result.pop("request_id", None)
     # JSONL emitter 为每个事件统一附加时间戳；它属于传输元数据，不是
     # literature 搜索响应契约的一部分。
     result.pop("at", None)
+    result = school_library.merge_search_results(result, await school_task, limit=payload.limit)
     return LiteratureSearchOut.model_validate(result)
+
+
+@router.get("/school/search", response_model=LiteratureSearchOut)
+async def search_school_library(
+    query: str = Query(..., min_length=1, max_length=2000),
+    limit: int = Query(default=200, ge=1, le=200),
+    user: User = Depends(get_current_user),
+) -> LiteratureSearchOut:
+    """Search the school's catalogue without requiring the model or platform index."""
+    rows = await _school_search(query, user, limit)
+    result = school_library.merge_search_results(
+        {"query": query, "papers": [], "candidate_count": 0,
+         "source_counts": {}, "search_mode": "school_library"},
+        rows, limit=limit,
+    )
+    return LiteratureSearchOut.model_validate(result)
+
+
+@router.get("/school/fulltext/{record_id}")
+async def school_fulltext(record_id: str, user: User = Depends(get_current_user),
+                          lang: Language = Depends(language_on_screen)):
+    """Demo institutional full text from the school-owned database."""
+    if len(record_id) > 100:
+        raise HTTPException(status_code=404, detail=say({"zh": "馆藏记录不存在", "en": "No such catalogue record"}, lang))
+    try:
+        content = await asyncio.to_thread(
+            school_library.fulltext, record_id,
+            institution_id=str(user.institution_id),
+        )
+    except (OSError, sqlite3.Error):
+        logger.exception("Institutional full text lookup failed")
+        raise HTTPException(status_code=503, detail=say({"zh": "馆藏暂不可用", "en": "The institutional catalogue is unavailable right now"}, lang)) from None
+    if content is None:
+        raise HTTPException(status_code=404, detail=say({"zh": "馆藏记录不存在或无权访问", "en": "No such catalogue record, or no access to it"}, lang))
+    return PlainTextResponse(content, headers={"Cache-Control": "private, no-store"})
 
 
 @router.post("/translate", response_model=LiteratureTranslateOut)
@@ -51,20 +110,22 @@ async def translate_literature_page(
     payload: LiteratureTranslateIn,
     user: User = Depends(get_current_user),
     db=Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> LiteratureTranslateOut:
     """按需翻译当前可见页；独立请求，不阻塞学术索引搜索结果。"""
     backend = await select_effective_backend(db, user, role=bridge.REASONING_ROLE)
     if backend is None:
-        raise HTTPException(status_code=503, detail="没有可用的 reasoning 模型后端")
+        raise HTTPException(status_code=503, detail=say(_NO_REASONING_MODEL, lang))
     try:
         result = await bridge.call(
             op="literature_translate_page",
-            payload={"papers": [paper.model_dump() for paper in payload.papers]},
+            payload={"papers": [paper.model_dump() for paper in payload.papers], "generate_summaries": payload.generate_summaries, "translate_titles": payload.translate_titles, "translate_abstracts": payload.translate_abstracts, "combine_translation": payload.combine_translation},
             result_type="literature_translation_result",
             backend=backend,
         )
     except (bridge.BridgeUnavailable, RuntimeError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=said_of(exc, lang, otherwise={
+            "zh": "这一页没翻译成：{why}", "en": "This page could not be translated: {why}"})) from exc
     for key in ("type", "request_id", "at"):
         result.pop(key, None)
     return LiteratureTranslateOut.model_validate(result)
@@ -75,6 +136,7 @@ async def literature_asset(
     doi: str = Query(..., min_length=1, max_length=300),
     kind: str = Query(..., pattern="^(pdf|figure)$"),
     name: str | None = Query(default=None, max_length=255),
+    lang: Language = Depends(language_on_screen),
 ):
     """安全地提供共享 literature 目录中的 PDF/figure 文件。"""
     # 「论文文件在哪」问 literature_projection —— 投影层和下载接口读的必须是
@@ -82,7 +144,8 @@ async def literature_asset(
     root = literature_papers_root()
     catalog = root / "literature_catalog.sqlite3"
     if not catalog.is_file():
-        raise HTTPException(status_code=404, detail="本地文献 catalog 不存在")
+        raise HTTPException(status_code=404, detail=say(
+            {"zh": "本地文献 catalog 不存在", "en": "The local literature catalog does not exist"}, lang))
     normalized = unquote(doi).strip().lower()
     try:
         with sqlite3.connect(catalog) as conn:
@@ -91,16 +154,19 @@ async def literature_asset(
                 (normalized,),
             ).fetchone()
     except sqlite3.Error as exc:
-        raise HTTPException(status_code=500, detail="读取本地文献 catalog 失败") from exc
+        raise HTTPException(status_code=500, detail=say(
+            {"zh": "读取本地文献 catalog 失败", "en": "Reading the local literature catalog failed"}, lang)) from exc
     if not row:
-        raise HTTPException(status_code=404, detail="本地没有这篇论文的归档记录")
+        raise HTTPException(status_code=404, detail=say(
+            {"zh": "本地没有这篇论文的归档记录", "en": "There is no local archive record for this paper"}, lang))
     article_dir, pdf_path, figure_path = row
     try:
         article = Path(article_dir).resolve()
         if not article.is_relative_to(root):
             raise ValueError
     except (OSError, ValueError):
-        raise HTTPException(status_code=404, detail="本地归档路径无效") from None
+        raise HTTPException(status_code=404, detail=say(
+            {"zh": "本地归档路径无效", "en": "The local archive path is invalid"}, lang)) from None
 
     candidates: list[Path] = []
     if kind == "pdf":
@@ -118,20 +184,23 @@ async def literature_asset(
         ) if (article / "figure").is_dir() else None
     target = next((p.resolve() for p in candidates if p.is_file()), None)
     if target is None or not target.is_relative_to(root):
-        raise HTTPException(status_code=404, detail="本地没有可用的该资产")
+        raise HTTPException(status_code=404, detail=say(
+            {"zh": "本地没有可用的该资产", "en": "This asset is not available locally"}, lang))
     media = "application/pdf" if kind == "pdf" else None
     return FileResponse(target, media_type=media, filename=target.name)
 
 
 @router.post("/search/stream")
-async def search_literature_stream(payload: LiteratureSearchIn, user: User = Depends(get_current_user), db=Depends(get_db)):
+async def search_literature_stream(payload: LiteratureSearchIn, user: User = Depends(get_current_user), db=Depends(get_db),
+                                   lang: Language = Depends(language_on_screen)):
     """流式返回学术搜索阶段，最后发送完整 index 结果。"""
     backend = await select_effective_backend(db, user, role=bridge.REASONING_ROLE)
     if backend is None:
-        raise HTTPException(status_code=503, detail="没有可用的 reasoning 模型后端")
+        raise HTTPException(status_code=503, detail=say(_NO_REASONING_MODEL, lang))
 
     async def events():
         queue: asyncio.Queue[dict] = asyncio.Queue()
+        school_task = asyncio.create_task(_school_search(payload.query, user, payload.limit))
 
         started = time.monotonic()
 
@@ -224,6 +293,9 @@ async def search_literature_stream(payload: LiteratureSearchIn, user: User = Dep
             for key in ("type", "request_id", "at"):
                 result.pop(key, None)
 
+            result = school_library.merge_search_results(
+                result, await school_task, limit=payload.limit,
+            )
             validated = LiteratureSearchOut.model_validate(result)
 
             done_event = {

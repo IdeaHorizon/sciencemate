@@ -141,7 +141,8 @@ a.feed-card-title:hover {
 /* 标题的译文，跟在原题下面一行。 */
 .feed-card-title-zh {
   margin: 0;
-  font-size: var(--font-size-caption);
+  font-size: var(--font-size-label);
+  font-weight: 400;
   line-height: 1.5;
   color: var(--color-fg-muted);
 }
@@ -167,6 +168,10 @@ a.feed-card-title:hover {
   font-size: var(--font-size-control);
   line-height: 1.6;
   color: var(--color-fg-muted);
+}
+
+.feed-card-summary-zh {
+  font-size: var(--font-size-label);
 }
 
 .feed-card-foot {
@@ -289,8 +294,8 @@ a.feed-card-title:hover {
 }
 
 .feed-picker-groups {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: var(--space-4);
   /* 155 个分类装不下时滚它自己的，不把整页推长。 */
   max-height: 52vh;
@@ -773,9 +778,7 @@ a.feed-card-title:hover {
   font-weight: 500;
 }
 
-/* 瀑布流的列容器：grid 只是把 N 列并排（列数由 FeedMasonry 的内联样式
- * 按断点 3/2/1 控制）。align-items:start 让每列顶部对齐、各自保持 natural
- * height，列内卡片垂直堆叠。列底对齐靠 JS 动态裁剪摘要来完成。 */
+/* 卡片宽度按响应式列数确定，位置按实测高度分配至最短列。 */
 .feed-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -783,12 +786,8 @@ a.feed-card-title:hover {
   align-items: start;
 }
 
-.feed-masonry-col {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  min-width: 0;
-}
+.feed-masonry { position: relative; }
+.feed-masonry-item { min-width: 0; display: flow-root; }
 
 /* Top 3 同理：它本来就是三块，别让它在宽屏上散成四块、窄屏上挤成三条。 */
 .feed-picks {
@@ -843,10 +842,9 @@ a.feed-card-title:hover {
 .feed-card-image {
   display: block;
   width: 100%;
-  /* 固定比例：各家给的图尺寸差异极大（APS 的 key image 近方形，
-     Phys.org 的 90×90 缩略图很小）。不固定的话同一行卡片高度乱跳。 */
-  aspect-ratio: 16 / 9;
-  object-fit: cover;
+  height: auto;
+  max-height: 360px;
+  object-fit: contain;
   background: var(--color-bg-overlay);
   border-bottom: 1px solid var(--color-border);
 }
@@ -906,8 +904,9 @@ a.feed-card-title:hover {
 .feed-dialog-image {
   display: block;
   width: 100%;
-  max-height: 320px;
-  object-fit: cover;
+  height: auto;
+  max-height: 60vh;
+  object-fit: contain;
   background: var(--color-bg-overlay);
   border-bottom: 1px solid var(--color-border);
 }
@@ -1002,7 +1001,10 @@ a.feed-dialog-title:hover {
 
 
 /* 推荐页控制与期刊/学者订阅 */
-.feed-recommendation-controls { display: flex; align-items: center; gap: var(--space-2); }
+.feed-recommendation-controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.feed-source-filters { display: flex; flex-wrap: wrap; align-items: center; column-gap: 16px; row-gap: 8px; margin-inline: 8px; }
+.feed-source-filters label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; }
+.feed-source-filters input { margin: 0; }
 .feed-interest-dialog { width: min(920px, 100%); }
 .feed-subscription-kinds { display: flex; gap: var(--space-2); margin: var(--space-4) 0; }
 .feed-subscription-search { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-bg-elevated); }
@@ -1025,3 +1027,52 @@ a.feed-dialog-title:hover {
 .feed-subscription-chips .feed-sub-avatar.is-scholar { width: 18px; height: 18px; }
 .feed-subscription-chips .feed-sub-avatar.is-journal { width: 14px; height: 19px; }
 .feed-subscription-feed-title { margin-top: var(--space-6); }
+
+.feed-progress { padding: var(--space-3); margin-bottom: var(--space-4); border: 1px solid var(--color-border); border-radius: 10px; background: var(--color-bg-elevated); }
+.feed-progress-counts { display: flex; flex-wrap: wrap; gap: var(--space-3); margin: var(--space-2) 0; }
+.feed-progress p { margin: var(--space-2) 0; }
+.feed-progress small { color: var(--color-fg-muted); }
+
+.feed-picker-groups > .feed-group-toggle { padding: 12px; border: 1px solid var(--color-border); }
+.feed-domain-backdrop { position: fixed; inset: 0; z-index: 1000; background: rgba(0,0,0,.4); display: flex; align-items: center; justify-content: center; padding: 24px; }
+.feed-domain-dialog { width: min(720px,100%); max-height: 80vh; overflow-y: auto; background: var(--color-bg); border-radius: 14px; padding: 24px; box-shadow: 0 12px 48px rgba(0,0,0,.2); }
+.feed-domain-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+.feed-domain-dialog header button { border: 0; background: transparent; color: inherit; cursor: pointer; }
+.feed-domain-dialog footer { display: flex; justify-content: flex-end; margin-top: 20px; }
+
+.feed-subscription-backdrop { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(0,0,0,.45); }
+.feed-subscription-dialog { width: min(1100px, 100%); max-height: 90vh; display: flex; flex-direction: column; background: var(--color-bg-elevated); border: 1px solid var(--color-border); border-radius: 14px; box-shadow: 0 12px 48px rgba(0,0,0,.2); }
+.feed-subscription-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 24px; border-bottom: 1px solid var(--color-border); }
+.feed-subscription-dialog-head h2 { margin: 0; font-size: var(--font-size-title); }
+.feed-subscription-dialog-head button { display: flex; border: 0; background: transparent; color: inherit; cursor: pointer; padding: 6px; }
+.feed-subscription-dialog-body { padding: 24px; overflow-y: auto; overscroll-behavior: contain; }
+@media (max-width: 600px) { .feed-subscription-backdrop { padding: 8px; } .feed-subscription-dialog { max-height: 95vh; } .feed-subscription-dialog-body { padding: 12px; } }
+
+.feed-domain-progress { display: grid; gap: var(--space-3); padding-bottom: var(--space-3); border-bottom: 1px solid var(--color-border); }
+.feed-domain-progress-row { display: grid; gap: var(--space-2); }
+.feed-domain-progress-row > span { color: var(--color-fg-muted); font-size: var(--font-size-label); }
+
+.feed-scholar-chip { min-width: 0; max-width: 100%; display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.feed-scholar-chip > small { color: var(--color-fg-muted); font-size: var(--font-size-label); }
+
+.feed-scholar-identity-candidate { flex-basis: 100%; display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--color-border); border-radius: 6px; }
+.feed-scholar-identity-candidate > div { flex: 1; min-width: 0; display: grid; gap: var(--space-1); }
+.feed-scholar-identity-candidate small { color: var(--color-fg-muted); font-size: var(--font-size-caption); }
+
+
+.feed-source-progress { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--space-3); }
+.feed-source-progress-item { display: grid; gap: var(--space-2); padding: var(--space-3); background: var(--color-bg-overlay); border: 1px solid var(--color-border); border-radius: 6px; }
+.feed-source-progress-item > span { font-size: var(--font-size-label); color: var(--color-fg-muted); }
+.feed-source-progress-item > small { font-size: var(--font-size-caption); color: var(--color-fg-muted); }
+.feed-progress-details { margin-top: var(--space-2); }
+.feed-progress-details > summary { cursor: pointer; color: var(--color-fg-muted); font-size: var(--font-size-label); }
+
+/* 学者机构统一单行省略，完整信息保留在悬停提示中。 */
+.feed-scholar-institution { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feed-scholar-chip > button { min-width: 0; max-width: 100%; }
+.feed-scholar-chip > button > .feed-scholar-institution { flex: 0 1 auto; }
+.feed-scholar-chip > button > svg,
+.feed-scholar-identity-candidate > button,
+.feed-subscription-result > button { flex-shrink: 0; }
+
+.feed-scholar-name { flex: none; white-space: nowrap; }

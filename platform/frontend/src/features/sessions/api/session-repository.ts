@@ -22,6 +22,7 @@ import type {
   SessionMessage,
 } from "../types";
 import { say, type Language } from "@/shared/i18n";
+import { ContractViolation } from "@/shared/contract-violation";
 import { diagnosticsFailureMessage, diagnosticsFilename } from "../lib/diagnostics";
 import type { EnvironmentRepairResult, SessionEnvironment } from "../lib/environment";
 
@@ -31,7 +32,7 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await api.fetchWithAuth(`${API_BASE_URL}${path}`, { ...init, headers });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new ApiError(body.detail || `API error: ${response.status}`, response.status);
+    throw ApiError.fromBody(body, response.status);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -45,6 +46,7 @@ export type SessionDataMode = "api" | "fixture";
 
 export async function listProjectSessions(
   projectId: string,
+  lang: Language,
   currentUser?: CurrentUser | null,
   mode: SessionDataMode = "api",
 ): Promise<ResearchSession[]> {
@@ -55,25 +57,27 @@ export async function listProjectSessions(
   const payload = await requestJson<CanonicalSessionPayload[] | { items: CanonicalSessionPayload[] }>(
     projectSessionsCollectionPath(projectId, { includeArchived: true }),
   );
-  return payloadItems(payload).map((session) => adaptCanonicalSession(session, currentUser));
+  return payloadItems(payload).map((session) => adaptCanonicalSession(session, lang, currentUser));
 }
 
 export async function getProjectSession(
   projectId: string,
   sessionId: string,
+  lang: Language,
   currentUser?: CurrentUser | null,
   mode: SessionDataMode = "api",
 ): Promise<ResearchSession> {
   if (mode === "fixture") {
     const fixture = sessionFixtures(projectId, currentUser).find((session) => session.id === sessionId);
-    if (!fixture) throw new ApiError("Session not found", 404);
+    // 演示模式下扮后端那句 404 —— 打不开会话的页面会照念 ApiError 的 message。
+    if (!fixture) throw new ApiError(say({ zh: "找不到这个会话", en: "Session not found" }, lang), 404);
     return fixture;
   }
   const payload = await requestJson<CanonicalSessionPayload>(
     `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}`,
   );
-  if (payload.projectId !== projectId) throw new Error("Session project identity mismatch.");
-  return adaptCanonicalSession(payload, currentUser);
+  if (payload.projectId !== projectId) throw new ContractViolation("Session project identity mismatch.");
+  return adaptCanonicalSession(payload, lang, currentUser);
 }
 
 export async function listSessionMessages(
@@ -88,7 +92,8 @@ export async function listSessionMessages(
   return adaptCanonicalMessages(payloadItems(payload));
 }
 
-export async function createProjectSession(projectId: string, title = "New research") {
+/** 标题由调用方按界面语言给 —— 它会存进库，此后谁打开都是这几个字。 */
+export async function createProjectSession(projectId: string, title: string) {
   return requestJson<CanonicalSessionPayload>(
     projectSessionsCollectionPath(projectId),
     { method: "POST", body: JSON.stringify({ title }) },
@@ -144,7 +149,7 @@ export async function undoLastSessionWrite(projectId: string, sessionId: string)
 export async function fetchSessionDiagnostics(
   projectId: string,
   sessionId: string,
-  lang: Language = "zh",
+  lang: Language,
 ): Promise<{ blob: Blob; filename: string }> {
   const response = await api.fetchWithAuth(
     `${API_BASE_URL}/projects/${projectId}/sessions/${sessionId}/diagnostics`,
@@ -209,7 +214,7 @@ export async function addFileToSession(
   file: File,
   note = "",
   // 兜底文案跟着界面语言 —— 后端给了 detail.message 就用后端那句。
-  lang: Language = "zh",
+  lang: Language,
 ) {
   const form = new FormData();
   form.append("file", file);

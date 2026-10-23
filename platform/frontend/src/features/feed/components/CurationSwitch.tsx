@@ -28,7 +28,7 @@ import { fc } from "../lib/feed-copy";
  * 「平台没配挖掘模型」和「我自己没开」是两件事，处置完全不同（一个要找管理员，
  * 一个自己点一下）。合成一个"开关是灰的"，用户无从分辨。
  */
-export function CurationSwitch() {
+export function CurationSwitch({ onChange }: { onChange?: () => void } = {}) {
   const queryClient = useQueryClient();
   const lang = useLanguage();
   const curation = useQuery({
@@ -37,10 +37,13 @@ export function CurationSwitch() {
   });
 
   const toggle = useMutation({
+    mutationKey: ["feed", "save-curation"],
+    onMutate: () => onChange?.(),
     mutationFn: (enabled: boolean) => api.setFeedCuration(enabled),
     onSuccess: () => {
       // 开关一变，方向和今天的选摘都可能变 —— 整片重取。
-      void queryClient.invalidateQueries({ queryKey: ["feed"] });
+      void queryClient.invalidateQueries({ queryKey: qk.feedCuration() });
+      void queryClient.invalidateQueries({ queryKey: qk.feedToday(), refetchType: "none" });
     },
     onError: (error) => {
       // 后端把"为什么打不开"写成人话（没配模型、去哪配），原样给用户。

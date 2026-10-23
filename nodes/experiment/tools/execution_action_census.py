@@ -722,7 +722,7 @@ def _receipted_fetch_actions(state: Any) -> list[dict[str, Any]]:
     except Exception:
         return []
     projected: list[dict[str, Any]] = []
-    dispatch_rows: dict[str, dict[str, Any]] = {}
+    dispatch_rows: dict[tuple[str, str], dict[str, Any]] = {}
     for index, event in enumerate(events):
         name = str(event.get("event") or "")
         if name in _FETCH_RECEIPT_EVENTS:
@@ -734,7 +734,7 @@ def _receipted_fetch_actions(state: Any) -> list[dict[str, Any]]:
             # P0a v4：dispatch 的权威收据本来就随基线的 data_request_dispatched 落账
             # （contract_audit 在账本提交后写它）；不另造第二条事件。paused 的派发
             # 终态未知——按 unknown 记，_accounted_failures 把它算失败，直到下面的
-            # data_dispatch_pause_reconciled 把同一 spec 的终态补上。
+            # data_dispatch_pause_reconciled 把同一 spec + child 的终态补上。
             receipt = event.get("data_dispatch_receipt")
             receipt = receipt if isinstance(receipt, dict) else {}
             tool = "dispatch_data_request"
@@ -750,7 +750,7 @@ def _receipted_fetch_actions(state: Any) -> list[dict[str, Any]]:
             terminal = _dispatch_terminal_status(
                 "returned", event.get("child_status"),
                 terminal_outcome=event.get("terminal_outcome"))
-            row = dispatch_rows.get(spec_id)
+            row = dispatch_rows.get((spec_id, str(event.get("data_run_id") or "")))
             if row is not None:
                 # 同一 receipt identity 的单调演进：终态由 reconcile 事件接管。
                 row["terminal_status"] = terminal
@@ -793,7 +793,9 @@ def _receipted_fetch_actions(state: Any) -> list[dict[str, Any]]:
             }
         )
         if tool == "dispatch_data_request":
-            dispatch_rows[str(event.get("spec_id") or "")] = projected[-1]
+            child_id = ((event.get("data_dispatch_receipt") or {}).get("child_run_id")
+                        if name == "data_request_dispatched" else event.get("data_run_id"))
+            dispatch_rows[(str(event.get("spec_id") or ""), str(child_id or ""))] = projected[-1]
     # 对抗审查（09-21）：paused 的派发若 data_request_dispatched 事件没落下（持久化
     # 失败已结构化返回），reconcile 在子 run 结束前补不了任何事件——census 看不见这次
     # 派发，build 收尾就能绿。权威账本（input delivery ledger）此时已提交：没有事件的
@@ -808,11 +810,14 @@ def _receipted_fetch_actions(state: Any) -> list[dict[str, Any]]:
         ledger = None
     specs = (ledger or {}).get("specs") if isinstance(ledger, dict) else None
     for spec_id, entry in sorted((specs or {}).items()):
-        if spec_id in dispatch_rows or not isinstance(entry, dict):
+        if not isinstance(entry, dict):
             continue
         delivery = entry.get("delivery")
         receipt = delivery.get("data_dispatch_receipt") if isinstance(delivery, dict) else None
         if not isinstance(receipt, dict) or entry.get("lifecycle_status") not in {None, "active"}:
+            continue
+        identity = (spec_id, str(receipt.get("child_run_id") or ""))
+        if identity in dispatch_rows:
             continue
         terminal = _dispatch_terminal_status(
             receipt.get("dispatch_state"), receipt.get("child_status"))
@@ -840,7 +845,7 @@ def _receipted_fetch_actions(state: Any) -> list[dict[str, Any]]:
             "receipt_event": "input_delivery_ledger",
             "errors": [],
         }
-        dispatch_rows[spec_id] = row
+        dispatch_rows[identity] = row
         projected.append(row)
     return projected
 

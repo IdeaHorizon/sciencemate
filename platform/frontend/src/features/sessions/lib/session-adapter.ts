@@ -1,5 +1,6 @@
 import type { CurrentUser, RunUsage } from "@/lib/api";
 import { readContextWindow } from "./context-window.ts";
+import { say, type Language } from "../../../shared/i18n/language.ts";
 import type {
   AnswerAffordance,
   ResearchSession,
@@ -172,20 +173,21 @@ function adaptAnswerAffordance(raw: unknown): AnswerAffordance {
   };
 }
 
-function attributionLabel(userId: string | null | undefined, currentUser?: CurrentUser | null) {
-  if (!userId) return "Unassigned";
+function attributionLabel(userId: string | null | undefined, lang: Language, currentUser?: CurrentUser | null) {
+  if (!userId) return say({ zh: "未指定", en: "Unassigned" }, lang);
   if (currentUser?.id === userId) return currentUser.display_name;
-  return "Project member";
+  return say({ zh: "项目成员", en: "Project member" }, lang);
 }
 
 export function adaptCanonicalSession(
   payload: CanonicalSessionPayload,
+  lang: Language,
   currentUser?: CurrentUser | null,
 ): ResearchSession {
   return {
     id: payload.id,
     projectId: payload.projectId,
-    title: payload.title || "Untitled research",
+    title: payload.title || say({ zh: "未命名的研究", en: "Untitled research" }, lang),
     summary: payload.summary ?? null,
     createdByUserId: payload.createdByUserId ?? null,
     primaryDriverUserId: payload.primaryDriverUserId ?? null,
@@ -210,8 +212,8 @@ export function adaptCanonicalSession(
     usage: payload.usage ?? { ...EMPTY_USAGE },
     contextWindow: readContextWindow(payload.contextWindow),
     retryCount: payload.retryCount ?? 0,
-    driverLabel: payload.primaryDriverName || attributionLabel(payload.primaryDriverUserId, currentUser),
-    creatorLabel: payload.createdByName || attributionLabel(payload.createdByUserId, currentUser),
+    driverLabel: payload.primaryDriverName || attributionLabel(payload.primaryDriverUserId, lang, currentUser),
+    creatorLabel: payload.createdByName || attributionLabel(payload.createdByUserId, lang, currentUser),
     capabilities: payload.capabilities ?? [],
     source: "canonical",
   };

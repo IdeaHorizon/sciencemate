@@ -93,6 +93,11 @@ def _iter11_requests() -> list[dict]:
     return [
         {
             "request_id": OVERVIEW_ID, "asset_kind": "schematic", "purpose": "publication",
+            # 双轨制后，纯文字 schematic 请求默认路由到 SVG 轨（方案 A §4.1）；
+            # 本文件全部用例考的是**编译轨**的 print-fit 与政策机器（bands 版面、
+            # 版心锁、字号下限），必须显式钉回编译轨，否则 declare 翻轨进
+            # illustration 家族，bands 在那条轨上是非法键。
+            "preferred_form": "compiled",
             "intent": "六种 GPU 服务器拓扑总览示意图：3×2 网格，每子图极简展示拓扑1-6 的机内结构",
             "constraints": dict(POLICY),
         },
@@ -260,7 +265,10 @@ def test_a_derived_medium_reports_the_fit_but_does_not_reject(tmp_path):
 
     if not _tex_and_poppler():
         pytest.skip("TeX (latexmk / tectonic) or dot not on PATH")
-    request = {"request_id": OVERVIEW_ID, "asset_kind": "schematic", "purpose": "publication", "intent": "六拓扑"}
+    # preferred_form=compiled：同 _iter11_requests —— 这两条考的是编译轨的版心机器，
+    # 不钉回编译轨 declare 会翻进 illustration 家族，SIX_TOPOLOGIES 的 bands 在那条轨上是非法键。
+    request = {"request_id": OVERVIEW_ID, "asset_kind": "schematic", "purpose": "publication",
+               "preferred_form": "compiled", "intent": "六拓扑"}
     state = _state(tmp_path, requests=[request])
     result = _declare(state, SIX_TOPOLOGIES)      # 2 组一行：170mm 下印不下
     assert result["status"] == "success", result.get("error")
@@ -274,7 +282,7 @@ def test_an_author_declared_medium_is_enforced(tmp_path):
 
     if not _tex_and_poppler():
         pytest.skip("TeX (latexmk / tectonic) or dot not on PATH")
-    request = {"request_id": OVERVIEW_ID, "asset_kind": "schematic", "intent": "六拓扑"}
+    request = {"request_id": OVERVIEW_ID, "asset_kind": "schematic", "preferred_form": "compiled", "intent": "六拓扑"}
     state = _state(tmp_path, requests=[request])
     result = _declare(state, {**_three_per_row(SIX_TOPOLOGIES), "medium": "single_column"})
     assert result["status"] == "error"
@@ -488,8 +496,9 @@ def test_a_compliant_render_passes_and_series_are_counted_by_legend_entries(tmp_
     assert set(model["series_colors"]) <= {c.lower() for c in DATA_PALETTE}
     assert model["min_font_pt"] >= 7.0
     assert not [f for f in result["findings"] if f.get("collector") == "OB-RESOLUTION"], "savefig(dpi=300) 不该被报 100 DPI"
-    # 样式前言进了冻结脚本：referee 重跑得到同一张图
-    script = next(Path(tmp_path).rglob("panorama_render.py"))
+    # 样式前言进了冻结脚本：referee 重跑得到同一张图（文件名带内容 hash，
+    # 同名再铸不覆写旧版证据 —— 2026-10-20 M6）
+    script = next(Path(tmp_path).rglob("panorama_*_render.py"))
     assert "axes.prop_cycle" in script.read_text(encoding="utf-8")
 
 

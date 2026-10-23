@@ -1,31 +1,12 @@
-"""采集调度 —— 每个源按**它自己的**节奏，不是一个全局 cron。
+"""推荐采集统一按24小时刷新，来源健康与用户订阅各自独立记账。
 
-## 三个节奏
+每5分钟检查到期项，实际周期统一取 settings.feed_refresh_interval_seconds。
+公共源按 last_polled_at、课题发现按 curated_at、订阅发现按各目标执行记录
+计时；订阅循环独立运行，避免学者慢请求拖住公共源。学科期刊由独立的
+literature_harvester 按同一周期刷新。
 
-设计上"什么时候生产内容"有三个互相独立的节奏，这个模块实现前两个：
-
-  1. **源的节奏**：arXiv 工作日一天一更、期刊按周、deadline 表几乎不动。
-     一个全局 cron 只能取最快的那个，等于把别的源每次都白拉一遍。所以周期
-     是 `feed_sources.poll_interval_seconds`，一源一值。
-  2. **平台空闲的节奏**：空闲时再去抓一遍 arXiv 没有边际收益 —— 原料的量由
-     源决定，不由我们勤快程度决定。空闲时值钱的活是**深加工**（把已采的原料
-     做成域周报），见 `digest.py`。
-  3. 用户事件的节奏（新开一个 Project → 定向补这个方向的近况）—— M2。
-
-## 熔断的判据是"有没有边际新增"，不是"跑没跑"
-
-一个源连着几轮抓回来的全是重复，说明它这段时间就是没有新东西，**这不是
-故障**，但继续按原周期拉它是白烧。所以空轮会让它退避（周期翻倍，有上限），
-一旦重新有新内容立刻恢复原周期。
-
-真正的失败（网络错、格式变、被封）另算：连续 `max_consecutive_failures` 次
-就把源停用，并把最后一次的错误留在 `last_error` 里 —— 一个静默不工作的源
-和一个正常但没新内容的源，从外面看长得一模一样，必须能分开。
-
-## 单写者
-
-只有这一个循环写 `feed_sources` 的健康字段和 `feed_items`。多个写者要处理
-"两轮同时拉同一个源"，而它带来的唯一好处是吞吐 —— 十几个源不需要吞吐。
+空轮不延长周期。来源失败保留 last_error，次日继续尝试；用户手动关闭的源
+仍保持关闭。只有公共源循环写 feed_sources 的健康状态。
 """
 
 from __future__ import annotations
@@ -45,16 +26,17 @@ from app.models.user import User
 from app.services.feed import collectors, discovery, ingest
 from app.services.feed.collectors import CollectorError
 from app.services.harness_contract import HarnessContractUnavailable
+from app.services.say import in_both_languages
 
 logger = logging.getLogger(__name__)
 
-#: 一轮用户挖掘的硬上限。正常一轮（每用户最多 5 组学术检索 + 5 组网页搜索 +
-#: 归档）约 3-5 分钟；这个值只负责“任何一处挂死都不无限阻塞全局采集”，
+#: 一轮用户挖掘的硬上限。正常一轮（每用户最多 8 组学术检索 + 8 组网页搜索 +
+#: 归档）可达数分钟；这个值只负责“任何一处挂死都不无限阻塞全局采集”，
 #: 不是正常路径的目标耗时。
-DISCOVERY_ROUND_TIMEOUT_SECONDS = 420.0
+DISCOVERY_ROUND_TIMEOUT_SECONDS = 600.0
 
 
-#: 多久看一次"谁到点了"。它**不是**采集周期 —— 采集周期在每个源自己身上。
+#: 每5分钟检查到期项，实际采集统一按24小时。
 TICK_SECONDS = 300
 
 #: 同时最多拉几个源。压到很低是刻意的：这些是别人的免费接口，
@@ -64,21 +46,19 @@ MAX_CONCURRENT_FETCHES = 3
 #: 同一轮里两次请求之间的间隔。arXiv 的使用条款明确要求请求之间留出间隔。
 POLITENESS_DELAY_SECONDS = 3.0
 
-#: 空轮退避的上限倍数。超过它就不再翻倍 —— 再稀疏的源也该每天看一眼。
-MAX_IDLE_BACKOFF_MULTIPLIER = 4
-
-
 class FeedCollector:
     """后台采集循环。生命周期挂在 app lifespan 上。"""
 
     def __init__(self) -> None:
         self._task: asyncio.Task[None] | None = None
+        self._subscription_task: asyncio.Task[None] | None = None
+        self._school_task: asyncio.Task[None] | None = None
+        self._project_asset_task: asyncio.Task[None] | None = None
+        self._translation_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
-        #: 源 id → 连续空轮次数。只在内存里：它是一个调速用的观察，不是事实，
-        #: 重启后从零开始最多多拉一轮。
-        self._idle_rounds: dict[str, int] = {}
         #: 当前这一轮的 HTTP client（补图那一步要用，见 run_once）。
         self._client: httpx.AsyncClient | None = None
+        self._school_last_refresh: datetime | None = None
 
     def start(self) -> None:
         if not settings.feed_collector_enabled:
@@ -88,6 +68,18 @@ class FeedCollector:
             return
         self._stop.clear()
         self._task = asyncio.create_task(self._run(), name="feed-collector")
+        self._subscription_task = asyncio.create_task(
+            self._run_subscriptions(), name="feed-subscription-collector"
+        )
+        self._school_task = asyncio.create_task(
+            self._run_school(), name="feed-school-library-collector"
+        )
+        self._project_asset_task = asyncio.create_task(
+            self._run_project_assets(), name="feed-project-asset-collector"
+        )
+        self._translation_task = asyncio.create_task(
+            self._run_translations(), name="feed-translation-worker"
+        )
         logger.info("Feed collector started (tick=%ss)", TICK_SECONDS)
 
     async def stop(self) -> None:
@@ -98,6 +90,14 @@ class FeedCollector:
         最难查，因为它们只在关机时出现。
         """
         self._stop.set()
+        subscriptions, self._subscription_task = self._subscription_task, None
+        school, self._school_task = self._school_task, None
+        project_assets, self._project_asset_task = self._project_asset_task, None
+        translations, self._translation_task = self._translation_task, None
+        for worker in (subscriptions, school, project_assets, translations):
+            if worker is not None:
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
         task, self._task = self._task, None
         if task is None:
             return
@@ -135,6 +135,90 @@ class FeedCollector:
                 await asyncio.wait_for(self._stop.wait(), timeout=TICK_SECONDS)
             except TimeoutError:
                 continue
+
+    async def _run_school(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await self.run_school_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("School literature feed round failed")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=TICK_SECONDS)
+            except TimeoutError:
+                continue
+
+    async def _run_subscriptions(self) -> None:
+        # 订阅检索独立循环，学者慢请求不能阻塞公共源和课题发现。
+        while not self._stop.is_set():
+            completed = 0
+            try:
+                await discovery.run_subscription_round()
+                completion = await discovery.run_subscription_asset_round()
+                completed = completion.get("completed", 0)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Feed subscription discovery round failed")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=1 if completed else TICK_SECONDS)
+            except TimeoutError:
+                continue
+
+    async def _run_project_assets(self) -> None:
+        while not self._stop.is_set():
+            found = 0
+            discovery.project_asset_wakeup.clear()
+            try:
+                result = await discovery.run_project_asset_round()
+                found = result.get("found", 0)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Project abstract completion round failed")
+            try:
+                await asyncio.wait_for(discovery.project_asset_wakeup.wait(), timeout=1 if found else TICK_SECONDS)
+            except TimeoutError:
+                continue
+
+    async def _run_translations(self) -> None:
+        from app.services.feed.translation import FeedTranslationWorker
+        worker = FeedTranslationWorker()
+        while not self._stop.is_set():
+            attempted = 0
+            try:
+                attempted = await worker.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Feed background translation round failed")
+            try:
+                # Continue through new ready items; failed sources have their own
+                # five minute cooldown and cannot starve the rest of the pool.
+                await asyncio.wait_for(self._stop.wait(), timeout=1 if attempted else 15)
+            except TimeoutError:
+                continue
+
+    async def run_school_once(self, *, force: bool = False) -> dict[str, int]:
+        """Poll the optional school catalogue on the same daily refresh cadence."""
+        from datetime import timedelta
+        from app.services import school_library
+        from app.services.feed.school_projection import sync_school_feed
+
+        if school_library._configuration() is None:
+            return {"seen": 0, "stored": 0, "updated": 0, "withdrawn": 0}
+        now = datetime.now(UTC)
+        interval = timedelta(seconds=settings.feed_refresh_interval_seconds)
+        if not force and self._school_last_refresh and now - self._school_last_refresh < interval:
+            return {"seen": 0, "stored": 0, "updated": 0, "withdrawn": 0}
+        factory = get_session_factory()
+        async with factory() as db:
+            report = await sync_school_feed(db, now=now)
+            await db.commit()
+        self._school_last_refresh = now
+        logger.info("School literature feed refresh: %s", report)
+        return report
 
     async def run_literature_once(self, limit: int = 50) -> dict[str, int]:
         """把本地已准备好的 literature figure 发布为资讯卡片。
@@ -242,13 +326,8 @@ class FeedCollector:
         return totals
 
     def _is_due(self, source: FeedSource) -> bool:
-        # 空轮退避：连着空 N 轮就把**这一次判断**用的周期拉长，但不超过上限。
-        # 退避是调速不是事实，所以只作用在这个判断上，不写回源那一行 ——
-        # 写回去的话，下次真有新内容时那个被改过的周期还留在库里。
-        idle = self._idle_rounds.get(source.id, 0)
-        multiplier = min(1 + max(idle, 0), MAX_IDLE_BACKOFF_MULTIPLIER)
         return ingest.is_stale(
-            source, interval_seconds=source.poll_interval_seconds * multiplier
+            source, interval_seconds=settings.feed_refresh_interval_seconds
         )
 
     async def _fetch(
@@ -285,9 +364,8 @@ class FeedCollector:
             source.consecutive_failures += 1
             source.last_error = error[:2000]
             if source.consecutive_failures >= source.max_consecutive_failures:
-                source.is_active = False
                 logger.error(
-                    "Feed source %r disabled after %d consecutive failures: %s",
+                    "Feed source %r failed %d times; retrying next day: %s",
                     source.name, source.consecutive_failures, error,
                 )
             return 0
@@ -301,7 +379,12 @@ class FeedCollector:
             # 唯一能让它被看见的地方（源健康在界面上有呈现），但错误文本要说
             # 清是谁的锅 —— 否则运维会去查 arXiv 为什么挂了。
             source.consecutive_failures += 1
-            source.last_error = f"域词表不可用（平台侧，与本源无关）：{exc}"[:2000]
+            # 存在源上、谁都看得到：写的那一刻不知道是谁、哪种语言来看，两种并排写。
+            source.last_error = in_both_languages({
+                "zh": "域词表不可用（平台侧，与本源无关）：{why}",
+                "en": "The domain vocabulary is unavailable (platform side, nothing to do with this "
+                      "source): {why}",
+            }, why=exc)[:2000]
             logger.error("Domain registry unavailable; feed ingest blocked", exc_info=True)
             return 0
 
@@ -309,11 +392,6 @@ class FeedCollector:
         source.last_error = None
         source.last_success_at = now
         source.last_item_count = report.stored
-
-        if report.stored == 0:
-            self._idle_rounds[source.id] = self._idle_rounds.get(source.id, 0) + 1
-        else:
-            self._idle_rounds.pop(source.id, None)
 
         if report.skipped_no_key or report.skipped_no_url:
             # 这两个数不为零通常意味着**源换了格式**，而不是内容有问题。

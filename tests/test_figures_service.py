@@ -54,7 +54,10 @@ def test_required_output_is_the_figure_record(figsvc):
 
 def test_service_budget_is_not_a_science_budget(figsvc):
     assert figsvc.max_turns == 40
-    assert figsvc.max_output_tokens <= 8192
+    # 8192 是按「matplotlib 脚本 + 一段说明」量的。SVG 插画轨（#1251）的产物就是模型写出的
+    # SVG DOM 本身，一张像样的示意图一万多 token，8192 会把工具调用截在半截 —— 那不是省预算，
+    # 是把这条轨道关掉。放到 16384，仍远低于科研节点；再往上要另说理由。
+    assert figsvc.max_output_tokens <= 16384
 
 
 def test_service_cannot_write_kb(figsvc):

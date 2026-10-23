@@ -544,7 +544,7 @@ def build_the_shell(app: Path) -> None:
          "/r:System.Web.Extensions.dll",
          "/r:System.Windows.Forms.dll", "/r:System.Drawing.dll",
          f"/r:{core}", f"/r:{winforms}",
-         str(SHELL_DIR / "Shell.cs")])
+         str(SHELL_DIR / "Shell.cs"), str(SHELL_DIR / "Speech.cs")])
     if not binary.is_file():
         raise SystemExit("壳没编出来")
 
@@ -791,7 +791,8 @@ def build_the_uninstaller(app: Path) -> None:
          f"/win32icon:{ICON if ICON.is_file() else draw_the_icon()}",
          "/r:System.Windows.Forms.dll", "/r:System.Drawing.dll",
          "/r:System.Web.Extensions.dll",
-         str(SHELL_DIR / "Uninstaller.cs"), str(SHELL_DIR / "InstallFootprint.cs")])
+         str(SHELL_DIR / "Uninstaller.cs"), str(SHELL_DIR / "InstallFootprint.cs"),
+         str(SHELL_DIR / "Speech.cs")])
     if not binary.is_file():
         raise SystemExit("卸载器没编出来")
     print(f"  {binary}（{binary.stat().st_size} 字节）")
@@ -1020,7 +1021,7 @@ def make_the_installer(app: Path, edition: str = "personal",
          "/r:System.IO.Compression.FileSystem.dll", "/r:System.IO.Compression.dll",
          "/r:System.Windows.Forms.dll", "/r:System.Drawing.dll",
          "/r:System.Web.Extensions.dll",
-         str(SHELL_DIR / "InstallerStub.cs"), str(SHELL_DIR / "InstallWizard.cs"),
+         str(SHELL_DIR / "InstallerStub.cs"), str(SHELL_DIR / "InstallWizard.cs"), str(SHELL_DIR / "Speech.cs"),
          str(SHELL_DIR / "InstallFootprint.cs"), str(version_source)])
     version_source.unlink(missing_ok=True)
     if not stub.is_file():
@@ -1151,6 +1152,9 @@ def prove_the_footprint_is_there(install_dir: Path, desktop_dir: Path, start_men
     expected = {
         desktop_dir / "ScienceMate.lnk": exe,
         start_menu_root / "ScienceMate" / "ScienceMate.lnk": exe,
+        # 自检用 `--language zh` 装（见 prove 那一步的命令行）：卸载项叫中文名 —— 走的是中文
+        # 文件名那条更容易坏的路（WSH 读成空、ANSI 写不出）。安装器默认英文时它叫
+        # 「Uninstall ScienceMate.lnk」（`Footprint.UninstallShortcutName`）。
         start_menu_root / "ScienceMate" / "卸载 ScienceMate.lnk": uninstaller,
     }
     for lnk, target in expected.items():
@@ -1177,6 +1181,13 @@ def prove_the_footprint_is_there(install_dir: Path, desktop_dir: Path, start_men
     if sorted(Path(x) for x in written["shortcuts"]) != sorted(expected):
         raise SystemExit(f"❌ 安装清单记的快捷方式和真建出来的对不上：{written['shortcuts']}")
     print(f"  ✅ 安装清单 {record.name} 记下了这 {len(expected)} 个落点")
+    # 自检点名了中文：清单要记下（卸载器照它说话），也要交给应用第一次打开时用。
+    if written.get("language") != "zh":
+        raise SystemExit(f"❌ 安装清单记的语言是 {written.get('language')!r}，自检点名的是 zh —— 卸载器会说错语言")
+    handed = Path(written["dataRoot"]) / "install-language"
+    if not handed.is_file() or handed.read_text(encoding="utf-8").strip() != "zh":
+        raise SystemExit(f"❌ 点名的语言没交给应用（{handed}）—— 应用第一次打开不会照它")
+    print("  ✅ 点名的语言（zh）记进了清单，也交给了应用")
     return list(expected)
 
 
@@ -1265,7 +1276,9 @@ def prove_the_installer_works(setup: Path, upgrade_fixture: Path | None = None) 
     data_root.mkdir()
     (data_root / "keep-me.txt").write_text("卸载不该删数据", encoding="utf-8")
     install_env = {**os.environ, "HARNESS_FRAMEWORK_HOME": str(data_root)}
-    proc = subprocess.run([str(setup), "--no-launch", "--install-dir", str(install_dir),
+    # `--language zh`：安装器默认英文（wangd 2026-10-19），而中文文件名才是那条容易坏的路 ——
+    # 自检点名中文，顺带验「点名了就记进清单、交给应用」。
+    proc = subprocess.run([str(setup), "--no-launch", "--install-dir", str(install_dir), "--language", "zh",
                            "--desktop-shortcut", "--start-menu", "--register-uninstall",
                            "--desktop-dir", str(desktop_dir),
                            "--start-menu-dir", str(start_menu_root),

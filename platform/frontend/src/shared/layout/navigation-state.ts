@@ -42,7 +42,7 @@ export const GLOBAL_NAVIGATION = {
   settings: { href: "/settings", label: { zh: "设置", en: "Settings" } as Phrase },
 } as const;
 
-export function workspaceDisplayName(scope?: GovernanceScope, lang: Language = "zh") {
+export function workspaceDisplayName(scope: GovernanceScope | undefined, lang: Language) {
   if (!scope || scope.kind === "personal" || (scope.kind as string) === "individual") {
     return say({ zh: "个人工作区", en: "Personal workspace" }, lang);
   }

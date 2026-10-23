@@ -11,6 +11,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.assembly import language_the_person_chose_at_install, system_languages_of_the_person
 from app.auth import get_current_user
 from app.database import get_db
 from app.models.execution import Run, SessionProjection
@@ -24,7 +25,7 @@ from app.schemas.settings import (
     NotificationSettingsOut,
     UsageSummary,
 )
-from app.services.user_interface import effective_interface
+from app.services.user_interface import Language, effective_interface, language_for, language_on_screen, say
 from app.services.model_backends import (
     bring_in_what_others_provide,
     tell_the_provider_about_the_choice,
@@ -69,6 +70,30 @@ _effective_interface = effective_interface
 @router.get("/interface", response_model=InterfaceSettings)
 async def get_interface_settings(user: User = Depends(get_current_user)) -> InterfaceSettings:
     return _effective_interface(user)
+
+
+@router.get("/interface/language")
+async def get_interface_language_hint(user: User = Depends(get_current_user)) -> dict:
+    """界面语言**选过没有**，以及这个人电脑上的系统语言。
+
+    第一次打开、还没选过的人，前端按系统语言替他定一次并存下（判据只在前端
+    `languageForASystem` 一处：列表里有中文就中文，否则英文）。存下之后这一问就答
+    "选过了"，往后只认他存的那个。
+
+    「选过」= 偏好里存着 language 这一项。前端每次存界面偏好都是整份写，所以存过
+    任何一项界面偏好的人（几乎所有老用户：开场关掉那一下就存了）都算选过 —— 升级
+    不会把谁的语言改掉。
+
+    不并进 `GET /interface` 的返回：那份模型同时是 PUT 的请求体（extra=forbid），
+    前端拿到什么就原样存回去，多出来的字段会让每一次保存都 422。
+    """
+    stored = user.preferences.get("interface") if isinstance(user.preferences, dict) else None
+    return {
+        "chosen": isinstance(stored, dict) and "language" in stored,
+        "system_languages": system_languages_of_the_person(),
+        # 在 Windows 安装器上点过「中文 / English」的，第一次打开照它（排在系统语言前面）。
+        "chosen_at_install": language_the_person_chose_at_install(),
+    }
 
 
 @router.put("/interface", response_model=InterfaceSettings)
@@ -279,7 +304,7 @@ class ModelBackendUpdate(BaseModel):
 
 
 
-def _validated_roles(requested: list[str] | None) -> list[str]:
+def _validated_roles(requested: list[str] | None, lang: Language) -> list[str]:
     """合法角色**由目录说了算**，且不合法要当场报错并把合法取值列出来。
 
     「合法取值只在运行时报错」这条路走过一次了：模型/人得靠猜。词表进
@@ -290,7 +315,7 @@ def _validated_roles(requested: list[str] | None) -> list[str]:
     try:
         known = model_role_ids()
     except ModelRoleCatalogError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=exc.said_in(lang)) from exc
     unknown = [item for item in requested if item not in known]
     if unknown:
         raise HTTPException(
@@ -347,7 +372,8 @@ async def _effective_id(
 
 @router.get("/model-roles")
 async def get_model_roles(
-    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> dict:
     """角色目录 + 每个角色**当下真会用哪条连接**。
 
@@ -361,7 +387,7 @@ async def get_model_roles(
     try:
         specs = model_role_catalog()
     except ModelRoleCatalogError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=exc.said_in(lang)) from exc
     # 组织提供的模型也是候选 —— 先对一次表（桌面上才有这回事）。
     await bring_in_what_others_provide(db, user)
     out = []
@@ -369,7 +395,7 @@ async def get_model_roles(
         selected = await select_effective_backend(db, user, role=item.id)
         out.append(
             {
-                **item.to_public_dict(),
+                **item.to_public_dict(language_for(user)),
                 "bound_backend_id": selected.id if selected else None,
                 "bound_display_name": selected.display_name if selected else None,
                 "bound_model": selected.model if selected else None,
@@ -418,13 +444,16 @@ async def get_model_backends(
     ]
 
 
-def _not_yours_to_change(config: ModelBackendConfig) -> HTTPException:
+def _not_yours_to_change(config: ModelBackendConfig, lang: Language) -> HTTPException:
     source = where_it_comes_from(config)
     if source:
-        return HTTPException(status_code=403, detail=(
-            f"「{config.display_name}」是「{source['organisation_name']}」提供的，由那个组织的管理员维护。"
-            "不想用它，就在模型角色里换一条。"))
-    return HTTPException(status_code=403, detail="Not allowed to modify this backend scope")
+        return HTTPException(status_code=403, detail=say(
+            {"zh": "「{name}」是「{organisation}」提供的，由那个组织的管理员维护。不想用它，就在模型角色里换一条。",
+             "en": "\"{name}\" is provided by \"{organisation}\" and maintained by that organisation's "
+                   "administrators. If you do not want it, pick another connection for the model role."},
+            lang, name=config.display_name, organisation=source["organisation_name"]))
+    return HTTPException(status_code=403, detail=say(
+        {"zh": "这条连接不归你改", "en": "Not allowed to modify this backend scope"}, lang))
 
 
 def _endpoint_taken(existing: ModelBackendConfig) -> HTTPException:
@@ -488,7 +517,7 @@ async def _endpoint_clash(
 async def create_model_backend(
     data: ModelBackendWrite,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db), lang: Language = Depends(language_on_screen),
 ) -> dict:
     scope_kind, scope_id = managed_scope(user)
     source = data.credential_source or ("encrypted" if data.api_key else "none")
@@ -507,7 +536,7 @@ async def create_model_backend(
         **identity,
         display_name=data.display_name,
         context_window_tokens=data.context_window_tokens,
-        roles=_validated_roles(data.roles),
+        roles=_validated_roles(data.roles, lang),
         credential_source=source,
         encrypted_api_key=encrypt_api_key(data.api_key) if data.api_key else None,
         created_by_user_id=user.id,
@@ -535,11 +564,11 @@ async def update_model_backend(
     backend_id: str,
     data: ModelBackendUpdate,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db), lang: Language = Depends(language_on_screen),
 ) -> dict:
     config = await get_visible_backend(db, user, backend_id)
     if not can_edit_backend(user, config):
-        raise _not_yours_to_change(config)
+        raise _not_yours_to_change(config, lang)
     # 撞不撞车，问的是**这次写完之后长什么样**：改端点、改模型名都能把这条
     # 连接挪到另一条已经占着的身份上。`None` = 这个字段不改。
     identity = dict(
@@ -564,7 +593,7 @@ async def update_model_backend(
                 if value is not None:
                     setattr(config, field, value)
             if data.roles is not None:
-                new_roles = _validated_roles(data.roles)
+                new_roles = _validated_roles(data.roles, lang)
                 roles_changed = set(new_roles) != set(config.roles or [])
                 config.roles = new_roles
                 # 撤销授权就把对应的默认一起摘掉 —— 留着一个指向未授权角色的默认，
@@ -644,11 +673,11 @@ async def probe_model_backend(
 async def delete_model_backend(
     backend_id: str,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db), lang: Language = Depends(language_on_screen),
 ) -> None:
     config = await get_visible_backend(db, user, backend_id)
     if not can_edit_backend(user, config):
-        raise _not_yours_to_change(config)
+        raise _not_yours_to_change(config, lang)
     if config.default_for_roles:
         raise HTTPException(
             status_code=409,

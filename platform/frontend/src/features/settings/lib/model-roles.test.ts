@@ -58,7 +58,7 @@ test("一条连接都改不动的人，不该被指去只读列表里授权", ()
   // 而提示写着"去下面的 Gateway connections 里授权" —— 他照做，下面一个
   // 能勾的地方都没有，于是判断平台不支持配审图模型。能力一直在（后端建
   // 个人连接从不查管理权限），界面把他指向了一堵墙。
-  const hint = roleAssignmentHint(VISION_ROLE, undefined, situation());
+  const hint = roleAssignmentHint(VISION_ROLE, undefined, situation(), "en");
   assert.match(hint, /Register your own connection/);
   assert.equal(
     /in Gateway connections|tick it in Edit/.test(hint),
@@ -68,7 +68,7 @@ test("一条连接都改不动的人，不该被指去只读列表里授权", ()
 });
 
 test("有自己改得动的连接时，先说在它上面勾", () => {
-  const hint = roleAssignmentHint(VISION_ROLE, undefined, situation({ canAuthorizeExisting: true }));
+  const hint = roleAssignmentHint(VISION_ROLE, undefined, situation({ canAuthorizeExisting: true }), "en");
   assert.match(hint, /tick it in Edit/);
 });
 
@@ -76,7 +76,7 @@ test("有候选只是没选，就别讲注册", () => {
   const hint = roleAssignmentHint(
     VISION_ROLE,
     undefined,
-    situation({ candidateCount: 1, canAuthorizeExisting: true }),
+    situation({ candidateCount: 1, canAuthorizeExisting: true }), "en",
   );
   assert.match(hint, /pick one/);
   assert.equal(/Register|tick it in Edit/.test(hint), false);
@@ -89,7 +89,7 @@ test("空槽的代价引 absence_impact —— absence_note 是写给节点的�
     situation({ candidateCount: 2 }),
     situation({ canSelect: false }),
   ]) {
-    const hint = roleAssignmentHint(VISION_ROLE, undefined, s);
+    const hint = roleAssignmentHint(VISION_ROLE, undefined, s, "en");
     assert.match(hint, /这个槽空着/);
     assert.equal(
       hint.includes("不是你能改的事"),
@@ -101,9 +101,9 @@ test("空槽的代价引 absence_impact —— absence_note 是写给节点的�
 
 test("槽已经填上了就别再讲它空着", () => {
   const bound = backend({ id: "bound", roles: ["visual_review"], last_vision_ok: true });
-  assert.equal(roleAssignmentHint(VISION_ROLE, bound, situation({ candidateCount: 1 })), "Ready.");
+  assert.equal(roleAssignmentHint(VISION_ROLE, bound, situation({ candidateCount: 1 }), "en"), "Ready.");
   assert.equal(
-    roleAssignmentHint(VISION_ROLE, bound, situation({ canSelect: false, candidateCount: 1 })),
+    roleAssignmentHint(VISION_ROLE, bound, situation({ canSelect: false, candidateCount: 1 }), "en"),
     "Your administrator controls this role.",
   );
 });
@@ -114,10 +114,13 @@ test("视觉角色：模型不认图跟凭据坏了是两件事", () => {
     last_vision_ok: false,
     last_vision_detail: "provider rejected an image message",
   });
-  assert.match(roleAssignmentHint(VISION_ROLE, rejects, situation({ candidateCount: 1 })), /image message/);
+  const said = roleAssignmentHint(VISION_ROLE, rejects, situation({ candidateCount: 1 }), "en");
+  assert.match(said, /the model is not/, "结论没说 —— 只剩一句 provider 原话");
+  assert.match(said, /provider rejected an image message/, "provider 原话丢了 —— 人拿什么去查");
+  assert.match(roleAssignmentHint(VISION_ROLE, rejects, situation({ candidateCount: 1 }), "zh"), /是模型不认图/);
   const unknown = backend({ roles: ["visual_review"], last_vision_ok: null });
   assert.match(
-    roleAssignmentHint(VISION_ROLE, unknown, situation({ candidateCount: 1 })),
+    roleAssignmentHint(VISION_ROLE, unknown, situation({ candidateCount: 1 }), "en"),
     /has not been confirmed yet/,
   );
 });
@@ -130,7 +133,7 @@ test("能不能在现有连接上勾，读的是后端给的 editable", () => {
 test("在一个组织里，成员加不了连接 —— 出路是找管理员，不是「加一条你自己的」", () => {
   // 组织的模型存在组织服务器上；成员的密钥不该存在别人管的服务器上，所以那一份不给他「添加」。
   // 这时再说"Register your own connection"就是把人领到一堵墙前面。
-  const hint = roleAssignmentHint(VISION_ROLE, undefined, situation({ canRegister: false }));
+  const hint = roleAssignmentHint(VISION_ROLE, undefined, situation({ canRegister: false }), "en");
   assert.match(hint, /administrator of this organisation has to add one/);
   assert.doesNotMatch(hint, /Register your own/);
 });

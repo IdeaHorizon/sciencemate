@@ -33,7 +33,7 @@ test("editable 是后端的答案，前端不再拿角色权限二次否决", ()
     status: "ready",
   }).canEdit, false);
   assert.match(modelAccessDescription(researcher, "en"), /Your own connections can be added and edited/);
-  assert.match(modelAccessDescription(researcher), /自己的连接/);
+  assert.match(modelAccessDescription(researcher, "zh"), /自己的连接/);
 });
 
 test("selection is unavailable for an unready backend or without select permission", () => {
@@ -58,7 +58,7 @@ test("object scopes and default impact are explained without internal IDs", () =
   assert.match(modelDefaultImpact(researcher, {
     editable: false,
     scope: { kind: "institution", id: "institution-a" },
-  }), /只改你新建会话时用的模型/);
+  }, "zh"), /只改你新建会话时用的模型/);
 
   const administrator = { ...researcher, role: "institution_admin" as const, permissions: ["model_backends.manage"] };
   assert.equal(modelDefaultImpact(administrator, {
@@ -69,7 +69,7 @@ test("object scopes and default impact are explained without internal IDs", () =
 
 test("新建连接的落点取后端给的治理 scope，不按角色再算一遍", () => {
   assert.equal(managedScopeLabel(researcher, "en"), "Personal connection");
-  assert.equal(managedScopeLabel(researcher), "个人的连接");
+  assert.equal(managedScopeLabel(researcher, "zh"), "个人的连接");
   assert.equal(managedScopeLabel({ ...researcher, governance_scope: { kind: "institution", id: "i", name: "I" } }, "en"), "Organisation connection");
   assert.equal(managedScopeLabel({ ...researcher, governance_scope: { kind: "institution", id: "i", name: "I" } }, "en"), "Organisation connection");
   assert.equal(managedScopeLabel(null, "en"), "Personal connection");

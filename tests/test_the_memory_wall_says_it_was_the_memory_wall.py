@@ -280,11 +280,36 @@ def test_a_real_oom_kill_is_reported_as_the_memory_wall(tmp_path: Path, monkeypa
             writable_roots=[tmp_path], sandbox_limits=limits))
         assert (status, rc) == ("done", 137), (status, rc, err)
         assert f"{isolation.SANDBOX_LIMIT_MARKER} memory ".encode() in err, err
-        # 对照：同一堵墙后面一个普通的 SIGKILL 还是 -9。
+        # 对照：同一堵墙后面一个普通的 SIGKILL 不许被说成内存墙。退出码本身看机器：
+        # 咽喉直接拿到信号时是 -9；经 systemd-run --scope 包着时外层以 128+9=137 退出
+        # （node20 实测）—— 两种都是"被 SIGKILL"，判据是**没有 memory 标记**，不是数字。
         status, rc, _out, err = asyncio.run(spawn_and_wait(
             "kill -9 $$", state=_State(), timeout=60, cwd=str(tmp_path), shell=True,
             writable_roots=[tmp_path], sandbox_limits=limits))
-        assert (status, rc) == ("done", -9), (status, rc, err)
+        assert status == "done" and rc in (-9, 137), (status, rc, err)
         assert isolation.SANDBOX_LIMIT_MARKER.encode() not in err
+    finally:
+        isolation._reset_for_tests()
+
+
+@pytest.mark.skipif(_REAL_SKIP is not None, reason=f"real OOM needs a systemd cgroup host: {_REAL_SKIP}")
+def test_a_real_oom_kill_needs_no_mlock_now_that_swap_is_off(tmp_path: Path, monkeypatch):
+    """#1207 的直接判据：不钉页也得被杀。
+
+    上面那条用 mlockall 是因为「有 swap 的机器上光有 MemoryMax 撞不出 OOM」—— 超限的页被换出去
+    了。MemorySwapMax=0 之后，普通地占 300 MB 压 100 MB 的上限，在有 swap 的机器（node20：
+    160 GB swapfile）上也必须当场 OOM 并被报成内存墙，而不是换页"慢慢跑完"。
+    """
+    monkeypatch.setenv(isolation.EXECUTOR_ENV, "linux")
+    isolation._reset_for_tests()
+    try:
+        limits = sandbox.SandboxLimits(memory_bytes=100 * 1024**2)
+        status, rc, _out, err = asyncio.run(spawn_and_wait(
+            sys.executable, "-c", "x = bytearray(300 * 1024 * 1024); print(len(x))",
+            state=_State(), timeout=60, cwd=str(tmp_path),
+            writable_roots=[tmp_path], sandbox_limits=limits))
+        assert (status, rc) == ("done", 137), (
+            f"没钉页的 300 MB 在 100 MB 的墙后面活下来了 —— swap 又成了后门: {(status, rc, err)}")
+        assert f"{isolation.SANDBOX_LIMIT_MARKER} memory ".encode() in err, err
     finally:
         isolation._reset_for_tests()

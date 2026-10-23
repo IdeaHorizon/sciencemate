@@ -56,6 +56,82 @@ NET_CONNECT_TCP = 1 << 1
 #: 网络规则要求的最低 ABI。
 NET_ABI = 4
 
+# ── seccomp：Landlock 只管 TCP，UDP / ICMP / DNS 由它补（#1180）────────────────
+#
+# Landlock ABI 4 的网络规则只覆盖 TCP bind/connect；UDP、raw socket 不在内，内核低于 6.7
+# 时连 TCP 都没有。seccomp 过滤器在 ``socket(2)`` 这一步按地址族拒掉 AF_INET / AF_INET6
+# （返回 EPERM）：没有 inet socket 就没有 TCP、没有 UDP、没有 DNS 查询。不需要 userns，
+# 不需要 root，只要 NO_NEW_PRIVS（上面已经设了）。
+#
+# **故意不碰 AF_UNIX**：python multiprocessing、X11、本机 IPC 都靠它，而且它不是出网；
+# 账上 ``unix_socket_reachable`` 照旧如实为 True。也不碰 AF_NETLINK：glibc 的 getaddrinfo
+# 列接口要用它，拦了会把一类本地程序打坏，而它本身不通外网。
+#
+# 过滤器按**本机架构**写死（seccomp_data.arch 对不上就放行 —— 别的 ABI 这里不懂，不装懂）。
+# 支持 x86_64 与 aarch64；别的架构不装过滤器，由 linux.py 的探针如实探出 ``net_scope: tcp``。
+PR_SET_SECCOMP = 22
+SECCOMP_MODE_FILTER = 2
+SECCOMP_RET_ALLOW = 0x7FFF0000
+SECCOMP_RET_ERRNO = 0x00050000
+AF_INET = 2
+AF_INET6 = 10
+#: machine → (AUDIT_ARCH_*, __NR_socket)。
+_SECCOMP_ARCH = {
+    "x86_64": (0xC000003E, 41),
+    "aarch64": (0xC00000B7, 198),
+}
+_BPF_LD_W_ABS = 0x20
+_BPF_JEQ_K = 0x15
+_BPF_RET_K = 0x06
+
+
+class SockFilter(ctypes.Structure):
+    _fields_ = [("code", ctypes.c_uint16), ("jt", ctypes.c_uint8),
+                ("jf", ctypes.c_uint8), ("k", ctypes.c_uint32)]
+
+
+class SockFprog(ctypes.Structure):
+    _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.POINTER(SockFilter))]
+
+
+def inet_socket_filter(machine: str) -> list[tuple[int, int, int, int]] | None:
+    """禁建 AF_INET / AF_INET6 socket 的 BPF 程序（code, jt, jf, k）；架构不认识就 None。
+
+    seccomp_data 的布局：nr@0、arch@4、args[0] 低 32 位@16（小端）。跳转是相对偏移：
+    下一条 = pc + 1 + jt/jf。
+    """
+    arch = _SECCOMP_ARCH.get(machine)
+    if arch is None:
+        return None
+    audit_arch, nr_socket = arch
+    return [
+        (_BPF_LD_W_ABS, 0, 0, 4),                 # 0: A = arch
+        (_BPF_JEQ_K, 0, 5, audit_arch),           # 1: 不是本机 ABI → 7 ALLOW
+        (_BPF_LD_W_ABS, 0, 0, 0),                 # 2: A = nr
+        (_BPF_JEQ_K, 0, 3, nr_socket),            # 3: 不是 socket(2) → 7 ALLOW
+        (_BPF_LD_W_ABS, 0, 0, 16),                # 4: A = args[0]（domain）
+        (_BPF_JEQ_K, 2, 0, AF_INET),              # 5: AF_INET → 8 EPERM
+        (_BPF_JEQ_K, 1, 0, AF_INET6),             # 6: AF_INET6 → 8 EPERM
+        (_BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW),    # 7
+        (_BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | errno.EPERM),  # 8
+    ]
+
+
+def deny_inet_sockets(libc: ctypes.CDLL) -> bool:
+    """装上过滤器；架构不认识或内核拒绝（EINVAL：没有 seccomp filter）返回 False，不抛。
+
+    返回值只给调用方记账用；真相由 linux.py 的探针决定（它在 ``--network deny`` 下真的去建
+    一个 UDP socket，建得出就是 ``tcp`` 口径、建不出才是 ``inet``）。
+    """
+    import platform
+
+    program = inet_socket_filter(platform.machine())
+    if program is None:
+        return False
+    insns = (SockFilter * len(program))(*[SockFilter(*insn) for insn in program])
+    prog = SockFprog(len(program), insns)
+    return libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(prog), 0, 0) == 0
+
 
 class RulesetAttr(ctypes.Structure):
     """ABI 1-3 的结构：只有文件系统一个字段。老内核按 size 判，多传一个字段就 E2BIG。"""
@@ -87,11 +163,13 @@ def landlock_abi() -> int:
 
 
 def restrict_writes_to(roots: list[str], *, network: bool = False) -> None:
-    """把自己关进「只许写这几个根」的规则集；``network=False`` 且 ABI ≥ 4 时再断 TCP。
+    """把自己关进「只许写这几个根」的规则集；``network=False`` 时再断网：ABI ≥ 4 用 Landlock
+    拒 TCP bind/connect，再加一层 seccomp 禁建 AF_INET / AF_INET6 socket（UDP / DNS / 老内核
+    上的 TCP 一起断，#1180）。
 
     ``network=True`` 只给框架拼的取物命令（``CommandSpec.network_access``），普通模型命令
-    永远 False。ABI < 4 的内核**没有**网络规则可用 —— 这里不假装，调用方按
-    ``landlock_abi()`` 记账（``linux.py`` 只在 abi ≥ 4 时声明 NET_DENY）。
+    永远 False。这里不假装：守到哪一层由 ``linux.py`` 的探针真连一次、真建一个 UDP socket
+    探出来，记账 ``net_scope`` 是 ``inet`` / ``tcp`` / ``none``。
     """
     libc = ctypes.CDLL(None, use_errno=True)
     abi = libc.syscall(
@@ -151,6 +229,11 @@ def restrict_writes_to(roots: list[str], *, network: bool = False) -> None:
             raise OSError(ctypes.get_errno(), "landlock_restrict_self_failed")
     finally:
         os.close(ruleset_fd)
+    if not network:
+        # Landlock 之外再补 seccomp：建不出 AF_INET / AF_INET6 socket 就没有 UDP、DNS、
+        # 老内核上的 TCP（#1180）。装不上不抛 —— 探针会如实探出口径是 tcp 还是 inet。
+        # 判据 D：删掉这一行，`test_net_deny_covers_udp_without_bwrap` 必须转红。
+        deny_inet_sockets(libc)
 
 
 def main(argv: list[str]) -> int:

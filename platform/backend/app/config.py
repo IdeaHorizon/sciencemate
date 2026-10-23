@@ -9,6 +9,8 @@ from typing import Literal
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings
 
+from app.services.say import in_both_languages
+
 
 def _default_data_root() -> Path:
     """见 `app.data_root_default.default_data_root` —— 规则只写在那一处。
@@ -146,18 +148,16 @@ class Settings(BaseSettings):
     literature_harvester_enabled: bool = True
     # 后台仅刷新用户实际订阅的学科，不再遍历完整二级学科目录。
     literature_harvester_offline_enabled: bool = True
-    # 文献增量采集与缺失资产补齐每七天执行一轮。
-    literature_harvester_interval_seconds: int = 604800
-    # 调度器多快检查一次“有没有订阅期刊满7天”。检查不等于发远程请求；
-    # 小间隔避免用户在两次整周 tick 之间新订阅后要等到第8—14天。
-    literature_harvester_check_interval_seconds: int = 3600
+    # 推荐板块所有采集路线统一每24小时刷新；检查频率不是采集频率。
+    feed_refresh_interval_seconds: int = 86400
+    literature_harvester_check_interval_seconds: int = 300
     literature_harvester_max_queries_per_round: int = 100
     literature_harvester_batch_pause_seconds: int = 60
     literature_harvester_max_per_source: int = 20
+    feed_translation_concurrency: int = 4
+    literature_asset_completion_concurrency: int = 3
     literature_asset_completion_max_per_round: int = 20
     literature_asset_completion_budget_seconds: int = 600
-    # 小红书后台只接收最近 N 天的期刊文章；E2E literature 不受此配置影响。
-    literature_harvester_recent_days: int = 7
     literature_harvester_seed_queries: str = ""
     # Database
     database_url: str = _SERVER_DATABASE_URL_DEFAULT
@@ -293,16 +293,19 @@ def the_data_root() -> Path:
     写进 B，两边都不报错 —— 那正是 08-21 丢掉 43 个会话的形状。
     """
     if not settings.platform_data_root:
-        raise DataRootError(
-            "PLATFORM_DATA_ROOT 没有配置。它是这台部署上所有持久科研数据的根，"
-            "必须显式给一个绝对路径。"
-        )
+        raise DataRootError(in_both_languages({
+            "zh": "PLATFORM_DATA_ROOT 没有配置。它是这台部署上所有持久科研数据的根，"
+                  "必须显式给一个绝对路径。",
+            "en": "PLATFORM_DATA_ROOT is not set. It is the root of all persistent research data on "
+                  "this deployment and must be given explicitly as an absolute path.",
+        }))
     root = Path(settings.platform_data_root).expanduser()
     if not root.is_absolute():
-        raise DataRootError(
-            f"PLATFORM_DATA_ROOT={settings.platform_data_root!r} 是相对路径。"
-            "持久科研数据的位置不能取决于进程的工作目录。"
-        )
+        raise DataRootError(in_both_languages({
+            "zh": "PLATFORM_DATA_ROOT={value} 是相对路径。持久科研数据的位置不能取决于进程的工作目录。",
+            "en": "PLATFORM_DATA_ROOT={value} is a relative path. Where persistent research data lives "
+                  "must not depend on the process's working directory.",
+        }, value=repr(settings.platform_data_root)))
     return root
 
 
@@ -316,12 +319,16 @@ def publish_the_data_root() -> Path:
     root = the_data_root()
     existing = os.environ.get(HARNESS_HOME_VARIABLE, "").strip()
     if existing and Path(existing).expanduser().resolve() != root.resolve():
-        raise DataRootError(
-            f"{HARNESS_HOME_VARIABLE}={existing!r} 和 PLATFORM_DATA_ROOT={str(root)!r} "
-            "指着两个不同的目录。它们是同一个数据根的两个名字：后端会把项目写进"
-            "后者，harness worker 会把知识库/记忆/运行态写进前者，两边都不会报错。"
-            "把两个变量指到同一个目录，或者只配一个。"
-        )
+        raise DataRootError(in_both_languages({
+            "zh": "{harness}={existing} 和 PLATFORM_DATA_ROOT={root} 指着两个不同的目录。它们是同一个"
+                  "数据根的两个名字：后端会把项目写进后者，harness worker 会把知识库/记忆/运行态写进"
+                  "前者，两边都不会报错。把两个变量指到同一个目录，或者只配一个。",
+            "en": "{harness}={existing} and PLATFORM_DATA_ROOT={root} point at two different directories. "
+                  "They are two names for the same data root: the backend would write projects into the "
+                  "latter and the harness worker would write knowledge, memory and run state into the "
+                  "former, and neither would report an error. Point both variables at the same "
+                  "directory, or set only one.",
+        }, harness=HARNESS_HOME_VARIABLE, existing=repr(existing), root=repr(str(root))))
     os.environ[HARNESS_HOME_VARIABLE] = str(root)
     if each_organisation_keeps_its_own_knowledge():
         # 组织档上没有「这台安装的那一个」org 层 —— 每个组织一个（`the_org_home`）。
@@ -407,9 +414,11 @@ def the_org_home(institution_id: str | None = None) -> Path:
         return the_data_root() / "org"
     wanted = str(institution_id or "").strip()
     if not _AN_ORGANISATION_ID.fullmatch(wanted):
-        raise DataRootError(
-            "组织服务器上每个组织一份知识，得说是哪个组织的"
-            f"（{institution_id!r} 不是一个组织 id）。")
+        raise DataRootError(in_both_languages({
+            "zh": "组织服务器上每个组织一份知识，得说是哪个组织的（{wanted} 不是一个组织 id）。",
+            "en": "On an organisation server each organisation keeps its own knowledge, so it has to "
+                  "say which organisation ({wanted} is not an organisation id).",
+        }, wanted=repr(institution_id)))
     return the_data_root() / "organisations" / wanted
 
 
@@ -436,12 +445,18 @@ def the_organisations_keyring(institution_id: str) -> Path:
     """
     wanted = str(institution_id or "").strip()
     if not _AN_ORGANISATION_ID.fullmatch(wanted):
-        raise DataRootError(f"{institution_id!r} 不是一个组织 id")
+        raise DataRootError(in_both_languages({
+            "zh": "{wanted} 不是一个组织 id", "en": "{wanted} is not an organisation id",
+        }, wanted=repr(institution_id)))
     return the_data_root() / "secrets" / "organisations" / wanted
 
 
 class DataRootError(RuntimeError):
-    """持久数据的根没配、或配了个相对路径。"""
+    """持久数据的根没配、或配了个相对路径。
+
+    消息两种语言并排写（`in_both_languages`，中文一行、英文一行），不收 `en=`：它在任何
+    界面出现之前就说了（启动器印到 stderr，原生壳拿去弹框），那一刻不知道该说哪种语言。
+    """
 
 
 #: 数据根下的固定布局。名字是**数据的**，不是某一版代码的 —— 换 release、换
@@ -507,25 +522,35 @@ def data_root(kind: str) -> Path:
     if override:
         candidate = Path(override).expanduser()
         if not candidate.is_absolute():
-            raise DataRootError(
-                f"{variable}={override!r} 是相对路径。持久科研数据的位置不能取决于"
-                f"进程的工作目录 —— 请给绝对路径，或改用 PLATFORM_DATA_ROOT。"
-            )
+            raise DataRootError(in_both_languages({
+                "zh": "{variable}={value} 是相对路径。持久科研数据的位置不能取决于进程的工作目录 ——"
+                      " 请给绝对路径，或改用 PLATFORM_DATA_ROOT。",
+                "en": "{variable}={value} is a relative path. Where persistent research data lives must "
+                      "not depend on the process's working directory — give an absolute path, or use "
+                      "PLATFORM_DATA_ROOT instead.",
+            }, variable=variable, value=repr(override)))
         return candidate
 
     if not settings.platform_data_root:
-        raise DataRootError(
-            "PLATFORM_DATA_ROOT 没有配置。它是这台部署上所有持久科研数据"
-            f"（Project 仓库 / Session worktree / harness 运行态 / worker socket）"
-            f"的根，必须显式给一个绝对路径，例如：\n"
-            f"    export PLATFORM_DATA_ROOT=/srv/research-platform/data\n"
-            f"（也可以只覆盖单独一类：{variable}=<绝对路径>，测试就是这么隔离的。）"
-        )
+        raise DataRootError(in_both_languages({
+            "zh": "PLATFORM_DATA_ROOT 没有配置。它是这台部署上所有持久科研数据"
+                  "（Project 仓库 / Session worktree / harness 运行态 / worker socket）"
+                  "的根，必须显式给一个绝对路径，例如：\n"
+                  "    export PLATFORM_DATA_ROOT=/srv/research-platform/data\n"
+                  "（也可以只覆盖单独一类：{variable}=<绝对路径>，测试就是这么隔离的。）",
+            "en": "PLATFORM_DATA_ROOT is not set. It is the root of all persistent research data on this "
+                  "deployment (Project repositories / Session worktrees / harness run state / worker "
+                  "sockets) and must be given explicitly as an absolute path, for example:\n"
+                  "    export PLATFORM_DATA_ROOT=/srv/research-platform/data\n"
+                  "(You can also override a single kind: {variable}=<absolute path> — that is how the "
+                  "tests isolate themselves.)",
+        }, variable=variable))
 
     root = Path(settings.platform_data_root).expanduser()
     if not root.is_absolute():
-        raise DataRootError(
-            f"PLATFORM_DATA_ROOT={settings.platform_data_root!r} 是相对路径。"
-            "持久科研数据的位置不能取决于进程的工作目录。"
-        )
+        raise DataRootError(in_both_languages({
+            "zh": "PLATFORM_DATA_ROOT={value} 是相对路径。持久科研数据的位置不能取决于进程的工作目录。",
+            "en": "PLATFORM_DATA_ROOT={value} is a relative path. Where persistent research data lives "
+                  "must not depend on the process's working directory.",
+        }, value=repr(settings.platform_data_root)))
     return root / subdirectory

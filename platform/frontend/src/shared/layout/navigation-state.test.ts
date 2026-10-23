@@ -7,10 +7,10 @@ import { GLOBAL_NAVIGATION, workspaceDisplayName } from "./navigation-state.ts";
 
 test("personal workspace naming never repeats the signed-in user identity", () => {
   assert.equal(workspaceDisplayName({ kind: "personal", id: "u", name: "Mia Zhang" }, "en"), "Personal workspace");
-  assert.equal(workspaceDisplayName({ kind: "personal", id: "u", name: "Mia Zhang" }), "个人工作区");
+  assert.equal(workspaceDisplayName({ kind: "personal", id: "u", name: "Mia Zhang" }, "zh"), "个人工作区");
   assert.equal(workspaceDisplayName({ kind: "individual" as never, id: "u", name: "Mia Zhang" }, "en"), "Personal workspace");
   // 机构/课题组的名字是后端给的真名 —— 两种语言里都原样显示，不翻译。
-  assert.equal(workspaceDisplayName({ kind: "group", id: "g", name: "Robotics Lab" }), "Robotics Lab");
+  assert.equal(workspaceDisplayName({ kind: "group", id: "g", name: "Robotics Lab" }, "zh"), "Robotics Lab");
   assert.equal(workspaceDisplayName({ kind: "group", id: "g", name: "Robotics Lab" }, "en"), "Robotics Lab");
 });
 

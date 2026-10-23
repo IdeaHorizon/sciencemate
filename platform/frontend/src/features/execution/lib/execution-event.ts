@@ -1,3 +1,5 @@
+import { ContractViolation } from "../../../shared/contract-violation.ts";
+
 export const EXECUTION_EVENT_KINDS = [
   "session.started",
   "session.message",
@@ -119,7 +121,7 @@ const ORIGINS = new Set<string>([
 ]);
 const VISIBILITIES = new Set<string>(["summary", "standard", "trace"]);
 
-export class FixtureContractError extends Error {
+export class FixtureContractError extends ContractViolation {
   constructor(message: string) {
     super(message);
     this.name = "FixtureContractError";

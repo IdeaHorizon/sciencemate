@@ -205,27 +205,46 @@ def upsert_paper(papers_root: str | Path, record: dict[str, Any]) -> None:
 
 
 def retry_asset_records(
-    papers_root: str | Path, limit: int = 20
+    papers_root: str | Path, limit: int = 20, *, profile_user_id: str | None = None,
+    catalog_keys: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """返回需要补齐全文或真实图片的论文记录。
+    """Return records needing assets, optionally scoped to one subscription owner.
 
-    标题卡属于可见兜底而不是真实论文插图，因此仍是 figure 重试候选。
-    SQLite 只负责筛选；完整元数据从同一行的 ``metadata_json`` 恢复。
+    A subscriber's newly indexed papers take precedence over older global figure
+    retries. Scoped completion stops selecting a record once its attempt is ready.
     """
+    if catalog_keys is not None and not catalog_keys:
+        return []
     path = catalog_path(papers_root)
     if not path.is_file():
         return []
+    owner_clause = ""
+    parameters: list[Any] = []
+    if profile_user_id:
+        owner_clause = """AND json_valid(metadata_json)
+            AND EXISTS (SELECT 1 FROM json_each(metadata_json, '$.profile_user_ids')
+                        WHERE value = ?)
+            AND COALESCE(json_extract(metadata_json, '$.literature_preparation'), 'pending') != 'ready'"""
+        parameters.append(str(profile_user_id))
+    if catalog_keys is not None:
+        owner_clause += " AND doi IN (SELECT value FROM json_each(?))"
+        parameters.append(json.dumps(catalog_keys))
     with _connect(path) as conn:
         rows = conn.execute(
-            """SELECT metadata_json FROM papers
-               WHERE fulltext_status IN ('', 'not_requested', 'fetch_failed',
-                                         'deferred', 'oa_unknown', 'unavailable')
-                  OR image_status IN ('', 'not_requested', 'failed', 'unavailable')
-                  OR (json_valid(metadata_json)
-                      AND json_extract(metadata_json, '$.image.fallback') = 'title_card')
-               ORDER BY updated_at ASC
+            f"""SELECT metadata_json FROM papers
+               WHERE (fulltext_status IN ('', 'not_requested', 'fetch_failed',
+                                          'deferred', 'oa_unknown', 'unavailable')
+                   OR image_status IN ('', 'not_requested', 'failed', 'unavailable')
+                   OR (json_valid(metadata_json) AND json_extract(metadata_json, '$.literature_preparation') = 'pending')
+                   OR (json_valid(metadata_json)
+                       AND json_extract(metadata_json, '$.image.fallback') = 'title_card'))
+                   {owner_clause}
+               ORDER BY CASE WHEN image_status IN ('', 'not_requested') THEN 0
+                             WHEN image_status IN ('failed', 'unavailable') THEN 1
+                             ELSE 2 END,
+                        updated_at {'DESC' if profile_user_id else 'ASC'}
                LIMIT ?""",
-            (max(1, int(limit)),),
+            (*parameters, max(1, int(limit))),
         ).fetchall()
     records: list[dict[str, Any]] = []
     for (raw,) in rows:

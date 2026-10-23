@@ -1,4 +1,5 @@
 import type { ExecutionEvent } from "./execution-event.ts";
+import { ContractViolation } from "../../../shared/contract-violation.ts";
 
 export type ConnectionPhase =
   | "idle"
@@ -17,14 +18,14 @@ export type ReconcilerSnapshot = {
   error?: string;
 };
 
-export class SequenceConflictError extends Error {
+export class SequenceConflictError extends ContractViolation {
   constructor(sequence: number) {
     super(`Sequence ${sequence} was received with two different event ids`);
     this.name = "SequenceConflictError";
   }
 }
 
-export class EventIdentityConflictError extends Error {
+export class EventIdentityConflictError extends ContractViolation {
   constructor(eventId: string) {
     super(`Event id ${eventId} was reused with a different canonical event`);
     this.name = "EventIdentityConflictError";
@@ -67,6 +68,12 @@ export class LiveEventReconciler {
   private eventIds = new Set<string>();
   private eventSignatures = new Map<string, string>();
   private phase: ConnectionPhase = "idle";
+  /**
+   * 出了什么错 —— 给排查的人看的诊断。界面不照念它：`useRuns` 拿它只当「出错了」
+   * （执行细节那块说一句固定的话），session reader 把它包进 ContractViolation 交给
+   * `describeApiProblem` 按类说。
+   * 抛出来的不是 Error 就原样记下它是什么，别换成一句笼统的话。
+   */
   private error?: string;
 
   reset() {
@@ -109,7 +116,7 @@ export class LiveEventReconciler {
       this.error = undefined;
     } catch (error) {
       this.phase = "error";
-      this.error = error instanceof Error ? error.message : "Unknown sequence error";
+      this.error = error instanceof Error ? error.message : String(error);
       throw error;
     }
   }
@@ -123,7 +130,7 @@ export class LiveEventReconciler {
       for (let pageIndex = 0; pageIndex < 100; pageIndex += 1) {
         const page = await fetchAfterSequence(requestCursor);
         if (page.afterSequence !== requestCursor) {
-          throw new Error("EventPage afterSequence does not match the requested cursor");
+          throw new ContractViolation("EventPage afterSequence does not match the requested cursor");
         }
         if (page.items.length === 0) {
           this.drainContiguous();
@@ -138,7 +145,7 @@ export class LiveEventReconciler {
         this.accept(page.items);
         if (page.hasMore) {
           if (page.nextAfterSequence <= requestCursor) {
-            throw new Error("EventPage nextAfterSequence did not advance");
+            throw new ContractViolation("EventPage nextAfterSequence did not advance");
           }
           requestCursor = page.nextAfterSequence;
           continue;
@@ -154,10 +161,10 @@ export class LiveEventReconciler {
           return this.snapshot();
         }
       }
-      throw new Error("Backfill exceeded 100 pages");
+      throw new ContractViolation("Backfill exceeded 100 pages");
     } catch (error) {
       this.phase = "error";
-      this.error = error instanceof Error ? error.message : "Reconnect failed";
+      this.error = error instanceof Error ? error.message : String(error);
       return this.snapshot();
     }
   }

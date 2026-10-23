@@ -1,4 +1,5 @@
 import type { ChatPauseOption } from "./chat-terminal.ts";
+import { ContractViolation } from "../../../shared/contract-violation.ts";
 import type {
   ChatMessageIn,
   ChatRequest,
@@ -89,7 +90,7 @@ export function composeAnswer(input: {
 }
 
 function unreachable(value: never): never {
-  throw new Error(`unreachable answer kind: ${JSON.stringify(value)}`);
+  throw new ContractViolation(`unreachable answer kind: ${JSON.stringify(value)}`);
 }
 
 /** `Answer` → 线格式。目标类型是生成的，字段名跟着后端走。 */

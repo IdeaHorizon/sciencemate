@@ -144,8 +144,9 @@ def test_network_is_denied_for_model_commands(roots) -> None:
     # 127.0.0.1 上没人听端口时不加沙箱也会 ECONNREFUSED，分不出真假。
     probe = (
         "import errno, socket, sys\n"
-        "s=socket.socket(); s.settimeout(3)\n"
-        "try:\n    s.connect(('1.1.1.1', 53))\n"
+        # socket() 也在 try 里：#1180 起 Linux 的 deny 多了一层 seccomp，建 socket 那一步就 EPERM。
+        "try:\n    s=socket.socket(); s.settimeout(3)\n"
+        "    s.connect(('1.1.1.1', 53))\n"
         "except PermissionError:\n    sys.exit(0)\n"
         "except OSError as e:\n"
         "    sys.exit(0 if e.errno in (errno.ENETUNREACH, errno.EACCES, errno.EPERM) else 3)\n"

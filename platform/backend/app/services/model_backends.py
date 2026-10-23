@@ -479,10 +479,9 @@ async def probe_backend_credential(config: ModelBackendConfig) -> tuple[bool | N
         if not key:
             # 没给 key 而被拒 —— 这是"这个端点要鉴权"，不是"这把 key 坏了"。
             # 判 False 会让界面说 "Credential rejected"，而这里根本没有凭据可拒。
-            return None, (
-                f"endpoint requires a credential (HTTP {response.status_code}) "
-                "—— 这个端点需要 API key"
-            )
+            # 只存 provider 那一侧的事实（英文）：这串落库后谁看都是它，设置页按看的人
+            # 的语言另说一句。从前尾巴上拼着一句中文，英文界面的悬停提示里就是中文。
+            return None, f"endpoint requires a credential (HTTP {response.status_code})"
         return False, f"provider rejected the credential (HTTP {response.status_code})"
     if response.status_code >= 500:
         return None, f"provider error (HTTP {response.status_code})"
@@ -578,10 +577,8 @@ async def probe_vision_capability(config: ModelBackendConfig) -> tuple[bool | No
     if response.status_code in (400, 415, 422):
         body = (response.text or "")[:2000].lower()
         if any(marker in body for marker in _VISION_REFUSAL_MARKERS):
-            return False, (
-                f"provider rejected an image message (HTTP {response.status_code}) "
-                "— 这个模型不接受图像输入"
-            )
+            # 「这个模型不认图」由设置页按看的人的语言说（model-roles.ts），这里只存事实。
+            return False, f"provider rejected an image message (HTTP {response.status_code})"
         return None, f"inconclusive rejection (HTTP {response.status_code})"
     return None, f"inconclusive (HTTP {response.status_code})"
 

@@ -1,12 +1,8 @@
 """前处理边界的机械观察层。
 
-`no_self_fabricated_preprocessing` 这条 quality_check 管的是一件确定的事：本 run
-有没有在缺正式输入时自己就地造前处理产物（初始结构 / 网格 / 输入包 / 格式转换 /
-训练集切分），而不是交给 data 服务。但它此前是纯 LLM judge —— judge 只能从
-state_summary 里推断命令做了什么，跟 `no_unauthorized_high_risk_commands` 当年
-的病一模一样（hook 明写 PASS，judge 因截断看不到证据而 fail-closed 误判）。
-
-本模块沿用 `high_risk_command_audit` 的模式：**hook 机械算，judge 只读结论**。
+按文件名和生成器命令记录本次运行的线索，不证明实际生成了什么，更不证明越权。
+即使未与 Data 回执对账，生成也可能是任务明确授权的科学工作。
+这些线索不是质量判决、完成门禁或长期错误经验；权限与正式输入核验由原契约负责。
 
 ## 只观察，不拦截
 
@@ -15,10 +11,10 @@ state_summary 里推断命令做了什么，跟 `no_unauthorized_high_risk_comma
 不可申诉的死锁。在误判率有真实数据之前，硬门禁的期望损失高于收益 —— 机器负责
 "看见"，判决交给 reviewer 和人。
 
-## 两层判定
+## 两类诊断线索
 
-1. **只认"生成"，不认"取得"**。计入的只有两类事实：跑了生成器命令，或者往
-   正式输入文件里**写**（重定向 / tee / heredoc / write_file / python 写文件）。
+1. **生成线索，不是生成事实**。匹配生成器命令，或疑似正式输入文件的写入语法
+   （重定向 / tee / heredoc / write_file / python 写文件）。
    读取、`cp` / `mv` / `ln` 一概不计 —— harness 把"按 prereg 把已有输入复制进
    workdir"和"CONTCAR→POSCAR 续跑"明文列为本节点可做的运行化轻调，靠语义把它们
    排除在外，比事后拿特例白名单去捞回来更不容易漏也更不容易误伤。
@@ -27,16 +23,9 @@ state_summary 里推断命令做了什么，跟 `no_unauthorized_high_risk_comma
    白名单按 **shell 段**判而不是整条命令：`gmsh --version && gmsh -3 a.geo -o a.msh`
    若按整条判就会被"前半句是探测"带着整条放行 —— 那等于给隐藏生成留了后门。
 
-2. **run 级对账**：剩下的 hits 在下列任一情况下算已对账，口径与 harness.yaml
-   里这条 check 自己写的 pass 条件一致：
-   - 本 run 有 verified 的 Data 交付，或已授权且 verified 的 Experiment fallback 输入；
-     Data 的终态 blocker 本身只证明 Data 未交付，不能为本地生成输入对账；
-   - `## Preprocessing Needed` 仅记录 blocker 和结束理由；它不授权已发生的本地输入生成；
-   - 本 run 的 scope 是 `operation`。operation 的 end audit 限定为 record_kind=operation 的证据三件套，不产出 verdict；
-     因此这里的前处理产物不可能污染科学结论；而编译完拿两原子算例冒烟这种事
-     强行要求走一趟 data 服务是荒谬的。scope 由 `classify_experiment_scope`
-     机械登记、run 内不可改道、且与绑定的冻结 prereg 冲突时会被拒 —— 它不能
-     被拿来给科学运行开后门。
+2. **run 级背景**：保留 verified Data / fallback 交付及 operation scope 的已有
+   对账信息，便于本次诊断。未对账不证明违规，已对账也不证明某个文件已获授权。
+   blocker 文本本身不授权生成；权限、正式输入来源及冻结要求仍由原契约核验。
 """
 from __future__ import annotations
 
@@ -51,8 +40,7 @@ PY_TOOL_NAMES = frozenset({"execute_python", "safe_execute_python"})
 WRITE_TOOL_NAMES = frozenset({"write_file", "safe_write_file"})
 
 
-# 生成器命令：这些工具的本职就是造求解器正式输入。命中不等于违规，只等于
-# "这一步在生成前处理产物"，是否对得上账由第二层判。
+# 生成器命令线索：命中不证明实际生成，更不证明越权。
 _GENERATOR_PATTERNS: tuple[tuple[str, str], ...] = (
     ("mesh_generator", r"\b(gmsh|snappyHexMesh|blockMesh|cfMesh|cartesianMesh|"
                        r"tetgen|netgen|triangle|cubit|coreform|salome|"
@@ -71,7 +59,7 @@ _GENERATOR_PATTERNS: tuple[tuple[str, str], ...] = (
                       r"\bsklearn\.model_selection\b"),
 )
 
-# 正式输入文件名：写这些文件 = 在造求解器输入。后缀类放宽到 basename 匹配。
+# 疑似正式输入文件名：仅作诊断线索。后缀类放宽到 basename 匹配。
 _INPUT_FILE_PATTERNS: tuple[tuple[str, str], ...] = (
     ("vasp_input", r"^(POSCAR|KPOINTS|INCAR|POTCAR)(\.[\w.-]+)?$"),
     # `data.<system>` 是 LAMMPS 的写法，但 `data.csv` / `results.data` 这类分析
@@ -273,7 +261,7 @@ def scan_preprocessing_boundary(state: Any) -> dict[str, Any]:
     )
     n_unaccounted = 0 if accounting else len(hits)
     return {
-        "verdict": "PASS" if n_unaccounted == 0 else "VIOLATION",
+        "verdict": "OBSERVATION",
         "n_scanned": n_scanned,
         "n_hits": len(hits),
         "n_whitelisted": len(whitelisted),

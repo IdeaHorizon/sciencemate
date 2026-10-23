@@ -36,10 +36,14 @@
 
 from __future__ import annotations
 
+from app.services.feed.profile import journal_display_name
+
 import asyncio
 import hashlib
 import logging
 import re
+import unicodedata
+from functools import lru_cache
 from pathlib import Path
 
 import httpx
@@ -206,10 +210,51 @@ async def figure_from_pdf(pdf_url: str) -> bytes | None:
 
 #: 生成封面的配色。按域取，同一个域永远同一套 —— 一眼能认出"这是同一类"。
 _PALETTES = (
-    ("#1e3a5f", "#2d6a9f"), ("#3d2b56", "#6b4d8f"), ("#1f4d3d", "#357a5b"),
-    ("#5a3320", "#96593a"), ("#42304f", "#7a5c8e"), ("#1d3f4d", "#2f7288"),
-    ("#4a2b3d", "#84506b"), ("#2b3d1f", "#587a35"),
+    ("#edf4fb", "#dceafa"), ("#f3eef9", "#e5dcf2"), ("#edf7f1", "#dcefe3"),
+    ("#fbf2ec", "#f3e1d5"), ("#f5eff8", "#eadeef"), ("#edf7f9", "#dceef3"),
+    ("#faf0f5", "#f0dde8"), ("#f3f7ed", "#e4edd7"),
 )
+
+
+@lru_cache(maxsize=1)
+def _cover_font():
+    import fitz
+    return fitz.Font("hebo")
+
+
+def _cover_text_width(text: str, font_size: float = 25) -> float:
+    """Measure Latin glyphs and full-width CJK glyphs in SVG coordinate units."""
+    font = _cover_font()
+    return sum(
+        font_size if unicodedata.east_asian_width(char) in {"W", "F"}
+        else font.text_length(char, fontsize=font_size)
+        for char in text
+    )
+
+
+def _cover_title_lines(title: str, width: float = 560, max_lines: int = 4) -> list[str]:
+    # Keep Latin words intact; Chinese characters can wrap without spaces.
+    tokens = re.findall(r"[\u3400-\u9fff]|[^\s\u3400-\u9fff]+|\s+", " ".join(title.split()))
+    lines: list[str] = []
+    line = ""
+    for token in tokens:
+        candidate = (line + token).lstrip()
+        if line.strip() and _cover_text_width(candidate.rstrip()) > width:
+            lines.append(line.rstrip())
+            line = token.lstrip()
+        else:
+            line = candidate
+    if line.strip():
+        lines.append(line.rstrip())
+    if not lines:
+        return ["（无标题）"]
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        tail = re.findall(r"[\u3400-\u9fff]|[^\s\u3400-\u9fff]+|\s+", lines[-1])
+        while tail and _cover_text_width("".join(tail).rstrip() + "…") > width:
+            tail.pop()
+        lines[-1] = "".join(tail).rstrip() + "…"
+    return lines
 
 
 def generated_cover(*, title: str, venue: str, domain: str) -> bytes:
@@ -220,47 +265,37 @@ def generated_cover(*, title: str, venue: str, domain: str) -> bytes:
     返回 SVG 字节。矢量、几百字节、任何缩放都清晰，而且不需要字体文件
     （用系统字体族名）—— 服务端画位图要引一整套字体渲染栈。
     """
+    venue = journal_display_name(venue)
     palette = _PALETTES[
         int(hashlib.sha256((domain or venue or "x").encode()).hexdigest()[:8], 16)
         % len(_PALETTES)
     ]
-    # 标题按字数硬折行。SVG 没有自动换行，`<foreignObject>` 在部分渲染器里
-    # 不生效，所以自己切。
-    words = (title or "").strip()
-    lines: list[str] = []
-    line = ""
-    for char in words:
-        line += char
-        if len(line) >= 26:
-            lines.append(line)
-            line = ""
-        if len(lines) >= 4:
-            break
-    if line and len(lines) < 4:
-        lines.append(line)
-    if not lines:
-        lines = ["（无标题）"]
-    if len("".join(lines)) < len(words):
-        lines[-1] = lines[-1][:24] + "…"
+    lines = _cover_title_lines(title or "")
 
     def escape(text: str) -> str:
         return (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 .replace('"', "&quot;"))
 
     spans = "".join(
-        f'<tspan x="40" dy="{0 if i == 0 else 30}">{escape(text)}</tspan>'
+        # Explicit widths keep browser font substitutions inside the same bounds.
+        # A single unusually long token is fitted to the line rather than split.
+        f'<tspan x="40" dy="{0 if i == 0 else 30}" '
+        f'textLength="{min(560, _cover_text_width(text)):.2f}" lengthAdjust="spacingAndGlyphs">{escape(text)}</tspan>'
         for i, text in enumerate(lines)
     )
+    title_y = 54
+    venue_y = title_y + (len(lines) - 1) * 30 + 38
+    height = venue_y + 30 if venue else title_y + (len(lines) - 1) * 30 + 32
     return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" '
-        f'width="640" height="360" role="img">'
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 {height}" '
+        f'width="640" height="{height}" role="img">'
         f'<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'
         f'<stop offset="0" stop-color="{palette[0]}"/>'
         f'<stop offset="1" stop-color="{palette[1]}"/></linearGradient></defs>'
-        f'<rect width="640" height="360" fill="url(#g)"/>'
-        f'<text x="40" y="130" fill="#ffffff" font-size="25" font-weight="600" '
+        f'<rect width="640" height="{height}" fill="url(#g)"/>'
+        f'<text x="40" y="{title_y}" fill="#25364a" font-size="25" font-weight="600" '
         f'font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">{spans}</text>'
-        f'<text x="40" y="310" fill="#ffffff" fill-opacity="0.72" font-size="16" '
+        f'<text x="40" y="{venue_y}" fill="#25364a" fill-opacity="0.72" font-size="16" '
         f'font-family="ui-sans-serif, system-ui, sans-serif">{escape(venue or "")}</text>'
         f"</svg>"
     ).encode("utf-8")

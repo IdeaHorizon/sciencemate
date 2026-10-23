@@ -173,6 +173,10 @@ WINDOWS_ACCEPTANCE = "windows-acceptance.json"
 #: 升级彩排收据：这份安装器**在上一版真跑过课题的数据根上**装起来、起来、发过一轮，旧 run / 旧 KB
 #: 读得回、权限没变（RFC_WORKER_START_IS_NOT_A_GATE §3.10）。同样不上传。
 WINDOWS_REHEARSAL = "windows-upgrade-rehearsal.json"
+#: 彩排收据里必须恰好为 True 的项。权限那一项从 0.5.8 起由彩排自己在搬根后记基线、事后同一个函数比
+#: （此前拿夹具里采集时的快照比，抄过来的文件 ACL 按新位置重新继承，没法比，只能记 None）。
+REHEARSAL_MUST_BE_TRUE = ("model_called", "environment_clean", "previous_runs_visible", "kb_readable",
+                          "permissions_unchanged")
 
 #: 清单里哪一条是 Windows 安装器。**与 `install.ps1` 认安装器用的是同一条规则**
 #: （它下 SHA256SUMS、挑 `*Setup.exe`）—— 两处各写一条规则就会在改名那天分叉，
@@ -244,10 +248,10 @@ def refuse_a_windows_build_that_never_rehearsed_an_upgrade(release_dir: Path) ->
     六次「继续」六次同一句。发布前没有任何闸能红：装完自检只在临时目录跑一条载荷，从不碰一份
     上一版的数据根。这道闸把「升级后旧数据读不读得回」从用户机器上搬回发布之前。
 
-    收据由 `scripts/acceptance/upgrade_rehearsal.py check` 写，且只在四件都过之后写：环境条幅没有
-    降级、上一版的 run 在、上一版的 KB 读得回、权限快照零差异（上一版没有快照时如实记 None）。
-    这里核：收据在不在、认的 sha256 是不是清单里这个安装器、有没有 previous_version、checks 里
-    有没有 False。
+    收据由 `scripts/acceptance/upgrade_rehearsal.py check` 写，且只在都过之后写：模型被调到、环境条幅
+    没有降级、上一版的 run 在、上一版的 KB 读得回、装新版起新版前后数据根的权限零差异。
+    这里核：收据在不在、认的 sha256 是不是清单里这个安装器、有没有 previous_version、
+    `REHEARSAL_MUST_BE_TRUE` 里每一项是不是**恰好 True**（缺席 / None = 没验，不是验过了）。
     """
     sums = (release_dir / "SHA256SUMS").read_text(encoding="utf-8")
     installers = the_windows_installers(sums)
@@ -268,9 +272,15 @@ def refuse_a_windows_build_that_never_rehearsed_an_upgrade(release_dir: Path) ->
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     if not receipt.get("against") or not receipt.get("previous_version"):
         raise SystemExit(f"{WINDOWS_REHEARSAL} 缺 against / previous_version —— 它验的不是装好跑着的新版对上一版的数据根。" + how)
-    failed = sorted(k for k, v in (receipt.get("checks") or {}).items() if v is False)
+    checks = receipt.get("checks") or {}
+    failed = sorted(k for k, v in checks.items() if v is False)
     if failed:
         raise SystemExit(f"{WINDOWS_REHEARSAL} 里有没过的项：{failed} —— 收据只该在全过之后写。" + how)
+    unproven = [k for k in REHEARSAL_MUST_BE_TRUE if checks.get(k) is not True]
+    if unproven:
+        raise SystemExit(
+            f"{WINDOWS_REHEARSAL} 里这些项没有验过：{unproven}（缺席或 None）—— 没执行不等于执行过没毛病。"
+            f"这份收据多半是旧版彩排脚本写的，用这棵树里的 upgrade_rehearsal.py 重跑。" + how)
     verified = str(receipt.get("sha256", "")).lower()
     for name, sha256 in sorted(installers.items()):
         if verified == sha256.lower():

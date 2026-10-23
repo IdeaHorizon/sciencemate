@@ -28,6 +28,15 @@ import time
 import webbrowser
 from pathlib import Path
 
+# 不 import 任何东西的一个模块（见它的文档）：启动器里说话不能等配置读出来。
+from app.services.say import in_both_languages
+
+#: 这个进程是不是由开发者模式接过来的（随包那份 launcher 把启动交给声明的源码 checkout 时，
+#: 在**接过去的那份** launcher 模块上翻成 True）。进程内的记号，不进环境变量 —— env 会漏给
+#: worker 子进程。「撤了声明还没重启」那一句靠它：没有它，任何从源码目录起的后端（终端里
+#: 开发、测试进程）都会被当成「撤了声明」而要求重启。
+RUNNING_DECLARED_CHECKOUT = False
+
 
 def _the_applied_payload() -> Path | None:
     """自更新切换过去的那一版载荷 —— **只有它比随包那份新才算数**。
@@ -125,10 +134,61 @@ def hand_over_to_the_payload_app(argv: list[str] | None) -> int | None:
     candidate = the_payload_app(_the_applied_payload())
     if candidate is None:
         return None
+    version = candidate.parent.parent.name
+    return _hand_the_start_to(candidate, argv, label=f"载荷 {version}")
+
+
+def the_source_checkout_in_charge():
+    """开发者模式声明的那个源码 checkout（合格的）；没声明 / 不合格 = None。
+
+    规则全在 `services/developer_source`（关于页读写同一份声明）；这里只问一句。
+    和载荷一样在 config 之前问：声明住在数据根里，由 `data_root_before_config` 答「在哪」。
+    """
+    from app.data_root_default import data_root_before_config
+    from app.services.developer_source import the_declared_checkout
+
+    try:
+        return the_declared_checkout(data_root_before_config())
+    except Exception:  # noqa: BLE001 - 一个开发者设置不许让机器起不来
+        return None
+
+
+def hand_over_to_the_source_checkout(checkout, argv: list[str] | None) -> int | None:
+    """开发者模式：三样东西都从声明的源码 checkout 来，后端 `app/` 由这份 launcher 接过去。
+
+    同事改了代码要在桌面版里看效果（2026-10-23）。随包那份 harness / 界面 / 后端是打包时
+    拷进去的，改自己的 checkout 对它没影响；这里把 launcher 本来就有的三个「显式指定」
+    一次指到同一个目录：
+
+    - `HARNESS_ROOT` → checkout 根（每个 run 拉起的 worker 从这儿跑，改了下一条消息就生效）；
+    - `STATIC_UI_ROOT` → checkout 里构建过的界面（`platform/frontend/out`）；没构建过就把
+      **随包 / 载荷**那份界面显式钉住 —— 不钉的话，接过去的那份 launcher 会按它自己的位置
+      去找「随包那份」，而 checkout 里没有，界面就没了；
+    - 后端 `app/` → `platform/backend/app`，接法与接载荷那条完全一样（`_hand_the_start_to`）。
+
+    环境变量**先于**「我是不是已经在 checkout 里」那道判断设置：直接在终端里从 checkout 起
+    后端、而数据根里又有声明时，两处答案也是同一个目录，不会被载荷抢走。
+
+    随包的 git / tectonic / biber 不受影响：它们锚在跑着的解释器旁边（`_bundled_binary`），
+    与哪份 launcher 在跑无关。
+    """
+    os.environ["HARNESS_ROOT"] = str(checkout.harness)
+    static_ui = checkout.static_ui or find_static_ui()
+    if static_ui is not None:
+        os.environ["STATIC_UI_ROOT"] = str(static_ui)
+    candidate = Path(checkout.backend_app)
+    return _hand_the_start_to(candidate, argv, label=f"源码目录 {checkout.root}",
+                              mark=lambda module: setattr(module, "RUNNING_DECLARED_CHECKOUT", True))
+
+
+def _hand_the_start_to(candidate: Path, argv: list[str] | None, *, label: str, mark=None) -> int | None:
+    """把这次启动整个交给 `candidate` 里的 `app/`（同一进程）。我就住在那儿 → None（循环终止）。
+
+    `mark`：接过去之前在**那份** launcher 模块上做的记号（开发者模式用它说「我是被接过来的」）。
+    """
     here = Path(__file__).resolve().parent
     if here == candidate.resolve():
         return None
-    version = candidate.parent.parent.name
     sys.path.insert(0, str(candidate.parent))
     for name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
         del sys.modules[name]
@@ -137,8 +197,14 @@ def hand_over_to_the_payload_app(argv: list[str] | None) -> int | None:
     new = importlib.import_module("app.launcher")
     landed = Path(new.__file__).resolve().parent
     if landed != candidate.resolve():
-        raise RuntimeError(f"要接载荷 {version} 里的 app/，import 到的却是 {landed}")
-    print(f"APP-SWAP: 用载荷 {version} 里的后端 app/（{candidate}）")
+        # 起不来的这一刻还没有界面（壳把日志尾巴弹成对话框）：两种语言并排说。
+        raise RuntimeError(in_both_languages({
+            "zh": "要接 {label} 里的 app/，import 到的却是 {landed}",
+            "en": "Expected to hand over to app/ in {label}, but the import landed on {landed}",
+        }, label=label, landed=landed))
+    if mark is not None:
+        mark(new)
+    print(f"APP-SWAP: 用 {label} 里的后端 app/（{candidate}）")
     return new.main(argv)
 
 
@@ -360,6 +426,12 @@ def describe_environment() -> list[tuple[str, str]]:
             facts.append(("pdf engine", "(unresolved — harness not found)"))
             return facts
         facts.append(("harness", str(harness)))
+        from app.data_root_default import data_root_before_config
+        from app.services.developer_source import read_declared
+
+        declared = read_declared(data_root_before_config())
+        if declared:
+            facts.append(("developer", f"{declared}（开发者模式 / developer mode）"))
         from app.services.self_update import version_of
 
         facts.append(("version", version_of(harness) or "(no PAYLOAD_VERSION marker — 打这套之前装的)"))
@@ -486,7 +558,14 @@ def main(argv: list[str] | None = None) -> int:
     # 新后端要等下一次启动）。接得到就把这次启动整个交给它（同一进程）；接不到照常往下。
     # 都必须在 import config / 开端口之前 —— 那之后随包这份代码就已经在场了。
     switch_to_the_staged_update()
-    handed = hand_over_to_the_payload_app(argv)
+    # 开发者模式声明了源码 checkout 就只认它：开发者要看的是自己改的代码，载荷是别人发的。
+    # 没声明才看载荷。两条路互斥 —— checkout 里那份 launcher 没有「随包的版本标记」，
+    # 任何载荷在它眼里都"更新"，要是再往下看载荷就会把源码换回别人的代码。
+    checkout = the_source_checkout_in_charge()
+    if checkout is not None:
+        handed = hand_over_to_the_source_checkout(checkout, argv)
+    else:
+        handed = hand_over_to_the_payload_app(argv)
     if handed is not None:
         return handed
 
@@ -540,7 +619,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         port = pick_a_free_port(args.port, host=args.host)
     except OSError as exc:
-        print(f"端口 {args.port} 用不了（{args.host}）：{exc}", file=sys.stderr)
+        print(in_both_languages({"zh": "端口 {port} 用不了（{host}）：{why}",
+                                 "en": "Port {port} cannot be used ({host}): {why}"},
+                                port=args.port, host=args.host, why=exc), file=sys.stderr)
         return 2
 
     url = f"http://127.0.0.1:{port}/"

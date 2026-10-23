@@ -56,13 +56,44 @@ def describe_entry(path: Path) -> dict[str, Any]:
     if sys.platform == "win32":  # pragma: no cover - 只在 Windows 上跑
         text = _icacls_text(path)
         if text is not None:
-            entry["acl_sha256"] = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
+            entry["acl_sha256"] = acl_fingerprint(text, path)
             entry["label"] = _mandatory_label(text)
         entry["owner"] = _windows_owner(path)
     else:
         entry["mode"] = oct(stat.S_IMODE(st.st_mode))
         entry["owner"] = str(st.st_uid)
     return entry
+
+
+#: 快照格式。2：ACL 指纹只哈希 ACE 本身（1 版哈希的是 icacls 整段输出 —— 第一行打头就是路径本身，
+#: 数据根一挪、每一条都「变了」）。格式不同的两份快照不比。
+SCHEMA_VERSION = 2
+
+
+def acl_fingerprint(icacls_text: str, path: Path | str) -> str:
+    """一条路径 ACL 的指纹：只取 ACE 行（去掉打头的路径与末尾「已成功处理 N 个文件」那段）。
+
+    icacls 的输出是 ``<路径> <ACE1>`` 一行、其余 ACE 各缩进一行、空行、汇总一行（本地化的）。
+    路径不进指纹：同一组 ACE 换个地方仍是同一份权限。"""
+    lines = icacls_text.splitlines()
+    aces: list[str] = []
+    prefix = str(path)
+    for index, line in enumerate(lines):
+        if not line.strip():
+            break
+        if index == 0 and line.startswith(prefix):
+            line = line[len(prefix):]
+        aces.append(line.strip())
+    return hashlib.sha256("\n".join(aces).encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def not_comparable(previous: dict[str, Any], current: dict[str, Any]) -> str | None:
+    """两份快照能不能比；不能就说为什么（不能比 ≠ 零差异）。"""
+    if previous.get("schema_version") != current.get("schema_version"):
+        return f"快照格式不同（{previous.get('schema_version')} → {current.get('schema_version')}）"
+    if str(previous.get("data_root") or "") != str(current.get("data_root") or ""):
+        return "数据根换了位置：ACL 继承自新的上级目录，逐条比较没有意义"
+    return None
 
 
 def _icacls_text(path: Path) -> str | None:  # pragma: no cover
@@ -102,7 +133,7 @@ def take_snapshot(data_root: Path, *, app_version: str | None) -> dict[str, Any]
         for child in children:
             entries[f"{name}/{child.name}"] = describe_entry(child)
     return {
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "taken_at": datetime.now(UTC).isoformat(),
         "app_version": app_version,
         "platform": sys.platform,
@@ -157,7 +188,11 @@ def record_startup(data_root: Path, *, app_version: str | None) -> dict[str, Any
     current = take_snapshot(data_root, app_version=app_version)
     change: dict[str, Any] | None = None
     if isinstance(previous, dict) and previous.get("app_version") != app_version:
-        diffs = compare(previous, current)
+        reason = not_comparable(previous, current)
+        if reason:
+            logger.info("permissions snapshot not compared across %s → %s: %s",
+                        previous.get("app_version"), app_version, reason)
+        diffs = [] if reason else compare(previous, current)
         if diffs:
             ours = read_journal_since(logs / JOURNAL_NAME, str(previous.get("taken_at") or "") or None)
             touched_by_us = {str(r.get("path")) for r in ours}
@@ -168,9 +203,12 @@ def record_startup(data_root: Path, *, app_version: str | None) -> dict[str, Any
                 "severity": "degraded",
                 "path": str(data_root),
                 "error": None,
-                "consequences": [
-                    f"从 {previous.get('app_version') or '?'} 升到 {app_version or '?'} 之间，数据根下 {len(diffs)} 处权限变了"
-                ],
+                "consequences": [{
+                    "zh": f"从 {previous.get('app_version') or '?'} 升到 {app_version or '?'} 之间，"
+                          f"数据根下 {len(diffs)} 处权限变了",
+                    "en": f"Between {previous.get('app_version') or '?'} and {app_version or '?'}, "
+                          f"{len(diffs)} permissions under the data root changed",
+                }],
                 "diffs": diffs[:200],
                 "previous_taken_at": previous.get("taken_at"),
                 "previous_version": previous.get("app_version"),

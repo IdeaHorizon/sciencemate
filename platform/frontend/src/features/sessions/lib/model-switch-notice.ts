@@ -22,7 +22,7 @@ export function modelSwitchNotice({ turnInFlight, modelLabel }: {
   turnInFlight: boolean;
   /** 换成了哪个 —— 换完不说换成了什么，人只能回头再看一眼 chip。 */
   modelLabel: string | null;
-}, lang: Language = "zh") {
+}, lang: Language) {
   const label = modelLabel?.trim();
   const target = label
     ? say({ zh: "已换成 {label}", en: "Switched to {label}" }, lang, { label })

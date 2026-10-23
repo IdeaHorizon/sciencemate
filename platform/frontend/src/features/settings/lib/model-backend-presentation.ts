@@ -1,4 +1,5 @@
 import type { ModelBackend } from "@/lib/api";
+import { say, type Language } from "../../../shared/i18n/language.ts";
 
 function normalizedProvider(provider: string) {
   return provider === "demo" || provider === "local_demo" ? "demo" : provider.trim().toLowerCase();
@@ -11,12 +12,16 @@ export function modelConnectionIdentity(backend: Pick<ModelBackend, "provider" |
   return `${provider}:${model}:${(backend.base_url ?? "managed").trim().replace(/\/$/, "").toLowerCase()}`;
 }
 
-export function modelBackendDisplayName(backend: Pick<ModelBackend, "provider" | "display_name">) {
-  return normalizedProvider(backend.provider) === "demo" ? "Local demonstration model" : backend.display_name;
+export function modelBackendDisplayName(backend: Pick<ModelBackend, "provider" | "display_name">, lang: Language) {
+  return normalizedProvider(backend.provider) === "demo"
+    ? say({ zh: "本机演示模型", en: "Local demonstration model" }, lang)
+    : backend.display_name;
 }
 
-export function modelBackendModelLabel(backend: Pick<ModelBackend, "provider" | "model">) {
-  return normalizedProvider(backend.provider) === "demo" ? "Deterministic local runtime" : backend.model;
+export function modelBackendModelLabel(backend: Pick<ModelBackend, "provider" | "model">, lang: Language) {
+  return normalizedProvider(backend.provider) === "demo"
+    ? say({ zh: "本机确定性运行时", en: "Deterministic local runtime" }, lang)
+    : backend.model;
 }
 
 export function deduplicateModelBackends(backends: readonly ModelBackend[]) {
@@ -59,26 +64,31 @@ export const MODEL_BACKEND_STATUSES = [
   "unreachable",
 ] as const;
 
-export function modelBackendStatusLabel(status: string): string {
+/**
+ * 状态词跟着界面语言走。从前这里只有英文 —— 中文界面的模型页上写着
+ * 「Ready」「Credential rejected」：护栏扫的是 JSX 里的英文，`.ts` 里 return
+ * 出来的英文它看不见。
+ */
+export function modelBackendStatusLabel(status: string, lang: Language): string {
   switch (status) {
     case "ready":
-      return "Ready";
+      return say({ zh: "可用", en: "Ready" }, lang);
     case "disabled":
-      return "Disabled";
+      return say({ zh: "已停用", en: "Disabled" }, lang);
     case "missing_credentials":
-      return "Credential required";
+      return say({ zh: "缺密钥", en: "Credential required" }, lang);
     case "credentials_rejected":
       // provider 明确拒绝了这把 key。是"坏了"，不是"没数据"。
-      return "Credential rejected";
+      return say({ zh: "密钥被拒", en: "Credential rejected" }, lang);
     case "harness_disabled":
-      return "Local execution disabled";
+      return say({ zh: "本机执行已关闭", en: "Local execution disabled" }, lang);
     case "unsupported_by_harness":
-      return "Not supported by local execution";
+      return say({ zh: "本机执行不支持", en: "Not supported by local execution" }, lang);
     case "not_configured":
-      return "Not configured";
+      return say({ zh: "未配置", en: "Not configured" }, lang);
     case "unreachable":
-      return "Unreachable";
+      return say({ zh: "连不上", en: "Unreachable" }, lang);
     default:
-      return "Status not reported";
+      return say({ zh: "没有报告状态", en: "Status not reported" }, lang);
   }
 }

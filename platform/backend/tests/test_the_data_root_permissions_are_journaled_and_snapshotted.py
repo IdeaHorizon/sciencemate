@@ -110,3 +110,43 @@ async def test_a_machine_level_change_shows_up_in_every_session_banner(monkeypat
     monkeypatch.setattr(snap, "_latest_change", None)
     got = await env.current_environment(_DB(), project_id="p", session_id="s")
     assert got["warnings"] == []
+
+
+ICACLS = (
+    "{path} DESKTOP-X\\\\CodexSandboxUsers:(I)(M,DC)\n"
+    "{pad}NT AUTHORITY\\\\SYSTEM:(I)(F)\n"
+    "{pad}DESKTOP-X\\\\fcbay:(I)(F)\n"
+    "\n"
+    "{summary}"
+)
+
+
+def _icacls(path: str, summary: str = "Successfully processed 1 files; Failed processing 0 files") -> str:
+    return ICACLS.format(path=path, pad=" " * len(path), summary=summary)
+
+
+def test_the_acl_fingerprint_is_the_aces_not_the_path_or_the_summary():
+    here = snap.acl_fingerprint(_icacls(r"C:\Users\x\afs\harness-state"), r"C:\Users\x\afs\harness-state")
+    moved = snap.acl_fingerprint(_icacls(r"D:\elsewhere\harness-state"), r"D:\elsewhere\harness-state")
+    localised = snap.acl_fingerprint(_icacls(r"C:\Users\x\afs\harness-state", "已成功处理 1 个文件; 处理 0 个文件时失败"),
+                                     r"C:\Users\x\afs\harness-state")
+    assert here == moved == localised
+    denied = _icacls(r"C:\a").replace("NT AUTHORITY", "DESKTOP-X\\\\fcbay:(DENY)(R)\n   NT AUTHORITY", 1)
+    assert snap.acl_fingerprint(denied, r"C:\a") != snap.acl_fingerprint(_icacls(r"C:\a"), r"C:\a")
+
+
+def test_snapshots_of_another_format_or_another_place_are_not_compared(tmp_path):
+    root = tmp_path / "afs"
+    (root / "harness-state").mkdir(parents=True)
+    logs = root / "logs"
+    logs.mkdir()
+    old_format = snap.take_snapshot(root, app_version="0.5.7") | {"schema_version": 1}
+    old_format["entries"] = {k: v | {"acl_sha256": "different"} for k, v in old_format["entries"].items()}
+    (logs / snap.SNAPSHOT_NAME).write_text(json.dumps(old_format), encoding="utf-8")
+    assert snap.record_startup(root, app_version="0.5.8") is None, "1 版快照的指纹带着路径，和 2 版逐条比必然全红"
+
+    elsewhere = snap.take_snapshot(root, app_version="0.5.8") | {"data_root": str(tmp_path / "old-root")}
+    elsewhere["entries"] = {k: v | {"mode": "0o0"} for k, v in elsewhere["entries"].items()}
+    (logs / snap.SNAPSHOT_NAME).write_text(json.dumps(elsewhere), encoding="utf-8")
+    assert snap.record_startup(root, app_version="0.5.9") is None, "数据根挪过地方：继承来的 ACL 本来就不同"
+    assert snap.not_comparable(elsewhere, snap.take_snapshot(root, app_version="x")) is not None

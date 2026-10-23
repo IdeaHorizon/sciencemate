@@ -49,7 +49,7 @@ async def ask_once(
     request: dict[str, Any],
     *,
     expect: str,
-    error: Callable[[str], Exception],
+    error: Callable[..., Exception],
     root: Path,
     python: str,
     child_env: dict[str, str],
@@ -59,17 +59,22 @@ async def ask_once(
     """写一行请求，等 `expect` 那个事件。任何一种失败都带上 stderr。
 
     `error` 是调用方的异常工厂 —— 调用方的错误类型是它自己契约的一部分，不该被
-    收口这件事改掉。`secret` 给了就从 stderr 和消息里打码（子进程的环境里带着
-    模型凭据，traceback 里出现过）。
+    收口这件事改掉。它按 `error(中文那句, en=英文那句)` 调（`SaidToAPerson` 的形状）：
+    这些错误有的原话透到界面上（KB 裁决、算力授权），两种语言都写。桥自己的话和
+    stderr 是证据，两句里各带一份原样的。`secret` 给了就从 stderr 和消息里打码
+    （子进程的环境里带着模型凭据，traceback 里出现过）。
     """
-    def say(headline: str, stderr: str) -> Exception:
+    def say(headline: dict[str, str], stderr: str) -> Exception:
         tail = _redact(stderr, secret).strip()
         if tail:
-            detail = (f"{headline}\n  桥的 stderr（末 {STDERR_TAIL_CHARS} 字）："
-                      f"\n{tail[-STDERR_TAIL_CHARS:]}")
+            zh = (f"{headline['zh']}\n  桥的 stderr（末 {STDERR_TAIL_CHARS} 字）："
+                  f"\n{tail[-STDERR_TAIL_CHARS:]}")
+            en = (f"{headline['en']}\n  bridge stderr (last {STDERR_TAIL_CHARS} chars):"
+                  f"\n{tail[-STDERR_TAIL_CHARS:]}")
         else:
-            detail = f"{headline}（桥的 stderr 一个字都没有）"
-        return error(_redact(detail, secret))
+            zh = f"{headline['zh']}（桥的 stderr 一个字都没有）"
+            en = f"{headline['en']} (the bridge wrote nothing to stderr)"
+        return error(_redact(zh, secret), en=_redact(en, secret))
 
     process = await asyncio.create_subprocess_exec(
         python, "-m", "platform_runtime",
@@ -88,7 +93,9 @@ async def ask_once(
         process.kill()
         # 杀完还要收尸并把它已经说过的话拿到手 —— 超时最需要 stderr。
         _, late = await process.communicate()
-        raise say(f"harness 桥 {timeout_s:.0f} 秒内没回答（op={request.get('op')!r}）",
+        raise say({"zh": f"harness 桥 {timeout_s:.0f} 秒内没回答（op={request.get('op')!r}）",
+                   "en": f"the harness bridge did not answer within {timeout_s:.0f} seconds "
+                         f"(op={request.get('op')!r})"},
                   (late or b"").decode("utf-8", errors="replace")) from exc
 
     stderr = (stderr_bytes or b"").decode("utf-8", errors="replace")
@@ -109,15 +116,20 @@ async def ask_once(
             # 而这两件事看起来一模一样。code 常常只有一个词（真机上见过光秃秃的
             # `runtime_error`）—— 所以 stderr 必须跟着一起走。
             told = str(event.get("message") or event.get("code") or "unknown")
-            refused = say(told, stderr)
+            refused = say({"zh": told, "en": told}, stderr)
             # 桥说的 code 挂在异常上：调用方按「哪一种拒绝」回 HTTP 状态（没有这一条 / 已经裁过 /
             # 缺理由），不必去解析给人看的那句话。
             refused.code = str(event.get("code") or "")  # type: ignore[attr-defined]
             raise refused
-    raise say(f"harness 桥没给出 {expect}（退出码 {process.returncode}）", stderr)
+    raise say({"zh": f"harness 桥没给出 {expect}（退出码 {process.returncode}）",
+               "en": f"the harness bridge gave no {expect} (exit code {process.returncode})"}, stderr)
 
 
 def _redact(text: str, secret: str | None) -> str:
+    """按原值抹 key —— 和 worker、会话、诊断包同一条规则（`shared.lib.secret_values`，#1228）。"""
     if not secret or not text:
         return text
-    return text.replace(secret, "[REDACTED]")
+    from app.services.harness_imports import harness_module
+
+    rule = harness_module("shared.lib.secret_values")
+    return rule.redact_values(text, rule.secret_values([secret]))

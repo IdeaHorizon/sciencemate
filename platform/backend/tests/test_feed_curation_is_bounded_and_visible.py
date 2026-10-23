@@ -33,38 +33,26 @@ def test_auto_curation_is_off_until_the_user_turns_it_on() -> None:
     assert curation.is_enabled(_user(auto_curation=True)) is True
 
 
-def test_explicit_choices_outrank_inferred_ones() -> None:
-    """手选的排前面且不会被推断结果挤掉 —— 顺序本身也是一种表达。"""
+def test_manual_domains_are_independent_of_project_inference() -> None:
+    """课题推断只生成课题检索词，不会偷偷增加领域订阅。"""
     user = _user(
         domains=["cond-mat.stat-mech"],
         inferred_domains=["cs.LG", "cond-mat.stat-mech"],
     )
-    effective = curation.effective_domains(user)
-    assert effective[0] == "cond-mat.stat-mech"
-    # 同一个域同时被手选和推断出来，只算一次。
-    assert effective == ("cond-mat.stat-mech", "cs.LG")
+    assert curation.effective_domains(user) == ("cond-mat.stat-mech",)
 
 
-def test_a_rejected_inference_never_comes_back() -> None:
-    """删掉一条推断项要被记住。
-
-    只从列表里移除是不够的：下次挖掘会把它重新推断出来，于是用户每天删同一个，
-    而系统看起来像没听见他说话。
-    """
+def test_rejected_inference_does_not_become_a_domain_subscription() -> None:
     user = _user(
         domains=[],
         inferred_domains=["cs.LG", "q-fin.TR"],
         rejected_domains=["q-fin.TR"],
     )
-    assert curation.effective_domains(user) == ("cs.LG",)
+    assert curation.effective_domains(user) == ()
 
 
-def test_turning_it_off_does_not_silently_change_what_you_follow() -> None:
-    """关掉开关不清空已推断的方向 —— 他可能只是想省钱，而那些方向仍然是对的。
-
-    （真要清掉，删具体某一条才是他表达"这个推错了"的动作。）
-    """
-    user = _user(auto_curation=False, inferred_domains=["cs.LG"])
+def test_turning_off_project_curation_preserves_manual_domains_only() -> None:
+    user = _user(auto_curation=False, domains=["cs.LG"], inferred_domains=["q-fin.TR"])
     assert curation.is_enabled(user) is False
     assert curation.effective_domains(user) == ("cs.LG",)
 
@@ -202,8 +190,8 @@ def test_the_model_answer_is_filtered_through_the_vocabulary(
     assert result["domains"] == expected_domains
 
 
-def test_each_project_keywords_are_capped_at_two() -> None:
-    """每个课题的检索词最多 2 个，多出来的机械丢弃 —— 词要属于「这个」课题，
+def test_each_project_paper_keywords_are_capped_at_three() -> None:
+    """每个课题的论文检索词最多 3 个，多出来的机械丢弃 —— 词要属于「这个」课题，
     一个课题不该吐五六个词挤掉别人。"""
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
@@ -218,7 +206,49 @@ def test_each_project_keywords_are_capped_at_two() -> None:
     assert result["projects"][0]["queries"] == [
         "steer-by-wire chassis control",
         "vehicle dynamics modeling",
-    ]  # 第 3、4 个被机械丢弃
+        "new energy vehicle",
+    ]  # 第 4 个被机械丢弃
+
+
+def test_paper_query_budget_covers_multiple_facets_without_erasing_projects() -> None:
+    per_project = [
+        {"queries": ["settling particles", "irregular particle settling", "immersed boundary sedimentation"]},
+        {"queries": ["battery thermal runaway", "battery cooling", "battery safety"]},
+    ]
+    merged = curation._merge_project_queries(
+        per_project, [None, None], field="queries", cap=curation.MAX_MERGED_QUERIES
+    )
+    assert len(merged) == 6
+    assert merged[:2] == ["settling particles", "battery thermal runaway"]
+    assert discovery.MAX_QUERIES_PER_USER >= len(merged)
+
+
+@pytest.mark.asyncio
+async def test_saved_examples_only_use_current_project_topic(db_session) -> None:
+    from datetime import UTC, datetime
+    from uuid import uuid4
+    from app.models.feed import FeedEngagement, FeedEngagementAction, FeedItem
+    from app.models.project import Project, ProjectStatus
+
+    user = User(id=str(uuid4()), email="saved-topic@lab.test", display_name="A", hashed_password="x")
+    project = Project(id=str(uuid4()), owner_id=user.id, name="irregular particle settling",
+                      research_domain="immersed boundary sedimentation", status=ProjectStatus.ACTIVE)
+    relevant = FeedItem(id=str(uuid4()), canonical_key="test:relevant-save", kind="paper",
+                        title="Irregular particle settling with immersed boundary simulations",
+                        authors=[], domains=[], extra={})
+    unrelated = FeedItem(id=str(uuid4()), canonical_key="test:unrelated-save", kind="paper",
+                         title="Transformer language model training for clinical diagnosis",
+                         authors=[], domains=[], extra={})
+    db_session.add_all([user, project, relevant, unrelated])
+    await db_session.flush()
+    db_session.add_all([
+        FeedEngagement(user_id=user.id, item_id=relevant.id, action=FeedEngagementAction.SAVE,
+                       created_at=datetime.now(UTC)),
+        FeedEngagement(user_id=user.id, item_id=unrelated.id, action=FeedEngagementAction.SAVE,
+                       created_at=datetime.now(UTC)),
+    ])
+    await db_session.flush()
+    assert await curation.saved_project_examples(db_session, user, [project]) == [relevant.title]
 
 
 def test_project_keywords_do_not_depend_on_domain_slots() -> None:
@@ -419,3 +449,32 @@ async def test_projects_last_active_uses_most_recent_user_message(db_session) ->
     got = await curation.projects_last_active(db_session, [pid_a, pid_b])
     assert got[pid_a] == base + timedelta(days=10)  # 取最近 user 消息，忽略 assistant
     assert got[pid_b] is None
+
+
+@pytest.mark.asyncio
+async def test_profile_keeps_curated_queries_after_relevant_save(db_session) -> None:
+    """Curation and ranking must hash the same saved-paper examples."""
+    from datetime import UTC, datetime
+    from uuid import uuid4
+    from app.models.feed import FeedEngagement, FeedEngagementAction, FeedItem
+    from app.models.project import Project, ProjectStatus
+    from app.services.feed.profile import build_profile
+
+    user = User(id=str(uuid4()), email="saved-fingerprint@lab.test", display_name="A", hashed_password="x")
+    project = Project(id=str(uuid4()), owner_id=user.id, name="irregular particle settling",
+                      research_domain="immersed boundary sedimentation", status=ProjectStatus.ACTIVE)
+    item = FeedItem(id=str(uuid4()), canonical_key="test:curated-save", kind="paper",
+                    title="Irregular particle settling with immersed boundary simulations",
+                    authors=[], domains=[], extra={})
+    db_session.add_all([user, project, item])
+    await db_session.flush()
+    db_session.add(FeedEngagement(user_id=user.id, item_id=item.id,
+                                  action=FeedEngagementAction.SAVE, created_at=datetime.now(UTC)))
+    await db_session.flush()
+    user.preferences = {"feed": {
+        "curated_fingerprint": curation.project_fingerprint([project], [item.title]),
+        "inferred_queries": ["irregular particle settling"],
+    }}
+    await db_session.flush()
+    result = await build_profile(db_session, user=user)
+    assert result.active_project_queries == frozenset({"irregular particle settling"})

@@ -7,7 +7,7 @@ import {
   authorLine,
   deadlineCountdown,
   hasExternalLink,
-  relativeTime,
+  feedDate,
   todayHeadline,
   truncate,
   visibleDomainTags,
@@ -28,6 +28,7 @@ function item(overrides: Partial<FeedItem> = {}): FeedItem {
     source_name: null,
     author_display_name: null,
     saved: false,
+    viewed: false,
     extra: {},
     ...overrides,
   };
@@ -61,21 +62,14 @@ test("作者超过三个折成 et al.", () => {
   assert.equal(authorLine(["A", "B", "C", "D"]), "A, B, C et al.");
 });
 
-/**
- * 判据自己不许依赖运行环境：`now` 是参数，不是函数里读的时钟。
- * 读时钟的版本只在某些时刻通过，而它会绿着骗过 CI。
- */
-test("相对时间按传进来的时刻算，不读真实时钟", () => {
-  const now = new Date("2026-08-22T12:00:00Z");
-  assert.equal(relativeTime("2026-08-22T11:59:40Z", now, "zh"), "刚刚");
-  assert.equal(relativeTime("2026-08-22T11:30:00Z", now, "zh"), "30 分钟前");
-  assert.equal(relativeTime("2026-08-22T06:00:00Z", now, "zh"), "6 小时前");
-  assert.equal(relativeTime("2026-08-19T12:00:00Z", now, "zh"), "3 天前");
-  assert.equal(relativeTime("2026-01-02T12:00:00Z", now, "zh"), "2026-01-02");
-  assert.equal(relativeTime("2026-08-22T11:30:00Z", now, "en"), "30 min ago");
-  // 源没给日期是常态（RSS 里 pubDate 可缺）—— 不能因此崩，也不能编一个。
-  assert.equal(relativeTime(null, now, "zh"), "");
-  assert.equal(relativeTime("not-a-date", now, "zh"), "");
+test("推荐卡显示来源日期，月份精度和发现日期不伪造发表日", () => {
+  assert.equal(feedDate(item({ published_at: "2026-09-23T11:30:00Z" }), "zh"), "2026-09-23");
+  assert.equal(feedDate(item({ published_at: "2026-09-01T00:00:00Z",
+    extra: { publication_date_precision: "month" } }), "zh"), "2026-09");
+  assert.equal(feedDate(item({ published_at: null,
+    extra: { discovered_at: "2026-09-20T10:00:00Z" } }), "zh"), "发现于 2026-09-20");
+  assert.equal(feedDate(item({ published_at: null }), "en"), "Date unavailable");
+  assert.equal(feedDate(item({ published_at: "not-a-date" }), "zh"), "日期未提供");
 });
 
 test("截稿倒计时说还剩几天，过期的说已截止", () => {
@@ -360,7 +354,7 @@ test("格子视图对每一条都取图，不再问条目有没有图", () => {
   ));
   assert.ok(!/has_image|hasImage/.test(card), "卡片又开始按标志位决定取不取图了");
   // 取图这件事本身还得在（否则上面那条断言在一个没有图的卡片上也成立）。
-  assert.match(card, /useFeedImage\(/);
+  assert.match(card, /useFeedImageAsset\(/);
 });
 
 /**

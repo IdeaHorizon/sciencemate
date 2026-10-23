@@ -36,10 +36,10 @@ export default function UsageSettingsPage() {
           </section>
 
           <section className="settings-compact-section">
-            <div className="settings-compact-heading"><div><h2>{t({ zh: "近 365 天", en: "365-day activity" })}</h2><p>{t({ zh: "一个方块是一天，颜色深浅按当天记录的 token 算。", en: "Each square is one calendar day; intensity is based on recorded tokens." })}</p></div><small>{usage.data.longest_streak} day longest streak</small></div>
+            <div className="settings-compact-heading"><div><h2>{t({ zh: "近 365 天", en: "365-day activity" })}</h2><p>{t({ zh: "一个方块是一天，颜色深浅按当天记录的 token 算。", en: "Each square is one calendar day; intensity is based on recorded tokens." })}</p></div><small>{t({ zh: "最长连续 {count} 天", en: "{count} day longest streak" }, { count: usage.data.longest_streak })}</small></div>
             <div className="usage-heatmap-wrap">
               <div className="usage-heatmap" aria-label={t({ zh: "近 365 天 token 活动", en: "365-day token activity" })}>
-                {heatmap.map((day) => <span key={day.date} className={`level-${usageIntensity(day.total_tokens, heatmapMax)}`} title={`${day.date} · ${day.total_tokens.toLocaleString()} tokens · ${day.run_count} Runs`} />)}
+                {heatmap.map((day) => <span key={day.date} className={`level-${usageIntensity(day.total_tokens, heatmapMax)}`} title={t({ zh: "{date} · {tokens} token · {runs} 次执行", en: "{date} · {tokens} tokens · {runs} Runs" }, { date: day.date, tokens: day.total_tokens.toLocaleString(), runs: day.run_count })} />)}
               </div>
               <div className="usage-legend"><span>{t({ zh: "少", en: "Less" })}</span>{[0, 1, 2, 3, 4].map((level) => <i key={level} className={`level-${level}`} />)}<span>{t({ zh: "多", en: "More" })}</span></div>
             </div>
@@ -48,7 +48,7 @@ export default function UsageSettingsPage() {
           <section className="settings-compact-section">
             <div className="settings-compact-heading"><div><h2>{t({ zh: "近 90 天", en: "Recent 90 days" })}</h2><p>{t({ zh: "每天记录的 token 量，悬停看准确数值。", en: "Daily recorded token volume; hover a bar for exact values." })}</p></div></div>
             <div className="usage-bar-chart" aria-label={t({ zh: "近 90 天 token 历史", en: "90-day token history" })}>
-              {recent.map((day) => <span key={day.date} title={`${day.date} · ${day.total_tokens.toLocaleString()} tokens · ${day.run_count} Runs`} style={{ height: `${recentMax && day.total_tokens ? Math.max(2, (day.total_tokens / recentMax) * 100) : 0}%` }} />)}
+              {recent.map((day) => <span key={day.date} title={t({ zh: "{date} · {tokens} token · {runs} 次执行", en: "{date} · {tokens} tokens · {runs} Runs" }, { date: day.date, tokens: day.total_tokens.toLocaleString(), runs: day.run_count })} style={{ height: `${recentMax && day.total_tokens ? Math.max(2, (day.total_tokens / recentMax) * 100) : 0}%` }} />)}
             </div>
           </section>
 

@@ -76,3 +76,24 @@ test("english copy exists for every branch", () => {
   assert.match(model?.title ?? "", /precondition/);
   assert.match(bannerModel(env([{ severity: "fatal", code: "tenant_home_conflict", consequences: [] }]), "en", null)?.title ?? "", /did not start/);
 });
+
+test("后端存下的话两种语言都写：横幅按这一屏挑；老事件里的一句字符串照原样给", () => {
+  // 2026-10-20：consequences / repair.changes 从前只写中文，英文界面的横幅上是一行中文。
+  const env = {
+    warnings: [{
+      code: "state_dir_unavailable", capability: "state", severity: "degraded" as const, path: "/x", error: "e",
+      consequences: [{ zh: "这一轮的转录写不进磁盘", en: "This turn's transcript cannot be written to disk" }, "老事件里的一句"],
+      repair: { kind: "reset_data_root_permissions", argv: ["chmod", "-R", "u+rwX", "/x"], command: "chmod -R u+rwX /x",
+                changes: { zh: "给数据根下所有对象加回本用户的读写权限", en: "Gives your user read and write access back" },
+                reversible: false, needs_consent: true, automatic: false },
+    }],
+    capabilities: null,
+  };
+  const en = bannerModel(env as never, "en", null);
+  assert.ok(en?.lines.includes("This turn's transcript cannot be written to disk"), JSON.stringify(en?.lines));
+  assert.ok(en?.lines.includes("老事件里的一句"), "老事件的字符串丢了");
+  assert.equal(en?.repair?.changes, "Gives your user read and write access back");
+  const zh = bannerModel(env as never, "zh", null);
+  assert.ok(zh?.lines.includes("这一轮的转录写不进磁盘"));
+  assert.equal(zh?.repair?.changes, "给数据根下所有对象加回本用户的读写权限");
+});

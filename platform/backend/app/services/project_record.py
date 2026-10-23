@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.project import Project, ProjectConfig, ProjectMembership
 from app.models.resource import ProjectResource
 from app.models.user import User
+from app.services.user_interface import language_for, said_of
 from app.services.project_repository import (
     ProjectRepositoryError,
     get_project_repository,
@@ -165,7 +166,9 @@ async def commit_project_record(
     except ProjectRepositoryError as exc:
         raise HTTPException(
             status_code=409,
-            detail={"code": "project_governance_commit_failed", "message": str(exc)},
+            detail={"code": "project_governance_commit_failed", "message": said_of(
+                exc, language_for(user), otherwise={
+                    "zh": "项目设置没能提交：{why}", "en": "The project settings could not be committed: {why}"})},
         ) from exc
     if commit == git_base_commit:
         # 什么都没变 —— `commit_main_files` 幂等返回同一个 sha。

@@ -26,7 +26,7 @@ function humanizeStatus(status: string, lang: Language) {
 export function projectIdentity(
   project: Project | undefined,
   state: { loading: boolean; error: boolean },
-  lang: Language = "zh",
+  lang: Language,
 ): ProjectIdentity {
   if (state.loading) {
     return { name: say({ zh: "载入中…", en: "Loading project…" }, lang), meta: say({ zh: "正在解析工作区", en: "Resolving workspace" }, lang), state: "loading" };

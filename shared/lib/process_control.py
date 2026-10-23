@@ -367,6 +367,60 @@ def process_table() -> list[tuple[int, int, str]] | None:
     return rows
 
 
+# ── 按环境标记收摊（#1094）────────────────────────────────────────────────────
+
+LAUNCH_MARKER = "HF_LAUNCH_ID"
+"""每条模型命令的环境里带一个独一无二的值；它的后代 —— 哪怕 ``setsid`` 自立门户、
+换了进程组和会话 —— 都继承这个环境。进程组认不出它们，这个标记认得出。"""
+
+
+def new_launch_marker() -> str:
+    return uuid4().hex
+
+
+def kill_marked(marker: str, *, grace_s: float = 1.0) -> list[int]:
+    """SIGKILL 环境里带着 ``HF_LAUNCH_ID=marker`` 的每个进程（除了自己），返回杀掉的 pid。
+
+    **为什么要这一层**（#1094）：调用结束时咽喉对顶层进程组 ``killpg``；模型命令里 ``setsid``
+    （或 bash ``set -m``）起的后代不在那个组里，于是 ``run_bash`` 已经返回 success / timeout /
+    cancelled，几秒后它们还在可写根里写文件，还能活过 harness 本身。有 systemd --user scope 的
+    机器靠停 slice 整片收掉（cgroup 不在乎进程组）；没有 scope 的 Linux 和 macOS 上，这条按
+    环境标记兜底：命令起跑时环境里塞一个本次独有的值，调用结束还活着的全部收掉。
+
+    **边界，如实**：读别人的 environ 要同一个 uid，别的用户的进程跳过；``env -i`` 把环境洗掉的
+    后代认不出来 —— 这不是墙，是兜底，cgroup 才是墙。Windows 走 Job 对象整组收，这里不做。
+    只杀不等收尸：孤儿的父进程是 init，它来收。
+    """
+    if _WINDOWS or not marker:
+        return []
+    me = os.getpid()
+    victims: list[int] = []
+    for proc in psutil.process_iter(["pid"]):
+        pid = int(proc.info["pid"])
+        if pid == me:
+            continue
+        try:
+            env = proc.environ()
+        except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
+            continue
+        except Exception:  # noqa: BLE001 - 个别内核态进程 psutil 抛 OSError，跳过
+            continue
+        if env.get(LAUNCH_MARKER) != marker:
+            continue
+        try:
+            proc.kill()
+            victims.append(pid)
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+        except psutil.AccessDenied:
+            log.warning("kill(%s) for launch %s denied", pid, marker)
+    if victims:
+        deadline = time.monotonic() + grace_s
+        while time.monotonic() < deadline and any(alive(p) for p in victims):
+            time.sleep(0.02)
+    return victims
+
+
 # ── 按 pid 收摊 ──────────────────────────────────────────────────────────────
 
 

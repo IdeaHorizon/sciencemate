@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from app.auth import get_current_user
 from app.models.user import User
 from app.services import harness_kb
+from app.services.user_interface import Language, language_on_screen
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +275,7 @@ async def approve_proposal(
     project_id: str = Query(...),
     reasoning: str = Query(..., min_length=5),
     user: User = Depends(get_current_user),
+    lang: Language = Depends(language_on_screen),
 ):
     """Accept a curator proposal — through the harness's own `resolve_proposal`.
 
@@ -281,7 +283,7 @@ async def approve_proposal(
     skill candidate writes `org/skills/<name>/SKILL.md`), and the reasoning is
     what keeps the queue auditable.  Same path the agent takes.
     """
-    return await _resolve(user, project_id, proposal_id, "accepted", reasoning)
+    return await _resolve(user, project_id, proposal_id, "accepted", reasoning, lang)
 
 
 @router.post("/proposals/{proposal_id}/reject")
@@ -290,12 +292,13 @@ async def reject_proposal(
     project_id: str = Query(...),
     reasoning: str = Query(..., min_length=5),
     user: User = Depends(get_current_user),
+    lang: Language = Depends(language_on_screen),
 ):
-    return await _resolve(user, project_id, proposal_id, "rejected", reasoning)
+    return await _resolve(user, project_id, proposal_id, "rejected", reasoning, lang)
 
 
 async def _resolve(user: User, project_id: str, proposal_id: str,
-                   decision: str, reasoning: str) -> dict[str, Any]:
+                   decision: str, reasoning: str, lang: Language) -> dict[str, Any]:
     try:
         return await harness_kb.resolve_proposal(
             user, project_id, proposal_id, decision=decision, reasoning=reasoning
@@ -303,7 +306,7 @@ async def _resolve(user: User, project_id: str, proposal_id: str,
     except harness_kb.HarnessKBError as exc:
         # 把 harness 的拒绝原样透出去（"已经处理过了" / "理由太短"），别翻译成
         # 一句笼统的 500 —— 用户要知道的是这条为什么没被接受。
-        raise HTTPException(400, str(exc)) from exc
+        raise HTTPException(400, exc.said_in(lang)) from exc
 
 
 # ── 组织层：全组织共用的那一份知识 ──────────────────────────────────────────

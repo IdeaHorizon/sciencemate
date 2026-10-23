@@ -68,10 +68,10 @@ function Inventory({ inventory, accessLabel }: { inventory: ComputeInventory; ac
       </div>
 
       <dl className="compute-capacity-summary" aria-label={t({ zh: "可用算力", en: "Available compute capacity" })}>
-        <div><dt>CPU</dt><dd>{value(capacity.cpu_logical_cores, " cores")}</dd><small>{t({ zh: "逻辑核", en: "logical cores" })}</small></div>
-        <div><dt>{t({ zh: "内存", en: "Memory" })}</dt><dd>{bytes(capacity.memory_available_bytes)}</dd><small>{capacity.memory_total_bytes === null ? "available" : `${bytes(capacity.memory_total_bytes)} total`}</small></div>
-        <div><dt>{t({ zh: "存储", en: "Storage" })}</dt><dd>{bytes(capacity.storage_free_bytes)}</dd><small>{capacity.storage_total_bytes === null ? "free" : `${bytes(capacity.storage_total_bytes)} total`}</small></div>
-        <div><dt>GPU</dt><dd>{value(capacity.gpu_count)}</dd><small>{capacity.gpu_memory_available_bytes === null ? (capacity.gpu_count === 1 ? "device" : "devices") : `${bytes(capacity.gpu_memory_available_bytes)} VRAM free`}</small></div>
+        <div><dt>CPU</dt><dd>{value(capacity.cpu_logical_cores, t({ zh: " 核", en: " cores" }))}</dd><small>{t({ zh: "逻辑核", en: "logical cores" })}</small></div>
+        <div><dt>{t({ zh: "内存", en: "Memory" })}</dt><dd>{bytes(capacity.memory_available_bytes)}</dd><small>{capacity.memory_total_bytes === null ? t({ zh: "可用", en: "available" }) : t({ zh: "共 {total}", en: "{total} total" }, { total: bytes(capacity.memory_total_bytes) })}</small></div>
+        <div><dt>{t({ zh: "存储", en: "Storage" })}</dt><dd>{bytes(capacity.storage_free_bytes)}</dd><small>{capacity.storage_total_bytes === null ? t({ zh: "空闲", en: "free" }) : t({ zh: "共 {total}", en: "{total} total" }, { total: bytes(capacity.storage_total_bytes) })}</small></div>
+        <div><dt>GPU</dt><dd>{value(capacity.gpu_count)}</dd><small>{capacity.gpu_memory_available_bytes === null ? t(capacity.gpu_count === 1 ? { zh: "张卡", en: "device" } : { zh: "张卡", en: "devices" }) : t({ zh: "显存空闲 {free}", en: "{free} VRAM free" }, { free: bytes(capacity.gpu_memory_available_bytes) })}</small></div>
         <div><dt>{t({ zh: "正在跑的", en: "Active work" })}</dt><dd>{active.count === null ? "—" : active.count.toLocaleString()}</dd><small>{active.detail}</small></div>
       </dl>
 
@@ -121,7 +121,7 @@ function Inventory({ inventory, accessLabel }: { inventory: ComputeInventory; ac
           )}
 
           {inventory.nodes.length > 0 && (
-            <section><h3>{t({ zh: "节点诊断", en: "Node diagnostics" })}</h3>{inventory.nodes.map((node) => <dl className="compute-diagnostic-row" key={node.id}><div><dt>{t({ zh: "节点 ID", en: "Node ID" })}</dt><dd><code>{node.id}</code></dd></div><div><dt>{t({ zh: "组件状态", en: "Component status" })}</dt><dd>CPU {statusLabel(node.cpu.status, lang)} · memory {statusLabel(node.memory.status, lang)} · storage {statusLabel(node.storage.status, lang)} · GPU {statusLabel(node.gpu.status, lang)}</dd></div>{node.gpu.devices.map((device) => <div key={device.id}><dt>{t({ zh: "GPU 设备", en: "GPU device" })}</dt><dd>{device.name} · {bytes(device.memory_available_bytes)} free of {bytes(device.memory_total_bytes)} · {device.utilization_percent === null ? "utilization unknown" : `${device.utilization_percent}% utilized`}</dd></div>)}</dl>)}</section>
+            <section><h3>{t({ zh: "节点诊断", en: "Node diagnostics" })}</h3>{inventory.nodes.map((node) => <dl className="compute-diagnostic-row" key={node.id}><div><dt>{t({ zh: "节点 ID", en: "Node ID" })}</dt><dd><code>{node.id}</code></dd></div><div><dt>{t({ zh: "组件状态", en: "Component status" })}</dt><dd>CPU {statusLabel(node.cpu.status, lang)} · {t({ zh: "内存", en: "memory" })} {statusLabel(node.memory.status, lang)} · {t({ zh: "存储", en: "storage" })} {statusLabel(node.storage.status, lang)} · GPU {statusLabel(node.gpu.status, lang)}</dd></div>{node.gpu.devices.map((device) => <div key={device.id}><dt>{t({ zh: "GPU 设备", en: "GPU device" })}</dt><dd>{device.name} · {t({ zh: "空闲 {free}，共 {total}", en: "{free} free of {total}" }, { free: bytes(device.memory_available_bytes), total: bytes(device.memory_total_bytes) })} · {device.utilization_percent === null ? t({ zh: "利用率未知", en: "utilization unknown" }) : t({ zh: "利用率 {percent}%", en: "{percent}% utilized" }, { percent: device.utilization_percent })}</dd></div>)}</dl>)}</section>
           )}
 
           {inventory.limitations.length > 0 && (

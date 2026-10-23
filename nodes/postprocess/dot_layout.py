@@ -239,6 +239,7 @@ def _build_dot_source(
     #      连向同一个 hub 的服务器全排成一行（实测：声明的 2×2 被压平成 1×4，
     #      画布 4412×590，7.5:1）。② 用不可见边表达，weight 拉高保证生效。
     if with_bands:
+        band_heads: list[list[str]] = []
         band_tails: list[list[str]] = []
         for band in contract["bands"]:
             heads: list[str] = []

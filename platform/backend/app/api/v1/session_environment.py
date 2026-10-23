@@ -15,6 +15,7 @@ from app.database import get_db
 from app.models.user import User
 from app.services.session_environment import RepairRefused, current_environment, run_repair
 from app.services.sessions import get_session, require_capability, require_drive_access
+from app.services.user_interface import Language, language_on_screen
 
 router = APIRouter()
 
@@ -43,6 +44,7 @@ async def repair_session_environment(
     data: RepairRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> dict:
     project, _session = await get_session(db, user, project_id, session_id)
     await require_drive_access(db, user=user, project=project, session_id=session_id)
@@ -50,4 +52,4 @@ async def repair_session_environment(
         return await run_repair(db, project_id=project_id, session_id=session_id,
                                 code=data.code, path=data.path)
     except RepairRefused as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=exc.said_in(lang)) from exc

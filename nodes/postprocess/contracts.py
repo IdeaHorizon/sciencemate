@@ -217,6 +217,14 @@ def visual_request_schema() -> dict[str, Any]:
                 },
             },
             "style_intent": {"type": "string"},
+            "preferred_form": {
+                "type": "string",
+                "enum": sorted(PREFERRED_FORMS),
+                "description": (
+                    "调用方显式指定成图形态（最高优先，推导轴为它让路）："
+                    "illustration=SVG 插画轨 / compiled=合同编译轨 / data_chart=数据图轨"
+                ),
+            },
             "spec": {"type": "object"},
             "generative_allowed": {"type": "boolean"},
         },
@@ -275,6 +283,103 @@ def validate_asset_kind(value: Any) -> str:
     return kind
 
 
+#: 调用方 `preferred_form` 的合法值（AutoFigure 移植，方案 A §4.1 定案）——
+#: 调用方意图的最高优先表达：design_decision 不得覆盖它。三值与轨道的映射
+#: 见 _FORM_TO_TRACK。
+PREFERRED_FORMS = frozenset({"illustration", "compiled", "data_chart"})
+
+
+def validate_preferred_form(value: Any) -> str | None:
+    """调用方显式指定的成图形态。未知值严格拒绝（同 validate_asset_kind 的姿态）；
+    None = 没填，轨道交给 route_track 的输入形态轴推导。"""
+
+    form = str(value or "").strip().lower()
+    if not form:
+        return None
+    if form not in PREFERRED_FORMS:
+        raise VisualContractError(
+            f"preferred_form must be one of {sorted(PREFERRED_FORMS)}; got {form!r}"
+        )
+    return form
+
+
+# ── 轨道（track）：这张图走哪条渲染管线 ────────────────────────────────
+#
+# 判别轴 = **输入形态**（2026-10-15 用户拍板，AutoFigure 移植方案 A §4.1）。
+# 关键词规则已废：「画一个拓扑图」里的结构词不该把纯文字请求送进编译轨。
+# fail-safe 方向：有数据才需防"画错数"（→matplotlib）；无数据时 matplotlib
+# 轨没东西可画（→SVG）。
+TRACKS = frozenset({"svg", "compiled", "matplotlib"})
+
+_FORM_TO_TRACK = {"illustration": "svg", "compiled": "compiled", "data_chart": "matplotlib"}
+
+#: asset_kind → 默认轨道（说明性文档 + briefing 展示；推导主逻辑在 route_track）。
+#: None = 按输入形态分流：有 spec 走编译轨、纯文字走 SVG 轨。
+TRACK_BY_ASSET_KIND: dict[str, str | None] = {
+    "quantitative": "matplotlib",
+    "composite": "matplotlib",
+    "scientific_image": "matplotlib",
+    "spatial_3d": "matplotlib",
+    "molecular_material": "matplotlib",
+    "electronic_structure": "matplotlib",
+    "particle_trajectory": "matplotlib",
+    "geospatial_field": "matplotlib",
+    "schematic": None,
+    "generative_illustration": "svg",
+    "auto": None,
+}
+
+#: 钉死在数据轨的 asset_kind：数据图家族。它们的数据可以在 render 时才绑，
+#: 请求里没有 source_artifact_ids ≠ 没数据（既有用法），不能因「纯文字」
+#: 翻轨。与 figure_contract.ASSERTED_FAMILIES 同源（这两个家族名恰好等于
+#: asset_kind 名）——漂移由测试钉住。
+_DATA_TRACK_KINDS: frozenset[str] = frozenset({"quantitative", "composite"})
+
+
+def has_machine_readable_spec(request: dict[str, Any]) -> bool:
+    """spec 里有没有机器可读结构（nodes/edges/blocks 声明）—— 编译轨的入场券。
+
+    「合同即渲染源」只在 spec 真的给了结构时成立；spec 是散文就走 SVG 轨。
+    """
+
+    spec = request.get("spec")
+    if not isinstance(spec, dict):
+        return False
+    if spec.get("nodes") or spec.get("edges") or spec.get("blocks"):
+        return True
+    inner = spec.get("contract")
+    return isinstance(inner, dict) and bool(inner.get("nodes") or inner.get("edges"))
+
+
+def route_track(request: dict[str, Any]) -> str:
+    """轨道判定（输入形态轴，方案 A §4.1）。优先级自上而下：
+
+    1. preferred_form 显式指定 → 从之（调用方意图优先）；
+    2. 数据图家族（quantitative/composite）钉在数据轨：数据可以在 render 时
+       才绑，请求里没有 source_artifact_ids ≠ 没数据（既有用法）——不能因
+       「纯文字」翻轨（2026-10-20 审查：此前这类请求被判 svg，briefing 的
+       轨道标签与 declare 的家族决定互相矛盾）；
+    3. source_artifact_ids 非空 → matplotlib（图编码上游数据，必须对象模型对账）；
+    4. spec 含机器可读结构 → compiled（合同即渲染源，最强保证）；
+    5. 纯 intent 文字描述（无数据、无 spec）→ svg（含 generative_illustration）。
+    """
+
+    form = validate_preferred_form(request.get("preferred_form"))
+    if form:
+        return _FORM_TO_TRACK[form]
+    kind = str(request.get("asset_kind") or "").strip().lower()
+    if kind in _DATA_TRACK_KINDS:
+        return "matplotlib"
+    source_ids = request.get("source_artifact_ids") or []
+    if isinstance(source_ids, str):
+        source_ids = [source_ids]
+    if source_ids:
+        return "matplotlib"
+    if has_machine_readable_spec(request):
+        return "compiled"
+    return "svg"
+
+
 def infer_purpose(request: dict[str, Any]) -> str:
     """从意图/venue 推断用途 —— 只用于导出预设（尺寸/DPI/格式），不是身份。"""
     explicit = str(request.get("purpose") or "").strip().lower()
@@ -319,7 +424,7 @@ def normalize_request(request: dict[str, Any]) -> dict[str, Any]:
         "purpose": purpose,
         "asset_kind": asset_kind,
         "claim_ref": request.get("claim_ref"),
-        "preferred_form": request.get("preferred_form"),
+        "preferred_form": validate_preferred_form(request.get("preferred_form")),
         "venue": request.get("venue"),
         "constraints": constraints,
         "generative_allowed": bool(request.get("generative_allowed")),

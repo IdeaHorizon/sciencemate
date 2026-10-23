@@ -144,7 +144,7 @@ internal static class Installer
         Console.Error.WriteLine(message);
         if (interactive)
         {
-            try { Footprint.MessageBoxW(IntPtr.Zero, message, "ScienceMate 安装", Footprint.IconError); }
+            try { Footprint.MessageBoxW(IntPtr.Zero, message, Speech.T("ScienceMate 安装", "ScienceMate Setup"), Footprint.IconError); }
             catch { /* 弹不出来也不能改变退出码 */ }
         }
         return code;
@@ -288,21 +288,24 @@ internal static class Installer
         try
         {
             if (string.IsNullOrWhiteSpace(installDir) || !Path.IsPathRooted(installDir))
-                return "请填一个绝对路径，例如 C:\\Users\\你\\ScienceMate。";
+                return Speech.T("请填一个绝对路径，例如 C:\\Users\\你\\ScienceMate。",
+                                "Enter a full path, for example C:\\Users\\you\\ScienceMate.");
             string full = Path.GetFullPath(installDir).TrimEnd(Path.DirectorySeparatorChar);
             if (string.IsNullOrEmpty(Path.GetDirectoryName(full)))
-                return "不能安装到磁盘根目录。";
+                return Speech.T("不能安装到磁盘根目录。", "ScienceMate cannot be installed at the root of a drive.");
             if (Directory.Exists(IoPath(full)) && Directory.GetFileSystemEntries(IoPath(full)).Length > 0
                 && !IsAnInstallation(full))
-                return "这个目录里已经有别的文件了。请选一个空目录，或已有的 ScienceMate 安装目录。";
+                return Speech.T("这个目录里已经有别的文件了。请选一个空目录，或已有的 ScienceMate 安装目录。",
+                                "This folder already has other files in it. Choose an empty folder, or an existing ScienceMate installation.");
             int running = RunningPidIn(full);
             if (running != 0)
-                return "ScienceMate 正在运行（pid " + running + "）。请先关掉它再安装。";
+                return string.Format(Speech.T("ScienceMate 正在运行（pid {0}）。请先关掉它再安装。",
+                                              "ScienceMate is running (pid {0}). Close it first, then install."), running);
             string refused = WhyThisFolderRefusesUs(full);
             if (refused != null) return refused;
             return null;
         }
-        catch (Exception ex) { return "这个路径用不了：" + ex.Message; }
+        catch (Exception ex) { return Speech.T("这个路径用不了：", "This path cannot be used: ") + ex.Message; }
     }
 
     /// <summary>写得进去吗 —— 答法是**真去建一个目录再删掉**，不是看路径长什么样。</summary>
@@ -335,7 +338,8 @@ internal static class Installer
             probeIn = up;
         }
         if (string.IsNullOrEmpty(probeIn) || !Directory.Exists(IoPath(probeIn)))
-            return "找不到这个位置所在的盘。换一个路径试试。";
+            return Speech.T("找不到这个位置所在的盘。换一个路径试试。",
+                            "The drive for this location cannot be found. Try another path.");
 
         string probe = Path.Combine(
             probeIn, Footprint.ProductName + ".probe-" + Guid.NewGuid().ToString("N"));
@@ -347,17 +351,18 @@ internal static class Installer
         }
         catch (UnauthorizedAccessException)
         {
-            return "装不进这个位置 —— 它要管理员权限。换成 "
-                 + InstallOptions.DefaultInstallDir()
-                 + "（不用权限），或者右键这个安装器、用「以管理员身份运行」重开一次。";
+            return string.Format(Speech.T(
+                "装不进这个位置 —— 它要管理员权限。换成 {0}（不用权限），或者右键这个安装器、用「以管理员身份运行」重开一次。",
+                "This location needs administrator rights. Use {0} instead (no rights needed), or right-click this installer and choose \"Run as administrator\"."),
+                InstallOptions.DefaultInstallDir());
         }
         catch (IOException ex)
         {
-            return "写不进这个位置：" + ex.Message;
+            return Speech.T("写不进这个位置：", "Cannot write to this location: ") + ex.Message;
         }
         catch (Exception ex)
         {
-            return "这个位置用不了：" + ex.Message;
+            return Speech.T("这个位置用不了：", "This location cannot be used: ") + ex.Message;
         }
         finally
         {
@@ -396,7 +401,8 @@ internal static class Installer
                 magic = reader.ReadInt64();
             }
             if (magic != MAGIC || offset < 64 || offset >= total - 16)
-                throw new InstallRefused("坏的安装包：footer 魔数不对（没拼上 payload？）", 2);
+                throw new InstallRefused(Speech.T("坏的安装包：footer 魔数不对（没拼上 payload？）",
+                                                  "Broken installer: the footer magic is wrong (payload not attached?)"), 2);
 
             string installDir = Path.GetFullPath(options.InstallDir).TrimEnd(Path.DirectorySeparatorChar);
             string lockName;
@@ -410,22 +416,25 @@ internal static class Installer
             if (!acquired)
             {
                 installLock.Dispose(); installLock = null;
-                throw new InstallRefused("另一个安装程序正在使用这个目录，请等它完成。", 4);
+                throw new InstallRefused(Speech.T("另一个安装程序正在使用这个目录，请等它完成。",
+                                                  "Another installer is using this folder. Wait for it to finish."), 4);
             }
             if (Directory.Exists(IoPath(installDir))
                 && Directory.GetFileSystemEntries(IoPath(installDir)).Length > 0
                 && !IsAnInstallation(installDir))
-                throw new InstallRefused("目标目录包含其他文件，请选择空目录或已有的 ScienceMate 安装目录。", 5);
+                throw new InstallRefused(Speech.T("目标目录包含其他文件，请选择空目录或已有的 ScienceMate 安装目录。",
+                                                  "The target folder has other files in it. Choose an empty folder or an existing ScienceMate installation."), 5);
 
             // 动手之前先问「它是不是正开着」——什么都还没动的时候说，代价最小。
             int running = RunningPidIn(installDir);
             if (running != 0)
-                throw new InstallRefused("ScienceMate 正在运行（pid " + running + "）。\n\n"
-                                         + "请先关掉它，再运行这个安装程序。\n"
-                                         + "现在什么都没有改动，已装好的那份完好无损。", 4);
+                throw new InstallRefused(string.Format(Speech.T(
+                    "ScienceMate 正在运行（pid {0}）。\n\n请先关掉它，再运行这个安装程序。\n现在什么都没有改动，已装好的那份完好无损。",
+                    "ScienceMate is running (pid {0}).\n\nClose it first, then run this installer again.\nNothing has been changed; the existing installation is intact."),
+                    running), 4);
 
-            Console.WriteLine("安装到 " + installDir + " …");
-            say("准备安装包…", -1);
+            Console.WriteLine(Speech.T("安装到 ", "Installing to ") + installDir + " …");
+            say(Speech.T("准备安装包…", "Preparing the package…"), -1);
 
             tmpZip = Path.Combine(
                 Path.GetTempPath(), "afs-setup-" + Guid.NewGuid().ToString("N") + ".zip");
@@ -442,7 +451,7 @@ internal static class Installer
                     if (n <= 0) break;
                     dst.Write(buffer, 0, n);
                     remaining -= n;
-                    say("准备安装包…", size <= 0 ? -1 : (double)(size - remaining) / size * 0.15);
+                    say(Speech.T("准备安装包…", "Preparing the package…"), size <= 0 ? -1 : (double)(size - remaining) / size * 0.15);
                 }
             }
 
@@ -453,9 +462,9 @@ internal static class Installer
             string retired = installDir + ".old-" + transaction;
 
             Directory.CreateDirectory(IoPath(staging));
-            say("正在解压文件…", 0.15);
+            say(Speech.T("正在解压文件…", "Unpacking files…"), 0.15);
             ExtractPackage(tmpZip, staging, delegate(double fraction) {
-                say("正在解压文件…", 0.15 + fraction * 0.75);
+                say(Speech.T("正在解压文件…", "Unpacking files…"), 0.15 + fraction * 0.75);
             });
             File.Delete(tmpZip);
             tmpZip = null;
@@ -463,19 +472,22 @@ internal static class Installer
             // 先验新的，再碰旧的。这一句之前失败，旧安装一个字节都没动过。
             string stagedExe = Path.Combine(staging, Footprint.ShellExeName);
             if (!File.Exists(IoPath(stagedExe)))
-                throw new InstallRefused("解出来没找到 " + stagedExe + " —— 包不对。\n"
-                                         + "已装好的那份没有改动。", 3);
+                throw new InstallRefused(string.Format(Speech.T(
+                    "解出来没找到 {0} —— 包不对。\n已装好的那份没有改动。",
+                    "{0} is not in the unpacked files — the package is wrong.\nThe existing installation has not been changed."),
+                    stagedExe), 3);
 
-            say("正在就位…", 0.92);
+            say(Speech.T("正在就位…", "Moving into place…"), 0.92);
             if (Directory.Exists(IoPath(installDir)))
             {
                 try { MoveWithPatience(installDir, retired, TimeSpan.FromSeconds(5)); }
                 catch (Exception move)
                 {
                     // 多半是刚刚有人把应用打开了（上面查的那一刻还没开）。
-                    throw new InstallRefused("换不动旧的安装（" + move.GetType().Name + "：" + move.Message + "）。\n\n"
-                                             + "多半是 ScienceMate 刚被打开了 —— 关掉它再装。\n"
-                                             + "已装好的那份完好无损。", 6);
+                    throw new InstallRefused(string.Format(Speech.T(
+                        "换不动旧的安装（{0}：{1}）。\n\n多半是 ScienceMate 刚被打开了 —— 关掉它再装。\n已装好的那份完好无损。",
+                        "The old installation cannot be replaced ({0}: {1}).\n\nScienceMate was probably just opened — close it and install again.\nThe existing installation is intact."),
+                        move.GetType().Name, move.Message), 6);
                 }
             }
             try { MoveWithPatience(staging, installDir, TimeSpan.FromSeconds(60)); }
@@ -484,26 +496,29 @@ internal static class Installer
                 if (Directory.Exists(IoPath(retired)) && !Directory.Exists(IoPath(installDir)))
                     Directory.Move(IoPath(retired), IoPath(installDir));
                 throw new InstallRefused(
-                    "装好的文件换不到位（" + move.GetType().Name + "：" + move.Message + "）。\n\n"
-                    + "有别的程序正攥着刚解压出来的文件（多半是杀毒软件在扫描），等了 60 秒仍没放开。\n"
-                    + "过一会儿再装一次即可；" + (Directory.Exists(IoPath(installDir))
-                        ? "已装好的那份完好无损。" : "这台机器上还没有装过，什么都没留下。"), 6);
+                    string.Format(Speech.T(
+                        "装好的文件换不到位（{0}：{1}）。\n\n有别的程序正攥着刚解压出来的文件（多半是杀毒软件在扫描），等了 60 秒仍没放开。\n过一会儿再装一次即可；",
+                        "The installed files could not be moved into place ({0}: {1}).\n\nAnother program is holding the freshly unpacked files (most likely antivirus scanning them) and did not let go within 60 seconds.\nTry installing again in a little while; "),
+                        move.GetType().Name, move.Message)
+                    + (Directory.Exists(IoPath(installDir))
+                        ? Speech.T("已装好的那份完好无损。", "the existing installation is intact.")
+                        : Speech.T("这台机器上还没有装过，什么都没留下。", "nothing was installed on this machine before, and nothing was left behind.")), 6);
             }
             staging = null;
             if (!Nuke(retired))
-                Console.Error.WriteLine("新安装已就位，旧安装清理未完成：" + retired);
+                Console.Error.WriteLine(Speech.T("新安装已就位，旧安装清理未完成：", "The new installation is in place; cleaning up the old one did not finish: ") + retired);
 
             var outcome = new InstallOutcome
             {
                 InstallDir = installDir,
                 ExePath = Path.Combine(installDir, Footprint.ShellExeName),
             };
-            say("正在创建快捷方式…", 0.96);
+            say(Speech.T("正在创建快捷方式…", "Creating shortcuts…"), 0.96);
             LeaveTheFootprint(options, installDir, outcome);
 
-            Console.WriteLine("装好了：" + outcome.ExePath);
+            Console.WriteLine(Speech.T("装好了：", "Installed: ") + outcome.ExePath);
             foreach (string warning in outcome.Warnings) Console.Error.WriteLine(warning);
-            say("完成", 1.0);
+            say(Speech.T("完成", "Done"), 1.0);
             return outcome;
         }
         finally
@@ -511,7 +526,7 @@ internal static class Installer
             if (installLock != null) { installLock.ReleaseMutex(); installLock.Dispose(); }
             if (tmpZip != null) { try { File.Delete(tmpZip); } catch { } }
             if (staging != null && !Nuke(staging))
-                Console.Error.WriteLine("安装临时目录清理未完成：" + staging);
+                Console.Error.WriteLine(Speech.T("安装临时目录清理未完成：", "Cleaning up the temporary install folder did not finish: ") + staging);
         }
     }
 
@@ -531,7 +546,10 @@ internal static class Installer
             installDir = installDir,
             version = Footprint.VersionIn(installDir),
             dataRoot = Footprint.DataRoot(),
+            language = Speech.Language,
         };
+        // 人在向导上选过语言，应用第一次打开就用它（没选过就让应用按系统语言定）。
+        Footprint.TellTheAppTheLanguage(record.dataRoot);
 
         if (options.DesktopShortcut)
         {
@@ -542,7 +560,7 @@ internal static class Installer
                 Footprint.CreateShortcut(lnk, exe, installDir, "ScienceMate", null);
                 record.shortcuts.Add(lnk);
             }
-            catch (Exception ex) { outcome.Warnings.Add("桌面快捷方式没建成：" + ex.Message); }
+            catch (Exception ex) { outcome.Warnings.Add(Speech.T("桌面快捷方式没建成：", "The desktop shortcut was not created: ") + ex.Message); }
         }
 
         if (options.StartMenuShortcut)
@@ -554,22 +572,32 @@ internal static class Installer
                 Footprint.CreateShortcut(lnk, exe, installDir, "ScienceMate", null);
                 record.shortcuts.Add(lnk);
             }
-            catch (Exception ex) { outcome.Warnings.Add("开始菜单快捷方式没建成：" + ex.Message); }
+            catch (Exception ex) { outcome.Warnings.Add(Speech.T("开始菜单快捷方式没建成：", "The Start menu shortcut was not created: ") + ex.Message); }
 
             // 卸载入口也放在开始菜单那个文件夹里：从「应用和功能」找得到，从开始菜单
             // 也找得到 —— 装的时候在哪儿看见它，卸的时候就该在哪儿找得到它。
             string uninstaller = Path.Combine(installDir, Footprint.UninstallerExeName);
             if (File.Exists(IoPath(uninstaller)))
             {
-                string lnkUninstall = Path.Combine(dir, "卸载 " + Footprint.ProductName + ".lnk");
+                // 名字跟着这次装的语言；上一次用另一种语言装留下的那个同义项删掉，别让开始菜单里有两个卸载。
+                string lnkUninstall = Path.Combine(dir, Footprint.UninstallShortcutName(Speech.Language));
+                foreach (string name in Footprint.EveryUninstallShortcutName())
+                {
+                    string other = Path.Combine(dir, name);
+                    if (other != lnkUninstall && File.Exists(IoPath(other)))
+                        try { File.Delete(IoPath(other)); } catch { }
+                }
                 try
                 {
-                    Footprint.CreateShortcut(lnkUninstall, uninstaller, installDir, "卸载 ScienceMate", null);
+                    Footprint.CreateShortcut(lnkUninstall, uninstaller, installDir,
+                                             Speech.T("卸载 ScienceMate", "Uninstall ScienceMate"), null);
                     record.shortcuts.Add(lnkUninstall);
                 }
-                catch (Exception ex) { outcome.Warnings.Add("开始菜单里的卸载项没建成：" + ex.Message); }
+                catch (Exception ex) { outcome.Warnings.Add(Speech.T("开始菜单里的卸载项没建成：", "The uninstall entry in the Start menu was not created: ") + ex.Message); }
             }
-            else outcome.Warnings.Add("安装包里没有 " + Footprint.UninstallerExeName + " —— 这一版装完没有卸载入口。");
+            else outcome.Warnings.Add(string.Format(Speech.T("安装包里没有 {0} —— 这一版装完没有卸载入口。",
+                                                             "The package has no {0} — this version has no uninstall entry."),
+                                                    Footprint.UninstallerExeName));
         }
 
         if (options.RegisterUninstall)
@@ -582,7 +610,7 @@ internal static class Installer
             }
             catch (Exception ex)
             {
-                outcome.Warnings.Add("没能登记到「应用和功能」列表：" + ex.Message);
+                outcome.Warnings.Add(Speech.T("没能登记到「应用和功能」列表：", "Could not register in \"Apps & features\": ") + ex.Message);
             }
         }
 
@@ -590,7 +618,8 @@ internal static class Installer
         catch (Exception ex)
         {
             // 清单写不进去，卸载器就只能按默认位置去找快捷方式（它还是会核对指向）。
-            outcome.Warnings.Add("安装清单没写成（卸载时将按默认位置查找）：" + ex.Message);
+            outcome.Warnings.Add(Speech.T("安装清单没写成（卸载时将按默认位置查找）：",
+                                          "The install record was not written (uninstall will look in the default places): ") + ex.Message);
         }
     }
 
@@ -616,11 +645,21 @@ internal static class Installer
         catch { /* 说不成 UTF-8 也不能因此装不上 */ }
     }
 
-    private const string Usage =
-        "用法：Setup.exe [--install-dir 绝对目录] [--no-launch] [--silent]\n"
-        + "              [--desktop-shortcut] [--start-menu] [--register-uninstall]\n"
-        + "              [--desktop-dir 目录] [--start-menu-dir 目录] [--uninstall-key HKCU子键]\n"
-        + "\n不带参数双击 = 图形安装向导。";
+    private static string Usage
+    {
+        get
+        {
+            return Speech.T(
+                "用法：Setup.exe [--install-dir 绝对目录] [--no-launch] [--silent] [--language zh|en]\n"
+                + "              [--desktop-shortcut] [--start-menu] [--register-uninstall]\n"
+                + "              [--desktop-dir 目录] [--start-menu-dir 目录] [--uninstall-key HKCU子键]\n"
+                + "\n不带参数双击 = 图形安装向导。",
+                "Usage: Setup.exe [--install-dir <absolute folder>] [--no-launch] [--silent] [--language zh|en]\n"
+                + "              [--desktop-shortcut] [--start-menu] [--register-uninstall]\n"
+                + "              [--desktop-dir <folder>] [--start-menu-dir <folder>] [--uninstall-key <HKCU subkey>]\n"
+                + "\nDouble-click without arguments = the graphical setup wizard.");
+        }
+    }
 
     /// <summary>命令行解析。解不动就返回 null 并把话说在 <paramref name="error"/> 里。</summary>
     private static InstallOptions Parse(string[] args, out string error)
@@ -641,7 +680,7 @@ internal static class Installer
                     if (++i >= args.Length || !Path.IsPathRooted(args[i])) { error = Usage; return null; }
                     options.InstallDir = Path.GetFullPath(args[i]).TrimEnd(Path.DirectorySeparatorChar);
                     if (string.IsNullOrEmpty(Path.GetDirectoryName(options.InstallDir)))
-                    { error = "不能安装到磁盘根目录"; return null; }
+                    { error = Speech.T("不能安装到磁盘根目录", "ScienceMate cannot be installed at the root of a drive"); return null; }
                     break;
                 case "--desktop-dir":
                     if (++i >= args.Length || !Path.IsPathRooted(args[i])) { error = Usage; return null; }
@@ -651,12 +690,18 @@ internal static class Installer
                     if (++i >= args.Length || !Path.IsPathRooted(args[i])) { error = Usage; return null; }
                     options.StartMenuDirOverride = args[i];
                     break;
+                case "--language":
+                    // 命令行上点名了就算这个人选的（同向导上点了「中文 / English」）。
+                    if (++i >= args.Length || !Speech.Known(args[i])) { error = Usage; return null; }
+                    Speech.Language = args[i];
+                    Speech.ChosenByThePerson = true;
+                    break;
                 case "--uninstall-key":
                     if (++i >= args.Length || string.IsNullOrWhiteSpace(args[i])) { error = Usage; return null; }
                     options.UninstallKey = args[i].Trim('\\');
                     break;
                 default:
-                    error = "不认识的参数：" + arg + "\n\n" + Usage;
+                    error = Speech.T("不认识的参数：", "Unknown argument: ") + arg + "\n\n" + Usage;
                     return null;
             }
         }
@@ -679,7 +724,7 @@ internal static class Installer
         // 不接住的话，一个打错的 `--install-dir` 换来的是一段未处理异常栈 —— 而且
         // winexe 双击时那段栈闪都不闪一下就没了。
         try { options = Parse(args, out error); }
-        catch (Exception ex) { return Fail("这个路径用不了：" + ex.Message + "\n\n" + Usage, 2, true); }
+        catch (Exception ex) { return Fail(Speech.T("这个路径用不了：", "This path cannot be used: ") + ex.Message + "\n\n" + Usage, 2, true); }
         if (options == null)
             return Fail(error, 2, true);
 
@@ -699,6 +744,6 @@ internal static class Installer
             return 0;
         }
         catch (InstallRefused refused) { return Fail(refused.Message, refused.Code, false); }
-        catch (Exception ex) { return Fail("安装失败：" + ex, 1, false); }
+        catch (Exception ex) { return Fail(Speech.T("安装失败：", "Installation failed: ") + ex, 1, false); }
     }
 }

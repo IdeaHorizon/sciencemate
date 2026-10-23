@@ -262,6 +262,16 @@
 .app-project-identity .project-identity-loading i { background: var(--color-fg-subtle); }
 .app-project-identity .project-identity-error i { background: var(--color-danger); }
 
+/* 侧栏最底下的版本号：小、淡、点得进关于页（AppVersion）。 */
+.app-version {
+  display: block;
+  padding: 0 var(--space-2);
+  font-size: var(--font-size-caption);
+  color: var(--color-fg-subtle);
+  text-decoration: none;
+}
+.app-version:hover { color: var(--color-fg-muted); text-decoration: underline; }
+
 .app-sidebar-bottom {
   display: flex;
   flex-direction: column;

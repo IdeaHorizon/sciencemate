@@ -174,6 +174,32 @@ __all__ = ["_postprocess_terminal_error_on_turn_end"]
 _REQUEST_BRIEFING_KEY = "_visual_request_ids_shown"
 
 
+#: genre 识别词表（AutoFigure 移植，补丁 6 定案：与消费者同文件的常量，
+#: 不放配置文件 —— 词表极少变，识别代码就在这下面的 briefing 里）。
+_GENRE_SURVEY = ("综述", "分类体系", "演进", "taxonomy", "survey", "overview", "timeline")
+_GENRE_TEXTBOOK = ("科普", "教程", "教学", "博客", "tutorial", "blog", "textbook", "primer")
+
+#: 轨道 → 人读标签（briefing 展示用；判定逻辑在 contracts.route_track）。
+_TRACK_LABEL = {
+    "svg": "SVG 轨（declare → 手写 SVG → render_illustration 试渲染/铸造）",
+    "compiled": "编译轨（schematic 合同即渲染源，框架排版）",
+    "matplotlib": "数据轨（matplotlib，对象模型对账）",
+}
+
+
+def _genre_of(*texts: str) -> str:
+    """从 intent/style_intent 机械识别内容文体：survey / textbook / paper（默认）。
+
+    只调引导策略（skill 推哪套模板话术），不动任何算法参数。
+    """
+    text = " ".join(t for t in texts if t).lower()
+    if any(token in text for token in _GENRE_SURVEY):
+        return "survey"
+    if any(token in text for token in _GENRE_TEXTBOOK):
+        return "textbook"
+    return "paper"
+
+
 def _visual_request_briefing(ctx) -> list | None:
     """开局把**本次要处理的 request_id** 摆到节点面前。
 
@@ -186,6 +212,10 @@ def _visual_request_briefing(ctx) -> list | None:
     要求别人引用一个它无从枚举的标识符，本来就只能靠猜。
 
     id 是每次调用才产生的运行时事实，写不进静态契约 —— 修在开局注入。
+
+    AutoFigure 移植（2026-10-15）加三件事：每条请求**预路由**（轨道预判，
+    锁定在 declare；agent 改不掉）、同批复 **request_id 去重**警示、
+    **政策空绑**显式提示（未绑定 → exploration 草稿级，交付如实披露）。
     """
     from core.llm import LLMMessage
 
@@ -204,10 +234,12 @@ def _visual_request_briefing(ctx) -> list | None:
     if not isinstance(raw, list) or not raw:
         return None
 
-    from nodes.postprocess.contracts import caller_policy, normalize_request
+    from nodes.postprocess.contracts import caller_policy, normalize_request, route_track
     from nodes.postprocess.tools.figure import RENDER_ATTEMPTS_PER_REQUEST
 
     rows: list[str] = []
+    id_counts: dict[str, int] = {}
+    unbound: list[str] = []
     for item in raw:
         if not isinstance(item, dict):
             continue
@@ -219,10 +251,19 @@ def _visual_request_briefing(ctx) -> list | None:
             policy = caller_policy(item)
         except Exception:  # noqa: BLE001 —— 政策写坏了由 declare 那边报，这里只列
             policy = {}
+        try:
+            track = route_track(item)
+        except Exception:  # noqa: BLE001 —— 词表错误会在 normalize/declare 报
+            track = "?"
+        genre = _genre_of(normalized["normalized_intent"], str(item.get("style_intent") or ""))
+        request_id = normalized["request_id"]
+        id_counts[request_id] = id_counts.get(request_id, 0) + 1
         bound = ", ".join(
             f"{key}={value}"
             for key, value in (
                 ("asset_kind", policy.get("asset_kind") or normalized["asset_kind"]),
+                ("track", _TRACK_LABEL.get(track, track)),
+                ("genre", genre),
                 ("width", policy.get("medium") or f"by purpose={normalized['purpose']}"),
                 ("text_language", policy.get("text_language")),
                 ("min_font_pt", policy.get("min_font_pt")),
@@ -230,6 +271,8 @@ def _visual_request_briefing(ctx) -> list | None:
             )
             if value
         )
+        if not any(policy.get(key) for key in ("medium", "text_language", "min_font_pt")):
+            unbound.append(request_id)
         rows.append(
             f"  - `{normalized['request_id']}` — {normalized['normalized_intent'][:120]}"
             f"（{bound}）"
@@ -238,21 +281,36 @@ def _visual_request_briefing(ctx) -> list | None:
         return None
 
     state.hook_state[_REQUEST_BRIEFING_KEY] = True
-    return [LLMMessage(role="system", content="\n".join([
+    sections = [
         "🎯 **本次调用的 visual request（render_figure 要引用的 request_id）**：",
         *rows,
         "",
-        "每条请求后面括号里的是**调用方绑定的政策**：asset_kind 决定家族（schematic 只能"
-        "按合同编译、不收 code；改标别的家族会被拒），width 决定版心（印刷字号下限 7pt），"
+        "每条请求后面括号里的是**调用方绑定的政策 + 框架预路由**：asset_kind 决定家族"
+        "（schematic 只能按合同编译、不收 code；改标别的家族会被拒），track 是轨道预判"
+        "（declare 时锁进 hook_state，你改不掉），width 决定版心（印刷字号下限 7pt），"
         "text_language=en 时图内任何中日韩文字都拒绝。这些在 declare_figure_contract 与 "
-        "render_figure 里机械核，你改不掉 —— 做不到就如实告诉调用方。",
+        "render 里机械核 —— 做不到就如实告诉调用方。",
         f"同一个 request_id 最多渲染 {RENDER_ATTEMPTS_PER_REQUEST} 次：先用 execute_python "
-        "试画自查，定稿再 render_figure。",
+        "试画自查（SVG 轨用 render_illustration 的试渲染，不占预算），定稿再铸。",
         "流程：读数据（read_artifact）→ figure_contract_schema 取该家族的 schema 与例子 → "
-        "declare_figure_contract → render_figure(request_id=..., contract_id=..., "
-        "source_artifact_ids=..., output_files=...) 铸记录。request_id 逐字用上面的 —— "
-        "它由调用方决定，不要自己编。",
-    ]))]
+        "declare_figure_contract → render_figure / render_illustration（request_id=..., "
+        "contract_id=..., ...）铸记录。request_id 逐字用上面的 —— 它由调用方决定，不要自己编。",
+    ]
+    duplicates = sorted(rid for rid, n in id_counts.items() if n > 1)
+    if duplicates:
+        sections.append(
+            "⚠️ **同批复 request_id 撞车**：" + ", ".join(f"`{rid}`" for rid in duplicates)
+            + " 各出现多次 —— 记录无法对回到唯一请求。请调用方给每条显式、互不相同的 "
+            "request_id 重发；不要自己改名凑合（那是平行身份）。"
+        )
+    if unbound:
+        sections.append(
+            "⚠️ **政策空绑**：" + ", ".join(f"`{rid}`" for rid in unbound)
+            + " 没有绑定 width / text_language / min_font_pt 中的任何一项 —— 本次按 "
+            "exploration 草稿级产出，交付时会如实披露「政策未绑定」。需要出版级就让调用方"
+            "在 constraints 里绑定政策后重发。"
+        )
+    return [LLMMessage(role="system", content="\n".join(sections))]
 
 
 register_loop_hook(

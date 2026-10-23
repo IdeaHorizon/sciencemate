@@ -37,6 +37,7 @@ import {
   undoLastSessionWrite,
 } from "../api/session-repository";
 import { saveBlobAs } from "@/shared/save-file";
+import { ContractViolation } from "@/shared/contract-violation";
 import { SessionComposerBar, type OperationMode }
   from "./SessionComposerBar";
 import { modelSwitchNotice } from "../lib/model-switch-notice";
@@ -339,7 +340,7 @@ export function SessionWorkspace({
         queryClient.setQueryData<ResearchSession>(
           qk.session(projectId, sessionId, mode),
           (current) => current
-            ? { ...current, modelBackendId: chosen.id, modelBackendName: modelBackendDisplayName(chosen) }
+            ? { ...current, modelBackendId: chosen.id, modelBackendName: modelBackendDisplayName(chosen, lang) }
             : current,
         );
       }
@@ -353,8 +354,8 @@ export function SessionWorkspace({
       if (turnInFlightRef.current) {
         pushInfo(modelSwitchNotice({
           turnInFlight: true,
-          modelLabel: chosen ? modelBackendDisplayName(chosen) : null,
-        }));
+          modelLabel: chosen ? modelBackendDisplayName(chosen, lang) : null,
+        }, lang));
       }
       void queryClient.invalidateQueries({ queryKey: qk.sessionsPrefix(projectId) });
     },
@@ -428,7 +429,7 @@ export function SessionWorkspace({
   // 「用户交来了哪些文件」当机械事实拿到（user_files hook），界面这边只需要
   // 让人知道东西上去了、在哪儿。
   const addFileMutation = useMutation({
-    mutationFn: (file: File) => addFileToSession(projectId, sessionId, file),
+    mutationFn: (file: File) => addFileToSession(projectId, sessionId, file, "", lang),
     onSuccess: (result) => {
       void queryClient.invalidateQueries({ queryKey: qk.projectFileTree(projectId) });
       pushSuccess(
@@ -638,7 +639,7 @@ export function SessionWorkspace({
    */
   const inputPlan = useMemo(
     () => (session
-      ? sessionInputPlan({ session, messages: chat.messages, sending: chat.sending })
+      ? sessionInputPlan({ session, messages: chat.messages, sending: chat.sending, lang })
       : null),
     [session, chat.messages, chat.sending],
   );
@@ -673,7 +674,8 @@ export function SessionWorkspace({
       <div className="session-workspace-error" role="alert">
         <span>{t({ zh: "打不开这条会话", en: "Session unavailable" })}</span>
         <h1>{t({ zh: "这份研究记录读不出来。", en: "This research record could not be opened." })}</h1>
-        <p>{problem instanceof Error ? problem.message : t({ zh: "平台没有返回一条能用的会话。", en: "The platform did not return a valid Session." })}</p>
+        {/* 对面违约（ContractViolation）的 message 是写给排查的人的诊断，不照念。 */}
+        <p>{problem instanceof Error && !(problem instanceof ContractViolation) ? problem.message : t({ zh: "平台没有返回一条能用的会话。", en: "The platform did not return a valid Session." })}</p>
         <Link href={`/projects/${encodeURIComponent(projectId)}/research`}><ChevronLeft size={13} />{t({ zh: "回到研究列表", en: "Back to research" })}</Link>
       </div>
     );
@@ -755,7 +757,8 @@ export function SessionWorkspace({
         ? t({ zh: "你能看这个会话，但不能往里发研究指令。", en: "You can view this session, but cannot append research commands." })
         : !isDriver
           ? activeDriver
-            ? `${session.driverLabel} is the current driver. This Session is view-only until they release control or the lease expires.`
+            // 原文还写着「或租约到期」—— 驾驶权租约 2026-09-05 已删，开车的是最近发话的人。
+            ? t({ zh: "{name} 正在推进这个会话，你这边只能看。", en: "{name} is driving this Session, so it is view-only for you." }, { name: session.driverLabel })
             : undefined
           : undefined;
 
@@ -958,7 +961,7 @@ export function SessionWorkspace({
         enabled={mode === "api"}
         open={aboutOpen}
         onClose={() => setAboutOpen(false)}
-        facts={sessionAboutFacts(session)}
+        facts={sessionAboutFacts(session, lang)}
       />
 
       {mode === "fixture" && <p className="session-fixture-provenance">{t({ zh: "界面演示数据 · 不是真实的项目历史", en: "UI demonstration data · not canonical project history" })}</p>}
@@ -1062,8 +1065,8 @@ export function SessionWorkspace({
               modelId={session.modelBackendId ?? null}
               models={(modelBackendsQuery.data ?? []).map((backend) => ({
                 id: backend.id,
-                label: modelBackendDisplayName(backend),
-                detail: [modelBackendModelLabel(backend), backend.base_url ?? t({ zh: "托管", en: "Managed" })]
+                label: modelBackendDisplayName(backend, lang),
+                detail: [modelBackendModelLabel(backend, lang), backend.base_url ?? t({ zh: "托管", en: "Managed" })]
                   .filter(Boolean)
                   .join(" · "),
                 ready: backend.status === "ready",

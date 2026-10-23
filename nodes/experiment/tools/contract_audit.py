@@ -2294,11 +2294,15 @@ def _child_run_terminal_summary(state: Any, run_id: str) -> dict[str, Any] | Non
     try:
         for line in transcript.read_text(encoding="utf-8", errors="replace").splitlines():
             event = json.loads(line)
-            if not isinstance(event, dict) or event.get("event") != "run_end":
+            if not isinstance(event, dict):
                 continue
-            candidate = str(event.get("status") or "").strip()
-            if candidate and candidate != "paused":
-                terminal_status = candidate
+            if event.get("event") == "run_start":
+                # Core reopens the same child without deleting its old summary.
+                # A new loop invalidates that old terminal until its own run_end.
+                terminal_status = None
+            elif event.get("event") == "run_end":
+                candidate = str(event.get("status") or "").strip()
+                terminal_status = candidate if candidate and candidate != "paused" else None
         if not terminal_status:
             return None
         payload = json.loads(summary.read_text(encoding="utf-8", errors="replace"))
@@ -2766,6 +2770,7 @@ async def _reconcile_data_dispatch(
         missing_receipt_event = not any(
             event.get("event") == "data_request_dispatched"
             and str(event.get("spec_id") or "") == requested_spec_id
+            and str((event.get("data_dispatch_receipt") or {}).get("child_run_id") or "") == child_run_id
             for event in _events(state)
         )
         if dispatch_state == "returned" and missing_receipt_event:
@@ -2898,6 +2903,21 @@ async def _reconcile_data_dispatch(
         result["blocked_report_id"] = terminal_artifact_id
     if already_reconciled:
         result["already_reconciled"] = True
+    # A paused dispatch may have committed its ledger without its event. Preserve
+    # this exact attempt before a later retry replaces the current receipt.
+    if not any(
+        event.get("event") == "data_request_dispatched"
+        and event.get("spec_id") == requested_spec_id
+        and (event.get("data_dispatch_receipt") or {}).get("child_run_id") == child_run_id
+        for event in _events(state)
+    ):
+        state.append_transcript(
+            "data_request_dispatched", spec_id=requested_spec_id,
+            data_dispatch_receipt=receipt,
+            input_delivery_ledger_artifact_id=ledger_artifact_id,
+            recorded_by="reconcile_data_dispatch",
+        )
+        result["receipt_event_recorded"] = True
     state.append_transcript("data_dispatch_pause_reconciled", **result)
     return result
 
@@ -2933,15 +2953,51 @@ async def _dispatch_data_request(
             "status": "error",
             "error": "Data dispatch is closed for this spec_id after a terminal blocker or fallback authorization",
         }
-    if isinstance(delivery.get("data_dispatch_receipt"), dict):
-        return {
-            "status": "error",
-            "error": (
-                "this spec_id already has a managed Data dispatch; reconcile that direct child "
-                "or supersede the spec before requesting Data again"
-            ),
-            "spec_id": spec_id,
-        }
+    previous = delivery.get("data_dispatch_receipt")
+    if isinstance(previous, dict):
+        child_id = str(previous.get("child_run_id") or "")
+        terminal = _child_run_terminal_summary(state, child_id)
+        errors, report = _managed_data_dispatch_receipt_errors(
+            state, spec_id, request, delivery, require_blocked_report=True,
+        )
+        # Match record_data_delivery_outcome: vocabulary is an observation,
+        # not provenance. The report must still be exact-child and recoverable.
+        errors = [e for e in errors
+                  if not str(e).startswith("data_blocked_report_status_invalid")]
+        try:
+            payload = json.loads((report or {}).get("content") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        recoverable = isinstance(payload, dict) and (
+            payload.get("status") in DATA_RECOVERABLE_OUTCOMES
+            or not _acquisition_attempt_evidence(payload)
+        )
+        # Only a recorded, exact-child recoverable outcome permits a new attempt.
+        # Running/paused/unknown children and successful unconsumed deliveries
+        # stay with the existing child. Request hashes still validate above.
+        retryable = (
+            not errors and report is not None and recoverable
+            and child_id in (delivery.get("data_recoverable_runs") or [])
+            and isinstance(terminal, dict)
+            and terminal.get("status") in {"completed", "incomplete", "failed", "blocked", "cancelled"}
+            and (terminal.get("node_task_outcome") or {}).get("outcome") != "success"
+            and not _direct_child_terminal_dataset_ids(state, child_id)
+        )
+        if not retryable:
+            return {
+                "status": "error",
+                "error": "this spec_id already has a managed Data dispatch; reconcile or resume that child, consume its delivery, or record its recoverable outcome before retrying",
+                "spec_id": spec_id,
+                "data_run_id": child_id,
+            }
+        if not any(
+            event.get("event") == "data_request_dispatched"
+            and event.get("spec_id") == spec_id
+            and (event.get("data_dispatch_receipt") or {}).get("child_run_id") == child_id
+            for event in _events(state)
+        ):
+            return {"status": "error", "spec_id": spec_id,
+                    "error": "reconcile_data_dispatch must preserve the previous attempt receipt before retrying"}
 
     intent_binding = _data_family_intent_binding(state)
     if not intent_binding.get("passed", False):
@@ -3140,6 +3196,11 @@ async def _dispatch_data_request(
             "receipt_errors": receipt_errors,
             "child_result": child_result,
         }
+    # Old attempts remain in versioned input-delivery records and dispatch events.
+    # The current projection must not attach the previous blocker to a new child.
+    for key in ("data_status", "data_run_id", "blocked_report_id", "blocked_report_source",
+                "data_outcome_detail", "data_status_corroborated"):
+        delivery.pop(key, None)
     try:
         committed = save_input_delivery_ledger(state, ledger)
     except Exception as exc:
@@ -3203,7 +3264,7 @@ async def _record_data_delivery_outcome(
     provenance（node20 / 23a0fe78）：报告必须来自本 spec 的受管派发回执，裸
     run_node 结果或任意历史报告都不能授权 fallback。
     分档（main / a3bcd65c）：判据取 data 自己写在 report 里的 status，分三档；
-    可恢复档不开 fallback，同一 spec 两个不同 data run 都卡在可恢复档才升终态。
+    可恢复档不提供终态佐证；尝试次数不能升级成数据不可得或 fallback 授权。
     """
     ledger, entry, context_error = _active_data_spec_context(state, spec_id)
     if context_error:
@@ -3311,8 +3372,7 @@ async def _record_data_delivery_outcome(
     # planner 空转到 max_iterations_reached / 规划循环无进展落成的 fatal（或旧
     # 词表 recoverable_blocked/blocked/incomplete）里没有任何"对具体来源试过并
     # 失败"的记录。这种报告**不是**"数据不可得"，不得一步判终态解锁 fallback，
-    # 也不得转述成"用户缺数据"。按可恢复档路由：重派同一 spec；两个不同的
-    # data run 都交不出证据才升终态（复用下方既有的机械梯子，不会死锁）。
+    # 也不得转述成"用户缺数据"。按可恢复档路由；重试次数不改变数据事实。
     internal_terminal = (report_status not in DATA_RECOVERABLE_OUTCOMES
                          and not acquisition_evidence)
     if report_status not in DATA_RECOVERABLE_OUTCOMES and acquisition_evidence:
@@ -3334,55 +3394,32 @@ async def _record_data_delivery_outcome(
                          "data_run_id": managed_run_id,
                          "blocked_report_id": managed_report_id,
                          "blocked_report_source": report_source,
-                         "data_outcome_detail": detail})
-        if len(attempts) < 2:
-            result = {"status": "success", "outcome": "recoverable",
-                      "spec_id": spec_id, "data_status": report_status,
-                      "data_terminally_blocked": False,
-                      # ca:1244 降格的记账必须两条路由都送到 —— 走哪一档都不
-                      # 影响「这个状态词有没有被佐证」这个事实。
-                      "corroborated": status_corroborated,
-                      **({} if status_corroborated
-                         else {"known_statuses": sorted(known)}),
-                      "data_run_id": managed_run_id,
-                      "blocked_report_id": managed_report_id,
-                      "blocked_report_source": report_source,
-                      "detail": detail,
-                      # 祈使句 + 点名下一步。只说"可恢复"会被当成"记完了"。
-                      "next_step": (
-                          DATA_RECOVERABLE_OUTCOMES[report_status]
-                          if report_status in DATA_RECOVERABLE_OUTCOMES else
-                          ("这是 Data 的内部失败（规划/执行循环未产生任何资产级获取"
-                           "尝试记录），不是数据不可得，更不是用户缺数据。用**同一个 "
-                           "spec_id** 重新 dispatch_data_request；不要据此请求用户"
-                           "手工提供数据或改动数据源。")
-                      ),
-                      "note": (("这不是终态，fallback 仍然关闭。直接用同一个 spec_id 重新 "
-                                "dispatch_data_request（experiment 侧没有要补齐的东西）；"
-                                "第二个 data run 仍交不出获取证据即判终态。")
-                               if internal_terminal else
-                               ("这不是终态，fallback 仍然关闭。补齐后用同一个 spec_id 重新 "
-                                "dispatch_data_request；如果第二次仍然卡在可恢复档，"
-                                "再调本工具即判终态。"))}
-            if internal_terminal:
-                result["failure_class"] = "data_internal_failure_without_acquisition_evidence"
-            try:
-                committed = save_input_delivery_ledger(state, ledger)
-            except Exception as exc:
-                return {"status": "error",
-                        "error": "input_delivery_ledger_persistence_failed",
-                        "detail": type(exc).__name__}
-            result["input_delivery_ledger_artifact_id"] = committed["artifact"]["id"]
-            state.append_transcript("data_delivery_recoverable_outcome", **result)
-            return result
-        # 解除路径（必须有，否则这道闸就是死锁）：**两个不同的 data run** 都卡在
-        # 可恢复档 —— 补过一次还是这样，按终态处理，fallback 打开。
-        # 判据用"不同的 run 出现过两次"而不是"模型说它试过了"：前者机械可查。
-        escalated_from = (f"{report_status}_without_acquisition_evidence"
-                          if internal_terminal else report_status)
-        report_status = "fatal"
-        detail = {**detail, "escalated_from": escalated_from,
-                  "recoverable_attempts": attempts}
+                         "data_outcome_detail": detail,
+                         "data_terminally_blocked": False})
+        result = {
+            "status": "success", "outcome": "recoverable",
+            "spec_id": spec_id, "data_status": report_status,
+            "data_terminally_blocked": False, "corroborated": status_corroborated,
+            **({} if status_corroborated else {"known_statuses": sorted(known)}),
+            "data_run_id": managed_run_id, "blocked_report_id": managed_report_id,
+            "blocked_report_source": report_source, "detail": detail,
+            "next_step": DATA_RECOVERABLE_OUTCOMES.get(report_status, (
+                "这是 Data 内部失败且缺少资产级获取证据，不是数据不可得。"
+                "先诊断原因，再用同一个 spec_id 重新 dispatch_data_request；"
+                "不要据此要求用户手工提供数据或改动数据源。")),
+            "note": "补齐条件后才重派；同一原因无进展时停止盲目重试并诚实报告受阻。"
+                    "次数不证明数据不可得，也不授权 fallback；修改冻结请求须走原修订机制。",
+        }
+        if internal_terminal:
+            result["failure_class"] = "data_internal_failure_without_acquisition_evidence"
+        try:
+            committed = save_input_delivery_ledger(state, ledger)
+        except Exception as exc:
+            return {"status": "error", "error": "input_delivery_ledger_persistence_failed",
+                    "detail": type(exc).__name__}
+        result["input_delivery_ledger_artifact_id"] = committed["artifact"]["id"]
+        state.append_transcript("data_delivery_recoverable_outcome", **result)
+        return result
 
     delivery.update({
         "data_terminally_blocked": True,
@@ -4106,8 +4143,8 @@ register_tool(ToolDefinition(
         "记录 data 交不出货的结果。**判据取 data 自己写在 blocked report 里的 status**，"
         "分三档：`needs_input`（补输入后用同一个 spec_id 重派）、`externally_blocked`"
         "（experiment 补环境后重派）、`fatal`（终态，之后才谈 fallback）。前两档返回 "
-        "outcome=recoverable 且**不**开 fallback；同一个 spec 有两个不同的 data run 都卡在"
-        "前两档时自动升为终态。"
+        "outcome=recoverable；缺少获取证据的内部失败也不构成数据不可得。"
+        "补齐条件后重派原请求，无进展时诊断或诚实受阻；次数不升级为终态或授权 fallback。"
     ),
     parameters_schema={"type": "object", "properties": {
         "spec_id": {"type": "string"},

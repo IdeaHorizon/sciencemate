@@ -1,0 +1,36 @@
+# enhancer_config.yaml —— enhancement（图像美化）的第 2 级身份配置（**非密钥**）
+#
+# enhancer.enhancement_identity() 的两级解析顺序：
+#
+#   第 1 级：core.model_roles.resolve("image_generation")
+#     —— 平台将来在 shared/model_roles.yaml 目录加 image_generation 角色并
+#        完成绑定后**自动生效**（届时本文件被忽略，无需改动任何代码）；
+#   第 2 级：本文件（provider / base_url / model / 默认参数）
+#     ＋ 环境变量密钥 POSTPROCESS_ENHANCEMENT_API_KEY。
+#        密钥不进任何文件；enhancer 模块在 import 时把它从 os.environ 弹出
+#        存进模块级变量 —— execute_python 的沙箱子进程继承 env，密钥躺在
+#        env 里就会跟着泄进去（core/model_roles.py 模块头记载过这类
+#        "透传名单与擦除名单各自演化"的事故）。
+#
+# 两级都缺席 → enhancement_identity() 返回 None → enhance() 诚实返回
+# {"status": "not_configured"}，enhancement 自动关闭、原图照常交付。
+# 这是配置局面，不是失败 —— 不需要任何报错处理。
+#
+# 填法：base_url 保留版本后缀（如 …/v1）；代码只在缺省末尾补
+# /chat/completions（OpenAI 兼容 chat 形态的图像生成协议，与 AutoFigure
+# 原版的调用方式一致）。api_key 不是"是否配置"的判据：自建端点（vLLM 等）
+# 默认不鉴权；端点要不要 key 由端点自己回答（它会回 401，如实入 attempts）。
+
+provider: "openai_compatible"   # 自由文本，随产物记账；填 "openrouter" 时
+                                # 请求体会自动补 modalities: ["image", "text"]
+base_url: ""                    # 例：https://api.bianxie.ai/v1
+model: ""                       # 例：gemini-3.1-flash-image-preview
+
+# 默认参数（本模块自用；enhance() 的 timeout_s 由调用方参数给，不在这里 —
+# 同一个旋钮放两处 = 两个真相源，迟早分叉）
+defaults:
+  conversion_max_tokens: 8192   # code2prompt 转译调用（reasoning LLM）的输出预算
+
+# provider 怪癖出口：mapping 原样并入请求体顶层（如某些网关要求的额外字段）。
+# openrouter 的 modalities 已由代码自动补，不必在这里重复。
+payload_extra: {}

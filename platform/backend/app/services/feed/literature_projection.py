@@ -7,6 +7,8 @@ feed needs for stable identities, visibility and engagement foreign keys.
 
 from __future__ import annotations
 
+from app.services.feed.profile import journal_display_name
+
 import html
 import json
 import os
@@ -18,9 +20,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.feed import FeedItem, FeedItemKind, FeedVisibility
+from app.services.feed import windows
 
 
 def literature_papers_root() -> Path:
@@ -38,6 +42,16 @@ def literature_papers_root() -> Path:
     from core import paths as harness_paths
 
     return harness_paths.literature_papers_dir().resolve()
+
+
+def preparation_status(metadata: dict) -> str:
+    """Recognize completed legacy lookups even when no abstract was available."""
+    if metadata.get("literature_preparation"):
+        return str(metadata["literature_preparation"])
+    image = metadata.get("image") if isinstance(metadata.get("image"), dict) else {}
+    metadata_done = bool(str(metadata.get("abstract") or "").strip()) or metadata.get("abstract_lookup_completed") is True
+    figure_done = image.get("status") in {"available", "generated"}
+    return "ready" if metadata_done and figure_done else "pending"
 
 
 def publication_datetime(raw: object, year: object = None) -> datetime | None:
@@ -126,18 +140,33 @@ def _authors(value: object) -> list[str]:
     return result
 
 
-async def project_literature_catalog(db: AsyncSession, *, limit: int = 50) -> ProjectionReport:
+async def project_literature_catalog(
+    db: AsyncSession, *, limit: int = 50, profile_user_id: str | None = None,
+    catalog_keys: list[str] | None = None
+) -> ProjectionReport:
     """Refresh a bounded batch of feed rows from the shared catalog."""
+    if catalog_keys is not None and not catalog_keys:
+        return ProjectionReport()
     catalog = literature_papers_root() / "literature_catalog.sqlite3"
     if not catalog.is_file():
         return ProjectionReport()
     try:
         with sqlite3.connect(catalog, timeout=5) as conn:
+            owner_clause = ""
+            params: tuple[object, ...] = ()
+            if profile_user_id:
+                owner_clause = """WHERE json_valid(metadata_json)
+                    AND EXISTS (SELECT 1 FROM json_each(metadata_json, '$.profile_user_ids')
+                                WHERE value = ?)"""
+                params = (str(profile_user_id),)
+            if catalog_keys is not None:
+                owner_clause += (" AND " if owner_clause else "WHERE ") + "doi IN (SELECT value FROM json_each(?))"
+                params += (json.dumps(catalog_keys),)
             rows = conn.execute(
-                """SELECT doi,title,source,year,article_dir,metadata_json,
+                f"""SELECT doi,title,source,year,article_dir,metadata_json,
                           published_at,updated_at
-                     FROM papers ORDER BY updated_at DESC LIMIT ?""",
-                (max(1, int(limit)),),
+                     FROM papers {owner_clause} ORDER BY updated_at DESC LIMIT ?""",
+                (*params, max(1, int(limit))),
             ).fetchall()
     except sqlite3.Error:
         return ProjectionReport()
@@ -145,6 +174,7 @@ async def project_literature_catalog(db: AsyncSession, *, limit: int = 50) -> Pr
         return ProjectionReport()
 
     from nodes.literature.tools.journal_policy import JournalDecision, decide
+    from nodes.literature.tools.journal_scope import current_domains
 
     prepared: list[tuple] = []
     for row in rows:
@@ -161,6 +191,11 @@ async def project_literature_catalog(db: AsyncSession, *, limit: int = 50) -> Pr
             str(code) for code in (metadata.get("second_level_domains") or [])
             if str(code)
         ))
+        if "journal" in routes and metadata.get("journal_harvest_verified") is True:
+            routed_domains = current_domains(
+                str(metadata.get("venue") or ""), routed_domains,
+                str(title or ""), str(metadata.get("abstract") or ""),
+            )
         # 课题路线（project_profile / web）**和用户直接订阅的路线**（scholar，
         # 以及明确标了 subscription_requested 的期刊订阅）都不走期刊映射判定：
         # 它们由用户点名的检索请求产生，靠 profile_user_ids + 检索相关度准入，
@@ -187,10 +222,11 @@ async def project_literature_catalog(db: AsyncSession, *, limit: int = 50) -> Pr
             )
         else:
             decision = decide(
-                venue=str(metadata.get("venue") or ""),
+                venue=journal_display_name(metadata.get("venue")),
                 source=str(metadata.get("source") or source or ""),
                 pub_type=str(metadata.get("pub_type") or ""),
                 title=str(title or ""),
+                abstract=str(metadata.get("abstract") or ""),
             )
         prepared.append(
             (
@@ -250,6 +286,7 @@ async def project_literature_catalog(db: AsyncSession, *, limit: int = 50) -> Pr
             "catalog_key": str(catalog_key).lower(),
             "article_dir": str(article_dir or ""),
             "classification_mode": decision.reason,
+            "journal_harvest_verified": metadata.get("journal_harvest_verified") is True,
             "feed_acquisition_routes": sorted(
                 str(route) for route in (metadata.get("feed_acquisition_routes") or [])
                 if str(route)
@@ -267,9 +304,24 @@ async def project_literature_catalog(db: AsyncSession, *, limit: int = 50) -> Pr
             "discovered_at": str(metadata.get("discovered_at") or ""),
             # 保留来源真实日期精度。YYYY-MM 在目录中表示“本月发表、日未知”，
             # 不能在投影后被误当成当月 1 日并被七天候选窗口提前淘汰。
-            "publication_date_precision": str(
-                metadata.get("publication_date_precision") or ""
+            "publication_date_precision": (
+                "day"
+                if windows.publication_precision(
+                    metadata.get("pub_date") or metadata.get("publication_date")
+                ) == "day" and published is not None and published.day != 1
+                else str(
+                    metadata.get("publication_date_precision")
+                    or windows.publication_precision(
+                        metadata.get("pub_date") or metadata.get("publication_date")
+                    )
+                )
             ),
+            "publication_date_unverified": bool(metadata.get("publication_date_unverified")),
+            "author_identities": metadata.get("author_identities") or [],
+            "verified_author_ids": metadata.get("verified_author_ids") or [],
+            "literature_preparation": preparation_status(metadata),
+            "abstract_enrichment_attempted": bool(metadata.get("abstract_enrichment_attempted")),
+            "abstract_lookup_completed": bool(metadata.get("abstract_lookup_completed") or (metadata.get("abstract_enrichment_attempted") and metadata.get("literature_preparation") == "ready")),
         }
         # web 路线是「资讯/新闻」通道，不是论文：网页发现的新闻、博客、行业
         # 动态不该套「论文」徽章。project_profile / journal 才是 paper 形态。
@@ -283,7 +335,7 @@ async def project_literature_catalog(db: AsyncSession, *, limit: int = 50) -> Pr
             "title": _plain_text(title)[:2000],
             "url": url or None,
             "summary": _plain_text(metadata.get("abstract"))[:1200] or None,
-            "authors": _authors(metadata.get("authors"))[:50],
+            "authors": _authors(metadata.get("zenodo_creators") or metadata.get("authors"))[:50],
             "venue": str(metadata.get("venue") or "")[:200] or None,
             "published_at": published,
             "domains": domains,
@@ -291,19 +343,38 @@ async def project_literature_catalog(db: AsyncSession, *, limit: int = 50) -> Pr
             "extra": extra,
         }
         if item is None:
-            item = FeedItem(
-                id=str(uuid.uuid5(uuid.NAMESPACE_URL, "literature:" + str(catalog_key).lower())),
-                canonical_key=canonical_key,
+            new_values = {
+                "id": str(uuid.uuid5(uuid.NAMESPACE_URL, "literature:" + str(catalog_key).lower())),
+                "canonical_key": canonical_key,
                 **values,
-            )
+            }
             try:
                 if updated_at:
-                    item.created_at = datetime.fromtimestamp(float(updated_at), tz=UTC)
+                    new_values["created_at"] = datetime.fromtimestamp(float(updated_at), tz=UTC)
             except (TypeError, ValueError, OSError):
                 pass
-            db.add(item)
-            existing[canonical_key] = item
-            stored += 1
+            if db.get_bind().dialect.name == "postgresql":
+                # Several independent collectors can project the same catalog
+                # key at once.  A SELECT before INSERT cannot arbitrate that race.
+                inserted = await db.execute(pg_insert(FeedItem).values(**new_values).on_conflict_do_nothing())
+                if inserted.rowcount:
+                    stored += 1
+                else:
+                    concurrent = (await db.execute(select(FeedItem).where(
+                        FeedItem.canonical_key == canonical_key
+                    ))).scalar_one_or_none()
+                    if concurrent is None:
+                        raise RuntimeError("Literature feed identity conflict without canonical match")
+                    if concurrent.kind == FeedItemKind.PAPER:
+                        for field, value in values.items():
+                            setattr(concurrent, field, value)
+                    duplicates += 1
+                    existing[canonical_key] = concurrent
+            else:
+                item = FeedItem(**new_values)
+                db.add(item)
+                existing[canonical_key] = item
+                stored += 1
         else:
             for field, value in values.items():
                 setattr(item, field, value)

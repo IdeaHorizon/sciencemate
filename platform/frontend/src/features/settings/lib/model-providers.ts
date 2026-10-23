@@ -1,3 +1,5 @@
+import { say, type Language, type Phrase } from "../../../shared/i18n/language.ts";
+
 /**
  * 建一条模型连接时，provider 那一栏的**合法取值**。
  *
@@ -18,19 +20,21 @@ export const HARNESS_COMPATIBLE_PROVIDERS = [
   "local",
 ] as const;
 
-const PROVIDER_LABELS: Record<string, string> = {
-  deepseek: "DeepSeek",
-  kimi: "Kimi / Moonshot",
-  openai: "OpenAI",
-  openai_compatible: "OpenAI-compatible endpoint",
-  local: "Local / self-hosted gateway",
+/** 品牌名两种语言一样写；描述端点的那两个要翻。 */
+const PROVIDER_LABELS: Record<string, Phrase> = {
+  deepseek: { zh: "DeepSeek", en: "DeepSeek" },
+  kimi: { zh: "Kimi / 月之暗面", en: "Kimi / Moonshot" },
+  openai: { zh: "OpenAI", en: "OpenAI" },
+  openai_compatible: { zh: "兼容 OpenAI 的端点", en: "OpenAI-compatible endpoint" },
+  local: { zh: "本机 / 自建网关", en: "Local / self-hosted gateway" },
 };
 
 /** 自定义端点必须给地址，官方托管的不用。 */
 const BASE_URL_REQUIRED = new Set(["openai_compatible", "local"]);
 
-export function providerLabel(provider: string) {
-  return PROVIDER_LABELS[provider] ?? provider;
+export function providerLabel(provider: string, lang: Language) {
+  const label = PROVIDER_LABELS[provider];
+  return label ? say(label, lang) : provider;
 }
 
 export function providerNeedsBaseUrl(provider: string) {
@@ -60,15 +64,20 @@ export function credentialIsOptional(baseUrl: string | null | undefined) {
  * 否则一打开编辑框，下拉自动落到别的值上，保存时把这条连接**改成了另一个
  * provider**，而人什么都没点。
  */
-export function providerOptions(current?: string) {
+export function providerOptions(current: string | undefined, lang: Language) {
   const options = HARNESS_COMPATIBLE_PROVIDERS.map((value) => ({
     value: value as string,
-    label: providerLabel(value),
+    label: providerLabel(value, lang),
     supported: true,
   }));
   const trimmed = (current ?? "").trim();
   if (trimmed && !options.some((option) => option.value === trimmed)) {
-    options.push({ value: trimmed, label: `${providerLabel(trimmed)} (not supported by local execution)`, supported: false });
+    options.push({
+      value: trimmed,
+      label: say({ zh: "{name}（本机执行不支持）", en: "{name} (not supported by local execution)" }, lang,
+        { name: providerLabel(trimmed, lang) }),
+      supported: false,
+    });
   }
   return options;
 }

@@ -35,6 +35,7 @@ from uuid import uuid4
 from app.config import data_root, settings, the_org_home, the_projects_home
 from app.models.user import User
 from app.services import harness_bridge_once
+from app.services.say import SaidToAPerson
 from app.services.harness_runtime import (
     harness_subprocess_env,
     the_interpreter_that_runs_the_harness,
@@ -43,8 +44,11 @@ from app.services.harness_runtime import (
 _TIMEOUT_SECONDS = 30
 
 
-class HarnessKBError(RuntimeError):
-    """The harness could not answer this knowledge query."""
+class HarnessKBError(SaidToAPerson, RuntimeError):
+    """The harness could not answer this knowledge query.
+
+    KB 裁决被拒的原话会透到界面上（"已经处理过了" / "理由太短"），两种语言都写。
+    """
 
 
 async def query(user: User, project_id: str, entity: str, *,
@@ -233,7 +237,8 @@ async def _ask(request: dict[str, Any], *,
     request = {**request, "projects_home": str(the_projects_home())}
     root = Path(settings.harness_root).expanduser().resolve()
     if not (root / "core" / "api.py").is_file():
-        raise HarnessKBError("HARNESS_ROOT is not a valid current harness checkout")
+        raise HarnessKBError("HARNESS_ROOT 不是一份当前的 harness checkout",
+                             en="HARNESS_ROOT is not a valid current harness checkout")
     return await harness_bridge_once.ask_once(
         request,
         expect=expect,

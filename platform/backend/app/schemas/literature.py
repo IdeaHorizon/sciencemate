@@ -16,6 +16,8 @@ class LiteratureTranslatePaperIn(LiteratureModel):
     key: str = Field(min_length=1, max_length=500)
     title: str = Field(min_length=1, max_length=1000)
     abstract: str | None = Field(default=None, max_length=50000)
+    doi: str | None = Field(default=None, max_length=500)
+    url: str | None = Field(default=None, max_length=2000)
     authors: list[str] = Field(default_factory=list, max_length=10)
     year: int | str | None = None
     venue: str | None = Field(default=None, max_length=1000)
@@ -23,6 +25,10 @@ class LiteratureTranslatePaperIn(LiteratureModel):
 
 class LiteratureTranslateIn(LiteratureModel):
     papers: list[LiteratureTranslatePaperIn] = Field(min_length=1, max_length=20)
+    generate_summaries: bool = True
+    translate_titles: bool = True
+    translate_abstracts: bool = True
+    combine_translation: bool = False
 
 
 class LiteratureTranslationOut(LiteratureModel):
@@ -56,6 +62,7 @@ class LiteraturePaperOut(LiteratureModel):
     score_breakdown: dict = Field(default_factory=dict)
     intent_coverage: float = 0.0
     ranking_score: float = 0.0
+    federated_rank: int | None = None
     cas_quartile: int | None = None
     cas_top: bool = False
     impact_factor: float | None = None
@@ -69,6 +76,8 @@ class LiteraturePaperOut(LiteratureModel):
     exact_title_match: bool = False
     local_pdf_url: str | None = None
     local_figure_urls: list[str] = Field(default_factory=list)
+    school_holdings: list[str] = Field(default_factory=list)
+    school_fulltext_url: str | None = None
 
 
 class LiteratureSearchOut(LiteratureModel):

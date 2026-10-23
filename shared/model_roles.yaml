@@ -35,24 +35,38 @@
 #                 重跑"，而设置页的读者恰恰是唯一能把这个槽填上的那个人。一份
 #                 文案同时服务两个相反的读者，必然对其中一个撒谎 —— 实测：
 #                 研究员在一个「注册模型」按钮旁边读到"这不是你能改的事"。
+#   title_en / description_en / absence_impact_en
+#                 设置页上那三句的英文。它们是**说给人听**的，跟着界面语言走；
+#                 absence_note 是注入给节点的，不在此列。缺了英文，英文界面的
+#                 设置页上就是一段中文（2026-10-19）—— 有条测试逐个角色核对。
 
 schema_version: 1
 
 roles:
   - id: reasoning
     title: 主推理模型
+    title_en: Main reasoning model
     description: >-
       调度器与全部 producing 节点的对话/推理主模型。会话里"选模型"选的就是它。
+    description_en: >-
+      The conversation and reasoning model for the orchestrator and every
+      producing node. Picking a model in a session picks this one.
     modality: text
     required: true
     absence_note: 没有主推理模型，任何 run 都无法开始。
     absence_impact: 这个槽空着，任何 run 都开不了工。
+    absence_impact_en: With this slot empty, no run can start.
 
   - id: visual_review
     title: 图像审查模型（VLM）
+    title_en: Image review model (VLM)
     description: >-
-      对渲染完成的 figure 做**可见缺陷判读**：只回答"在哪、看见了什么"，
+      对渲染完成的 figure 做可见缺陷判读：只回答"在哪、看见了什么"，
       严重度与是否放行由确定性规则判。不看生产者的 transcript。
+    description_en: >-
+      Reads rendered figures for visible defects: it only answers "where,
+      and what is visible"; severity and whether a figure passes are decided by
+      deterministic rules. It never sees the producer's transcript.
     modality: vision
     required: false
     absence_note: >-
@@ -63,17 +77,32 @@ roles:
     absence_impact: >-
       这个槽空着，figure 不做可见缺陷判读：交付按 draft 走，产物标记
       visual_review_capability=absent，不带任何"已审图"的断言。
+    absence_impact_en: >-
+      With this slot empty, figures get no visible-defect review: delivery goes
+      out as a draft, the output is marked visual_review_capability=absent, and
+      it carries no "image reviewed" claim.
 
   - id: feed_curation
     title: 资讯挖掘模型
+    title_en: Feed curation model
     description: >-
-      科研资讯流的**自动挖掘**：读你的 Project 推断关注方向与检索词，
+      科研资讯流的自动挖掘：读你的 Project 推断关注方向与检索词，
       并把一周的条目缩成领域简报。它是有界的单次调用 ——
-      **没有工具面、不建 run、不进 KB、不留执行事件**，
+      没有工具面、不建 run、不进 KB、不留执行事件，
       失败只影响资讯流本身，绝不挡住任何研究。
       刻意不复用调度器那套：那边的 system prompt 是整部研究章程、
       工具面能写 KB 与文件，套在"从一段描述里挑几个 arXiv 分类"上
       既贵又把爆炸半径放大到别人的课题里。
+    description_en: >-
+      Automatic curation for the research feed: reads your projects to infer
+      interests and search terms, and condenses a week of items into a field
+      brief. It is a bounded single call — no tools, no runs, no KB writes, no
+      execution events — and a failure only affects the feed, never any
+      research. It deliberately does not reuse the orchestrator's setup: that
+      system prompt is the whole research charter and its tools can write the KB
+      and files, which would make "pick a few arXiv categories from a
+      description" expensive and widen the blast radius into someone else's
+      project.
     modality: text
     required: false
     absence_note: >-
@@ -84,3 +113,7 @@ roles:
     absence_impact: >-
       这个槽空着，资讯流不替你推断关注方向、也不做定向检索；全局采集、按你
       手选方向排序、周报按需生成照常。
+    absence_impact_en: >-
+      With this slot empty, the feed does not infer your interests or run
+      targeted searches; global collection, ranking by the topics you pick, and
+      on-demand weekly briefs keep working.

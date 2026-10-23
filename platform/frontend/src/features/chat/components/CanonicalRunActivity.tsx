@@ -128,7 +128,7 @@ function Narration({ items }: { items: RunActivityNarration[] }) {
     <div className="chat-run-narration">
       {items.map((item) => (
         <div key={item.id}>
-          {item.turn > 0 && <span className="chat-run-narration-turn">第 {item.turn} 轮</span>}
+          {item.turn > 0 && <span className="chat-run-narration-turn">{t({ zh: "第 {turn} 轮", en: "Turn {turn}" }, { turn: item.turn })}</span>}
           <RichText text={item.text} />
           {item.previewOnly && (
             /* 老 transcript 只存了硬截 500 字的预览且不留截断标记 —— 完不完整
@@ -434,7 +434,9 @@ function StepSummaryRecord({ step }: { step: RunActivityStep }) {
       {step.status === "failed" && <AlertCircle size={10} />}
       <span>
         <strong>{recordedTitle ?? (step.kind === "child" ? t({ zh: "一步研究", en: "Research step" }) : t({ zh: "研究活动", en: "Research activity" }))}</strong>
-        <small>{step.summary ?? `${step.tools.length} recorded ${step.tools.length === 1 ? "action" : "actions"}${step.status === "completed" ? " completed" : ""}`}</small>
+        <small>{step.summary ?? (step.status === "completed"
+          ? t({ zh: "记下了 {count} 个动作，已完成", en: "{count} recorded action{s} completed" }, { count: step.tools.length, s: step.tools.length === 1 ? "" : "s" })
+          : t({ zh: "记下了 {count} 个动作", en: "{count} recorded action{s}" }, { count: step.tools.length, s: step.tools.length === 1 ? "" : "s" }))}</small>
       </span>
     </div>
   );
@@ -463,8 +465,8 @@ function FailedToolHistory({
   const count = tools.length + steps.length;
   if (count === 0 && !failure?.detail) return null;
   const label = count > 0
-    ? `${count} failed ${count === 1 ? "action" : "actions"}`
-    : "run failure";
+    ? t({ zh: "{count} 个动作没成", en: "{count} failed action{s}" }, { count, s: count === 1 ? "" : "s" })
+    : t({ zh: "这一轮没跑成", en: "run failure" });
   return (
     <details className="chat-run-failure-history">
       <summary>
@@ -797,7 +799,7 @@ export function CanonicalRunActivity({
             {runAttention.recovery && <em>{runAttention.recovery}</em>}
             {/* 只在**真失败**的横幅里出现，而且说成一句话：一个裸计数
                 （「1 recorded retry」）回答不了"它试过没有、还有没有救"。 */}
-            {retryCount > 0 && <i>平台已自动重试 {retryCount} 次，仍未成功</i>}
+            {retryCount > 0 && <i>{t({ zh: "平台已自动重试 {count} 次，仍未成功", en: "The platform retried {count} times; it still failed" }, { count: retryCount })}</i>}
             {/* 技术细节不在这里 —— 它和"失败的动作"一起进下面那个唯一的
                 「技术细节」抽屉。正文只回答"出了什么事 / 现在能做
                 什么"，用户不该被一条 SQL 转储劈头盖脸砸一脸。 */}

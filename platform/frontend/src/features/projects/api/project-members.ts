@@ -25,7 +25,7 @@ async function requestMembers<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     if (response.status === 404 || response.status === 405) throw new ProjectMembersUnavailableError();
     const body = await response.json().catch(() => ({}));
-    throw new ApiError(body.detail || `API error: ${response.status}`, response.status);
+    throw ApiError.fromBody(body, response.status);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;

@@ -5,8 +5,10 @@ import { parseExecutionEvents } from "./execution-event.ts";
 import { projectExecution as projectExecutionRaw } from "./execution-projection.ts";
 
 // 判据断言英文文案，显式说英文（默认是中文）。见 run-activity-detail.test.ts。
-const projectExecution: typeof projectExecutionRaw = (events, options = {}) =>
-  projectExecutionRaw(events, { ...options, lang: options.lang ?? "en" });
+const projectExecution = (
+  events: Parameters<typeof projectExecutionRaw>[0],
+  options: Partial<Parameters<typeof projectExecutionRaw>[1]> = {},
+) => projectExecutionRaw(events, { ...options, lang: options.lang ?? "en" });
 import { readPayload, summarizeSessionResources } from "./payload-view.ts";
 
 function loadBackendFixture(name: string) {

@@ -4,6 +4,7 @@ import {
 } from "./execution-event.ts";
 import type { EventPage } from "./live-event-reconciler.ts";
 import { belongsToRun } from "./run-scope.ts";
+import { ContractViolation } from "../../../shared/contract-violation.ts";
 
 export type DecisionStatus =
   | "pending"
@@ -97,7 +98,7 @@ export class ExecutionStreamInterruptedError extends Error {
   }
 }
 
-export class ExecutionReadContractError extends Error {
+export class ExecutionReadContractError extends ContractViolation {
   constructor(message: string) {
     super(message);
     this.name = "ExecutionReadContractError";

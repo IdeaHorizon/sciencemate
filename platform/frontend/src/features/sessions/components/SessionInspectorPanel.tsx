@@ -207,14 +207,14 @@ export function SessionInspectorPanel({
             className={tab === "current" ? "is-active" : ""}
             onClick={() => setTab("current")}
           >
-            当前{current.length > 0 ? ` · ${current.length}` : ""}
+            {t({ zh: "当前", en: "Current" })}{current.length > 0 ? ` · ${current.length}` : ""}
           </button>
           <button
             type="button" role="tab" aria-selected={tab === "history"}
             className={tab === "history" ? "is-active" : ""}
             onClick={() => setTab("history")}
           >
-            历史 · {history.length}
+            {t({ zh: "历史", en: "History" })} · {history.length}
           </button>
         </div>
       </div>

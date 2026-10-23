@@ -202,7 +202,7 @@ export function researchActivityKindForTool(name?: string): ResearchActivityKind
   return "general";
 }
 
-export function researchActivityAcceptance(kind: ResearchActivityKind, lang: Language = "zh"): ResearchActivityAcceptance {
+export function researchActivityAcceptance(kind: ResearchActivityKind, lang: Language): ResearchActivityAcceptance {
   const copy = ACCEPTANCE[kind];
   return {
     running: say(copy.running, lang),
@@ -218,7 +218,7 @@ function readableArgumentValue(value: unknown, lang: Language) {
   return undefined;
 }
 
-export function researchToolInputPreview(argumentsValue?: Record<string, unknown>, lang: Language = "zh") {
+export function researchToolInputPreview(argumentsValue: Record<string, unknown> | undefined, lang: Language) {
   if (!argumentsValue) return undefined;
   const parts: string[] = [];
   const usedKeys = new Set<string>();
@@ -289,8 +289,8 @@ function exceptionSafe(raw: string, code?: string) {
 
 export function researchToolFailurePresentation(
   name: string | undefined,
-  error?: { code?: string; message: string; retryable?: boolean; recovery?: string },
-  lang: Language = "zh",
+  error: { code?: string; message: string; retryable?: boolean; recovery?: string } | undefined,
+  lang: Language,
 ) {
   const raw = (error?.message ?? "").trim();
   const normalized = raw.toLowerCase();
@@ -406,9 +406,9 @@ export function isVisibleResearchTool(name?: string) {
 
 export function researchToolTitle(
   name: string | undefined,
-  argumentsValue?: Record<string, unknown>,
-  detail?: string,
-  lang: Language = "zh",
+  argumentsValue: Record<string, unknown> | undefined,
+  detail: string | undefined,
+  lang: Language,
 ) {
   if (!name) return objectFrom(undefined, detail) ?? say({ zh: "用一个研究工具", en: "Use research tool" }, lang);
   const action = say(actionFor(name).action, lang);
@@ -421,9 +421,9 @@ export function researchToolTitle(
 
 export function researchToolRunningStatus(
   name: string | undefined,
-  argumentsValue?: Record<string, unknown>,
-  detail?: string,
-  lang: Language = "zh",
+  argumentsValue: Record<string, unknown> | undefined,
+  detail: string | undefined,
+  lang: Language,
 ) {
   if (!name) return objectFrom(undefined, detail) ?? say({ zh: "正在用一个研究工具", en: "Using a research tool" }, lang);
   const action = say(actionFor(name).running, lang);

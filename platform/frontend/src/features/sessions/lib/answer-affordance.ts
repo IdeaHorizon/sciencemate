@@ -1,5 +1,6 @@
 import type { ChatPause } from "@/features/chat";
 import type { ResearchSession } from "../types";
+import type { Language } from "../../../shared/i18n/language.ts";
 import { toChatPause } from "./session-presentation.ts";
 
 /**
@@ -39,6 +40,8 @@ export function sessionInputPlan(input: {
   messages: readonly OfferBearingMessage[];
   /** 这个标签页此刻正在发送 —— 后端不知道的唯一一件事。 */
   sending: boolean;
+  /** 呈递没带问句时，卡片上补的那一句用哪种语言。 */
+  lang: Language;
 }): SessionInputPlan {
   const answer = input.session.execution.answer;
   if (input.sending) {
@@ -50,7 +53,7 @@ export function sessionInputPlan(input: {
     return { kind: "locked", reason: answer.reason, recheckAt: answer.until ?? null };
   }
   if (answer.via === "pause") {
-    const pause = toChatPause(answer.pause);
+    const pause = toChatPause(answer.pause, input.lang);
     // 类型上 via==="pause" 就该有卡；真转不出来（问句都没有）时**不许**留在
     // prompt 分支 —— 那就是"说了走卡片却没有卡片"。降级成输入框，别锁人。
     if (!pause) return { kind: "composer", degraded: "pause_body_unavailable" };

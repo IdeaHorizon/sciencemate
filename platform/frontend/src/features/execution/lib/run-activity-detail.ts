@@ -178,7 +178,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function structuredOutput(value: string) {
+function structuredOutput(value: string, lang: Language) {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
@@ -212,24 +212,29 @@ function structuredOutput(value: string) {
     const sections: string[] = [];
     if (stdout) sections.push(`stdout\n${stdout}`);
     if (stderr) sections.push(`stderr\n${stderr}`);
-    if (returnCode !== undefined) sections.push(`Exit code ${String(returnCode)}`);
+    if (returnCode !== undefined) {
+      sections.push(say({ zh: "退出码 {code}", en: "Exit code {code}" }, lang, { code: String(returnCode) }));
+    }
     return { text: sections.join("\n\n"), format: "terminal" as const };
   }
   const summary = [candidate.summary, candidate.message, candidate.result]
     .find((item) => typeof item === "string" || typeof item === "number");
   if (summary !== undefined) return { text: String(summary), format: "text" as const };
   if (typeof candidate.count === "number") {
-    return { text: `${candidate.count} recorded results`, format: "text" as const };
+    return {
+      text: say({ zh: "记下了 {count} 条结果", en: "{count} recorded results" }, lang, { count: candidate.count }),
+      format: "text" as const,
+    };
   }
   return { hidden: true as const };
 }
 
-function outputPreview(payload: EventPayloadView) {
+function outputPreview(payload: EventPayloadView, lang: Language) {
   if (payload.outputLines.length) {
     return { ...clip(payload.outputLines.join("\n"), 1600), format: "terminal" as const };
   }
   if (!payload.summary) return undefined;
-  const structured = structuredOutput(payload.summary);
+  const structured = structuredOutput(payload.summary, lang);
   if (structured && "hidden" in structured) return undefined;
   const presentation = structured ?? { text: payload.summary, format: "text" as const };
   return { ...clip(presentation.text, 1600), format: presentation.format };
@@ -366,8 +371,8 @@ export function projectRunActivity(
    * 回答这个布尔。事件流里推不出来时（没有父 run 的终态事件）才回落到下面
    * 那段自己扫。
    */
-  parentInterruptedHint?: boolean,
-  lang: Language = "zh",
+  parentInterruptedHint: boolean | undefined,
+  lang: Language,
 ): RunActivityDetail {
   const ordered = [...events].sort((left, right) => left.sequence - right.sequence);
   // 父 run 的终态只认**它自己**的生命周期事件（子事件都带 parentRunId）。
@@ -409,7 +414,7 @@ export function projectRunActivity(
     const inputValue = researchToolInputPreview(start.toolArguments, lang);
     const input = inputValue ? clip(inputValue) : undefined;
     const code = codePreview(start.toolArguments);
-    const output = endEvent?.kind === "tool.completed" ? outputPreview(end) : undefined;
+    const output = endEvent?.kind === "tool.completed" ? outputPreview(end, lang) : undefined;
     const failure = endEvent?.kind === "tool.failed"
       ? researchToolFailurePresentation(start.technicalName ?? end.technicalName, end.error, lang)
       : undefined;
@@ -616,7 +621,7 @@ export function projectRunActivity(
         title: dispatchedTitle ?? (child || allTools.length > 0
           ? startPayload?.title
           : status === "failed"
-            ? "Research step failed"
+            ? say({ zh: "这一步没做成", en: "Research step failed" }, lang)
             : undefined),
         summary: endPayload?.summary,
         status,

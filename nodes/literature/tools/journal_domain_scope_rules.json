@@ -1,0 +1,293 @@
+{
+  "version": 1,
+  "review_date": "2026-09-28",
+  "rules": {
+    "050103": {
+      "description": "综合语言学期刊须有汉语或汉语方言证据；汉语专刊直接映射。",
+      "all_patterns": [
+        "\\b(?:chinese|mandarin|cantonese|sinitic|hakka|hokkien|shanghainese|min nan|min dialect\\w*|wu chinese|gan chinese|xiang chinese)\\b|汉语|中文|汉字|粤语|官话|闽语|客家话|吴语"
+      ],
+      "direct_journals": [
+        "Journal of Chinese Linguistics"
+      ]
+    },
+    "050107": {
+      "description": "中国少数民族语言文学须同时匹配地域/族群与语言文学。",
+      "all_patterns": [
+        "\\b(?:chin(?:a|ese)|sino|tibet\\w*|uyghur\\w*|uighur\\w*|xinjiang|yunnan|guizhou|guangxi|hui|miao|hakka|zhuang|dong|yi|dai|mongol\\w*)\\b|中国|中华|藏族|维吾尔|苗族|壮族|彝族|蒙古族|少数民族",
+        "\\b(?:minority|minorities|ethnic\\w*|indigenous|tibet\\w*|uyghur\\w*|uighur\\w*|zhuang|miao|hakka|mongol\\w*|dong|hui|yi|dai)\\b|少数民族|民族|藏族|维吾尔|苗族|壮族|彝族|蒙古族",
+        "\\b(?:linguist\\w*|language\\w*|literatur\\w*|grammar|phon\\w*|syntax|syntactic|lexic\\w*|semant\\w*|dialect\\w*|oral tradition|narrative\\w*)\\b|语言|文学|语法|语音|语义|文字|方言|口述"
+      ],
+      "direct_journals": []
+    },
+    "030405": {
+      "description": "少数民族艺术须同时匹配中国/相关族群、民族和艺术；民族社会学不是整刊艺术映射。",
+      "all_patterns": [
+        "\\b(?:chin(?:a|ese)|sino|tibet\\w*|uyghur\\w*|uighur\\w*|xinjiang|yunnan|guizhou|guangxi|hui|miao|hakka|zhuang|dong|yi|dai|mongol\\w*)\\b|中国|中华|藏族|维吾尔|苗族|壮族|彝族|蒙古族|少数民族",
+        "\\b(?:minority|minorities|ethnic\\w*|indigenous|tibet\\w*|uyghur\\w*|uighur\\w*|zhuang|miao|hakka|mongol\\w*|dong|hui|yi|dai)\\b|少数民族|民族|藏族|维吾尔|苗族|壮族|彝族|蒙古族",
+        "\\b(?:art|arts|artistic|music\\w*|danc\\w*|theat\\w*|perform\\w*|craft\\w*|aesthetic\\w*|paint\\w*|sculpt\\w*|opera|singing|song\\w*|textile\\w*|embroid\\w*|visual culture)\\b|艺术|音乐|舞蹈|戏剧|工艺|绘画|雕塑|刺绣|表演|歌曲"
+      ],
+      "direct_journals": []
+    },
+    "040304": {
+      "description": "民族传统体育须有传统或民族体育证据，不能整刊纳入运动医学。",
+      "all_patterns": [
+        "\\b(?:wushu|kung fu|tai chi|taiji\\w*|qigong|traditional sport\\w*|indigenous sport\\w*|ethnic sport\\w*|martial art\\w*)\\b|武术|太极|气功|民族传统体育|传统体育"
+      ],
+      "direct_journals": []
+    },
+    "030403": {
+      "description": "综合经济/民族研究期刊须匹配中国少数民族经济主题。",
+      "all_patterns": [
+        "\\b(?:chin(?:a|ese)|sino|tibet\\w*|uyghur\\w*|uighur\\w*|xinjiang|yunnan|guizhou|guangxi|hui|miao|hakka|zhuang|dong|yi|dai|mongol\\w*)\\b|中国|中华|藏族|维吾尔|苗族|壮族|彝族|蒙古族|少数民族",
+        "\\b(?:minority|minorities|ethnic\\w*|indigenous|tibet\\w*|uyghur\\w*|uighur\\w*|zhuang|miao|hakka|mongol\\w*|dong|hui|yi|dai)\\b|少数民族|民族|藏族|维吾尔|苗族|壮族|彝族|蒙古族",
+        "\\b(?:econom\\w*|income|poverty|development|employment|livelihood\\w*|labor|labour|trade|business)\\b|经济|收入|贫困|就业|产业|生计"
+      ],
+      "direct_journals": []
+    },
+    "030404": {
+      "description": "少数民族史须有中国/族群和历史证据。",
+      "all_patterns": [
+        "\\b(?:chin(?:a|ese)|sino|tibet\\w*|uyghur\\w*|uighur\\w*|xinjiang|yunnan|guizhou|guangxi|hui|miao|hakka|zhuang|dong|yi|dai|mongol\\w*)\\b|中国|中华|藏族|维吾尔|苗族|壮族|彝族|蒙古族|少数民族",
+        "\\b(?:minority|minorities|ethnic\\w*|indigenous|tibet\\w*|uyghur\\w*|uighur\\w*|zhuang|miao|hakka|mongol\\w*|dong|hui|yi|dai)\\b|少数民族|民族|藏族|维吾尔|苗族|壮族|彝族|蒙古族",
+        "\\b(?:histor\\w*|dynast\\w*|ancient|imperial|archive\\w*|heritage|centur\\w*)\\b|历史|古代|近代|史料|王朝"
+      ],
+      "direct_journals": []
+    },
+    "090203": {
+      "description": "综合食品期刊仅将茶相关论文映射到茶学。",
+      "all_patterns": [
+        "\\b(?:tea|teas|camellia sinensis|matcha|oolong|pu[ -]?erh|theanine|theaflavin\\w*)\\b|茶叶|茶树|茶学|绿茶|红茶|乌龙|普洱|茶氨酸"
+      ],
+      "direct_journals": []
+    },
+    "083204": {
+      "description": "综合食品期刊须有水产原料及加工、贮藏或食品主题证据。",
+      "all_patterns": [
+        "\\b(?:fish|seafood|aquatic|shrimp|prawn\\w*|shellfish|oyster\\w*|mussel\\w*|surimi|seaweed|alga\\w*|salmon|tuna|tilapia|crab\\w*)\\b|水产|鱼|虾|贝类|海藻",
+        "\\b(?:food\\w*|process\\w*|stor\\w*|preserv\\w*|packag\\w*|freez\\w*|drying|fillet\\w*|spoilage|quality|shelf[ -]life|edible|ferment\\w*)\\b|食品|加工|贮藏|保鲜|冷冻|品质|食用|发酵"
+      ],
+      "direct_journals": []
+    },
+    "082202": {
+      "description": "综合食品/生物工程期刊须有制糖或糖料加工证据。",
+      "all_patterns": [
+        "\\b(?:sugar\\w*|sucrose|sugarcane|sugar cane|sugar beet|molasses|sacchar\\w*)\\b|制糖|蔗糖|糖料|甘蔗|甜菜"
+      ],
+      "direct_journals": [
+        "Sugar Tech",
+        "Sugar Industry"
+      ]
+    },
+    "082204": {
+      "description": "综合化学/环境期刊须有皮革或制革证据。",
+      "all_patterns": [
+        "\\b(?:leather|tanner\\w*|tanning|hide\\w*|skin processing|collagen leather)\\b|皮革|制革|鞣制|鞣革"
+      ],
+      "direct_journals": [
+        "Journal of the American Leather Chemists Association",
+        "Journal of Leather Science and Engineering",
+        "Collagen and Leather"
+      ]
+    },
+    "082403": {
+      "description": "综合船舶/海洋工程期刊须有水声或声学证据。",
+      "all_patterns": [
+        "\\b(?:acoustic\\w*|sonar|hydrophone\\w*|underwater sound|sound propagation|sound transmission|underwater noise|underwater communication\\w*|sound absorption)\\b|水声|声呐|声学|水听器|水下噪声"
+      ],
+      "direct_journals": []
+    },
+    "081503": {
+      "description": "综合水文/水资源期刊须有水工结构证据。",
+      "all_patterns": [
+        "\\b(?:dam\\w*|spillway\\w*|hydraulic structure\\w*|hydraulic concrete|reservoir structure\\w*|levee\\w*|embankment\\w*|sluice\\w*|water retaining|hydropower structure\\w*)\\b|水工结构|水坝|大坝|溢洪道|堤坝|水闸"
+      ],
+      "direct_journals": []
+    },
+    "081504": {
+      "description": "综合能源/水资源期刊须有水电或水利工程证据。",
+      "all_patterns": [
+        "\\b(?:hydropower|hydroelectric\\w*|hydraulic engineering|water infrastructure|water conservancy|dam\\w*|reservoir\\w*|irrigation infrastructure)\\b|水电|水利工程|大坝|水库|灌溉工程"
+      ],
+      "direct_journals": []
+    },
+    "081403": {
+      "description": "宽泛环境、建材期刊须有市政设施主题证据。",
+      "all_patterns": [
+        "\\b(?:municipal\\w*|urban water|urban drainage|urban infrastructure|wastewater|sewer\\w*|sewage|drinking water|water supply|stormwater|sanitation)\\b|市政|给排水|污水|城市供水|雨水"
+      ],
+      "direct_journals": [],
+      "only_journals": [
+        "Journal of Cleaner Production",
+        "Construction and Building Materials",
+        "Environmental Science & Technology",
+        "Journal of Environmental Management",
+        "Water Resources Research",
+        "Journal of Hydrology"
+      ]
+    },
+    "082402": {
+      "description": "船舶结构或综合能源期刊须有船舶动力、机舱或轮机证据。",
+      "all_patterns": [
+        "\\b(?:marine engine\\w*|ship propulsion|marine propulsion|diesel engine\\w*|engine room|marine power|ship power|marine turbine\\w*|ship energy|marine fuel\\w*)\\b|轮机|船舶动力|船舶推进|机舱|船用发动机|船用燃料"
+      ],
+      "direct_journals": []
+    },
+    "071010": {
+      "description": "Nature、Science 等综合刊须有生化/分子生物学证据。",
+      "all_patterns": [
+        "\\b(?:protein\\w*|gene\\w*|genom\\w*|dna|rna|enzyme\\w*|molecular biolog\\w*|biochem\\w*|transcript\\w*|ribosom\\w*|cellular|metabol\\w*)\\b|蛋白|基因|核酸|酶|生化|分子生物"
+      ],
+      "direct_journals": [],
+      "only_journals": [
+        "Nature",
+        "Science"
+      ]
+    },
+    "100501": {
+      "description": "综合补充医学、民族药理及西医期刊须有中医或中西医结合证据。",
+      "all_patterns": [
+        "\\b(?:traditional chinese medic\\w*|chinese medic\\w*|chinese herb\\w*|chinese herbal\\w*|tcm|acupunctur\\w*|moxibustion|tuina|tui na|chinese formula\\w*|chinese decoction\\w*)\\b|中医|中药|针灸|推拿|方剂|艾灸"
+      ],
+      "direct_journals": [
+        "Journal of Traditional Chinese Medicine",
+        "Chinese Medicine",
+        "Chinese Journal of Integrative Medicine",
+        "The American Journal of Chinese Medicine"
+      ]
+    },
+    "100502": {
+      "description": "综合补充医学、民族药理及西医期刊须有中医或中西医结合证据。",
+      "all_patterns": [
+        "\\b(?:traditional chinese medic\\w*|chinese medic\\w*|chinese herb\\w*|chinese herbal\\w*|tcm|acupunctur\\w*|moxibustion|tuina|tui na|chinese formula\\w*|chinese decoction\\w*)\\b|中医|中药|针灸|推拿|方剂|艾灸"
+      ],
+      "direct_journals": [
+        "Journal of Traditional Chinese Medicine",
+        "Chinese Medicine",
+        "Chinese Journal of Integrative Medicine",
+        "The American Journal of Chinese Medicine"
+      ]
+    },
+    "100504": {
+      "description": "综合补充医学、民族药理及西医期刊须有中医或中西医结合证据。",
+      "all_patterns": [
+        "\\b(?:traditional chinese medic\\w*|chinese medic\\w*|chinese herb\\w*|chinese herbal\\w*|tcm|acupunctur\\w*|moxibustion|tuina|tui na|chinese formula\\w*|chinese decoction\\w*)\\b|中医|中药|针灸|推拿|方剂|艾灸"
+      ],
+      "direct_journals": [
+        "Journal of Traditional Chinese Medicine",
+        "Chinese Medicine",
+        "Chinese Journal of Integrative Medicine",
+        "The American Journal of Chinese Medicine"
+      ]
+    },
+    "100505": {
+      "description": "综合补充医学、民族药理及西医期刊须有中医或中西医结合证据。",
+      "all_patterns": [
+        "\\b(?:traditional chinese medic\\w*|chinese medic\\w*|chinese herb\\w*|chinese herbal\\w*|tcm|acupunctur\\w*|moxibustion|tuina|tui na|chinese formula\\w*|chinese decoction\\w*)\\b|中医|中药|针灸|推拿|方剂|艾灸"
+      ],
+      "direct_journals": [
+        "Journal of Traditional Chinese Medicine",
+        "Chinese Medicine",
+        "Chinese Journal of Integrative Medicine",
+        "The American Journal of Chinese Medicine"
+      ]
+    },
+    "100506": {
+      "description": "综合补充医学、民族药理及西医期刊须有中医或中西医结合证据。",
+      "all_patterns": [
+        "\\b(?:traditional chinese medic\\w*|chinese medic\\w*|chinese herb\\w*|chinese herbal\\w*|tcm|acupunctur\\w*|moxibustion|tuina|tui na|chinese formula\\w*|chinese decoction\\w*)\\b|中医|中药|针灸|推拿|方剂|艾灸"
+      ],
+      "direct_journals": [
+        "Journal of Traditional Chinese Medicine",
+        "Chinese Medicine",
+        "Chinese Journal of Integrative Medicine",
+        "The American Journal of Chinese Medicine"
+      ]
+    },
+    "100511": {
+      "description": "综合补充医学、民族药理及西医期刊须有中医或中西医结合证据。",
+      "all_patterns": [
+        "\\b(?:traditional chinese medic\\w*|chinese medic\\w*|chinese herb\\w*|chinese herbal\\w*|tcm|acupunctur\\w*|moxibustion|tuina|tui na|chinese formula\\w*|chinese decoction\\w*)\\b|中医|中药|针灸|推拿|方剂|艾灸"
+      ],
+      "direct_journals": [
+        "Journal of Traditional Chinese Medicine",
+        "Chinese Medicine",
+        "Chinese Journal of Integrative Medicine",
+        "The American Journal of Chinese Medicine"
+      ]
+    },
+    "100601": {
+      "description": "综合补充医学、民族药理及西医期刊须有中医或中西医结合证据。",
+      "all_patterns": [
+        "\\b(?:traditional chinese medic\\w*|chinese medic\\w*|chinese herb\\w*|chinese herbal\\w*|tcm|acupunctur\\w*|moxibustion|tuina|tui na|chinese formula\\w*|chinese decoction\\w*)\\b|中医|中药|针灸|推拿|方剂|艾灸"
+      ],
+      "direct_journals": [
+        "Journal of Traditional Chinese Medicine",
+        "Chinese Medicine",
+        "Chinese Journal of Integrative Medicine",
+        "The American Journal of Chinese Medicine"
+      ]
+    },
+    "100602": {
+      "description": "综合补充医学、民族药理及西医期刊须有中医或中西医结合证据。",
+      "all_patterns": [
+        "\\b(?:traditional chinese medic\\w*|chinese medic\\w*|chinese herb\\w*|chinese herbal\\w*|tcm|acupunctur\\w*|moxibustion|tuina|tui na|chinese formula\\w*|chinese decoction\\w*)\\b|中医|中药|针灸|推拿|方剂|艾灸"
+      ],
+      "direct_journals": [
+        "Journal of Traditional Chinese Medicine",
+        "Chinese Medicine",
+        "Chinese Journal of Integrative Medicine",
+        "The American Journal of Chinese Medicine"
+      ]
+    },
+    "100507": {
+      "description": "综合中医/西医期刊须同时有中医和外科证据。",
+      "all_patterns": [
+        "\\b(?:traditional chinese medic\\w*|chinese medic\\w*|chinese herb\\w*|chinese herbal\\w*|tcm|acupunctur\\w*|moxibustion|tuina|tui na|chinese formula\\w*|chinese decoction\\w*)\\b|中医|中药|针灸|推拿|方剂|艾灸",
+        "\\b(?:surg\\w*|wound\\w*|dermat\\w*|skin|ulcer\\w*|burn\\w*|hernia|hemorrhoid\\w*)\\b|外科|创面|皮肤|溃疡|烧伤|痔"
+      ],
+      "direct_journals": []
+    },
+    "100508": {
+      "description": "综合中医/西医期刊须同时有中医和骨伤证据。",
+      "all_patterns": [
+        "\\b(?:traditional chinese medic\\w*|chinese medic\\w*|chinese herb\\w*|chinese herbal\\w*|tcm|acupunctur\\w*|moxibustion|tuina|tui na|chinese formula\\w*|chinese decoction\\w*)\\b|中医|中药|针灸|推拿|方剂|艾灸",
+        "\\b(?:orthop\\w*|bone\\w*|fractur\\w*|joint\\w*|musculoskeletal|spine|osteop\\w*|osteoarth\\w*)\\b|骨|骨折|关节|脊柱|筋伤"
+      ],
+      "direct_journals": []
+    },
+    "100509": {
+      "description": "综合中医/西医期刊须同时有中医和妇科证据。",
+      "all_patterns": [
+        "\\b(?:traditional chinese medic\\w*|chinese medic\\w*|chinese herb\\w*|chinese herbal\\w*|tcm|acupunctur\\w*|moxibustion|tuina|tui na|chinese formula\\w*|chinese decoction\\w*)\\b|中医|中药|针灸|推拿|方剂|艾灸",
+        "\\b(?:gynecol\\w*|gynaecol\\w*|obstetric\\w*|fertility|infertil\\w*|pregnan\\w*|menopaus\\w*|menstr\\w*|ovarian|uter\\w*|endometri\\w*)\\b|妇科|妇产|生殖|妊娠|月经|卵巢|子宫"
+      ],
+      "direct_journals": []
+    },
+    "100510": {
+      "description": "综合中医/西医期刊须同时有中医和儿科证据。",
+      "all_patterns": [
+        "\\b(?:traditional chinese medic\\w*|chinese medic\\w*|chinese herb\\w*|chinese herbal\\w*|tcm|acupunctur\\w*|moxibustion|tuina|tui na|chinese formula\\w*|chinese decoction\\w*)\\b|中医|中药|针灸|推拿|方剂|艾灸",
+        "\\b(?:pediatric\\w*|paediatric\\w*|child\\w*|infant\\w*|neonat\\w*)\\b|儿童|儿科|婴儿|新生儿"
+      ],
+      "direct_journals": []
+    },
+    "100503": {
+      "description": "综合医学史期刊须有中国医学及医史文献证据。",
+      "all_patterns": [
+        "\\b(?:chinese|china|sino|traditional chinese)\\b|中国|中医",
+        "\\b(?:histor\\w*|ancient|classic\\w*|manuscript\\w*|text\\w*|dynast\\w*|archive\\w*)\\b|历史|古代|经典|古籍|文献|医史"
+      ],
+      "direct_journals": []
+    },
+    "100513": {
+      "description": "综合医药刊须有民族医药证据。",
+      "all_patterns": [
+        "\\b(?:ethnomedic\\w*|ethnopharm\\w*|indigenous medic\\w*|tibetan medic\\w*|mongolian medic\\w*|uyghur medic\\w*|uighur medic\\w*|dai medic\\w*|zhuang medic\\w*|folk medic\\w*)\\b|民族医|藏医|蒙医|维医|傣医|壮医"
+      ],
+      "direct_journals": [
+        "Journal of Ethnobiology and Ethnomedicine"
+      ]
+    }
+  }
+}

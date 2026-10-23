@@ -75,6 +75,12 @@ system_prompt: |
        output_files=[...], ...)`，**不传 code**；框架按合同编译渲染。
        `backend` 默认 `tikz`（出版级排版与原生矢量 PDF），只有需要 svg 时传
        `matplotlib`。
+     - illustration（SVG 轨，纯文字描述的示意图）：按 `svg-illustration`
+       skill 手写带 DOM 标记的 SVG（合同每个 id 在 DOM 恰好一次），先
+       `render_illustration(..., svg_text=..., trial=true)` 试渲染看审计摘要
+       （不占预算），迭代干净后同一调用 `trial=false` 铸造：断言对 SVG DOM
+       逐条求值、文字政策与字号下限机械核，过了才铸记录。可选
+       `enhance_figure` AI 美化（未配置会诚实说 not_configured，原图即是交付品）。
      - quantitative/composite：用 `execute_python` 写 matplotlib 代码试画、
        自查、调整，定稿后 `render_figure(..., contract_id=..., code=...)`。
        渲染后框架读对象模型核：≥2 条序列必须有图例（条目逐字等于 series 的
@@ -159,6 +165,8 @@ rules:
   - "机械审计恒跑；VLM 审图由平台是否配置 visual_review 角色机械决定 —— 角色缺席时 findings 里自然没有 VLM 条目，不写替代文案；瞬态审图失败按原因如实记进 findings，不影响铸记录。"
   - "VLM 只报告可见现象；观察进 findings，严重度与规则映射由确定性代码标注 —— 没有 verdict，改不改归你，终审归 referee。"
   - "schematic 必须先 declare_figure_contract 再 render_figure，且不传 code：合同即渲染源，同时存在手写坐标就等于同时有两个真相源。quantitative/composite 的合同是断言，渲染后按 matplotlib 对象模型逐条核。"
+  - "illustration（SVG 轨）的合同是宣言：布局归你，结构归合同核。手写 SVG 必须带 DOM 标记（data-role+data-node / data-edge-from+data-edge-to / data-label / data-group / data-placeholder），合同声明的每个 id 在 DOM 里恰好出现一次；先 trial=true 试渲染看审计摘要再铸造。"
+  - "enhance_figure 只接 SVG 轨已铸 figure（证据型/数据型图构造上到不了它）；图像模型未配置时它返回 not_configured —— 交付未美化版即可，占位框本来就必须是可交付形态。"
   - "家族、版心、图内文字语言由调用方的 visual_request 绑定在 request_id 上（asset_kind / constraints.width / constraints.text_language）：声明与渲染都按它核，改标 asset_kind 或写别的 medium 会被拒。做不到就如实告诉调用方，不要换家族绕。"
   - "同一个 request_id 最多渲染 3 次：到上限工具返回「画不出合同要求的样子」和每次的原因，此时不再声明或渲染这条请求，继续其余请求，并在最终答复里把没做到的要求和原因交给调用方决定。"
   - "数据图的设计合同渲染后机械核：≤4 面板；≥2 条序列必须有图例且条目逐字等于 series[].label、图例在画布内；每根轴 `Label (unit)` 在纸上；每段文字按 figsize 换算到版心 ≥ 字号下限；序列颜色来自框架调色板。不成立拒绝铸记录 —— 按 declare 返回的 render_guidance 写代码。"
@@ -179,6 +187,7 @@ skills:
   - visual-provenance
   - publication-accessibility
   - review-response-protocol
+  - svg-illustration               # SVG 轨（AutoFigure 移植）：DOM 标记约定 + 冻结风格规格 + genre 适配
 
 tools:
   - write_node_readme            # 交接自述 README.md（引导里许诺的那个）
@@ -193,13 +202,15 @@ tools:
   - declare_figure_contract      # 先声明后渲染：结构事实 + 断言（声明时即求值）
   - execute_python               # 沙箱试画/迭代（自由文件，不落账）
   - render_figure                # 定稿：沙箱执行 + 出处绑定 + 恒跑审计 + 铸 figure 记录
-  - inspect_figure
+  - render_illustration          # SVG 轨：手写 SVG 的试渲染（trial，不占预算）与铸造门
+  - enhance_figure               # 可选：图像模型美化已铸 SVG 轨 figure（未配置则诚实缺席）
+  - inspect_figure                  # 按需 VLM 观察（仅平台配置 visual_review 时在场）
   - freeze_artifact             # figure 是 frozen-gated 永久交付物（artifact_policy:
                                 # retention=permanent + 发布判据 "frozen by producing
                                 # node"），冻结=作者签字、orchestrator 代签会被
                                 # owner 闸正确拒绝 —— 所以唯一能签的就是本节点。
                                 # 2026-09-01 实测死锁：三张图记录完整、审计全过，
-                                # 却没有任何人有权冻结，交付物页面永远缺图。               # 按需 VLM 观察（仅平台配置 visual_review 时在场）
+                                # 却没有任何人有权冻结，交付物页面永远缺图。
   - request_upstream_rework
   - write_scratchpad
   - memory_note                     # 一条可复用教训 → 直接入册（无候选队列）
@@ -214,7 +225,7 @@ loop_hooks:
 context_config:
   memory_query: "scientific visualization conventions, domain plots, visual accessibility, figure review failures"
   kb_query: ""
-  max_output_tokens: 8192
+  max_output_tokens: 16384
   temperature: 0.2
 
 required_input_artifact_types: []
@@ -233,6 +244,10 @@ expected_inputs:
         electronic_structure | schematic | generative_illustration | composite
       - purpose：exploration | diagnostic | publication | presentation |
         interactive | report（导出尺寸/DPI/格式的默认值按它选；不是身份）
+      - preferred_form（可选，最高优先）：illustration=SVG 插画轨 |
+        compiled=合同编译轨 | data_chart=数据图轨。给了就按它定轨；
+        不给按输入形态推导（有数据→数据轨，有机器可读 spec→编译轨，
+        纯文字→SVG 轨）
       - source_artifact_ids / constraints / style_intent / spec /
         generative_allowed（均可选）
       - quality_mode 已废除（判决拆除）：传了会被忽略并记一条 deprecation

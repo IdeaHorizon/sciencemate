@@ -9,10 +9,14 @@ import {
   useState,
 } from "react";
 import { api, type InterfaceSettings } from "@/lib/api";
+import { queryClient } from "@/lib/query/client";
 import { useAuth } from "@/features/auth";
-import { isLanguage, say } from "@/shared/i18n";
+import { languageToSettleOnFirstOpen } from "@/features/settings/lib/first-language";
+import { isLanguage, languageForASystem, say, type Language } from "@/shared/i18n";
 
 export const INTERFACE_SETTINGS_CACHE_KEY = "atrium.interface_settings";
+/** 登录页上点过的语言 —— 那时还没有账号可存，登录后若账号没选过语言，就用这一个。 */
+export const LANGUAGE_BEFORE_SIGN_IN_KEY = "atrium.language_before_sign_in";
 
 export const DEFAULT_INTERFACE_SETTINGS: InterfaceSettings = {
   theme: "system",
@@ -37,6 +41,8 @@ type InterfaceSettingsState = {
   error: string | null;
   save: (settings: InterfaceSettings) => Promise<InterfaceSettings>;
   refresh: () => Promise<InterfaceSettings | null>;
+  /** 换界面语言。登录前也能点（登录页）：那时只记在这台浏览器上，登录后再存进账号。 */
+  chooseLanguage: (language: Language) => Promise<void>;
 };
 
 const InterfaceSettingsContext = createContext<InterfaceSettingsState | null>(null);
@@ -84,9 +90,21 @@ export function normalizeInterfaceSettings(value: unknown): InterfaceSettings | 
   } as InterfaceSettings;
 }
 
+/** 上一次摆出来的语言 —— 换了语言，后端按旧语言给的字（角色说明、资讯、状态句）就得重取。 */
+let languageOnScreen: string | null = null;
+
 export function applyInterfaceSettings(settings: InterfaceSettings) {
+  // 后端的报错照这一屏的语言说：每一问都带上它（见 `api.speaking`）。
+  api.speaking(settings.language);
+  if (languageOnScreen !== null && languageOnScreen !== settings.language) {
+    // 2026-10-19 真跑：开场卡片上点了 English，卡片标题换了，角色说明还是中文 —— 那段是
+    // 后端按语言给的，按中文取过一次就留着。查询全部作废、在屏的重取。
+    void queryClient.invalidateQueries();
+  }
+  languageOnScreen = settings.language;
   if (typeof document === "undefined") return;
   const root = document.documentElement;
+  root.lang = settings.language === "zh" ? "zh-CN" : "en";
   root.dataset.theme = settings.theme;
   root.dataset.density = settings.density;
   root.dataset.reduceMotion = String(settings.reduce_motion);
@@ -101,6 +119,29 @@ function readCachedSettings() {
     return normalizeInterfaceSettings(parsed);
   } catch {
     return null;
+  }
+}
+
+/** 浏览器给的语言（桌面版的 WKWebView 只给第一项 —— 整张表由后端读，见 refresh）。 */
+function browserLanguages(): string[] {
+  if (typeof navigator === "undefined") return [];
+  return navigator.languages?.length ? [...navigator.languages] : navigator.language ? [navigator.language] : [];
+}
+
+function readLanguageBeforeSignIn(): Language | null {
+  try {
+    const value = typeof localStorage === "undefined" ? null : localStorage.getItem(LANGUAGE_BEFORE_SIGN_IN_KEY);
+    return isLanguage(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function forgetLanguageBeforeSignIn() {
+  try {
+    if (typeof localStorage !== "undefined") localStorage.removeItem(LANGUAGE_BEFORE_SIGN_IN_KEY);
+  } catch {
+    // 存储被禁用：本来也没记下什么。
   }
 }
 
@@ -124,7 +165,14 @@ export function InterfaceSettingsProvider({ children }: { children: React.ReactN
       setSettings(cached);
       applyInterfaceSettings(cached);
     } else {
-      applyInterfaceSettings(DEFAULT_INTERFACE_SETTINGS);
+      // 这台浏览器上从没存过：账号那份还没到（或者还没登录），先按浏览器给的语言摆，
+      // 别让一个不懂中文的人在登录页上先看见一屏中文。账号到了之后以 refresh 为准。
+      const guessed = {
+        ...DEFAULT_INTERFACE_SETTINGS,
+        language: readLanguageBeforeSignIn() ?? languageForASystem(browserLanguages()),
+      };
+      setSettings(guessed);
+      applyInterfaceSettings(guessed);
     }
   }, []);
 
@@ -135,7 +183,17 @@ export function InterfaceSettingsProvider({ children }: { children: React.ReactN
     }
     try {
       const response = await api.getInterfaceSettings();
-      const current = normalizeInterfaceSettings(response) ?? DEFAULT_INTERFACE_SETTINGS;
+      let current = normalizeInterfaceSettings(response) ?? DEFAULT_INTERFACE_SETTINGS;
+      // 这个人还没选过语言 → 按系统语言替他定一次，并存进账号（后端的文案读的是那一份，
+      // 不存的话界面是英文、资讯和失败说明还是中文）。存下之后这一问就答"选过了"。
+      // 问不到就不猜，照账号那份摆 —— 切换钮在侧栏上，用目标语言写着。
+      const hint = await api.getInterfaceLanguageHint().catch(() => null);
+      const language = hint && languageToSettleOnFirstOpen(hint, readLanguageBeforeSignIn(), browserLanguages());
+      if (language) {
+        const saved = await api.saveInterfaceSettings({ ...current, language }).catch(() => null);
+        current = (saved && normalizeInterfaceSettings(saved)) ?? { ...current, language };
+        forgetLanguageBeforeSignIn();
+      }
       setSettings(current);
       cacheAndApply(current);
       setError(null);
@@ -182,6 +240,24 @@ export function InterfaceSettingsProvider({ children }: { children: React.ReactN
     }
   }, [settings]);
 
+  const chooseLanguage = useCallback(async (language: Language) => {
+    if (authenticated) {
+      forgetLanguageBeforeSignIn();
+      await save({ ...settings, language });
+      return;
+    }
+    // 还没登录（登录页 / 注册页）：没有账号可存。先在这台浏览器上换过来、记一笔，
+    // 登录后账号要是没选过语言，就用这一笔（见 refresh）。
+    const next = { ...settings, language };
+    setSettings(next);
+    cacheAndApply(next);
+    try {
+      localStorage.setItem(LANGUAGE_BEFORE_SIGN_IN_KEY, language);
+    } catch {
+      // 存储被禁用：这一屏照样换了，只是记不住。
+    }
+  }, [authenticated, save, settings]);
+
   const value = useMemo<InterfaceSettingsState>(() => ({
     settings,
     ready,
@@ -189,7 +265,8 @@ export function InterfaceSettingsProvider({ children }: { children: React.ReactN
     error,
     save,
     refresh,
-  }), [settings, ready, saving, error, save, refresh]);
+    chooseLanguage,
+  }), [settings, ready, saving, error, save, refresh, chooseLanguage]);
 
   return <InterfaceSettingsContext.Provider value={value}>{children}</InterfaceSettingsContext.Provider>;
 }

@@ -48,7 +48,7 @@ import tempfile
 import time
 import threading
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
@@ -214,8 +214,10 @@ class StartReport:
         code: str,
         error: BaseException,
         path: Path | str | None,
-        consequences: Sequence[str],
+        consequences: Sequence[Mapping[str, str]],
     ) -> None:
+        """`consequences` 每一条两种语言都写（`{"zh": …, "en": …}`）：这件事落进事件、存下来，
+        之后谁用哪种语言看界面，写的这一刻不知道 —— 前端按那一屏挑（`environment.ts`）。"""
         self.capabilities[capability] = False
         self.warnings.append(
             {
@@ -375,16 +377,22 @@ class SecretFilter:
     """Best-effort output boundary redaction; never mutates harness files."""
 
     def __init__(self, secrets: list[str] | None = None) -> None:
-        self._secrets = sorted(
-            {s for s in (secrets or []) if isinstance(s, str) and s},
-            key=len,
-            reverse=True,
-        )
+        # 哪些值算密钥、怎么抹：一条规则（`shared.lib.secret_values`，#1228）。太短的不按原值抹 ——
+        # 一个字母的 key 会把事件里的路径与 code 全部抹花；按形状的规则（下面两条正则）照样管着。
+        from shared.lib.secret_values import MIN_SECRET_CHARS, split_secret_values
+
+        self._secrets, too_short = split_secret_values(secrets or [])
+        if too_short:
+            logging.getLogger("platform_runtime").warning(
+                "%d configured credential(s) shorter than %d characters are not redacted by value "
+                "(a real key is never that short; redacting it would rewrite every event)",
+                too_short, MIN_SECRET_CHARS,
+            )
 
     def text(self, value: str) -> str:
-        clean = value
-        for secret in self._secrets:
-            clean = clean.replace(secret, "[REDACTED]")
+        from shared.lib.secret_values import redact_values
+
+        clean = redact_values(value, self._secrets)
         clean = _BEARER_RE.sub("Bearer [REDACTED]", clean)
         return _COMMON_KEY_RE.sub("[REDACTED]", clean)
 
@@ -1906,6 +1914,20 @@ def _clean_literature_text(value: Any) -> str:
     return " ".join(html.unescape(text).split())
 
 
+def _cached_abstract_matches_title(title: str, abstract: str) -> bool:
+    """Guard against an older index row carrying another paper's abstract."""
+    if len(abstract) < 150:
+        return True
+    title_terms = {
+        term for term in re.findall(r"[a-z]{5,}", title.lower())
+        if term not in {"about", "after", "among", "between", "from", "their", "these", "those", "using", "without"}
+    }
+    if len(title_terms) < 3:
+        return True
+    abstract_terms = set(re.findall(r"[a-z]{5,}", abstract[:1200].lower()))
+    return bool(title_terms & abstract_terms)
+
+
 def _index_paper(paper: Any, query: str) -> dict[str, Any]:
     from nodes.literature.tools.filter import compute_relevance_score, quality_score_breakdown
     relevance = compute_relevance_score(paper, query)
@@ -1926,8 +1948,8 @@ def _index_paper(paper: Any, query: str) -> dict[str, Any]:
         impact_factor = None
     result = {
         "title": title,
-        "title_zh": None,
-        "abstract_zh": None,
+        "title_zh": getattr(paper, "title_zh", None),
+        "abstract_zh": getattr(paper, "abstract_zh", None),
         "authors": authors,
         "year": getattr(paper, "year", None),
         "pub_date": str(getattr(paper, "pub_date", "") or "") or None,
@@ -1962,6 +1984,10 @@ _ACADEMIC_QUERY_STOPWORDS = {
     "about", "against", "among", "and", "are", "for", "from", "how",
     "into", "of", "on", "or", "the", "their", "this", "through", "to",
     "using", "versus", "via", "what", "when", "where", "which", "with",
+    "article", "articles", "case", "cases", "experimental", "find", "findings",
+    "incorrect", "not", "paper", "papers", "related", "result", "results",
+    "review", "reviews", "scholarly", "studies", "study", "task", "tasks",
+    "type", "types",
 }
 
 _RELATIVE_DATE_QUERY_RE = re.compile(
@@ -1996,11 +2022,313 @@ def _academic_core_terms(query: str) -> list[str]:
     ))
 
 
+def _academic_compact_query(query: str, *, max_terms: int = 8) -> str:
+    """Keep the leading research concepts; instructions do not dilute relevance.
+
+    A long translated question can contain 15-25 words. Scoring against all of
+    them makes a good paper with a concise title/abstract miss the 0.4 gate.
+    Search the compact form first and retain the complete query as a second
+    retrieval angle.
+    """
+    terms = _academic_core_terms(query)
+    compact = " ".join(terms[:max_terms])
+    return compact if compact and compact.casefold() != query.casefold() else query
+
+
+def _academic_boolean_facets(query: str) -> list[list[str]]:
+    """Preserve topic facets and later explicit study-population constraints.
+
+    The subject can follow a method and an outcome, for example ``machine
+    learning AND early prediction AND sepsis``. Later clauses often list
+    optional validations or publication types. OR alternatives remain options.
+    """
+    if not re.search(r"\bAND\b", query, re.IGNORECASE):
+        return []
+    pieces = re.split(r"\s+AND\s+", query, flags=re.IGNORECASE)
+    facets = []
+    population_terms = {"child", "children", "pediatric", "paediatric", "adolescent", "infant", "elderly", "older adult", "pregnant", "women", "men"}
+    selected = [
+        piece for index, piece in enumerate(pieces)
+        if index < 3 or any(
+            re.search(rf"\b{re.escape(term)}\b", piece, re.IGNORECASE)
+            for term in population_terms
+        )
+    ]
+    for piece in selected:
+        alternatives = re.split(r"\s+OR\s+", piece.strip(" ()"), flags=re.IGNORECASE)
+        terms = [" ".join(_academic_core_terms(value)) for value in alternatives]
+        facets.append([value for value in terms if value])
+    return facets if len(facets) >= 2 and all(facets) else []
+
+
+def _academic_comparison_facets(
+    facets: list[list[str]], original_query: str
+) -> list[list[str]]:
+    """A question comparing two approaches needs evidence about either one."""
+    if len(facets) < 3 or not re.search(
+        r"哪(?:一)?种更|哪个更|孰优|which\s+.+?\s+more|\bversus\b|\bvs\.?\b",
+        original_query, re.IGNORECASE,
+    ):
+        return facets
+    return [facets[0] + facets[1], *facets[2:]]
+
+
+def _paper_matches_academic_facets(paper: dict[str, Any], facets: list[list[str]]) -> bool:
+    if not facets:
+        return True
+    text = f"{paper.get('title') or ''} {paper.get('abstract') or ''}".lower()
+    title = str(paper.get("title") or "").lower()
+    if any("language" in alternative.split() for facet in facets for alternative in facet):
+        if not re.search(r"\blanguages?\b", title + " " + str(paper.get("abstract") or "")[:350].lower()):
+            return False
+    # An exact exposure target must not be satisfied solely by background
+    # mentions in a study whose title explicitly names a different particle
+    # class. Such abstracts often cite PM2.5 before describing coarse PM or
+    # ultrafine particles as the actual measured exposure.
+    if facets and any("pm2" in alternative.split() and "5" in alternative.split()
+                      for alternative in facets[0]):
+        target = r"\b(?:pm\s*2[.\- ]?5|fine particulate matter|fine particles|fine pm)\b"
+        if re.search(r"\b(?:coarse particulate matter|coarse pm|ultrafine particles?)\b", title) \
+                and not re.search(target, title):
+            return False
+        if not re.search(target, text):
+            return False
+    # New-onset outcomes are different from symptom control, exacerbations,
+    # or absenteeism among patients who already have the condition.
+    onset_facets = [facet for facet in facets if any(
+        re.search(r"\b(?:incident|incidence|new-onset)\b", alternative)
+        for alternative in facet
+    )]
+    if onset_facets:
+        outcome_terms = set.intersection(*(
+            set(alternative.split()) for alternative in onset_facets[0]
+        )) if len(onset_facets[0]) > 1 else set()
+        if re.search(r"\brisk of\b", title) and outcome_terms and not any(
+            _academic_term_matches(term, title) for term in outcome_terms
+        ):
+            return False
+        if re.search(r"\b(?:exacerbations?|symptoms?|absenteeism)\b", title) \
+                and not (
+                    re.search(r"\b(?:incident|incidence|onset|develop(?:ment|ing)?)\b", title)
+                    or any(re.search(rf"\b(?:risk of\s+{re.escape(term)}|{re.escape(term)}\s+risk)\b", title)
+                           for term in outcome_terms)
+                ):
+            return False
+    if any(set(" ".join(facet).split()) & {"child", "children", "pediatric", "paediatric"} for facet in facets):
+        if re.search(r"\b(?:elderly|older adults?|adult patients?|post-menopausal)\b", title):
+            return False
+    for index, facet in enumerate(facets):
+        shared = set.intersection(*(set(item.split()) for item in facet)) if len(facet) > 1 else set()
+        # A third OR group often lists alternative measurement methods. A
+        # sparse abstract may name neither, while still studying the target.
+        # Keep it for ranking but do not make it a hard admission condition.
+        if index == 2 and len(facet) > 1 and not shared and all(len(item.split()) > 1 for item in facet):
+            continue
+        if shared and not all(
+            _academic_term_matches(term, title + " " + str(paper.get("abstract") or "")[:350].lower())
+            for term in shared
+        ):
+            return False
+        if not any(
+            sum(_academic_term_matches(term, text) for term in alternative.split())
+            >= (
+                len(alternative.split())
+                if any(term.isdigit() for term in alternative.split())
+                else (len(alternative.split()) + 1) // 2
+            )
+            for alternative in facet
+        ):
+            return False
+    return True
+
+
+def _academic_facet_title_coverage(
+    paper: dict[str, Any], facets: list[list[str]]
+) -> float:
+    if not facets:
+        return 0.0
+    title = str(paper.get("title") or "").lower()
+    return sum(
+        any(
+            all(_academic_term_matches(term, title) for term in alternative.split())
+            for alternative in facet
+        )
+        for facet in facets
+    ) / len(facets)
+
+
+def _academic_period_focus(query: str) -> tuple[str, str, list[str]] | None:
+    """Extract an explicitly named historical period and its following topic.
+
+    A paper mentioning a period only in background should not outrank one
+    whose title studies that period and the question's stated phenomenon.
+    """
+    match = re.search(
+        r"\b(?:(?P<place>[A-Z][a-z]+)\s+)?"
+        r"(?P<era>(?:Bronze|Iron|Stone|Copper|Middle|Dark)\s+Age)\b",
+        query,
+    )
+    if not match:
+        return None
+    place = (match.group("place") or "").lower()
+    following = query[match.end():].lstrip()
+    # Models may write either "European Bronze Age population migration" or
+    # "Bronze Age Europe population migration". In both cases Europe is the
+    # place and the next words describe the phenomenon being studied.
+    if not place:
+        next_word = re.match(r"([A-Z][a-z]+)\b", following)
+        if next_word:
+            place = next_word.group(1).lower()
+            following = following[next_word.end():]
+    topic = _academic_core_terms(following)[:2]
+    return place, match.group("era").lower(), topic
+
+
+def _academic_period_focus_score(
+    paper: dict[str, Any], focus: tuple[str, str, list[str]] | None
+) -> float:
+    if not focus:
+        return 0.0
+    place, era, topic = focus
+    title = str(paper.get("title") or "").lower()
+    text = f"{title} {paper.get('abstract') or ''}".lower()
+    place_forms = [place, place[:-2]] if place.endswith("ean") else [place]
+    place_hit = not place or any(value and value in text for value in place_forms)
+    era_title = era in title
+    topic_title = bool(topic) and any(_academic_term_matches(term, title) for term in topic)
+    other_era_title = bool(re.search(r"\b[a-z]+ age\b", title)) and not era_title
+    return (
+        0.20 * place_hit + 0.25 * era_title + 0.55 * topic_title
+        - 0.25 * other_era_title
+    )
+
+
+def _academic_period_method_terms(query: str) -> list[str]:
+    """Keep an explicit analytical method in named-period searches.
+
+    DNA studies are often titled as genomics/genetics. These are genuine
+    equivalents, while a plain archaeology or news item is not evidence from
+    the requested method merely because it mentions the period and migration.
+    """
+    if not _academic_period_focus(query):
+        return []
+    if re.search(r"\bDNA\b", query, re.IGNORECASE):
+        return ["dna", "genom", "genetic"]
+    return []
+
+
+def _paper_has_academic_period(
+    paper: dict[str, Any], focus: tuple[str, str, list[str]] | None
+) -> bool:
+    if not focus:
+        return True
+    era = focus[1]
+    title = str(paper.get("title") or "").lower()
+    abstract_opening = str(paper.get("abstract") or "")[:500].lower()
+    # For a question about population migration, ancient animal DNA is a
+    # different research subject even when the specimen dates to the era.
+    if any(term.startswith(("populat", "migrat")) for term in focus[2]) and re.search(
+        r"\b(?:rabbits?|pigs?|boars?|horses?|dogs?|cattle|sheep|goats?)\b", title
+    ):
+        return False
+    return era in title or era in abstract_opening
+
+
+def _paper_has_academic_method(
+    paper: dict[str, Any], terms: list[str]
+) -> bool:
+    if not terms:
+        return True
+    # An incidental sentence in a long abstract is too weak to establish
+    # that the requested method was actually used in the study.
+    text = f"{paper.get('title') or ''} {str(paper.get('abstract') or '')[:300]}".lower()
+    return any(_academic_term_matches(term, text) for term in terms)
+
+
+def _academic_leading_title_coverage(
+    paper: dict[str, Any], terms: list[str]
+) -> float:
+    leading = terms[:2]
+    if not leading:
+        return 0.0
+    title = str(paper.get("title") or "").lower()
+    return sum(_academic_term_matches(term, title) for term in leading) / len(leading)
+
+
+def _academic_english_query_ok(value: str) -> bool:
+    """Reject untranslated or single-word fallbacks for a full Chinese question."""
+    return (
+        not re.search(r"[\u4e00-\u9fff]", value)
+        and len(_academic_core_terms(value)) >= 2
+    )
+
+
+def _academic_retry_strategy_better(current: dict[str, Any], retry: dict[str, Any]) -> bool:
+    current_valid = _academic_english_query_ok(str(current.get("english_query") or ""))
+    retry_valid = _academic_english_query_ok(str(retry.get("english_query") or ""))
+    current_count = len(current.get("search_queries") or [])
+    retry_count = len(retry.get("search_queries") or [])
+    return retry_valid and (not current_valid or retry_count > current_count)
+
+
+def _academic_strategy_queries(strategy: dict[str, Any], original_query: str) -> list[str]:
+    """Search international sources with English terms when a Chinese prompt has them.
+
+    The strategy response has a separate ``english_query`` field. Older code
+    ignored it and used Chinese ``search_queries`` for English metadata, then
+    required those Chinese phrases to appear in English titles/abstracts.
+    """
+    raw = strategy.get("search_queries") or []
+    queries = list(dict.fromkeys(
+        " ".join(str(item.get("query") or "").split())
+        for item in raw
+        if isinstance(item, dict) and str(item.get("query") or "").strip()
+    ))
+    if not re.search(r"[\u4e00-\u9fff]", original_query):
+        return queries[:6] or [original_query]
+
+    english = " ".join(str(strategy.get("english_query") or "").split())
+    # A single broad acronym such as "DNA" is not a translation of a detailed
+    # research question. Keep it out of the anchor position.
+    if not _academic_english_query_ok(english):
+        return queries[:6] or [original_query]
+
+    facets = _academic_boolean_facets(english)
+    if len(facets) >= 3 and len(_academic_comparison_facets(facets, original_query)) < len(facets):
+        # A comparison may be answered by separate evidence for each option.
+        # Searching only the full Boolean expression misses studies of one
+        # option; the ordinary compact prefix can also omit the shared goal.
+        goal = facets[2][0]
+        angles = [f"{side[0]} {goal}" for side in facets[:2]]
+        angles.extend(f"{side[0].split()[0]} {goal}" for side in facets[:2])
+        return list(dict.fromkeys([english, *angles, original_query]))[:6]
+
+    compact = _academic_compact_query(english)
+    international = [compact, english, *(
+        item for item in queries
+        if not re.search(r"[\u4e00-\u9fff]", item)
+    )]
+    international = list(dict.fromkeys(international))[:5]
+    # Preserve the original language for CNKI, but never use it as the anchor
+    # for relevance checks on English papers.
+    return [*international, original_query][:6]
+
+
 def _academic_term_matches(term: str, text: str) -> bool:
-    """数字按完整数值匹配，普通词按大小写无关子串匹配。"""
+    """数字完整匹配；普通词匹配子串及常见属性名词的形容词词形。"""
     if term and term[0].isdigit():
         return re.search(rf"(?<!\d){re.escape(term)}(?!\d)", text) is not None
-    return bool(term) and term in text
+    if not term:
+        return False
+    if term in text:
+        return True
+    # Noun/adjective forms convey the same property (tolerance/tolerant,
+    # resistance/resistant). Preserve the existing substring semantics, also
+    # covering compounds such as thermotolerant, without adding topic synonyms.
+    for noun_suffix, adjective_suffix in (("ance", "ant"), ("ence", "ent")):
+        if term.endswith(noun_suffix) and len(term) - len(noun_suffix) >= 4:
+            return term[:-len(noun_suffix)] + adjective_suffix in text
+    return False
 
 
 def _paper_has_anchor_coverage(paper: dict[str, Any], terms: list[str]) -> bool:
@@ -2033,28 +2361,112 @@ def _academic_intent_coverage(
     return matched / len(terms)
 
 
+def _academic_nonresearch_record(paper: dict[str, Any]) -> bool:
+    """Exclude notices and source documents, including those mislabeled as articles."""
+    from nodes.literature.tools.publication_types import is_journal_notice_title
+
+    title = str(paper.get("title") or "").strip()
+    venue = str(paper.get("venue") or "").lower()
+    abstract_opening = str(paper.get("abstract") or "")[:100].lower().lstrip()
+    if re.match(r"reviewed by\s*:", abstract_opening):
+        return True
+    if is_journal_notice_title(title):
+        return True
+    if re.search(r"\b(?:science news|news & views|book review)\b", venue):
+        return True
+    # Crossref sometimes concatenates two reviewed book titles and their
+    # authors into one apparent journal-article title.
+    if re.search(r"\.\s+[A-Z][a-z]+\s+[A-Z][a-z]+\s+The\s+[A-Z]", title):
+        return True
+    if re.search(r"\bvol(?:ume)?\.?\s*\d+\b.*\bby\s+[A-Z][a-z]+\s+[A-Z]", title, re.IGNORECASE):
+        return True
+    return bool(re.search(
+        r"^(?:book review\s*[:：]|review of\s+(?:the\s+)?book\s+|"
+        r"(?:united nations|unesco)\s+(?:general assembly\s+)?(?:discusses|resolution|session)\b|"
+        r"(?:the\s+)?resolution\s+on\s+the\s+return\b|"
+        r"unesco:\s*\w+\s+session\b)",
+        title, re.IGNORECASE,
+    ))
+
+
+def _academic_primary_focus_penalty(
+    paper: dict[str, Any], terms: list[str], facets: list[list[str]]
+) -> float:
+    """Downrank a study of a complication or an incidental method mention."""
+    title = str(paper.get("title") or "").lower()
+    opening = str(paper.get("abstract") or "")[:500].lower()
+    words = set(terms)
+    facet_words = {
+        alternative for facet in facets for alternative in facet
+        if " " not in alternative and len(alternative) >= 5
+    }
+    predictive = bool(words & {"prediction", "predict", "detection", "early"})
+    if predictive and any(re.search(
+        rf"\b{re.escape(target)}[- ](?:associated|induced|related)\b", title
+    ) for target in facet_words):
+        return 0.30
+    for facet in facets:
+        if len(facet) < 2:
+            continue
+        shared = set.intersection(*(set(item.split()) for item in facet))
+        if any(len(term) >= 5 and not _academic_term_matches(term, title) for term in shared):
+            return 0.18
+    if any(word.startswith("rerank") for word in words):
+        # A RAG paper that merely mentions reranking deep in the abstract
+        # should not outrank a study that evaluates the requested method.
+        if not re.search(r"\bre[- ]?rank(?:ing|ed|er|ers)?\b", title + " " + opening):
+            return 0.25
+    return 0.0
+
+
+def _academic_named_concept_gate(paper: dict[str, Any], terms: list[str]) -> bool:
+    """Keep a named technique tied to its field, not a lexical homonym."""
+    words = set(terms)
+    if not {"optimal", "transport", "sinkhorn"} <= words:
+        return True
+    text = f"{paper.get('title') or ''} {str(paper.get('abstract') or '')[:500]}".lower()
+    return "optimal transport" in text or "sinkhorn" in text
+
+
+def _academic_exclusion_reason(
+    paper: dict[str, Any], *, core_terms=None, mandatory_facets=None,
+    period_focus=None, method_terms=None,
+) -> str | None:
+    """First failing admission gate; counts are mutually exclusive."""
+    if _academic_nonresearch_record(paper):
+        return "nonresearch"
+    if paper.get("exact_title_match"):
+        return None
+    relevance = float(((paper.get("score_breakdown") or {}).get("raw") or {}).get("relevance", 0.0) or 0.0)
+    if not relevance >= _ACADEMIC_SEARCH_MIN_RELEVANCE:
+        return "relevance"
+    if not _paper_has_anchor_coverage(paper, core_terms or []):
+        return "anchor"
+    if not _paper_matches_academic_facets(paper, mandatory_facets or []):
+        return "facets"
+    if not _paper_has_academic_period(paper, period_focus):
+        return "period"
+    if not _paper_has_academic_method(paper, method_terms or []):
+        return "method"
+    if not _academic_named_concept_gate(paper, core_terms or []):
+        return "named_concept"
+    return None
+
+
 def _select_academic_search_results(
     papers: list[dict[str, Any]],
     *,
     limit: int,
     core_terms: list[str] | None = None,
+    mandatory_facets: list[list[str]] | None = None,
+    period_focus: tuple[str, str, list[str]] | None = None,
+    method_terms: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """先做相关性准入，再按综合质量排序；返回结果绝不补位。"""
-    eligible = [
-        paper
-        for paper in papers
-        if bool(paper.get("exact_title_match"))
-        or (
-            float(
-                ((paper.get("score_breakdown") or {}).get("raw") or {}).get(
-                    "relevance", 0.0
-                )
-                or 0.0
-            )
-            >= _ACADEMIC_SEARCH_MIN_RELEVANCE
-            and _paper_has_anchor_coverage(paper, core_terms or [])
-        )
-    ]
+    eligible = [paper for paper in papers if _academic_exclusion_reason(
+        paper, core_terms=core_terms, mandatory_facets=mandatory_facets,
+        period_focus=period_focus, method_terms=method_terms,
+    ) is None]
     # 综合质量分仍然决定相关论文之间的质量顺序，但额外保留 35% 给原始问题
     # 的要素覆盖，避免某个宽泛扩展查询把只沾边的高质量论文抬到最前面。
     for paper in eligible:
@@ -2062,9 +2474,24 @@ def _select_academic_search_results(
             paper, core_terms or []
         )
         paper["intent_coverage"] = round(intent_coverage, 4)
+        facet_title_coverage = _academic_facet_title_coverage(
+            paper, mandatory_facets or []
+        )
+        period_score = _academic_period_focus_score(paper, period_focus)
+        leading_title = _academic_leading_title_coverage(paper, core_terms or [])
         paper["ranking_score"] = round(
-            float(paper.get("score") or 0.0) * 0.65
-            + intent_coverage * 0.35,
+            float(paper.get("score") or 0.0) * (
+                0.50 if mandatory_facets else 0.45 if period_focus else 0.50
+            )
+            + intent_coverage * (
+                0.30 if mandatory_facets else 0.15 if period_focus else 0.30
+            )
+            + facet_title_coverage * (0.20 if mandatory_facets else 0.0)
+            + period_score * (0.40 if period_focus and not mandatory_facets else 0.0)
+            + leading_title * (0.20 if not mandatory_facets and not period_focus else 0.0)
+            - _academic_primary_focus_penalty(
+                paper, core_terms or [], mandatory_facets or []
+            ),
             4,
         )
     eligible.sort(
@@ -2175,53 +2602,56 @@ async def _add_chinese_titles(
     if not missing:
         return {"status": "cache_hit", "cached": len(cached), "translated": 0}
 
-    rows = [{"id": index, "title": title} for index, title in enumerate(missing)]
-    try:
-        from core.llm import LLMClient, LLMMessage, opening_system_prompt
+    from core.llm import LLMClient, LLMMessage, opening_system_prompt
 
-        client = LLMClient(timeout=60, max_retries=0)
-        response = await client.chat(
-            [
-                opening_system_prompt(_TITLE_TRANSLATION_SYSTEM),
-                LLMMessage(
-                    role="user",
-                    content=json.dumps(rows, ensure_ascii=False, separators=(",", ":")),
-                ),
-            ],
-            max_tokens=min(16384, max(2048, len(rows) * 80)),
-            temperature=0.0,
-            timeout=60,
-            max_retries=0,
-        )
-        by_id = _parse_title_translations(
-            response.content or "", set(range(len(rows)))
-        )
-    except Exception as exc:
-        return {
-            "status": "failed",
-            "cached": len(cached),
-            "translated": 0,
-            "error_type": type(exc).__name__,
-        }
-    fresh = {
-        missing[item_id]: title_zh
-        for item_id, title_zh in by_id.items()
-        if 0 <= item_id < len(missing)
-    }
-    if local_index is not None and fresh:
-        try:
-            local_index.save_title_translations(fresh)
-        except Exception:
-            pass
+    # Small independent requests avoid long output generation and keep partial
+    # successes reusable when another batch times out. No conversation history.
+    semaphore = asyncio.Semaphore(3)
+    fresh: dict[str, str] = {}
+    errors: list[str] = []
+
+    async def translate_batch(offset: int) -> None:
+        rows = [{"id": index, "title": missing[index]}
+                for index in range(offset, min(offset + 20, len(missing)))]
+        async with semaphore:
+            try:
+                client = LLMClient(timeout=35, max_retries=0)
+                response = await asyncio.wait_for(client.chat(
+                    [
+                        opening_system_prompt(_TITLE_TRANSLATION_SYSTEM),
+                        LLMMessage(role="user", content=json.dumps(
+                            rows, ensure_ascii=False, separators=(",", ":"))),
+                    ],
+                    max_tokens=max(2048, len(rows) * 100),
+                    temperature=0.0, timeout=35, max_retries=0,
+                ), timeout=35)
+                by_id = _parse_title_translations(
+                    response.content or "", {row["id"] for row in rows})
+                translated = {missing[item_id]: title for item_id, title in by_id.items()}
+                fresh.update(translated)
+                if local_index is not None and translated:
+                    try:
+                        local_index.save_title_translations(translated)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+
+    await asyncio.gather(*(translate_batch(offset) for offset in range(0, len(missing), 20)))
     for paper in english:
         paper["title_zh"] = cached.get(str(paper["title"])) or fresh.get(
             str(paper["title"])
         )
     return {
-        "status": "ok" if fresh else "empty_response",
+        "status": ("ok" if len(fresh) == len(missing) else "partial" if fresh
+                   else "failed" if errors else "empty_response"),
         "cached": len(cached),
         "translated": len(fresh),
+        "batch_count": (len(missing) + 19) // 20,
+        "failed_batches": len(errors),
+        "error_types": sorted(set(errors)),
     }
+
 
 
 _AI_SUMMARY_SYSTEM = (
@@ -2508,6 +2938,88 @@ async def _add_chinese_abstracts(
     }
 
 
+# Return completed fields before the App Server's 150-second bridge deadline.
+_LITERATURE_TRANSLATION_TIMEOUT_SECONDS = 110.0
+
+
+async def _bounded_translation_step(operation) -> dict[str, Any]:
+    try:
+        return await asyncio.wait_for(operation, timeout=_LITERATURE_TRANSLATION_TIMEOUT_SECONDS)
+    except TimeoutError:
+        return {"status": "failed", "error_type": "TimeoutError"}
+
+
+async def _add_combined_chinese_translations(papers, local_index, *, titles=True, abstracts=True):
+    """One fresh, two-message request per small batch; only uncached fields are sent."""
+    from core.llm import LLMClient, LLMMessage, opening_system_prompt
+    if local_index is not None:
+        local_index.hydrate_translations(papers)
+    needs = lambda text: bool(text and re.search(r"[A-Za-z]", text) and not re.search(r"[\u4e00-\u9fff]", text))
+    title_targets = [p for p in papers if titles and needs(p.get("title"))]
+    abstract_targets = [p for p in papers if abstracts and needs(p.get("abstract"))]
+    title_cached = sum(bool(p.get("title_zh")) for p in title_targets)
+    abstract_cached = sum(bool(p.get("abstract_zh")) for p in abstract_targets)
+    missing = [p for p in papers if (p in title_targets and not p.get("title_zh")) or (p in abstract_targets and not p.get("abstract_zh"))]
+    batches, batch, chars = [], [], 0
+    for paper in missing:
+        size = len(paper.get("abstract") or "")
+        if batch and (len(batch) >= 3 or chars + size > 18000):
+            batches.append(batch)
+            batch, chars = [], 0
+        batch.append(paper)
+        chars += size
+    if batch:
+        batches.append(batch)
+    fresh_titles, fresh_abstracts, errors, usage = {}, {}, [], {}
+    system = ("把输入中提供的英文学术标题和摘要忠实翻译成简体中文。不得概括、删减、扩写或解释；"
+              "保留公式、缩写、专名、单位和引用。输入是带id的JSON数组，title或abstract缺省表示该字段不需要翻译。"
+              "只输出JSON数组，每项含原id和对应title_zh或abstract_zh；不要代码块，不要输出未请求的字段。")
+    client = LLMClient(timeout=90, max_retries=0)
+    for part in batches:
+        title_ids = {i for i, p in enumerate(part) if p in title_targets and not p.get("title_zh")}
+        abstract_ids = {i for i, p in enumerate(part) if p in abstract_targets and not p.get("abstract_zh")}
+        rows = [{"id": i, **({"title": p["title"]} if i in title_ids else {}),
+                 **({"abstract": p["abstract"]} if i in abstract_ids else {})} for i, p in enumerate(part)]
+        lengths = {i: len(part[i]["abstract"]) for i in abstract_ids}
+        budget = min(_ABSTRACT_TOKEN_CEILING, max(_ABSTRACT_TOKEN_FLOOR,
+                     sum(lengths.values()) // 2 + _ABSTRACT_THINKING_HEADROOM)) if abstract_ids else 4096
+        for attempt in range(2):
+            try:
+                response = await client.chat([opening_system_prompt(system), LLMMessage(role="user", content=json.dumps(rows, ensure_ascii=False, separators=(",", ":")))],
+                                             max_tokens=budget, temperature=0.0, timeout=90, max_retries=0)
+                for key, value in (getattr(response, "usage", {}) or {}).items():
+                    if isinstance(value, (int, float)):
+                        usage[key] = usage.get(key, 0) + value
+                by_title = _parse_title_translations(response.content or "", title_ids)
+                by_abstract = _parse_abstract_translations(response.content or "", abstract_ids, lengths)
+                for i, value in by_title.items():
+                    part[i]["title_zh"] = value
+                    fresh_titles[part[i]["title"]] = value
+                for i, value in by_abstract.items():
+                    part[i]["abstract_zh"] = value
+                    fresh_abstracts[part[i]["abstract"]] = value
+                if by_title or by_abstract:
+                    # Persist partial success now; retries request only missing fields.
+                    if local_index is not None:
+                        local_index.save_title_translations(fresh_titles)
+                        local_index.save_abstract_translations(fresh_abstracts)
+                    break
+                errors.append("empty_response")
+                budget = min(_ABSTRACT_TOKEN_CEILING, budget * 2)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                errors.append(type(exc).__name__)
+                break
+    def diagnostic(targets, cached, fresh, field):
+        complete = all(p.get(field) for p in targets)
+        return {"status": "not_needed" if not targets else "cache_hit" if cached == len(targets) else "ok" if complete else "failed",
+                "cached": cached, "translated": len(fresh), "error_types": errors}
+    return {"titles": diagnostic(title_targets, title_cached, fresh_titles, "title_zh"),
+            "abstracts": diagnostic(abstract_targets, abstract_cached, fresh_abstracts, "abstract_zh"),
+            "usage": usage, "batches": len(batches), "history_messages": 0}
+
+
 async def run_literature_translate_page(request: dict[str, Any]) -> dict[str, Any]:
     """翻译当前可见页；独立于搜索请求，失败或缓慢都不阻塞索引展示。"""
     if not isinstance(request, dict) or not isinstance(request.get("papers"), list):
@@ -2522,6 +3034,8 @@ async def run_literature_translate_page(request: dict[str, Any]) -> dict[str, An
             continue
         papers.append({
             "key": str(raw.get("key") or index)[:500],
+            "doi": raw.get("doi"),
+            "url": raw.get("url"),
             "title": title[:1000],
             "title_zh": None,
             "abstract": _clean_literature_text(raw.get("abstract")) or None,
@@ -2540,11 +3054,28 @@ async def run_literature_translate_page(request: dict[str, Any]) -> dict[str, An
 
     from nodes.literature.tools.local_index import get_index
     local_index = get_index()
-    title_result, abstract_result, summary_result = await asyncio.gather(
-        _add_chinese_titles(papers, local_index),
-        _add_chinese_abstracts(papers, local_index),
-        _add_ai_summaries(papers, local_index),
-    )
+    combined_result = None
+    if request.get("combine_translation") and not request.get("generate_summaries", True):
+        combined_result = await _bounded_translation_step(_add_combined_chinese_translations(
+            papers, local_index, titles=request.get("translate_titles", True),
+            abstracts=request.get("translate_abstracts", True)))
+        title_result = combined_result.get("titles", combined_result)
+        abstract_result = combined_result.get("abstracts", combined_result)
+        summary_result = {"status": "not_needed", "cached": 0, "generated": 0}
+    else:
+        title_result, abstract_result, summary_result = await asyncio.gather(
+            _bounded_translation_step(_add_chinese_titles(papers if request.get("translate_titles", True) else [], local_index)),
+            _bounded_translation_step(_add_chinese_abstracts(papers if request.get("translate_abstracts", True) else [], local_index)),
+            _bounded_translation_step(_add_ai_summaries(
+                papers if request.get("generate_summaries", True) else [], local_index,
+            )),
+        )
+    if local_index is not None:
+        local_index.record_paper_translations(papers)
+    failed = any(result.get("status") in {"failed", "empty_response"}
+                 for result in (title_result, abstract_result, summary_result))
+    has_translation = any(paper.get("title_zh") or paper.get("abstract_zh") or paper.get("ai_summary")
+                          for paper in papers)
     return {
         "translations": [
             {
@@ -2555,8 +3086,9 @@ async def run_literature_translate_page(request: dict[str, Any]) -> dict[str, An
             }
             for paper in papers
         ],
-        "status": "ok",
+        "status": ("partial" if has_translation else "failed") if failed else "ok",
         "diagnostics": {
+            **({"combined": {key: value for key, value in combined_result.items() if key not in {"titles", "abstracts"}}} if combined_result else {}),
             "titles": title_result,
             "abstracts": abstract_result,
             "summaries": summary_result,
@@ -2575,6 +3107,14 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
     remote_refresh = bool(request.get("remote_refresh", False))
     started = time.perf_counter()
     progress_state = {"percent": 3}
+    timings: dict[str, float] = {}
+    stage_started = started
+
+    def finish_stage(name: str) -> None:
+        nonlocal stage_started
+        now = time.perf_counter()
+        timings[name] = round(now - stage_started, 3)
+        stage_started = now
 
     def report(stage: str, detail: str, **extra: Any) -> None:
         if progress is None:
@@ -2618,23 +3158,40 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
             generate_strategy_detailed,
             _academic_strategy_question(query),
         )
-        # 拆词超时/异常降级规则引擎时只出 1 组词，召回池缩到 1/6 —— 这是
-        # "学术搜索结果偏少"的复发性根因（2026-09-21 实测 fallback_rules +
-        # decomposed=[原始 query]）。对一次明确失败的拆词重试一轮：LLM 模式
-        # 第二次调用通常命中网关缓存或避开瞬时拥堵，失败概率大幅下降。
-        _weak = (
-            diagnostics.get("status") in ("fallback_rules", "read_timeout", "invalid_json")
-            or len((strategy.get("search_queries") or []) if isinstance(strategy, dict) else []) < 2
+        # strategy_generator already owns one bounded recovery attempt. Retrying the
+        # whole generator here repeated both model calls, doubled the worst-case
+        # latency, and did unnecessary work for a valid one-query strategy.
+        translation_valid = (
+            not re.search(r"[\u4e00-\u9fff]", query)
+            or _academic_english_query_ok(str(strategy.get("english_query") or ""))
         )
-        if _weak:
-            strategy2, diagnostics2 = await asyncio.to_thread(
-                generate_strategy_detailed,
-                _academic_strategy_question(query),
+        if not translation_valid:
+            semantic_issues = diagnostics.get(
+                f"translation_attempt_{diagnostics.get('translation_attempts')}_semantic_issues"
+            ) or []
+            final_attempt = diagnostics.get("translation_attempts")
+            finish_reason = diagnostics.get(
+                f"translation_attempt_{final_attempt}_finish_reason"
             )
-            if len((strategy2.get("search_queries") or []) if isinstance(strategy2, dict) else []) > len((strategy.get("search_queries") or []) if isinstance(strategy, dict) else []):
-                strategy, diagnostics = strategy2, diagnostics2
-        raw = strategy.get("search_queries", []) if isinstance(strategy, dict) else []
-        queries = list(dict.fromkeys([" ".join(str(x.get("query") or "").split()) for x in raw if isinstance(x, dict) and str(x.get("query") or "").strip()]))[:6] or [query]
+            raise RequestError(
+                "strategy_translation_failed",
+                "未能生成有效的英文检索词，请重试本次学术检索。"
+                + (f"（校验：{','.join(map(str, semantic_issues))}）" if semantic_issues else "")
+                + (f"（模型结束原因：{finish_reason}）" if finish_reason else ""),
+                details={
+                    "strategy_status": diagnostics.get("status"),
+                    "translation_status": diagnostics.get("translation_status"),
+                    "translation_request_status": diagnostics.get("translation_request_status"),
+                    "translation_attempts": diagnostics.get("translation_attempts"),
+                    "semantic_issues": semantic_issues,
+                    "finish_reason": finish_reason,
+                },
+            )
+        queries = _academic_strategy_queries(strategy, query)
+        diagnostics["strategy_english_query"] = str(strategy.get("english_query") or "")[:300]
+        diagnostics["strategy_translation_valid"] = translation_valid
+    except RequestError:
+        raise
     except Exception:
         queries, diagnostics = [query], {"status": "strategy_exception"}
     from nodes.literature.tools.search_engines import CrossrefSearch, SearchManager
@@ -2725,6 +3282,7 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
         )
     from nodes.literature.tools.filter import compute_relevance_score
 
+    finish_stage("strategy_and_exact_title")
     report("search", f"已生成 {len(queries)} 组检索词，开始联网检索", query_count=len(queries))
     for idx, item in enumerate(queries, 1):
         report(
@@ -2736,54 +3294,70 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
         # arXiv 的公开 Atom API 对同一出口的连续请求容易返回 429；一轮学术
         # 搜索只用第一组（最宽泛、最接近原问题）召回预印本，其余组继续检索
         # 期刊/生医来源。这样仍保留 arXiv 覆盖，又不因六组词连续撞六次限流。
-        query_sources = sources if idx == 1 else sources - {"arxiv"}
-        results = await manager.search_all(
-            item,
-            max_per_source=20,
-            enabled_sources=query_sources,
-            include_local_catalog=False,
-            use_query_cache=False,
-            # OpenAlex 只做 DOI 精准补齐，不重新加入耗时的关键词检索。
-            # 出版商落地页仅接受明确的摘要元标签。
-            metadata_lookup_sources=candidate_metadata_sources,
-            # 学术搜索先拿本轮远程候选身份，缓存命中判断完成后再统一写库；
-            # 否则本轮刚返回的 DOI 会被误判成历史缓存。
-            persist_results=False,
-            # 学术搜索先完成六组 index 召回；逐组补摘要会对稍后被全局去重的
-            # 同一论文重复发请求，并在第六组结束前耗尽 bridge 总预算。
-            enrich_metadata=False,
+        query_sources = (
+            {"cnki"} if re.search(r"[\u4e00-\u9fff]", item)
+            else sources - {"cnki"}
         )
-        # Crossref 综合结果中的会议/书籍会占据来源上限；再取一页期刊专用
-        # 结果，保证期刊召回不被其他出版类型挤掉。两路稍后统一按 DOI/标题去重，
-        # 因此已有期刊不会重复展示。这个补充通道只属于学术搜索呈现层。
-        journal_results = []
-        journal_started = time.perf_counter()
-        try:
-            import httpx
+        if idx != 1:
+            query_sources = query_sources - {"arxiv"}
+        async def search_sources():
+            return await manager.search_all(
+                item,
+                max_per_source=20,
+                enabled_sources=query_sources,
+                include_local_catalog=False,
+                use_query_cache=False,
+                # OpenAlex 只做 DOI 精准补齐，不重新加入耗时的关键词检索。
+                # 出版商落地页仅接受明确的摘要元标签。
+                metadata_lookup_sources=candidate_metadata_sources,
+                # 学术搜索先拿本轮远程候选身份，缓存命中判断完成后再统一写库；
+                # 否则本轮刚返回的 DOI 会被误判成历史缓存。
+                persist_results=False,
+                # 学术搜索先完成六组 index 召回；逐组补摘要会对稍后被全局去重的
+                # 同一论文重复发请求，并在第六组结束前耗尽 bridge 总预算。
+                enrich_metadata=False,
+            )
 
-            async with httpx.AsyncClient(follow_redirects=True) as client:
-                journal_results = await CrossrefSearch(client).search(
-                    item,
-                    rows=journal_recall_limit,
-                    publication_types=("journal-article",),
+        async def search_journals():
+            # Respect the same source policy as the primary query. Chinese-only
+            # CNKI queries must not silently trigger broad Crossref retrieval.
+            if "crossref" not in query_sources:
+                return []
+            journal_results = []
+            journal_started = time.perf_counter()
+            try:
+                import httpx
+
+                async with httpx.AsyncClient(follow_redirects=True) as client:
+                    journal_results = await CrossrefSearch(client).search(
+                        item,
+                        rows=journal_recall_limit,
+                        publication_types=("journal-article",),
+                    )
+                report(
+                    "journal_recall",
+                    f"第 {idx}/{len(queries)} 组期刊专用召回完成：{len(journal_results)} 篇",
+                    query_index=idx,
+                    query_count=len(queries),
+                    result_count=len(journal_results),
+                    elapsed_seconds=round(time.perf_counter() - journal_started, 3),
                 )
-            report(
-                "journal_recall",
-                f"第 {idx}/{len(queries)} 组期刊专用召回完成：{len(journal_results)} 篇",
-                query_index=idx,
-                query_count=len(queries),
-                result_count=len(journal_results),
-                elapsed_seconds=round(time.perf_counter() - journal_started, 3),
-            )
-        except Exception as exc:
-            report(
-                "journal_recall",
-                f"第 {idx}/{len(queries)} 组期刊专用召回暂不可用：{type(exc).__name__}",
-                query_index=idx,
-                query_count=len(queries),
-                error_type=type(exc).__name__,
-                elapsed_seconds=round(time.perf_counter() - journal_started, 3),
-            )
+            except Exception as exc:
+                report(
+                    "journal_recall",
+                    f"第 {idx}/{len(queries)} 组期刊专用召回暂不可用：{type(exc).__name__}",
+                    query_index=idx,
+                    query_count=len(queries),
+                    error_type=type(exc).__name__,
+                    elapsed_seconds=round(time.perf_counter() - journal_started, 3),
+                )
+            return journal_results
+
+        # TaskGroup cancels the sibling on failure/cancellation; no orphan requests.
+        async with asyncio.TaskGroup() as group:
+            source_task = group.create_task(search_sources())
+            journal_task = group.create_task(search_journals())
+        results, journal_results = source_task.result(), journal_task.result()
         existing_keys = {
             (getattr(paper, "doi", "") or "").strip().lower()
             or "title:" + " ".join((getattr(paper, "title", "") or "").lower().split())
@@ -2807,6 +3381,7 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
             multi_source_count=len(results),
             journal_recall_count=len(journal_results),
         )
+    finish_stage("source_search")
     post_started = time.perf_counter()
     report("dedup", f"六组检索已完成，开始对累计 {len(all_papers)} 条记录全局去重", raw_count=len(all_papers))
     merged_papers = manager._merge_results([], all_papers)
@@ -2838,6 +3413,10 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
             for field in reusable_fields:
                 current = getattr(remote_paper, field, None)
                 cached_value = getattr(cached_paper, field, None)
+                if field == "abstract" and cached_value and not _cached_abstract_matches_title(
+                    str(getattr(remote_paper, "title", "") or ""), str(cached_value)
+                ):
+                    continue
                 if not current and cached_value:
                     setattr(remote_paper, field, cached_value)
                     remote_paper.metadata_provenance.setdefault(field, "local_index")
@@ -2868,6 +3447,16 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
     # 多源补齐。同一次检索中缓存只复用已有字段，不能阻断其他来源补摘要。
     relevance_queries = list(dict.fromkeys([query, *queries]))
     anchor_terms = _academic_core_terms(queries[0])
+    mandatory_facets = _academic_boolean_facets(
+        str(strategy.get("english_query") or queries[0])
+    )
+    mandatory_facets = _academic_comparison_facets(mandatory_facets, query)
+    period_focus = _academic_period_focus(
+        str(strategy.get("english_query") or queries[0])
+    )
+    period_method_terms = _academic_period_method_terms(
+        str(strategy.get("english_query") or queries[0])
+    )
     obvious_missing = []
     fallback_missing = []
     for key, paper in unique.items():
@@ -2906,6 +3495,7 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
         seen_enrichment_keys.add(key)
         enrichment_targets.append(paper)
 
+    finish_stage("dedup_and_cache")
     if enrichment_targets:
         report(
             "metadata_enrichment",
@@ -2928,6 +3518,7 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
                 target_count=len(enrichment_targets),
                 source_status="timeout",
             )
+    finish_stage("candidate_enrichment")
     candidate_enriched_keys = {
         (str(getattr(paper, "doi", "") or "").strip().lower()
          or "title:" + " ".join(
@@ -2967,8 +3558,12 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
         scored_papers,
         limit=limit,
         core_terms=_academic_core_terms(anchor_query),
+        mandatory_facets=mandatory_facets,
+        period_focus=period_focus,
+        method_terms=period_method_terms,
     )
 
+    finish_stage("initial_scoring")
     # 全局补全有时间上限，可能在长候选列表尾部尚未处理到最终真正入选的论文。
     # 因此初排后只针对最终展示结果再做一次快速 DOI 补齐；不访问出版商网页/PDF，
     # 也不跨 DOI 猜测版本。摘要变化后必须重新评分，否则补回的摘要不会影响排序。
@@ -3082,10 +3677,14 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
             scored_papers,
             limit=limit,
             core_terms=_academic_core_terms(anchor_query),
+            mandatory_facets=mandatory_facets,
+            period_focus=period_focus,
+            method_terms=period_method_terms,
         )
     if manager.local_index and unique:
         manager.local_index.add_papers(list(unique.values()), query)
 
+    finish_stage("final_enrichment_and_rescoring")
     title_translation_started = time.perf_counter()
     report(
         "translation",
@@ -3105,6 +3704,11 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
         translation_status=title_translation.get("status"),
         elapsed_seconds=round(time.perf_counter() - title_translation_started, 3),
     )
+
+    finish_stage("title_translation")
+    if manager.local_index and hasattr(manager.local_index, "hydrate_translations"):
+        manager.local_index.hydrate_translations(papers)
+        manager.local_index.record_paper_translations(papers)
 
     # 学术搜索只获取 Index，但仍创建统一的三要素目录；paper/figure 明确标记为
     # 本流程未尝试，交给七天一次的后台补齐任务处理。
@@ -3141,13 +3745,33 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
     for paper in papers:
         source = paper["source"].split("/", 1)[0]
         source_counts[source] = source_counts.get(source, 0) + 1
+    exclusion_counts: dict[str, int] = {}
+    exclusion_samples: dict[str, list[dict[str, Any]]] = {}
+    for candidate in scored_papers:
+        reason = _academic_exclusion_reason(
+            candidate, core_terms=_academic_core_terms(anchor_query),
+            mandatory_facets=mandatory_facets, period_focus=period_focus,
+            method_terms=period_method_terms,
+        )
+        if reason:
+            exclusion_counts[reason] = exclusion_counts.get(reason, 0) + 1
+            samples = exclusion_samples.setdefault(reason, [])
+            if len(samples) < 3:
+                samples.append({key: candidate.get(key) for key in ("title", "doi", "abstract", "score_breakdown")})
+    diagnostics["admission"] = {
+        "candidate_count": len(scored_papers), "excluded_by_reason": exclusion_counts,
+        "eligible_count": len(scored_papers) - sum(exclusion_counts.values()),
+        "returned_count": len(papers), "excluded_samples": exclusion_samples,
+        "counting": "first_failing_gate",
+    }
+    diagnostics["source_audits"] = audits
     warnings = [w for a in audits for w in a.get("warnings", [])]
     if low_relevance_count:
         warnings.append({
             "code": "low_relevance_candidates_excluded",
             "detail": (
-                f"已淘汰 {low_relevance_count} 篇相关度低于 "
-                f"{_ACADEMIC_SEARCH_MIN_RELEVANCE:.1f} 的候选；结果不会补足到请求数量。"
+                f"已淘汰 {low_relevance_count} 篇未通过相关性或研究条件检查的候选；"
+                "各原因见 admission 诊断，结果不会补足到请求数量。"
             ),
         })
     if not remote_refresh and not papers:
@@ -3162,7 +3786,9 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
         f"检索与排序完成，正在整理 {len(papers)} 篇结果",
         progress_percent=99,
     )
-    return {"query": query, "decomposed_queries": queries, "papers": papers, "total": len(papers), "candidate_count": len(scored_papers), "excluded_low_relevance": low_relevance_count, "minimum_relevance": _ACADEMIC_SEARCH_MIN_RELEVANCE, "required_core_terms": _academic_core_terms(queries[0]), "source_counts": source_counts, "requested_sources": sorted(sources), "attempted_sources": sorted({s for a in audits for s in a.get("attempted_sources", [])}), "unavailable_sources": sorted({s for a in audits for s in a.get("unavailable_sources", [])}), "warnings": warnings, "from_cache": all(bool(a.get("from_cache")) for a in audits) if audits else False, "search_mode": "remote", "timings": {"total": round(time.perf_counter()-started, 3)}, "strategy_diagnostics": {k:v for k,v in diagnostics.items() if k != "started_at"}}
+    finish_stage("finalize")
+    timings["total"] = round(time.perf_counter() - started, 3)
+    return {"query": query, "decomposed_queries": queries, "papers": papers, "total": len(papers), "candidate_count": len(scored_papers), "excluded_low_relevance": low_relevance_count, "minimum_relevance": _ACADEMIC_SEARCH_MIN_RELEVANCE, "required_core_terms": _academic_core_terms(queries[0]), "source_counts": source_counts, "requested_sources": sorted(sources), "attempted_sources": sorted({s for a in audits for s in a.get("attempted_sources", [])}), "unavailable_sources": sorted({s for a in audits for s in a.get("unavailable_sources", [])}), "warnings": warnings, "from_cache": all(bool(a.get("from_cache")) for a in audits) if audits else False, "search_mode": "remote", "timings": timings, "strategy_diagnostics": {k:v for k,v in diagnostics.items() if k != "started_at"}}
 
 
 _FEED_DIGEST_SYSTEM = (
@@ -3244,11 +3870,12 @@ _FEED_CURATION_SYSTEM = (
     "按相关度从高到低。选不出就给空数组 —— 猜一个错的分类会一直影响他看到什么。\n"
     "2. `projects` 是一个数组，**长度必须等于课题数、顺序一一对应**（第 [1] 个"
     "课题对应第一个元素）。每个课题一个对象：\n"
-    "   - `queries`：该课题的论文检索关键词，**最多 2 个**（每个 1-5 个词）。\n"
+    "   - `queries`：该课题的论文检索关键词，**最多 3 个**（每个 1-5 个词）。\n"
     "   - `news_queries`：该课题的资讯检索关键词，**最多 2 个**（每个 1-8 个词）。\n"
-    "3. 每个课题后面都标了「最近活跃 X 天前 / 从未活跃」—— 这是各课题的真实"
-    "活跃度，用它决定词要怎么分：刚在做的课题（最近活跃）把两组词配满 2 个；很久"
-    "没动或从未说过话的课题，每组配 1 个最准的词就够，不要把词槽押在搁置的课题上。\n"
+    "3. 输入的课题都处于进行中。每个课题给 2-3 个论文词、最多 2 个资讯词；"
+    "论文词可从同一研究问题的对象、方法和验证角度展开，但必须有课题文字或"
+    "相关收藏作依据。依据不足就少给，不能延伸到无关学科。最近活跃度只用于"
+    "多个课题超过总词槽时决定优先级。\n"
     "4. 关键词按优先级取：① 用户在这个课题下留下的原始输入（最能说明他真的在做"
     "什么）；② 课题名称和研究方向；③ 课题描述。要具体 —— 写「steer-by-wire "
     "chassis control」「城镇空间分异」这类实质词，不要写 machine learning、"
@@ -3340,6 +3967,12 @@ async def run_feed_curate_profile(request: dict[str, Any]) -> dict[str, Any]:
     if not lines:
         raise RequestError("invalid_projects", "no project carried a usable name")
 
+    saved_examples = [
+        " ".join(str(value).split())[:200]
+        for value in (request.get("saved_project_examples") or [])[:6]
+        if str(value).strip()
+    ]
+
     catalog = "\n".join(
         f"  {entry}" for entry in (str(c).strip() for c in candidates) if entry
     )
@@ -3355,18 +3988,25 @@ async def run_feed_curate_profile(request: dict[str, Any]) -> dict[str, Any]:
                 content=("用户明确选择的学科：\n"
                          + ("\n".join(f"  {value}" for value in selected) or "  （未选择）")
                          + "\n\n他手上的课题：\n" + "\n".join(lines)
+                         + "\n\n与当前课题匹配的近期收藏论文标题（仅供细化检索角度；不要复制无关主题）：\n"
+                         + ("\n".join(f"  {value}" for value in saved_examples) or "  （无）")
                          + "\n\n候选分类（只能从这里选，逐字照抄）：\n" + catalog),
             ),
         ],
-        max_tokens=1500,
+        # 推理模型的思考同样占输出预算，1500可能在生成JSON前耗尽。
+        max_tokens=8192,
         temperature=0.0,
     )
-    return parse_feed_curation(response.content or "", candidates)
+    result = parse_feed_curation(response.content or "", candidates)
+    if not any(p.get("queries") or p.get("news_queries") for p in result["projects"]):
+        raise RequestError("empty_curation", "资讯挖掘模型未返回有效检索词（空输出或JSON无效）")
+    return result
 
 
-#: 每个课题最多几个论文/资讯检索词。prompt 里写的是「最多 2 个」，这里是解析
+#: 每个课题最多几个论文/资讯检索词。prompt 里写的是论文最多 3 个、资讯最多 2 个，这里是解析
 #: 侧的机械截断 —— 双重上限，模型多吐的词直接丢弃，保证课题之间词槽公平。
-_PER_PROJECT_QUERY_CAP = 2
+_PER_PROJECT_QUERY_CAP = 3
+_PER_PROJECT_NEWS_QUERY_CAP = 2
 
 
 def parse_feed_curation(raw: str, candidates: list) -> dict[str, Any]:
@@ -3413,7 +4053,7 @@ def parse_feed_curation(raw: str, candidates: list) -> dict[str, Any]:
             word = " ".join(str(value).split())[:120]
             if word and word not in out:
                 out.append(word)
-        return out[:_PER_PROJECT_QUERY_CAP]
+        return out[:_PER_PROJECT_NEWS_QUERY_CAP if key == "news_queries" else _PER_PROJECT_QUERY_CAP]
 
     raw_projects = payload.get("projects")
     if isinstance(raw_projects, list) and raw_projects:
@@ -3942,7 +4582,9 @@ class PlatformSession:
                 "home_bound", self._bind_home_step,
                 code="home_marker_unreadable",
                 path=self.home_dir / ".platform-tenant-identity.json",
-                consequences=("无法核实这个家属于本租户", "这一轮读到的个人设置与项目层按原样用"),
+                consequences=({"zh": "无法核实这个家属于本租户", "en": "Cannot verify that this home belongs to this tenant"},
+                              {"zh": "这一轮读到的个人设置与项目层按原样用",
+                               "en": "This turn uses the personal settings and project layer as read"}),
                 fallback=self._home_fallback,
             )
             # 6. state 目录。建不出 → 进程私有临时目录，这一轮的记录不持久。
@@ -3950,7 +4592,8 @@ class PlatformSession:
                 "state_persistent", self._state_dir_step,
                 code="state_dir_unavailable",
                 path=self.config["state_dir"],
-                consequences=("这一轮的运行记录、对话与产物落在临时目录，进程退出即丢"),
+                consequences=({"zh": "这一轮的运行记录、对话与产物落在临时目录，进程退出即丢",
+                               "en": "This turn's run records, conversation and outputs land in a temporary directory and are lost when the process exits"},),
                 fallback=self._private_state_dir,
             )
             self._stack.enter_context(_temporary_runs_root(self.base_dir))
@@ -3959,7 +4602,8 @@ class PlatformSession:
                 "state_bound", self._bind_state_step,
                 code="state_marker_unreadable",
                 path=self.base_dir / ".platform-runtime-identity.json",
-                consequences=("无法核实这个 state 目录属于本会话",),
+                consequences=({"zh": "无法核实这个 state 目录属于本会话",
+                               "en": "Cannot verify that this state directory belongs to this session"},),
                 fallback=self._state_marker_fallback,
             )
             session_root = self.base_dir / session_dir_name(self.project_id, self.session_id)
@@ -3968,21 +4612,24 @@ class PlatformSession:
                 "lock_held", lambda: self._lock_step(session_root),
                 code="lock_unavailable",
                 path=session_root / ".chat.lock",
-                consequences=("没有单写者锁：同一会话若有第二个进程同时写，记录可能互相覆盖",),
+                consequences=({"zh": "没有单写者锁：同一会话若有第二个进程同时写，记录可能互相覆盖",
+                               "en": "No single-writer lock: if a second process writes the same session, records may overwrite each other"},),
             )
             # 10. 活性文件。写不了 → 后端按 RPC 心跳判活。
             self._probe(
                 "activity_file", lambda: self._activity_step(session_root),
                 code="activity_file_unavailable",
                 path=session_root,
-                consequences=("后端只能按 RPC 心跳判断这个 worker 是否还活着",),
+                consequences=({"zh": "后端只能按 RPC 心跳判断这个 worker 是否还活着",
+                               "en": "The backend can only tell whether this worker is alive from RPC heartbeats"},),
             )
             # 11. 事件落盘副本。接不上 → None，后端据此知道断线期间的事件补不回来。
             self._durable_sink = self._probe(
                 "durable_sink", lambda: self._durable_sink_step(session_root),
                 code="durable_sink_unavailable",
                 path=session_root,
-                consequences=("后端不在的窗口里产生的事件没有落盘副本",),
+                consequences=({"zh": "后端不在的窗口里产生的事件没有落盘副本",
+                               "en": "Events produced while the backend is away have no on-disk copy"},),
             )
 
             bootstrap()
@@ -3991,7 +4638,8 @@ class PlatformSession:
                 "state_loaded", self._state_step,
                 code="state_unreadable",
                 path=self.base_dir,
-                consequences=("这一轮从空状态开始：上次的对话与运行记录读不回来",),
+                consequences=({"zh": "这一轮从空状态开始：上次的对话与运行记录读不回来",
+                               "en": "This turn starts empty: the previous conversation and run records cannot be read back"},),
                 fallback=self._state_fallback,
             )
             self.harness = load_harness("_orchestrator")
@@ -4018,7 +4666,8 @@ class PlatformSession:
                 "conversation_loaded", lambda: self._conversation_step(chat),
                 code="conversation_unreadable",
                 path=self.state.root / "conversation.json",
-                consequences=("这一轮从开场消息起：上次的对话读不回来",),
+                consequences=({"zh": "这一轮从开场消息起：上次的对话读不回来",
+                               "en": "This turn starts from the opening message: the previous conversation cannot be read back"},),
                 fallback=lambda exc: chat.build_messages(self.harness, self.state, node_inputs={}),
             )
             # 15. 协议修补记录 + 会话开始记录。写不进 transcript → 这一轮的转录不完整。
@@ -4026,7 +4675,7 @@ class PlatformSession:
                 "transcript_writable", lambda: self._transcript_step(chat),
                 code="transcript_unwritable",
                 path=self.state.transcript_path,
-                consequences=("这一轮的转录写不进磁盘",),
+                consequences=({"zh": "这一轮的转录写不进磁盘", "en": "This turn's transcript cannot be written to disk"},),
             )
 
             self._tailer = TranscriptTailer(self.base_dir, lambda: self.request_id, self.emit)
@@ -4089,7 +4738,7 @@ class PlatformSession:
         *,
         code: str,
         path: Path | str | None = None,
-        consequences: Sequence[str] = (),
+        consequences: Sequence[Mapping[str, str]] = (),
         fallback: Callable[[BaseException], Any] | None = None,
     ) -> Any:
         """跑一步持久化前提。成立 → 记 True 返回结果；不成立 → 记 False + 一条
@@ -4193,8 +4842,11 @@ class PlatformSession:
             return
         lines = ["[平台环境提示] 这一轮有持久化前提没成立，用户已在界面上被告知；你不必也不能去修它："]
         for warning in degraded:
-            consequences = "；".join(str(c) for c in (warning.get("consequences") or [])) or "影响未知"
-            lines.append(f"- {warning.get('code')}（{warning.get('path') or '路径未知'}）：{consequences}")
+            # 这几行是给模型看的（中文章程那一侧），两种语言写的那条取中文。
+            for_the_model = "；".join(
+                (c.get("zh") or "") if isinstance(c, dict) else str(c)
+                for c in (warning.get("consequences") or [])) or "影响未知"
+            lines.append(f"- {warning.get('code')}（{warning.get('path') or '路径未知'}）：{for_the_model}")
         lines.append("不要向用户承诺本轮的内容已被记住或保存；不要试图自己修复权限或目录，那不是你的工具。")
         hook_state.setdefault("injected_messages", []).append(
             {"content": "\n".join(lines), "source": "platform_environment"}
@@ -5350,6 +6002,35 @@ class PlatformSession:
             self._stack.close()
 
 
+#: 错误事件里 `cause` 的上限：它是底层异常的类型与原文（含 `[WinError 5]` 与路径），给人查，不给机器判。
+_CAUSE_MAX_CHARS = 2000
+
+
+def _cause_of(exc: BaseException | None) -> str:
+    """错误事件的 `cause`：底层异常的原文（RFC_WORKER_START_IS_NOT_A_GATE §3.7，窄单 E #1220）。
+
+    `RequestError` 是我们自己的话（code + 一句英文），真正发生了什么在它链着的那个异常里
+    （`raise RequestError(...) from exc`）；没链着就是没有底层原因，不编一个。其余异常本身
+    就是底层原因。读不到原文时宁可空着也不让报错路径再炸一次。
+    """
+    if exc is None:
+        return ""
+    try:
+        if isinstance(exc, (RequestError, ProjectBusyError)):
+            underlying = exc.__cause__ or exc.__context__
+        else:
+            underlying = exc
+        if underlying is None:
+            return ""
+        # 不用 repr：OSError 的 repr 只有 (errno, strerror)，路径丢了 —— 而路径正是要的那一半。
+        # str() 是 `[WinError 5] 拒绝访问。: 'C:\\…'`；前面补上类型名。
+        said = str(underlying)
+        text = f"{type(underlying).__name__}: {said}" if said else repr(underlying)
+    except Exception:  # noqa: BLE001 —— 报错路径上的 str 不许再抛
+        return ""
+    return text if len(text) <= _CAUSE_MAX_CHARS else text[:_CAUSE_MAX_CHARS] + " …"
+
+
 def _error_code_for(exc: BaseException) -> str:
     """serve 兜底的 error 事件该声明什么 code。
 
@@ -5452,8 +6133,10 @@ async def serve_jsonl(
     spoken_to = False
 
     def _emit_error(request_id: str, code: str, error_type: str, message: str,
-                    identity: dict[str, Any], details: Any = None) -> None:
+                    identity: dict[str, Any], details: Any = None, *,
+                    exc: BaseException | None = None) -> None:
         event_emit = session.emit if session is not None else emit
+        cause = _cause_of(exc)
         event_emit(
             "error",
             request_id=request_id,
@@ -5461,6 +6144,7 @@ async def serve_jsonl(
             error_type=error_type,
             message=message,
             **({"details": details} if details else {}),
+            **({"cause": cause} if cause else {}),
             **({} if session is not None else identity),
         )
 
@@ -5512,15 +6196,16 @@ async def serve_jsonl(
                     raise RequestError("invalid_answer", "answer must be a non-empty string")
                 await session.answer(request_id, pause_id.strip(), answer, choice=choice)
         except RequestError as exc:
-            _emit_error(request_id, exc.code, type(exc).__name__, str(exc), identity, exc.details)
+            _emit_error(request_id, exc.code, type(exc).__name__, str(exc), identity, exc.details, exc=exc)
         except ProjectBusyError as exc:
-            _emit_error(request_id, "project_busy", type(exc).__name__, str(exc), identity)
+            _emit_error(request_id, "project_busy", type(exc).__name__, str(exc), identity, exc=exc)
             await session.close(request_id=request_id, reason="startup_error")
             session = None
             _shutdown(source)
         except Exception as exc:  # noqa: BLE001 - JSONL process boundary
             _emit_error(
-                request_id, _error_code_for(exc), type(exc).__name__, str(exc)[:2000], identity
+                request_id, _error_code_for(exc), type(exc).__name__, str(exc)[:2000], identity,
+                exc=exc,
             )
             # A runtime exception may leave messages, child tasks or tool
             # protocol state mid-transition.  Fail this dedicated session
@@ -5785,11 +6470,12 @@ async def serve_jsonl(
             except RequestError as exc:
                 _emit_error(
                     request_id, exc.code, type(exc).__name__, str(exc),
-                    identity_payload, exc.details,
+                    identity_payload, exc.details, exc=exc,
                 )
             except ProjectBusyError as exc:
                 _emit_error(
-                    request_id, "project_busy", type(exc).__name__, str(exc), identity_payload
+                    request_id, "project_busy", type(exc).__name__, str(exc), identity_payload,
+                    exc=exc,
                 )
                 if session is not None:
                     await session.close(request_id=request_id, reason="startup_error")
@@ -5797,7 +6483,7 @@ async def serve_jsonl(
             except Exception as exc:  # noqa: BLE001 - JSONL process boundary
                 _emit_error(
                     request_id, _error_code_for(exc), type(exc).__name__,
-                    str(exc)[:2000], identity_payload,
+                    str(exc)[:2000], identity_payload, exc=exc,
                 )
                 if session is not None:
                     with contextlib.suppress(Exception):

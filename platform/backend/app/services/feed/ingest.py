@@ -252,8 +252,7 @@ def is_stale(
 ) -> bool:
     """这个源该拉了吗 —— 按**它自己的**周期。
 
-    `interval_seconds` 覆盖源上的周期，给空轮退避用（调度器把周期临时拉长）。
-    退避是调速，不是事实，所以它只存在于调用点，不写进源那一行。
+    `interval_seconds` 覆盖源上的旧周期；推荐调度器传入统一24小时周期。
 
     `last_polled_at` 从库里取回来在 Postgres 上是 aware、在 SQLite 上是
     naive（驱动差异，不是我们的选择）。拿 naive 去和 aware 相减是 TypeError，

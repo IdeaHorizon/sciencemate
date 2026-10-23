@@ -223,7 +223,7 @@ test("settings center contracts use authenticated canonical endpoints and method
   await client.updateCurrentUser({ display_name: "Updated" });
   await client.getUsageSettings();
   await client.getNotificationSettings();
-  await client.saveNotificationSettings({ decision_required: false, run_failed: true, run_completed: true, budget_warning: false });
+  await client.saveNotificationSettings({ decision_required: false, run_failed: true, budget_warning: false });
 
   assert.deepEqual(requests.map((request) => new URL(request.input, "http://platform.test").pathname), [
     "/api/v1/settings/interface",
@@ -237,7 +237,6 @@ test("settings center contracts use authenticated canonical endpoints and method
   assert.deepEqual(JSON.parse(String(requests[5].init?.body)), {
     decision_required: false,
     run_failed: true,
-    run_completed: true,
     budget_warning: false,
   });
   // 改密码（token 轮换）和组织名录是专业版的：src/pro/lib/api-auth.test.ts。
@@ -317,4 +316,23 @@ test("compute inventory reads the real local inventory endpoint", async () => {
   assert.match(inputs[0], /\/compute\/inventory$/);
   assert.equal(inventory.capacity.gpu_count, null);
   assert.equal(inventory.recent_jobs.supported, false);
+});
+
+test("every request says which language the screen is in, so errors come back in it", async () => {
+  // 2026-10-19：后端的报错有一半在没有用户的端点上（注册、桌面本地的组织连接），读不到账号
+  // 偏好 —— 只能照发问这一屏的语言说。没带这个头，英文界面上就是一句中文。
+  const requests: RequestInit[] = [];
+  const client = new ApiClient((async (_input: string | URL | Request, init?: RequestInit) => {
+    requests.push(init ?? {});
+    return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch);
+  client.speaking("en");
+  await client.getInterfaceLanguageHint();
+  await client.fetchWithAuth("http://api.test/anything");
+  for (const init of requests) {
+    assert.equal(new Headers(init.headers).get("X-Interface-Language"), "en");
+  }
+  client.speaking("zh");
+  await client.fetchWithAuth("http://api.test/anything");
+  assert.equal(new Headers(requests.at(-1)?.headers).get("X-Interface-Language"), "zh");
 });

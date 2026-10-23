@@ -56,10 +56,10 @@ export function rawFileUrl(projectId: string, path: string, sessionId?: string):
 export async function fetchFilePreview(
   projectId: string,
   path: string,
-  sessionId?: string,
+  sessionId: string | undefined,
   // 兜底文案要跟着界面语言 —— 后端给了 detail 就用后端那句（它也已经按
   // 用户的语言给了），这里只负责"后端什么都没说"的那一支。
-  lang: Language = "zh",
+  lang: Language,
 ): Promise<FilePreviewPayload> {
   const response = await api.fetchWithAuth(rawFileUrl(projectId, path, sessionId));
 

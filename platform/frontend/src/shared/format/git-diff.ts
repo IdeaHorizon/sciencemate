@@ -28,7 +28,8 @@ function fileFromHeader(line: string): GitDiffFile {
   return {
     oldPath,
     newPath,
-    displayPath: newPath ?? oldPath ?? "unknown file",
+    // 两边都读不出路径（头行坏了）就照原样显示那一行 —— 比一句笼统的话有用，也不分语言。
+    displayPath: newPath ?? oldPath ?? line,
     lines: [{ kind: "header", content: line, oldLine: null, newLine: null }],
   };
 }

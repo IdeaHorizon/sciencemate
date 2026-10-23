@@ -3,8 +3,8 @@
 import { useEffect, useRef } from "react";
 import { Bookmark, BookmarkCheck, ExternalLink, X } from "lucide-react";
 import { Badge } from "@/shared/ui";
-import type { FeedItem } from "@/lib/api";
-import { useLanguage } from "@/shared/i18n";
+import { api, literatureAssetUrl, type FeedItem } from "@/lib/api";
+import { say, useLanguage } from "@/shared/i18n";
 import { fc } from "../lib/feed-copy";
 import {
   KIND_BADGE,
@@ -12,11 +12,11 @@ import {
   kindLabel,
   deadlineCountdown,
   hasExternalLink,
-  relativeTime,
+  feedDate,
   visibleDomainTags,
 } from "../lib/feed-presentation";
 import { useFeedEngagement } from "../hooks/useFeed";
-import { useFeedImage } from "../hooks/useFeedImage";
+import { useFeedImageAsset } from "../hooks/useFeedImage";
 import { HandoffAction } from "./HandoffAction";
 
 /**
@@ -54,7 +54,8 @@ export function FeedItemDialog({
 }) {
   const { record, undo } = useFeedEngagement();
   const lang = useLanguage();
-  const imageSrc = useFeedImage(item.id);
+  const imageAsset = useFeedImageAsset(item.id);
+  const imageSrc = imageAsset?.src ?? null;
   const closeRef = useRef<HTMLButtonElement>(null);
   const external = hasExternalLink(item);
   const countdown = item.kind === "deadline" ? deadlineCountdown(item, now, lang) : "";
@@ -106,11 +107,12 @@ export function FeedItemDialog({
         <div className="feed-dialog-body">
           <div className="feed-card-head">
             <Badge kind={KIND_BADGE[item.kind]}>{kindLabel(item.kind, lang)}</Badge>
+            {item.viewed && <Badge kind="muted">{fc("badge.viewed", lang)}</Badge>}
             {countdown && <Badge kind="warning">{countdown}</Badge>}
             {visibleDomainTags(item, 4).map((tag) => (
               <Badge key={tag.domain} kind="muted">{tag.label}</Badge>
             ))}
-            <span className="feed-card-time">{relativeTime(item.published_at, now, lang)}</span>
+            <span className="feed-card-time">{feedDate(item, lang)}</span>
           </div>
 
           {external ? (
@@ -134,11 +136,32 @@ export function FeedItemDialog({
           {reason && <p className="feed-card-reason">{reason}</p>}
 
           <p className="feed-dialog-attribution">{attribution(item, lang)}</p>
+          {Boolean(item.extra.school_library) && <p className="feed-dialog-attribution">{say({ zh: "学校馆藏", en: "School library" }, lang)}：{String(item.extra.school_library)}</p>}
 
           {/* 摘要**不截断** —— 这正是打开详情要看的东西。 */}
           {(summaryZh || item.summary) && <p className="feed-dialog-summary">{summaryZh || item.summary}</p>}
 
           <div className="feed-dialog-actions">
+            {typeof item.extra.school_fulltext_url === "string" && item.extra.school_fulltext_url && (
+              <button type="button" className="feed-action" onClick={() => {
+                const popup = window.open("about:blank", "_blank");
+                if (popup) popup.opener = null;
+                void api.fetchWithAuth(literatureAssetUrl(item.extra.school_fulltext_url as string))
+                  .then(async (response) => {
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const url = URL.createObjectURL(await response.blob());
+                    if (popup) popup.location.replace(url);
+                    else window.open(url, "_blank", "noopener,noreferrer");
+                    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+                  })
+                  .catch(() => {
+                    popup?.close();
+                    window.alert(say({ zh: "学校馆藏全文打开失败", en: "Could not open school full text" }, lang));
+                  });
+              }}>
+                <ExternalLink size={15} /> <span>{say({ zh: "查看学校馆藏全文", en: "Open school full text" }, lang)}</span>
+              </button>
+            )}
             {external && (
               <a
                 className="feed-action"

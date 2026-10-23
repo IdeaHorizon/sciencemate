@@ -1,16 +1,12 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { FeedCard } from "@/lib/api";
 import { FeedItemCard } from "./FeedItemCard";
 import type { FeedTranslation } from "../hooks/useFeedTranslation";
+import { layoutFeedCards } from "../lib/feed-masonry";
 
-/** 摘要最多显示行数（接近完整）。 */
 const MAX_CLAMP = 6;
-/** 摘要最少显示行数（截断的底限，别截到只剩一行让卡片不像样）。 */
-const MIN_CLAMP = 3;
-/** 三列底部允许的高度差（约两行摘要），超过就继续收短最高的那一列。 */
-const BALANCE_THRESHOLD_PX = 48;
 
 /** 响应式列数，和 CSS 断点保持一致：3 / 2 / 1。 */
 function useColumnCount(): number {
@@ -30,33 +26,8 @@ function useColumnCount(): number {
   return cols;
 }
 
-/**
- * 粗略预估一张卡的高度（相对分），只用于贪心分列时均衡列高；
- * 绝对值无关，只要「长标题/长摘要/带理由」的卡得分更高即可。
- */
-function cardWeight(card: FeedCard): number {
-  const item = card.item;
-  let w = 100; // 配图 + head + foot 等固定部分
-  w += Math.ceil((item.title?.length ?? 0) / 45) * 12; // 标题换行
-  if (item.summary) {
-    w += Math.min(MAX_CLAMP, Math.ceil(item.summary.length / 80)) * 10; // 摘要
-  }
-  if (card.reason) {
-    w += Math.ceil(card.reason.length / 55) * 8; // 「为什么推给你」
-  }
-  return w;
-}
-
-/**
- * 瀑布流：卡片各自不等高，但三列累积总高要大致对齐。
- *
- * 手段是动态裁剪摘要 —— 最矮的列完整显示摘要，最高的列少显示几行，把底部
- * 拉平。纯 CSS（grid 等高 / column 瀑布流）都做不到「既要卡片不等高、又要
- * 列底对齐」，所以这里手动分列（JS）+ 逐列动态 line-clamp：
- *
- *  1. 轮转把卡片均分到 N 列，每列独立 flex column；
- *  2. 渲染后量每列真实高度；
- *  3. 最高的那列摘要 `clamp` 减一行，重新渲染、再量，迭代到列高差够小。
+/** Keep cards mounted while placing them by their measured height.
+ * ResizeObserver covers image decoding, text changes and container resizing.
  */
 export function FeedMasonry({
   cards,
@@ -70,76 +41,59 @@ export function FeedMasonry({
   onOpenDetail: (id: string) => void;
 }) {
   const colCount = useColumnCount();
-  const [clamps, setClamps] = useState<number[]>(() => Array(3).fill(MAX_CLAMP));
-  const colRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [layout, setLayout] = useState<ReturnType<typeof layoutFeedCards> | null>(null);
 
-  // 截断到列数倍数 + 贪心最短列分列：
-  // 轮转分列在卡片数非列数倍数时会让某列多一张卡、列底差出一整张卡的高度
-  // （~400-500px），远超摘要裁剪的补偿能力（最多 3 行/卡）。截掉的是排序
-  // 最末的 1-2 条，视觉无感；余下用贪心把高矮卡均衡到各列，再交给摘要裁剪微调。
-  const columns = useMemo(() => {
-    const perCol = Math.floor(cards.length / colCount);
-    const kept = perCol >= 1 ? cards.slice(0, perCol * colCount) : cards;
-    const heights = new Array(colCount).fill(0);
-    const cols: FeedCard[][] = Array.from({ length: colCount }, () => []);
-    for (const card of kept) {
-      let minIdx = 0;
-      for (let i = 1; i < colCount; i++) {
-        if (heights[i] < heights[minIdx]) minIdx = i;
-      }
-      cols[minIdx].push(card);
-      heights[minIdx] += cardWeight(card);
-    }
-    return cols;
-  }, [cards, colCount]);
-
-  // 列数变化（拖窗口跨断点）时重置 clamp。
-  useEffect(() => {
-    setClamps(Array(colCount).fill(MAX_CLAMP));
-  }, [colCount]);
-
-  // 渲染后量列高，把最高列的摘要减一行，迭代到列底大致对齐。
   useLayoutEffect(() => {
-    if (clamps.length !== colCount) return;
-    const heights = colRefs.current.map((el) => el?.offsetHeight ?? 0);
-    if (heights.some((h) => !h)) return; // 首帧还没铺开
-    const maxH = Math.max(...heights);
-    const minH = Math.min(...heights);
-    if (maxH - minH <= BALANCE_THRESHOLD_PX) return;
-    const maxIdx = heights.indexOf(maxH);
-    if (clamps[maxIdx] <= MIN_CLAMP) return;
-    setClamps((c) => c.map((v, i) => (i === maxIdx ? v - 1 : v)));
-  }, [clamps, columns, colCount]);
+    const grid = gridRef.current;
+    if (!grid) return;
+    let frame = 0;
+    const measure = () => {
+      const elements = Array.from(grid.children) as HTMLElement[];
+      const gap = Number.parseFloat(getComputedStyle(grid).columnGap) || 0;
+      const next = layoutFeedCards(elements.map((element) => element.getBoundingClientRect().height), colCount, gap);
+      setLayout((previous) => previous && previous.height === next.height
+        && previous.positions.length === next.positions.length
+        && previous.positions.every((position, index) => position.column === next.positions[index].column && position.top === next.positions[index].top)
+        ? previous : next);
+    };
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measure);
+    });
+    observer.observe(grid);
+    for (const element of Array.from(grid.children)) observer.observe(element);
+    measure();
+    return () => { cancelAnimationFrame(frame); observer.disconnect(); };
+  }, [cards, colCount]);
 
   return (
     <div
-      className="feed-grid"
-      style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))` }}
+      ref={gridRef}
+      className="feed-grid feed-masonry"
+      style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))`, height: layout?.height }}
     >
-      {columns.map((colCards, colIdx) => (
-        <div
-          key={colIdx}
-          className="feed-masonry-col"
-          ref={(el) => {
-            colRefs.current[colIdx] = el;
-          }}
-        >
-          {colCards.map((card) => (
-            <FeedItemCard
-              key={card.item.id}
-              item={card.item}
-              reason={card.reason}
-              titleZh={translations[card.item.id]?.titleZh}
-              summaryZh={translations[card.item.id]?.abstractZh}
-              todayPick={card.is_today_pick}
-              layout="grid"
-              summaryClamp={clamps[colIdx] ?? MAX_CLAMP}
-              now={now}
-              onOpenDetail={() => onOpenDetail(card.item.id)}
-            />
-          ))}
-        </div>
-      ))}
+      {cards.map((card, index) => {
+        const position = layout?.positions[index];
+        return <div key={card.item.id} className="feed-masonry-item" style={position ? {
+          position: "absolute",
+          width: `calc((100% - ${colCount - 1} * var(--space-3)) / ${colCount})`,
+          left: `calc(${position.column} * ((100% - ${colCount - 1} * var(--space-3)) / ${colCount} + var(--space-3)))`,
+          top: position.top,
+        } : undefined}>
+          <FeedItemCard
+            item={card.item}
+            reason={card.reason}
+            titleZh={translations[card.item.id]?.titleZh}
+            summaryZh={translations[card.item.id]?.abstractZh}
+            todayPick={card.is_today_pick}
+            layout="grid"
+            summaryClamp={MAX_CLAMP}
+            now={now}
+            onOpenDetail={() => onOpenDetail(card.item.id)}
+          />
+        </div>;
+      })}
     </div>
   );
 }

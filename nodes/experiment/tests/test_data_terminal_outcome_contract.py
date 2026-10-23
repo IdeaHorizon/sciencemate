@@ -20,7 +20,7 @@ CI 抓不到：两边各自的测试都绿，**没有一条测试跨这道边界
 1. 词表**机械对齐**（`test_every_status_data_can_emit_has_a_route`）：判据直接读
    两边的声明求子集，不抄名单。词表哪天再漂一次，这条当天红。
 2. 三档**路由正确**：`needs_input` / `externally_blocked` 不是终态、不开 fallback；
-   只有 `fatal`（或同一个 spec 两个 data run 都卡在可恢复档）才开。
+   终态须有对应获取证据；重试次数不构成数据不可得或 fallback 授权。
 
 为什么第 2 条重要：fallback = 允许 experiment 自己造输入并把整个 run 标成
 `analysis_eligible=False`。为"少一个参数"付这个代价是荒唐的 —— 老词表把三种
@@ -255,12 +255,8 @@ def test_junk_attempt_entries_do_not_count_as_evidence(tmp_path: Path) -> None:
     assert _fallback_authorization_is_uncorroborated(state, spec["spec_id"])
 
 
-def test_two_evidence_less_fatal_runs_escalate_to_terminal(tmp_path: Path) -> None:
-    """解除路径：两个不同的 data run 都交不出获取证据 → 升终态，fallback 可开。
-
-    没有这条，内容门就是新的死锁（planner 一直坏 = 永远出不去）。判据仍是
-    "不同的 run 出现过两次"，机械可查。
-    """
+def test_two_evidence_less_fatal_runs_remain_internal_failures(tmp_path: Path) -> None:
+    """多次内部失败仍不构成资产不可得的证据。"""
     runs = tmp_path / "runs"
     runs.mkdir()
     state = State.new("experiment", runs)
@@ -274,9 +270,10 @@ def test_two_evidence_less_fatal_runs_escalate_to_terminal(tmp_path: Path) -> No
                                  stop_reason="no_effective_progress")
 
     assert second_run != first_run
-    assert second["outcome"] == "terminal", second
-    assert second["detail"]["escalated_from"] == "fatal_without_acquisition_evidence"
-    assert not _fallback_authorization_is_uncorroborated(state, spec["spec_id"])
+    assert second["outcome"] == "recoverable", second
+    assert second["failure_class"] == "data_internal_failure_without_acquisition_evidence"
+    assert second["data_terminally_blocked"] is False
+    assert _fallback_authorization_is_uncorroborated(state, spec["spec_id"])
 
 
 def test_legacy_empty_blocker_no_longer_terminal_on_first_hit(tmp_path: Path) -> None:
@@ -309,13 +306,8 @@ def test_legacy_empty_blocker_no_longer_terminal_on_first_hit(tmp_path: Path) ->
 
 # ── 3. 可恢复档必须有解除路径（否则这道闸就是新的死锁）────────────────────
 
-def test_a_second_data_run_still_recoverable_escalates_to_terminal(tmp_path: Path) -> None:
-    """补过一次还是卡在同一档 → 按终态处理。
-
-    判据是"**两个不同的 data run** 都卡在可恢复档"，机械可查；不是"模型说它试过了"。
-    没有这条，`needs_input` / `externally_blocked` 就成了一个永远出不去的状态 ——
-    单边硬门禁必须配解除路径，这是 issue #166 那次死锁的教训。
-    """
+def test_a_second_data_run_still_recoverable_does_not_invent_fatal(tmp_path: Path) -> None:
+    """环境未恢复不等于数据不可得；合法恢复另由真实派发链路覆盖。"""
     runs = tmp_path / "runs"
     runs.mkdir()
     state = State.new("experiment", runs)
@@ -327,13 +319,10 @@ def test_a_second_data_run_still_recoverable_escalates_to_terminal(tmp_path: Pat
     second, second_run = _record(state, spec["spec_id"], runs, "externally_blocked")
 
     assert second_run != first_run
-    assert second["outcome"] == "terminal", second
-    assert second["data_status"] == "fatal"
-    assert second["detail"]["escalated_from"] == "externally_blocked"
-    # 升级之后，授权的见证是有佐证的（corroborated=True）。
-    escalated = asyncio.run(_authorize_experiment_fallback(state, spec["spec_id"]))
-    assert escalated["status"] == "success"
-    assert escalated["corroborated"] is True
+    assert second["outcome"] == "recoverable", second
+    assert second["data_status"] == "externally_blocked"
+    assert second["data_terminally_blocked"] is False
+    assert _fallback_authorization_is_uncorroborated(state, spec["spec_id"])
 
 
 def test_the_same_data_run_reported_twice_does_not_escalate(tmp_path: Path) -> None:

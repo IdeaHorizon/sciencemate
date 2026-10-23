@@ -73,7 +73,7 @@ export function ProjectOutputsView({ projectId }: { projectId: string }) {
       {catalog.isLoading && !catalog.data ? (
         <p className="muted">{t({ zh: "正在读这个项目的产出…", en: "Reading this project's outputs…" })}</p>
       ) : catalog.error ? (
-        <p className="muted">读不到研究产出：{String((catalog.error as Error).message)}</p>
+        <p className="muted">{t({ zh: "读不到研究产出：{detail}", en: "Could not read the research outputs: {detail}" }, { detail: String((catalog.error as Error).message) })}</p>
       ) : (catalog.data?.entries.length ?? 0) === 0 ? (
         <p className="muted">{t({ zh: "这个项目还没有产出 —— agent 冻结第一件产物之后会出现在这里。", en: "This project has no outputs yet — they appear once the agent freezes the first one." })}</p>
       ) : (

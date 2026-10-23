@@ -73,7 +73,7 @@ export function roleAssignmentHint(
   role: ModelRole,
   bound: ModelBackend | undefined,
   situation: RoleSituation,
-  lang: Language = "en",
+  lang: Language,
 ): string {
   const { canSelect, candidateCount, canAuthorizeExisting } = situation;
   const say_ = (phrase: Phrase) => say(phrase, lang);
@@ -101,11 +101,12 @@ export function roleAssignmentHint(
     return withImpact(how, role);
   }
   if (role.modality === "vision" && bound.last_vision_ok === false) {
-    return (
-      bound.last_vision_detail ??
-      say_({ zh: "这条连接拒收了一条带图的消息 —— 密钥没问题，是模型不认图。",
-             en: "This connection rejected an image message — the credential is fine, the model is not." })
-    );
+    // 结论按看的人的语言说；探针落库的那句 provider 原话跟在后面当证据。从前有原话就
+    // 只给原话，而原话尾巴上拼着一句中文 —— 英文界面的识图角色下面是一行中文。
+    const verdict = say_({ zh: "这条连接拒收了一条带图的消息 —— 密钥没问题，是模型不认图。",
+                           en: "This connection rejected an image message — the credential is fine, the model is not." });
+    const evidence = (bound.last_vision_detail ?? "").trim();
+    return evidence ? `${verdict} (${evidence})` : verdict;
   }
   if (role.modality === "vision" && bound.last_vision_ok == null) {
     return say_({ zh: "还没确认它认不认图 —— 点「测试」查一次。",

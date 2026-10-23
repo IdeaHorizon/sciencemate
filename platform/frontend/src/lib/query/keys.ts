@@ -33,6 +33,8 @@ export const qk = {
     ["sessions", projectId, sessionId, "change-set"] as const,
   sessionConflicts: (projectId: string, sessionId: string) =>
     ["sessions", projectId, sessionId, "conflicts"] as const,
+  /** 装着的是哪一版（侧栏底部）。不联网，一次会话里不会变 —— 更新会重启整个窗口。 */
+  installedVersion: () => ["app", "installed-version"] as const,
   /** worker 起来时哪些持久化前提没成立 + 修复提案（会话顶部的环境条幅）。 */
   sessionEnvironment: (projectId: string, sessionId: string) =>
     ["sessions", projectId, sessionId, "environment"] as const,

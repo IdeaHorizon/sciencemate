@@ -23,7 +23,7 @@ export function modelBackendActions(
   };
 }
 
-export function modelAccessDescription(user: CurrentUser | null, lang: Language = "zh") {
+export function modelAccessDescription(user: CurrentUser | null, lang: Language) {
   if (canManageModels(user)) return say({ zh: "可以管理模型连接和默认模型", en: "Model backend connections and defaults can be managed" }, lang);
   if (canSelectModels(user)) return say({ zh: "可以添加和修改自己的连接；共享的连接由管理员维护", en: "Your own connections can be added and edited; shared connections are managed by an administrator" }, lang);
   return say({ zh: "模型配置只读", en: "Read-only model configuration" }, lang);
@@ -41,13 +41,13 @@ export function modelBackendScopeKind(scope: ModelBackend["scope"]) {
  * 所以这里读后端已经给过的事实，不按角色再算一遍。两边的名字差一个词：
  * 治理层叫 individual，连接的 scope 叫 personal。
  */
-export function managedScopeLabel(user: CurrentUser | null, lang: Language = "zh") {
+export function managedScopeLabel(user: CurrentUser | null, lang: Language) {
   const kind = user?.governance_scope?.kind;
   if (kind === "institution") return modelBackendScopeLabel("institution", lang);
   return modelBackendScopeLabel("personal", lang);
 }
 
-export function modelBackendScopeLabel(scope: ModelBackend["scope"], lang: Language = "zh") {
+export function modelBackendScopeLabel(scope: ModelBackend["scope"], lang: Language) {
   const kind = modelBackendScopeKind(scope);
   // institution scope 就是「组织」（一台组织服务器上的一个组织）；"机构"是 node20 时代的叫法。
   if (kind === "institution") return say({ zh: "组织的连接", en: "Organisation connection" }, lang);
@@ -58,7 +58,7 @@ export function modelBackendScopeLabel(scope: ModelBackend["scope"], lang: Langu
 export function modelDefaultImpact(
   user: CurrentUser | null,
   backend: Pick<ModelBackend, "editable" | "scope">,
-  lang: Language = "zh",
+  lang: Language,
 ) {
   const scope = modelBackendScopeKind(backend.scope);
   if (canManageModels(user) && backend.editable && scope === "institution") {

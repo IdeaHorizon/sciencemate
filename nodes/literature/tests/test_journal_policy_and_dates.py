@@ -10,11 +10,292 @@ from nodes.literature.tools.search_engines import (
 )
 from platform_runtime import (
     _clean_literature_text,
+    _cached_abstract_matches_title,
     _index_paper,
     _parse_ai_summaries,
     _parse_title_translations,
+    _academic_strategy_queries,
+    _academic_retry_strategy_better,
+    _academic_boolean_facets,
+    _academic_comparison_facets,
+    _paper_matches_academic_facets,
+    _academic_period_focus,
+    _academic_period_method_terms,
+    _academic_nonresearch_record,
+    _academic_primary_focus_penalty,
+    _academic_named_concept_gate,
     _select_academic_search_results,
 )
+
+
+def test_academic_search_excludes_source_documents_but_keeps_scholarship() -> None:
+    assert _academic_nonresearch_record({"title": "UNESCO: Ninth Session of the Intergovernmental Committee", "venue": "International Journal of Cultural Property"})
+    assert _academic_nonresearch_record({"title": "The Resolution on the Return and Restitution of Cultural Property", "venue": "International Journal of Cultural Property"})
+    assert _academic_nonresearch_record({"title": "Ancient DNA study", "venue": "Science News"})
+    assert _academic_nonresearch_record({"title": "Issues in Repatriation The Return of Cultural Treasures. Jeanette Greenfield The Ethics of Collecting Cultural Property. Phyllis Mauch Messenger", "venue": "Current Anthropology"})
+    assert _academic_nonresearch_record({"title": "Endangered Languages: Essays on Revitalization (review)",
+                                         "abstract": "Reviewed by: A collected volume on language education."})
+    assert not _academic_nonresearch_record({"title": "Repatriation without Ethics: Return of Colonial Collections", "publication_category": "书籍"})
+    assert not _academic_nonresearch_record({"title": "The role of UN resolutions in repatriation law", "venue": "Museum Studies"})
+
+
+def test_academic_search_primary_focus_prefers_target_and_evaluated_method() -> None:
+    sepsis_facets = _academic_boolean_facets("machine learning AND early prediction AND sepsis")
+    terms = ["machine", "learning", "early", "prediction", "sepsis"]
+    assert _academic_primary_focus_penalty({"title": "Early prediction of sepsis-induced cardiomyopathy"}, terms, sepsis_facets) > 0
+    assert _academic_primary_focus_penalty({"title": "Early prediction of sepsis in ICU patients"}, terms, sepsis_facets) == 0
+    rag_terms = ["retrieval", "augmented", "generation", "reranking"]
+    assert _academic_primary_focus_penalty({"title": "Stealthy membership inference for RAG"}, rag_terms, []) > 0
+    assert _academic_primary_focus_penalty({"title": "Cross-encoder reranking for RAG"}, rag_terms, []) == 0
+
+
+def test_cached_abstract_must_overlap_its_title() -> None:
+    liver = "We study the molecular signals of hepatic regeneration after injury. " * 5
+    museum = "We study repatriation of museum collections and colonial restitution. " * 5
+    title = "Issues in the Repatriation of Museum Collections"
+    assert not _cached_abstract_matches_title(title, liver)
+    assert _cached_abstract_matches_title(title, museum)
+
+
+def test_sinkhorn_query_does_not_admit_unrelated_entropy_work() -> None:
+    terms = ["entropy", "regularization", "optimal", "transport", "sinkhorn"]
+    assert not _academic_named_concept_gate({"title": "Entropy Regularization in General Graph Matching"}, terms)
+    assert _academic_named_concept_gate({"title": "Sinkhorn Algorithm for Approximate Matching"}, terms)
+    assert _academic_named_concept_gate({"title": "Entropy-Regularized Optimal Transport"}, terms)
+
+
+def test_alternative_observation_methods_do_not_hide_urban_cooling_studies() -> None:
+    facets = _academic_boolean_facets(
+        "urban green space AND urban heat island mitigation AND "
+        "(remote sensing OR ground observation)"
+    )
+    assert _paper_matches_academic_facets(
+        {"title": "Cooling from urban green parks reduces heat islands", "abstract": ""},
+        facets,
+    )
+    assert not _paper_matches_academic_facets(
+        {"title": "Cooling from rural forests", "abstract": ""}, facets,
+    )
+
+
+def test_valid_english_retry_beats_more_chinese_fallback_queries() -> None:
+    fallback = {"english_query": "《藻海无边》与《简·爱》", "search_queries": [
+        {"query": "藻海无边"}, {"query": "简爱"}, {"query": "文学比较"},
+    ]}
+    translated = {"english_query": "Wide Sargasso Sea Jane Eyre colonial literature", "search_queries": [
+        {"query": "Wide Sargasso Sea Jane Eyre colonial literature"},
+    ]}
+    assert _academic_retry_strategy_better(fallback, translated)
+    assert not _academic_retry_strategy_better(translated, fallback)
+
+
+def test_later_child_population_constraint_excludes_adult_asthma() -> None:
+    facets = _academic_boolean_facets(
+        "(PM2.5 OR fine particulate matter) AND long-term exposure AND "
+        "(incident asthma OR new-onset asthma) AND (children OR child OR pediatric)"
+    )
+    assert ["children", "child", "pediatric"] in facets
+    adult = {"title": "Long-term PM2.5 exposure and incident asthma among elderly adults", "abstract": "Children were discussed as background."}
+    child = {"title": "Long-term PM2.5 exposure and incident childhood asthma", "abstract": "A pediatric cohort study."}
+    assert not _paper_matches_academic_facets(adult, facets)
+    assert _paper_matches_academic_facets(child, facets)
+    unrelated = {"title": "Long-term PM2.5 exposure and childhood cancer", "abstract": "A pediatric cohort study of cancer incidence."}
+    assert not _paper_matches_academic_facets(unrelated, facets)
+    no_pm25 = {"title": "Long-term exposure to NO2 and incident asthma in children", "abstract": "A pediatric cohort study."}
+    assert not _paper_matches_academic_facets(no_pm25, facets)
+    coarse = {"title": "Long-term coarse particulate matter exposure and asthma in children",
+              "abstract": "Earlier PM2.5 studies motivated this investigation of coarse PM."}
+    ultrafine = {"title": "Exposure to ultrafine particles and incident asthma in children",
+                 "abstract": "Fine particulate matter is discussed as prior work."}
+    exacerbation = {"title": "Severe asthma exacerbations in asthmatic children",
+                    "abstract": "Long-term PM2.5 exposure was measured in this cohort."}
+    other_outcome = {"title": "Long-term PM2.5 exposure and risk of urticaria in children",
+                     "abstract": "Asthma studies motivated this research."}
+    absenteeism = {"title": "School absenteeism in students with asthma from elevated AQI risk areas",
+                   "abstract": "PM2.5 exposure was measured over the school year."}
+    assert not _paper_matches_academic_facets(coarse, facets)
+    assert not _paper_matches_academic_facets(ultrafine, facets)
+    assert not _paper_matches_academic_facets(exacerbation, facets)
+    assert not _paper_matches_academic_facets(other_outcome, facets)
+    assert not _paper_matches_academic_facets(absenteeism, facets)
+
+
+def test_comparison_accepts_evidence_about_either_approach() -> None:
+    facets = _academic_boolean_facets(
+        "school education AND community daily use AND endangered language revitalization"
+    )
+    comparison = _academic_comparison_facets(
+        facets, "学校教育和社区日常使用，哪种更有助于濒危语言复兴？"
+    )
+    assert _paper_matches_academic_facets(
+        {"title": "School education in endangered language revitalization"}, comparison,
+    )
+    assert _paper_matches_academic_facets(
+        {"title": "Community language revitalization through daily practice"}, comparison,
+    )
+    assert not _paper_matches_academic_facets(
+        {"title": "School education and mathematics learning"}, comparison,
+    )
+    assert not _paper_matches_academic_facets(
+        {"title": "Revitalization of endangered heritage buildings",
+         "abstract": "Community groups seek the best use of historic sites."}, comparison,
+    )
+
+
+def test_comparison_searches_each_option_with_the_shared_goal() -> None:
+    question = "学校教育和社区日常使用，哪种更有助于濒危语言复兴？"
+    strategy = {"english_query": "school education AND community daily use AND endangered language revitalization",
+                "search_queries": [{"query": "school community endangered language revitalization"}]}
+    queries = _academic_strategy_queries(strategy, question)
+    assert "school education endangered language revitalization" in queries
+    assert "community daily use endangered language revitalization" in queries
+    assert "community endangered language revitalization" in queries
+    assert queries[-1] == question
+
+
+def test_chinese_academic_query_uses_english_strategy_for_international_sources() -> None:
+    original = "古 DNA 如何解释欧洲青铜时代的人口迁移？"
+    strategy = {
+        "english_query": "ancient DNA European Bronze Age population migration",
+        "search_queries": [
+            {"query": "DNA"},
+            {"query": "人口迁移"},
+        ],
+    }
+    queries = _academic_strategy_queries(strategy, original)
+    assert queries[0] == strategy["english_query"]
+    assert queries[-1] == original
+    assert "人口迁移" not in queries[:-1]
+
+
+def test_long_translated_query_searches_compact_concepts_first() -> None:
+    english = (
+        "retrieval-augmented generation reranking retrieved results reduce "
+        "answer errors incorrect citations experimental studies reviews task types"
+    )
+    queries = _academic_strategy_queries(
+        {"english_query": english, "search_queries": [{"query": english}]},
+        "检索增强生成中的重排序能否减少错误引文？",
+    )
+    assert queries[0] == "retrieval-augmented generation reranking retrieved reduce answer errors citations"
+    assert english in queries
+    assert queries[-1].startswith("检索增强生成")
+
+
+def test_academic_boolean_object_facets_reject_other_diseases_and_species() -> None:
+    sepsis_facets = _academic_boolean_facets(
+        "(machine learning OR artificial intelligence) AND "
+        "(sepsis OR septic shock) AND early prediction"
+    )
+    assert sepsis_facets == [
+        ["machine learning", "artificial intelligence"],
+        ["sepsis", "septic shock"],
+        ["early prediction"],
+    ]
+
+    def paper(title: str) -> dict:
+        return {
+            "title": title, "abstract": "", "score": 0.8,
+            "score_breakdown": {"raw": {"relevance": 0.8}},
+        }
+
+    delirium = paper("Machine learning for early delirium prediction")
+    sepsis = paper("Machine learning for early sepsis prediction")
+    ranked, excluded = _select_academic_search_results(
+        [delirium, sepsis], limit=10,
+        core_terms=["machine", "learning", "sepsis"],
+        mandatory_facets=sepsis_facets,
+    )
+    assert ranked == [sepsis]
+    assert excluded == 1
+
+    # The translated strategy can place the target disease after method and
+    # outcome. The third AND group still must gate admission.
+    third_group = _academic_boolean_facets(
+        "(machine learning OR artificial intelligence) AND "
+        "(early prediction OR early detection) AND sepsis AND "
+        "(review OR external validation)"
+    )
+    adr = paper("Machine learning for early prediction of adverse drug reactions")
+    ranked, excluded = _select_academic_search_results(
+        [adr, sepsis], limit=10,
+        core_terms=["machine", "learning", "early", "sepsis"],
+        mandatory_facets=third_group,
+    )
+    assert ranked == [sepsis]
+    assert excluded == 1
+
+    drought_facets = _academic_boolean_facets("drought AND wheat AND root traits")
+    maize = paper("Drought response of maize root traits")
+    wheat = paper("Drought response of wheat root traits")
+    ranked, excluded = _select_academic_search_results(
+        [maize, wheat], limit=10,
+        core_terms=["drought", "wheat", "root"],
+        mandatory_facets=drought_facets,
+    )
+    assert ranked == [wheat]
+    assert excluded == 1
+
+
+def test_named_period_ranking_prefers_study_of_requested_population() -> None:
+    focus = _academic_period_focus(
+        "ancient DNA European Bronze Age population migration archaeology"
+    )
+    assert focus == ("european", "bronze age", ["population", "migration"])
+    assert _academic_period_focus(
+        "ancient DNA Bronze Age Europe population migration genetics"
+    ) == ("europe", "bronze age", ["population", "migration"])
+    assert _academic_period_focus("Average Age in clinical prediction") is None
+    assert _academic_period_method_terms(
+        "ancient DNA Bronze Age Europe population migration"
+    ) == ["dna", "genom", "genetic"]
+
+    def paper(title: str, abstract: str = "") -> dict:
+        return {
+            "title": title, "abstract": abstract, "score": 0.7,
+            "score_breakdown": {"raw": {"relevance": 0.8}},
+        }
+
+    rabbit = paper("Ancient DNA from Bronze Age bones of European rabbit")
+    pig = paper("Ancient DNA and population turnover in southern Levantine pigs--signature of the sea peoples migration?")
+    human = paper(
+        "Population genomics of Bronze Age Eurasia",
+        "Human migration in Europe inferred from ancient genomes.",
+    )
+    ranked, excluded = _select_academic_search_results(
+        [rabbit, pig, human], limit=10,
+        core_terms=["ancient", "dna", "european", "bronze", "age", "population", "migration"],
+        period_focus=focus,
+        method_terms=["dna", "genom", "genetic"],
+    )
+    assert ranked[0] is human
+    assert rabbit not in ranked
+    assert pig not in ranked
+    assert excluded == 2
+
+    archaeology_only = paper("Bronze Age population migrations in Europe")
+    ranked, excluded = _select_academic_search_results(
+        [archaeology_only, human], limit=10,
+        core_terms=["bronze", "age", "europe", "population", "migration"],
+        period_focus=focus,
+        method_terms=["dna", "genom", "genetic"],
+    )
+    assert ranked == [human]
+    assert excluded == 1
+
+    incidental_period = paper(
+        "Genomic population history in modern Europe",
+        "This study concerns modern populations. " + "Background. " * 70
+        + "Bronze Age was also historically important.",
+    )
+    ranked, excluded = _select_academic_search_results(
+        [incidental_period, human], limit=10,
+        core_terms=["genomic", "europe", "bronze", "age", "population"],
+        period_focus=focus,
+        method_terms=["dna", "genom", "genetic"],
+    )
+    assert ranked == [human]
+    assert excluded == 1
 
 
 def test_offline_title_guess_is_not_treated_as_verified(tmp_path, monkeypatch) -> None:
@@ -407,3 +688,41 @@ async def test_crossref_doi_enrichment_fills_year_from_the_same_date_source(monk
     await manager._enrich_metadata_cross_source([paper], {"crossref"})
 
     assert paper.year == 1984
+@pytest.mark.asyncio
+async def test_crossref_issn_window_reads_all_pages() -> None:
+    class Response:
+        def __init__(self, message):
+            self.message = message
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"message": self.message}
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        async def get(self, url, **kwargs):
+            params = dict(kwargs["params"])
+            self.calls.append(params)
+            doi = "10.1234/one" if params["cursor"] == "*" else "10.1234/two"
+            item = {
+                "DOI": doi,
+                "title": [doi],
+                "container-title": ["Marine Pollution Bulletin"],
+                "published-online": {"date-parts": [[2026, 9, 1]]},
+            }
+            if len(self.calls) > 1:
+                return Response({"items": [], "next-cursor": "next"})
+            return Response({"items": [item], "next-cursor": "next"})
+
+    client = Client()
+    papers = await CrossrefSearch(client).search_issn_window(
+        "0025-326X", date_from="2025-09-01", date_until="2026-09-24", rows=1
+    )
+    assert len(papers) == 1
+    assert client.calls[0]["cursor"] == "*"
+    assert client.calls[1]["cursor"] == "next"
+    assert "issn:0025-326X" in client.calls[0]["filter"]

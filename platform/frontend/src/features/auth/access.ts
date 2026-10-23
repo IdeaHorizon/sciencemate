@@ -8,7 +8,7 @@ const ROLE_LABELS: Record<UserRole, Phrase> = {
   researcher: { zh: "成员", en: "Member" },
 };
 
-export function roleLabel(role: UserRole | undefined, lang: Language = "zh") {
+export function roleLabel(role: UserRole | undefined, lang: Language) {
   return say(ROLE_LABELS[role ?? "researcher"] ?? ROLE_LABELS.researcher, lang);
 }
 
@@ -32,7 +32,7 @@ export function canCreateSessions(user: CurrentUser | null) {
   return hasAnyPermission(user, ["projects.create"]);
 }
 
-export function governanceKindLabel(kind?: string, lang: Language = "zh") {
+export function governanceKindLabel(kind: string | undefined, lang: Language) {
   if (kind === "institution") return say({ zh: "机构", en: "Institution" }, lang);
   return say({ zh: "个人", en: "Individual" }, lang);
 }

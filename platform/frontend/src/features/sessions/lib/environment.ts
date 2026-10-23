@@ -30,11 +30,21 @@ export interface EnvironmentHolder {
   error?: string | null;
 }
 
+/**
+ * 后端写进事件、存下来的一句话。新事件两种语言都写（写的那一刻不知道将来谁用哪种语言看）；
+ * 2026-10-20 之前存下的是一句中文字符串 —— 照原样给，别丢。
+ */
+export type StoredSaying = string | { zh: string; en: string };
+
+export function sayStored(saying: StoredSaying, lang: Language): string {
+  return typeof saying === "string" ? saying : say(saying, lang);
+}
+
 export interface EnvironmentRepair {
   kind: string;
   argv: string[] | null;
   command: string | null;
-  changes: string;
+  changes: StoredSaying;
   reversible: boolean | null;
   needs_consent: boolean;
   automatic: boolean;
@@ -55,7 +65,7 @@ export interface EnvironmentWarning {
   severity: EnvironmentSeverity;
   path: string | null;
   error: string | null;
-  consequences: string[];
+  consequences: StoredSaying[];
   backup?: string;
   repair_attempt?: string;
   facts?: EnvironmentFacts | null;
@@ -209,7 +219,10 @@ export function bannerModel(
 
   const lines: string[] = [];
   for (const w of [...fatal, ...degraded]) {
-    for (const c of w.consequences ?? []) if (!lines.includes(c)) lines.push(c);
+    for (const c of w.consequences ?? []) {
+      const said = sayStored(c, lang);
+      if (!lines.includes(said)) lines.push(said);
+    }
   }
   if (degraded.length > 0 && lines.length === 0) {
     lines.push(say({ zh: "这一轮照常回答，但它记下的东西可能保不住。", en: "This turn still answers, but what it records may not persist." }, lang));
@@ -219,7 +232,8 @@ export function bannerModel(
     (w) => w.repair?.argv && w.repair.command && !(w.repair_result && w.repair_result.returncode === 0),
   );
   const repair = candidate?.repair?.command
-    ? { code: candidate.code, path: candidate.path, command: candidate.repair.command, changes: candidate.repair.changes }
+    ? { code: candidate.code, path: candidate.path, command: candidate.repair.command,
+        changes: sayStored(candidate.repair.changes, lang) }
     : null;
 
   const details: string[] = [];

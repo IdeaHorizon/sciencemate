@@ -210,7 +210,7 @@ export default function ResearchSettingsPage() {
                   <div className="research-layer-row" key={layer.kind}>
                     <i aria-hidden />
                     <span><strong>{layer.name}</strong><small>{layer.summary}</small></span>
-                    <span>{layer.editable ? `${layer.instruction_count} personal instruction${layer.instruction_count === 1 ? "" : "s"}` : t({ zh: "访问策略", en: "Access policy" })}</span>
+                    <span>{layer.editable ? t({ zh: "{count} 条个人指令", en: "{count} personal instruction{s}" }, { count: layer.instruction_count, s: layer.instruction_count === 1 ? "" : "s" }) : t({ zh: "访问策略", en: "Access policy" })}</span>
                     <span>{layer.editable ? t({ zh: "可在本页编辑", en: "Editable on this page" }) : t({ zh: "只读 · 由管理员维护", en: "Read only · managed by administrators" })}</span>
                   </div>
                 ))}

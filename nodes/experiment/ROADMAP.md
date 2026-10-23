@@ -5,6 +5,114 @@
 信箱只保留讨论与交接，报告保存详细证据；本页维护目标、取舍、进度和下一步，避免复制规则。
 代码、测试数量和历史“已完成”标记不自动成为规范或就绪证明。
 
+## 本轮最小改进：合法恢复、记忆减法、事实投影（本地候选）
+
+在 `codex/experiment-slurm-gpu-0929` / `5dc425a4805979a476d52b442239a1d7be87f0a5`
+上接续；无 upstream，与本地 `origin/main` 为 0/0。保留并审收下节既有 outcome
+接线和测试，不改动其实现。本轮仅改 Experiment；经独立短审和用户确认固定为本地
+候选，产品未 push 或部署，不代表整体可合并或真实 Data/UI 验收通过。
+
+- **#1096，Experiment 恢复部分已修**：直属 child 的当前生命周期已结束，且精确
+  报告已经记录为可恢复，才允许原请求新派发。运行、暂停、未知或已有成功交付均不
+  重跑；Core 恢复后的新 `run_start` 使旧终态摘要失效。旧报告及版本化账本保留，
+  reconcile 和执行记录按既有 `spec_id + child_run_id` 区分尝试；暂停派发事件丢失
+  可补账，旧尝试的迟到事件不覆盖新尝试。两次可恢复失败不再被改写成 fatal，
+  冻结请求修订及 fallback 授权规则保持不变。
+- **#1188，长期错误经验入口已拆**：文件名/命令启发式只输出本次运行的
+  `OBSERVATION`，扫描失败为 `UNKNOWN`；不写长期 pitfall，不向消费者宣称违规。
+  hook、架构描述和已有 formal-input-recovery 指导同步；按 skill-creator 的精简
+  原则修改原指导，不增加工具、必填声明或逐题规则。权限与正式输入核验不变。
+- **#895 A，manifest 已接齐现有事实**：任务 outcome 来自有效封存交付审计；
+  lifecycle 单列；作业事实来自现有账本并分作业保留。顶层退出码仅在唯一已绑定
+  终态作业有确证时填写，不再猜最后一份日志。无有效交付/退出证据就保持未知。
+  兼容 `status` 复用 Core 的 status_floor，不新建完成判定；它仍可能在无有效 C 时
+  保留循环的 completed，不能据此宣称 Core completion admission 完成。
+
+可判别证据：恢复链最初 5 failed/4 passed；合法生成的长期 pitfall 反例修复前失败；
+manifest 的 14 条权威事实回归修复前失败。最终定向整合回归 **253 passed / 4 xfailed**，
+见本机 `/tmp/experiment-minimal-recovery-pF8uhE/targeted-final.xml`；4 项均为已知跨 owner
+缺口（3 项 Core completion admission、1 项 Data acquisition_reference 传递）。
+实际 load_skill 正文加载检查通过。另通过真实 Core execute_node 恢复入口、替代模型
+循环独立证明：修前活跃 child 仍可被重派，修后拒绝且派发数保持1。只覆盖受影响接口、
+状态恢复、消费者和既有 outcome 接线，不是全题包或整个平台验收。
+
+经用户单次授权，使用现有 deepseek-v4-pro（temperature=0.6，输出上限8192，
+最多10轮）完成一条真实模型补件观察，run `1791611786-aeb21e`，9轮结束。
+这是 Core run_loop + 真实 Experiment 工具 + **受控 Data 子节点替身**，没有 UI、
+完整 executor 或真实 Data 执行，且移除了计算/网络/写文件工具。模型自然重派原请求、
+验收第二次交付，总共两个 child、请求哈希相同，没有第三次重跑。
+最终封存 **partial**：替身文件未归属为本 run 产物，不能声称整体任务成功。
+实际 manifest 为 `lifecycle=completed / task_outcome=partial / status=incomplete`，
+`return_code=null / jobs=[]`。原始 seed、messages、result、run transcript 和脚本
+均在上述临时目录；这是本机临时证据，不是长期归档。未追加模型重跑。
+
+观察保留的问题：替身只给出 `mesh bytes`，不是真实网格；模型读到它后仍曾请求
+success，并用 echo 自报未启动仿真，还给出缺乏实算依据的 xfoil 后续建议。
+该 success 未封存；恢复步骤走通不能证明模型检查充分或科学输入有效，也不能据此
+声称指导增量效果、真实 Data 补件或最终实机验收通过。没有启动 UI 或集群作业。
+
+跨 owner 待办仍保留：Core 的 #1141 completion admission、重开不经 finish 重放、
+#1082 REVISE 身份及 fresh 调度事务；Data 的 #1189 请求/实体交付语义，以及
+acquisition_reference 结构化传递。#1182.1 构建受管等待、旧 CLI、全面路径重写
+继续暂缓。
+
+独立短审已完成：本轮差分未发现阻断项；恢复与 manifest 独立定向回归为
+**59 passed**，复核原始整合 XML 与上述 253 passed / 4 xfailed 一致。
+需保留的边界：原环境/原输入恢复可用后允许同请求重派，不等于新增 URL、文件位置
+或参数已经传给 Data；`user_note` 是父侧宣告，不是 child 输入。不能据替身观察
+宣称所有 needs_input 补件场景打通，也不能把因产物归属被拒的 success 当成科学
+无效输入被识别。该补充事实传递缺口不是本轮新增回归。
+
+用户授权后，本地代码候选已固定为 `93d6371daff61a83e14a0d95ae14d9c146b6c344`。
+提交前再次独立复跑为 **253 passed / 4 xfailed**，证据位于
+`/tmp/experiment-candidate-check-VEnb03/targeted-candidate.xml`。未 push 或部署。
+
+有限真实 Data 联调 **未通过**：控制端调用正式 Experiment dispatch → Core executor
+→ Data custom loop，无 Data 替身，但不是 UI 或父 Experiment 模型自主测试。
+父 run `1791613389-471576`，真实 Data child `1791613461-046112`，模型 deepseek-v4-pro。
+题面要求原路径 CSV 无损转 TSV；首轮文件尚未提供。Data 真实检查并记录缺文件，
+Requirement 分析也保留缺件事实，却继续进入 Designer；计划因 `work_unit_id` 缺失、
+`converted_tsv` 与 `converted.tsv` 交付身份不一致被拒后又开始重试。
+到预设 **300 秒**预算仍未返回 blocked report，控制端中止。没有 Data summary/run_end，
+不能把控制端超时当成 Data 自己诚实受阻，也不能认定 Experiment 重派失败：该转换
+尚未到达。未补文件、未派第二个 child、未生成 dataset；没有启动 UI 或集群作业。
+控制进程已退出，无该测试进程残留；取消时出现流读取 ReadError，保留观察但不伪造
+节点终态。原始记录、控制脚本及独立判卷在 `/tmp/experiment-real-data-recovery-8n1F70/`。
+此前控制端漏载已有 callable_nodes 配置的一次零 child 拒绝另存 preflight 记录，
+修正仅加载原 harness 声明，不是产品缺陷修复或权限扩大。
+
+下一步只向 Data owner 提供缺件后仍规划及计划 schema 对齐的最短事实链；本轮不跨
+owner 打补丁、不加题面提示或继续刷模型。实际补件传递、重派后的真实消费及交付
+仍未验证。上述本机临时目录不是长期归档，若后续交接应连同原始记录保留。
+
+## 当前主线：接通已封存任务结局（2026-10-10）
+
+开发分支 `codex/experiment-slurm-gpu-0929` 已快进到本次拉取的 `origin/main`
+`5dc425a4805979a476d52b442239a1d7be87f0a5`，无 upstream。以下为该基线上的本地修改，
+尚未提交、推送或部署；下方 9 月检查点保留为历史记录，不代表当前待办或运行实例状态。
+
+本片只补 Experiment 的生产方接线：`finish` 从实际封存的 C 调用 Core 现有
+`record_task_outcome`，把 success / partial / failed / blocked / cancelled 写入父层
+summary。封存成功不等于任务成功；Core 的既有 `status_floor` 防止非 success 误报
+completed。结局、摘要均不从重试请求补猜；被拒请求不覆盖旧结局，合法修订更新投影，
+恢复重放不重跑载荷、不重复封存。任务成功不清除独立 blocker，也不冒充科学目标闭合。
+无新工具、模型手续或状态体系，不修改 Core 或旧 v2 blocker 兼容逻辑。
+
+验证：补齐有效 fixture 后，未改实现的定向回归 **13 failed / 6 passed**，明确复现
+非 success 被汇总为 completed 与任务结局缺席。接线后的定向及相邻节点回归
+**46 passed / 3 xfailed**，Core 既有任务结局测试 **8 passed**；包含首次交付、
+重开重放、事务中断且新参数冲突、被拒/合法修订及记账异常后从封存 C 补记。
+原始结果在本机 `/tmp/experiment-outcome-red.e6vqVs/results.xml`、
+`/tmp/experiment-outcome-regression.BrqGAx/results.xml` 和
+`/tmp/experiment-outcome-core.Vu2zot/results.xml`；临时记录不是长期证据归档。
+
+范围边界：3 项既有 xfail 仍是 Core 完成准入缺口（未提交 finish、封存 head 漂移、
+Project 工作区变更绕过交付）。恢复后不重放 finish 而直接 finalize 也未接通；
+[#1141](https://desktop-9el2944.taile9f15e.ts.net/wangd/harness-framework/issues/1141)
+的统一 completion admission / reenter / suspend 仍由 Core 设计，不以本片代替或关闭。
+本轮没有 UI、模型或集群实测。下一步是提交前复核本片，必要时在获准的独立实例观察
+父层回执；不重新跑全题包，也不在节点里补第二套完成门禁。
+
 ## 当前基线：先完成共同集成，再接续单 GPU（2026-09-29）
 
 用户要求 review-lead 先整合已审净差分和最新 main，不等待 GPU 功能完成。

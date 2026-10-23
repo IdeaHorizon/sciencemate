@@ -49,6 +49,7 @@ from app.services.project_repository import (
     run_in_repository_thread,
 )
 from app.services.sessions import require_capability
+from app.services.user_interface import Language, language_on_screen, said_of
 
 router = APIRouter()
 
@@ -136,6 +137,7 @@ async def write_project_instructions(
     data: InstructionText,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> dict:
     """写项目层 —— 一次提交落在项目仓库 main 上。
 
@@ -165,7 +167,8 @@ async def write_project_instructions(
     except ProjectRepositoryError as exc:
         raise HTTPException(
             status_code=409,
-            detail={"code": "project_instructions_commit_failed", "message": str(exc)},
+            detail={"code": "project_instructions_commit_failed", "message": said_of(exc, lang, otherwise={
+                "zh": "项目指令没能提交：{why}", "en": "The project instructions could not be committed: {why}"})},
         ) from exc
     return {**_payload(f"{PROJECT_FILENAME}@{commit[:12]}", body), "commit": commit}
 

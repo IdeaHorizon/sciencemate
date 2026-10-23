@@ -69,9 +69,16 @@ COMPILED_FAMILIES = frozenset({"schematic"})
 #: 「合同即断言」的家族：agent 写渲染代码，框架读对象模型逐条核对。
 ASSERTED_FAMILIES = frozenset({"quantitative", "composite"})
 
+#: 「合同即宣言」的家族（AutoFigure 移植，SVG 轨）：agent 手写 SVG，框架把
+#: 断言对 **SVG DOM 标记**求值（svg_vocab 词表）。结构与编译轨同款
+#: （nodes/edges/groups），但布局完全归作者 —— 没有 bands，也没有
+#: 「每个节点恰好放置一次」这类编译轨结构核查（§六-B8：放宽，只保留断言求值
+#: 与自洽核查）。
+ILLUSTRATION_FAMILIES = frozenset({"illustration"})
+
 #: 目前不受合同管辖的家族（显微/三维/分子等像素型产物，结构事实不在图里）。
 #: 它们走原路径：机械审计 + VLM 证人，零行为变化。
-CONTRACT_FAMILIES = COMPILED_FAMILIES | ASSERTED_FAMILIES
+CONTRACT_FAMILIES = COMPILED_FAMILIES | ASSERTED_FAMILIES | ILLUSTRATION_FAMILIES
 
 #: asset_kind → 合同家族。词表与校验同源（contracts.ASSET_KINDS 是上游真相源）。
 _ASSET_KIND_FAMILY: dict[str, str] = {
@@ -300,7 +307,8 @@ FAMILY_CHECKLIST: dict[str, tuple[str, ...]] = {
         "键 —— 归一化不认识它，图上不会有，而且不会报错。写进顶层 unexpressed=["
         "\"...\"]：框架照画其余部分，记录里如实披露图上缺这件事。缺词表是词表的问题，"
         "把它藏起来才是你的问题。",
-        "**先问这张图印出来多大**：`medium`（slide / page / column / poster）决定版心，"
+        "**先问这张图印出来多大**：`medium`（slide / single_column / double_column / "
+        "poster）决定版心，"
         "框架按它算「复现之后节点标签还剩几 pt」，低于该媒介下限就报。画布的 pt 数"
         "就是物理英寸数 —— 一张 420mm 宽的图放进期刊单栏，11pt 的标签只剩 2.2pt。"
         "读不了的时候唯一有效的办法是**让一行里并排的东西变少**（折叠一层 / 明细搬进 "
@@ -448,6 +456,24 @@ FAMILY_CHECKLIST: dict[str, tuple[str, ...]] = {
         "把需求里「几个面板、什么顺序」写成 assertion。",
         "**同一个 request_id 最多渲染 3 次**：第 4 次返回「画不出合同要求的样子」和原因，"
         "由调用方决定。先 execute_python 试画自查，定稿再 render_figure。",
+    ),
+    "illustration": (
+        "**铁律：合同里声明的每个 id，必须在 SVG DOM 里以标记出现且恰好一次** —— "
+        "节点主形状 data-role+data-node、连线 data-edge-from/to、文字标签 data-label、"
+        "组容器 data-group、占位框 data-placeholder。缺标记即 finding，断言会对着 DOM 核。",
+        "角色色由框架发色（declare 返回的 role_colors），fill 或 stroke 其一承载即可；"
+        "白底描边的机箱轮廓合法。占位框在 enhancement 缺席时也必须可直接交付"
+        "（色块+居中短标签）—— enhancement 是锦上添花，不是必需工序。",
+        "文字政策全局核所有 <text>：语言、字号（按 medium 缩放系数 px→pt 换算）、"
+        "禁用词。标题/图例等自由文字不用打 data-label，但一样被核。",
+        "需求里带量词的数（8 张 / 两个 / 4 台）每一条都要有断言核（node_count / degree "
+        "/ edge_count），derived_from 引用需求原文那一小段。",
+        "图上印的数**不许填 annotated_values** —— 文字来源的数没有 artifact 出处，"
+        "填了会被判「够不到出处」拒铸；不声明，对账缺席会被如实披露，那是特性。",
+        "先 svg_render 试渲染看审计摘要（文字出界/碰撞/缺字形/标记完整性），"
+        "定稿再 render_illustration 铸记录 —— 试渲染不占渲染预算。",
+        "词表是有限的：想说的事在 schema 里找不到词时写进顶层 unexpressed=[\"...\"]，"
+        "别自造字段 —— 归一化不认识它，图上不会有，而且不会报错。",
     ),
 }
 
@@ -885,6 +911,13 @@ def normalize_contract(raw: Any, *, family: str) -> dict[str, Any]:
             out["blocks"] = _normalize_blocks(body["blocks"])
             merged = _merge_diagram_blocks(out["blocks"])
             out.update(merged)
+            # 各 diagram block 滤掉的空 band 汇聚到顶层 —— empty_row_findings
+            # 只读这一个键（与平铺分支同一形状）。
+            out["dropped_empty_bands"] = sum(
+                int(block.get("dropped_empty_bands") or 0)
+                for block in out["blocks"]
+                if block.get("kind") == "diagram"
+            )
             # 顶层 `notes` 在这条分支上**从来没被搬过来** —— schema 里是合法键，
             # 作者写了，图上没有，而 `unexpressed_findings` 也不会响（它问的是
             # 「这个键认不认识」，不是「这个键到没到纸上」）。2026-09-17。
@@ -929,6 +962,44 @@ def normalize_contract(raw: Any, *, family: str) -> dict[str, Any]:
                 "every band is empty, so nothing would be placed: bands are the "
                 "top-level rows — put 'group:<id>' or 'node:<id>' entries in them"
             )
+        out["notes"] = [str(item).strip() for item in body.get("notes") or [] if str(item).strip()]
+        if body.get("medium"):
+            out["medium"] = _one_of(body["medium"], tuple(sorted(MEDIA)), "medium", allow_empty=True)
+        out["annotations"] = [
+            _normalize_annotation(a, i, {n["id"] for n in nodes}, "contract")
+            for i, a in enumerate(_require_list(body.get("annotations") or [], "annotations"))
+        ]
+    elif family in ILLUSTRATION_FAMILIES:
+        # SVG 轨（AutoFigure 移植）：结构与编译轨同款（nodes/edges/groups），
+        # 但**没有 bands** —— 布局完全归作者，合同是宣言不是渲染源（§六-B8）。
+        # groups 的 ranks 在这里是**成员清单**，不是编译轨的摆放行。
+        if body.get("bands") or body.get("blocks"):
+            raise VisualContractError(
+                "an illustration contract has no bands/blocks: on the svg track the "
+                "layout belongs entirely to the author — the contract is a declaration "
+                "that the SVG DOM gets checked against, not the render source. "
+                "Express grouping with groups=[...] (membership lists) and lay the "
+                "figure out in your SVG. (2026-10-16 e2e: bands learned from the "
+                "schematic schema were silently dropped here — reject loudly instead.)"
+            )
+        nodes = [
+            _normalize_node(item, index)
+            for index, item in enumerate(_require_list(body.get("nodes") or [], "nodes"))
+        ]
+        if not nodes:
+            raise VisualContractError(
+                "an illustration contract must declare nodes: the contract is what "
+                "the SVG DOM gets checked against — an empty node list proves nothing"
+            )
+        out["nodes"] = nodes
+        out["groups"] = [
+            _normalize_group(item, index)
+            for index, item in enumerate(_require_list(body.get("groups") or [], "groups"))
+        ]
+        out["edges"] = [
+            _normalize_edge(item, index)
+            for index, item in enumerate(_require_list(body.get("edges") or [], "edges"))
+        ]
         out["notes"] = [str(item).strip() for item in body.get("notes") or [] if str(item).strip()]
         if body.get("medium"):
             out["medium"] = _one_of(body["medium"], tuple(sorted(MEDIA)), "medium", allow_empty=True)
@@ -1007,7 +1078,13 @@ def _normalize_block(raw: Any, index: int) -> dict[str, Any]:
                 f"blocks[{index}] is a diagram without bands: "
                 "bands=[['group:<id>' | 'node:<id>', ...], ...]"
             )
-        bands = [_normalize_band(b, i) for i, b in enumerate(bands_raw)]
+        # 空 band 照平铺分支同一姿态：丢掉（不拒——空行不与任何东西矛盾），
+        # 但计数留给 empty_row_findings 点名。2026-10-20 审查实测：不滤的空
+        # band 存活到布局器，`max()` 对空序列裸抛 ValueError —— declare 接受
+        # 的合同渲染时永远崩。
+        _bands = [_normalize_band(b, i) for i, b in enumerate(bands_raw)]
+        bands = [band for band in _bands if band]
+        dropped_bands = len(_bands) - len(bands)
         known = {node["id"] for node in nodes}
         annotations = [
             _normalize_annotation(a, i, known, f"blocks[{index}]")
@@ -1019,6 +1096,7 @@ def _normalize_block(raw: Any, index: int) -> dict[str, Any]:
             "kind": "diagram", "title": title, "row": row,
             "nodes": nodes, "groups": groups, "bands": bands, "edges": edges,
             "annotations": annotations,
+            "dropped_empty_bands": dropped_bands,
         }
     if kind == "spec":
         items = [
@@ -1131,8 +1209,16 @@ def _group_member_ids(contract: dict[str, Any], group_id: str) -> set[str]:
     by_id = {group["id"]: group for group in contract["groups"]}
     out: set[str] = set()
     stack = [group_id]
+    # visited 集：成环的组树（A.parent=B, B.parent=A）会让栈无限增长。
+    # 成环检查归 check_structure，但 detail_of 检查等调用方可能跑在它之前
+    # （2026-10-20 审查实测：compiled 分支 detail_of 检查先于成环检查，
+    # 环 + detail_of 的合同让 declare 永久挂死）——遍历本身必须自带终止性。
+    seen_groups: set[str] = set()
     while stack:
         current = stack.pop()
+        if current in seen_groups:
+            continue
+        seen_groups.add(current)
         group = by_id.get(current)
         if group is None:
             continue
@@ -1150,10 +1236,84 @@ def is_sequence(contract: dict[str, Any]) -> bool:
     return any(edge.get("step") for edge in contract.get("edges") or [])
 
 
+def _check_illustration_structure(contract: dict[str, Any]) -> None:
+    """SVG 轨合同的自洽核查 —— 编译轨核查的**放宽子集**（§六-B8）。
+
+    保留（不自洽 = 自相矛盾，拒绝）：节点/组 id 唯一、组嵌套不成环、
+    组里有成员、边的两端指着已声明的节点或组。
+    放宽（布局归作者）：没有 bands；不查「每个节点恰好放置一次」；不查
+    detail_of 的跨 block 规则；不拒孤立节点（孤立由 svg_audit /
+    vlm_extraction 披露成 finding，不是矛盾）。
+    """
+
+    nodes = contract["nodes"]
+    node_ids = [node["id"] for node in nodes]
+    duplicates = sorted({nid for nid in node_ids if node_ids.count(nid) > 1})
+    if duplicates:
+        raise VisualContractError(f"duplicate node ids: {duplicates}")
+    known = set(node_ids)
+
+    group_ids = [group["id"] for group in contract["groups"]]
+    dupe_groups = sorted({gid for gid in group_ids if group_ids.count(gid) > 1})
+    if dupe_groups:
+        raise VisualContractError(f"duplicate group ids: {dupe_groups}")
+    known_groups = set(group_ids)
+
+    parent_of = {g["id"]: g["parent"] for g in contract["groups"]}
+    for gid, parent in parent_of.items():
+        if parent is None:
+            continue
+        if parent not in known_groups:
+            raise VisualContractError(
+                f"group {gid!r} declares parent {parent!r}, which is not a declared "
+                f"group. Declared groups: {group_ids}"
+            )
+        seen_chain = {gid}
+        cursor = parent
+        while cursor is not None:
+            if cursor in seen_chain:
+                raise VisualContractError(f"group nesting forms a cycle through {gid!r}")
+            seen_chain.add(cursor)
+            cursor = parent_of.get(cursor)
+
+    for index, group in enumerate(contract["groups"]):
+        if not _group_member_ids(contract, group["id"]):
+            raise VisualContractError(
+                f"groups[{index}] ends up with no members: a group is a box around "
+                "some nodes; a box around nothing takes up room without saying anything"
+            )
+        for rank in group["ranks"]:
+            for nid in rank:
+                if nid not in known:
+                    raise VisualContractError(
+                        f"group {group['id']!r} lists unknown node {nid!r}; "
+                        f"declared nodes: {sorted(known)}"
+                    )
+
+    for index, edge in enumerate(contract["edges"]):
+        for endpoint_key in ("from", "to"):
+            endpoint = edge[endpoint_key]
+            prefix, _, ident = endpoint.partition(":")
+            if prefix == "group":
+                if ident not in known_groups:
+                    raise VisualContractError(
+                        f"edges[{index}].{endpoint_key} references unknown group "
+                        f"{ident!r}; declared groups: {group_ids}"
+                    )
+            elif endpoint not in known:
+                raise VisualContractError(
+                    f"edges[{index}].{endpoint_key} references unknown node "
+                    f"{endpoint!r}; declared nodes: {sorted(known)}"
+                )
+
+
 def check_structure(contract: dict[str, Any]) -> None:
     """合同自身必须自洽。不自洽 = 自相矛盾，不是质量判决，所以拒绝。"""
 
     family = contract["family"]
+    if family in ILLUSTRATION_FAMILIES:
+        _check_illustration_structure(contract)
+        return
     if family not in COMPILED_FAMILIES:
         _check_asserted_structure(contract)
         return
@@ -1495,16 +1655,22 @@ def _check_asserted_structure(contract: dict[str, Any]) -> None:
 # ── 断言求值 ──────────────────────────────────────────────────────────────
 def _select_nodes(contract: dict[str, Any], selector: dict[str, Any]) -> list[str]:
     nodes = contract.get("nodes") or []
-    group_of: dict[str, str] = {}
-    for group in contract.get("groups") or []:
-        for rank in group["ranks"]:
-            for nid in rank:
-                group_of[nid] = group["id"]
+    # 「组成员」按**子树**计（2026-10-20 M11）：嵌套子组的成员也属于祖先组。
+    # 清单教作者用 groups[].parent 表达归属（「归属要写进结构」），只数直接
+    # ranks 会让子组成员对父组选择器隐形 —— 与 _group_member_ids（组端点
+    # 展开）、check_structure、vlm_extraction 同一语义。
+    subtree_cache: dict[str, set[str]] = {}
+
+    def in_group(nid: str, gid: str) -> bool:
+        if gid not in subtree_cache:
+            subtree_cache[gid] = _group_member_ids(contract, gid)
+        return nid in subtree_cache[gid]
+
     out: list[str] = []
     for node in nodes:
         if "role" in selector and node["role"] != selector["role"]:
             continue
-        if "group" in selector and group_of.get(node["id"]) != selector["group"]:
+        if "group" in selector and not in_group(node["id"], selector["group"]):
             continue
         if "ids" in selector and node["id"] not in set(selector["ids"]):
             continue
@@ -1520,6 +1686,43 @@ def _compare(actual: Any, comparator: str, expected: Any) -> bool:
     return actual <= expected
 
 
+def _expanded_endpoints(
+    contract: dict[str, Any], edge: dict[str, Any]
+) -> tuple[list[str], list[str]]:
+    """边的两端展开为节点 id 清单：`group:<id>` 端点 = 该组子树全体成员。
+
+    与 check_structure 的孤儿判定（「连到组就是连到全体成员」）、
+    vlm_extraction 的证人期望同一语义 —— 2026-10-20 审查前断言求值按端点
+    字符串字面比对，组级边对 edge_count/degree/neighbors 完全隐形，同一份
+    合同的两个机械判据给出相反答案（结构检查说不是孤儿，断言说度数是 0）。
+    """
+
+    def expand(endpoint: Any) -> list[str]:
+        text = str(endpoint)
+        if text.startswith("group:"):
+            return sorted(_group_member_ids(contract, text[len("group:"):]))
+        return [text]
+
+    return expand(edge["from"]), expand(edge["to"])
+
+
+def _degree_of(node_id: str, expanded: list[tuple[Any, list[str], list[str]]]) -> int:
+    """节点的度 = 关联链路数：每条碰到它的边，按**对端端点数**（group: 已
+    展开为子树成员）× represents 计权。自环两端都算（与 check_structure
+    同口径）。于是 degree(node) ≡ neighbors(node, 全宇宙)，两个断言词
+    不再各说各话（2026-10-20 第三类语义对齐）。"""
+
+    total = 0
+    for edge, from_ids, to_ids in expanded:
+        links = 0
+        if node_id in from_ids:
+            links += len(to_ids)
+        if node_id in to_ids:
+            links += len(from_ids)
+        total += links * int(edge.get("represents") or 1)
+    return total
+
+
 def evaluate_assertions(
     contract: dict[str, Any], observed: dict[str, Any] | None = None
 ) -> list[dict[str, Any]]:
@@ -1533,6 +1736,11 @@ def evaluate_assertions(
     observed = observed or {}
     results: list[dict[str, Any]] = []
     edges = contract.get("edges") or []
+    # 端点展开（group: → 子树成员）每条边只算一次；represents 是这条边的
+    # 链路权重（编译器画 N 股、端口对账按 N —— 断言求值同口径，H4）。
+    _expanded = [
+        (edge, *_expanded_endpoints(contract, edge)) for edge in edges
+    ]
 
     for assertion in contract.get("assertions") or []:
         kind = assertion["kind"]
@@ -1551,14 +1759,36 @@ def evaluate_assertions(
             elif kind == "edge_count":
                 source = set(_select_nodes(contract, assertion.get("source") or {}))
                 target = set(_select_nodes(contract, assertion.get("target") or {}))
-                hits = [
-                    f"{edge['from']}→{edge['to']}"
-                    for edge in edges
-                    if (edge["from"] in source and edge["to"] in target)
-                    or (edge["from"] in target and edge["to"] in source)
-                ]
-                actual = len(hits)
+                hits: list[str] = []
+                weight = 0
+                group_edges = 0
+                expanded_links = 0
+                for edge, from_ids, to_ids in _expanded:
+                    matched = (
+                        any(f in source for f in from_ids)
+                        and any(t in target for t in to_ids)
+                    ) or (
+                        any(f in target for f in from_ids)
+                        and any(t in source for t in to_ids)
+                    )
+                    if not matched:
+                        continue
+                    hits.append(f"{edge['from']}→{edge['to']}")
+                    weight += int(edge.get("represents") or 1)
+                    if str(edge["from"]).startswith("group:") or str(edge["to"]).startswith("group:"):
+                        group_edges += 1
+                        expanded_links += len(from_ids) * len(to_ids)
+                # 条数口径 = 声明的边按 represents 计权（「2×400G」一条线算 2
+                # 条链路）。组级边参与匹配（展开后按成员判定），但条数不按
+                # 成员数翻 —— 作者心智是「一条线」，编译器画的也是一条到组框
+                # 的线；展开规模在 detail 里如实注明。
+                actual = weight
                 detail["matched"] = hits[:12]
+                if group_edges:
+                    detail["group_edges"] = (
+                        f"{group_edges} 条组级边按 group: 端点展开为 "
+                        f"{expanded_links} 条成员连接参与匹配；条数仍按声明的边计"
+                    )
             elif kind == "degree" and assertion.get("node"):
                 node_id = assertion["node"]
                 # **数进去的是哪几条，列出来。** degree 数的是这个节点上的全部
@@ -1569,17 +1799,14 @@ def evaluate_assertions(
                 # list** —— degree 这一支从不记 matched。它只能猜，猜了四次。
                 hits = [
                     f"{edge['from']}→{edge['to']}"
-                    for edge in edges
-                    if node_id in (edge["from"], edge["to"])
+                    for edge, from_ids, to_ids in _expanded
+                    if node_id in from_ids or node_id in to_ids
                 ]
-                actual = len(hits)
+                actual = _degree_of(node_id, _expanded)
                 detail["matched"] = hits[:12]
             elif kind == "degree":
                 selected = _select_nodes(contract, assertion.get("selector") or {})
-                degrees = {
-                    nid: sum(1 for edge in edges if nid in (edge["from"], edge["to"]))
-                    for nid in selected
-                }
+                degrees = {nid: _degree_of(nid, _expanded) for nid in selected}
                 offenders = {
                     nid: value
                     for nid, value in degrees.items()
@@ -1606,13 +1833,20 @@ def evaluate_assertions(
             elif kind == "neighbors":
                 node_id = assertion.get("node") or ""
                 within = set(_select_nodes(contract, assertion.get("within") or {}))
-                hits = [
-                    f"{edge['from']}→{edge['to']}"
-                    for edge in edges
-                    if (edge["from"] == node_id and edge["to"] in within)
-                    or (edge["to"] == node_id and edge["from"] in within)
-                ]
-                actual = len(hits)
+                hits = []
+                weight = 0
+                for edge, from_ids, to_ids in _expanded:
+                    # 邻居按**对端端点**数（group: 展开后的成员逐个计），
+                    # × represents 计权 —— 与 _degree_of 同一链路口径。
+                    links = 0
+                    if node_id in from_ids:
+                        links += sum(1 for t in to_ids if t in within)
+                    if node_id in to_ids:
+                        links += sum(1 for f in from_ids if f in within)
+                    if links:
+                        hits.append(f"{edge['from']}→{edge['to']}")
+                        weight += links * int(edge.get("represents") or 1)
+                actual = weight
                 detail["matched"] = hits[:12]
             elif kind == "series_count":
                 actual = int(observed.get("series_count", -1))
@@ -1655,6 +1889,32 @@ def failed_assertions(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [item for item in results if not item.get("holds")]
 
 
+def evaluate_svg_dom_assertions(
+    contract: dict[str, Any],
+    *,
+    dom_nodes: list[dict[str, Any]],
+    dom_edges: list[dict[str, Any]],
+    dom_groups: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """把合同断言对 **SVG DOM 实际标记出来的结构**求值（SVG 轨铸造门）。
+
+    断言执行器只认 nodes/edges/groups 三张表 —— 把 DOM 里数出来的同形表
+    换进去，求值逻辑零改动。与编译轨核合同、asserted 轨核 matplotlib 对象
+    模型同型：判据不变，变的是它读的那份结构。
+
+    `dom_nodes` 每项至少 {"id", "role"}；`dom_edges` 每项 {"from", "to"}；
+    `dom_groups` 缺省时按合同声明计（组计数断言退化为对声明求值）。
+    """
+
+    observed = {
+        **contract,
+        "nodes": dom_nodes,
+        "edges": dom_edges,
+        "groups": dom_groups if dom_groups is not None else contract.get("groups") or [],
+    }
+    return evaluate_assertions(observed)
+
+
 # ── 覆盖：需求原文里的「量」有没有在合同里出现 ─────────────────────────────
 # ── 词表之外（合同说不出来的事实）──────────────────────────────────────
 # 合同是一门**有限的**描述语言。模型想说一件它没有词的事（「这条关系是 1:N」
@@ -1680,6 +1940,25 @@ _TOP_KEYS_ASSERTED = frozenset({
     "title", "assertions", "panels", "series", "unexpressed", "medium", "medium_source",
     "text_language",
 })
+#: SVG 插画轨（ILLUSTRATION_FAMILIES）的顶层合法键 = 编译轨减去 bands/blocks
+#: （布局归作者，合同是宣言不是渲染源，§六-B8）。2026-10-16 真实 e2e 的教训：
+#: 这条分支此前落进 _TOP_KEYS_ASSERTED，于是 nodes/groups/edges 全被报成
+#: 「词表里没有的键」，而作者从 schematic schema 学来的 bands 又被归一化静默
+#: 丢掉 —— 同一份合同被诬告两次。词表按家族分开是这条判据成立的前提。
+_TOP_KEYS_ILLUSTRATION = frozenset({
+    "title", "assertions", "nodes", "groups", "edges", "notes",
+    "annotations", "unexpressed", "medium", "medium_source", "text_language",
+})
+
+
+def _top_keys_for(family: str | None) -> frozenset[str]:
+    if family in COMPILED_FAMILIES:
+        return _TOP_KEYS_COMPILED
+    if family in ILLUSTRATION_FAMILIES:
+        return _TOP_KEYS_ILLUSTRATION
+    if family in ASSERTED_FAMILIES:
+        return _TOP_KEYS_ASSERTED
+    return _TOP_KEYS_COMPILED | _TOP_KEYS_ASSERTED | _TOP_KEYS_ILLUSTRATION
 _SHAPE_KEYS: dict[str, frozenset[str]] = {
     "nodes": frozenset({"id", "label", "sublabel", "shape", "ports", "role",
                         "isolated", "detail_of", "side", "emphasis"}),
@@ -1712,7 +1991,7 @@ def _collect_unknown(items: Any, allowed: frozenset[str], where: str,
             sink.append((f"{where}[{index}].{key}", str(item.get(key))[:60]))
 
 
-def dropped_findings(raw: Any, normalized: Any) -> list[dict[str, Any]]:
+def dropped_findings(raw: Any, normalized: Any, family: str | None = None) -> list[dict[str, Any]]:
     """词表**认识**、作者也填了、可归一化之后没了的顶层键。
 
     `unexpressed_findings` 问的是「这个键认不认识」；它答不了「这个键到没到纸上」。
@@ -1721,12 +2000,16 @@ def dropped_findings(raw: Any, normalized: Any) -> list[dict[str, Any]]:
 
     **一个键有两条归一化路径时，只要有一条忘了它，它就会在那条路径上静默消失。**
     这条判据扫的是结果，所以不管将来加多少条分支，都问得住。
+
+    `family` 给了就按那个家族的词表扫（别拿编译轨的 bands 去问插画轨的合同，
+    2026-10-16 e2e 那条诬告就是这么来的）；没给按全部家族的并集扫（旧行为，
+    测试与外部调用方兼容）。
     """
 
     if not isinstance(raw, dict) or not isinstance(normalized, dict):
         return []
     lost: list[str] = []
-    for key in sorted(_TOP_KEYS_COMPILED | _TOP_KEYS_ASSERTED):
+    for key in sorted(_top_keys_for(family)):
         if key in ("unexpressed", "family", "kind"):
             continue
         before = raw.get(key)
@@ -1904,8 +2187,7 @@ def unexpressed_findings(raw: Any, family: str) -> list[dict[str, Any]]:
     if not isinstance(raw, dict):
         return []
     sink: list[tuple[str, str]] = []
-    compiled = family in COMPILED_FAMILIES
-    top_allowed = _TOP_KEYS_COMPILED if compiled else _TOP_KEYS_ASSERTED
+    top_allowed = _top_keys_for(family)
     for key in sorted(set(raw) - top_allowed):
         sink.append((key, str(raw.get(key))[:60]))
 
@@ -2472,6 +2754,78 @@ def contract_schema(family: str) -> dict[str, Any]:
             },
             "required": ["nodes", "groups", "bands", "edges"],
         }
+    if family in ILLUSTRATION_FAMILIES:
+        return {
+            "type": "object",
+            "properties": {
+                **common,
+                "medium": _medium_schema(),
+                "nodes": {
+                    "type": "array",
+                    "description": (
+                        "图上每一个有合同身份的组件一条。每个 id 必须在 SVG DOM 里 "
+                        "以 data-node 标记出现且恰好一次（见 svg-illustration skill "
+                        "的 DOM 标记约定）；role 决定框架发色与证人计数。"
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "label": {"type": "string"},
+                            "sublabel": {"type": "string"},
+                            "role": {"type": "string"},
+                        },
+                        "required": ["id", "label"],
+                    },
+                },
+                "groups": {
+                    "type": "array",
+                    "description": (
+                        "容器（机箱/分区/子系统）。ranks 在 SVG 轨是**成员清单**"
+                        "（平铺节点 id 即可），不是编译轨的摆放行。组容器在 DOM 里"
+                        "以 data-group 标记。"
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "label": {"type": "string"},
+                            "ranks": {
+                                "type": "array",
+                                "items": {"type": "array", "items": {"type": "string"}},
+                            },
+                            "label_position": {"type": "string", "enum": ["top", "bottom"]},
+                            "style": {"type": "string", "enum": list(GROUP_STYLES)},
+                            "parent": {"type": "string"},
+                        },
+                        "required": ["id", "ranks"],
+                    },
+                },
+                "edges": {
+                    "type": "array",
+                    "description": (
+                        "每条连线一条，端点是节点 id 或 group:<id>；DOM 里以 "
+                        "data-edge-from / data-edge-to 标记。represents=N 表示"
+                        "这一笔是 N 条链路的简写，计数断言按 N 算。"
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "from": {"type": "string"},
+                            "to": {"type": "string"},
+                            "label": {"type": "string"},
+                            "kind": {"type": "string", "enum": ["bus", "dashed", "link"]},
+                            "represents": {"type": "integer"},
+                            "role": {"type": "string"},
+                            "bidirectional": {"type": "boolean"},
+                        },
+                        "required": ["from", "to"],
+                    },
+                },
+                "notes": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["nodes", "edges"],
+        }
     axis = {
         "type": "object",
         "properties": {
@@ -2539,7 +2893,7 @@ def contract_schema(family: str) -> dict[str, Any]:
 def contract_summary(contract: dict[str, Any]) -> str:
     """一行人读摘要（进 findings / 交付披露）。"""
 
-    if contract["family"] in COMPILED_FAMILIES:
+    if contract["family"] in COMPILED_FAMILIES or contract["family"] in ILLUSTRATION_FAMILIES:
         return (
             f"{len(contract.get('nodes') or [])} nodes / "
             f"{len(contract.get('edges') or [])} edges / "

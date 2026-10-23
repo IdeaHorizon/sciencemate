@@ -73,10 +73,15 @@ test("notification preferences use the canonical API and only expose real live-R
   const page = source("../../../app/(workspace)/settings/notifications/page.tsx");
   const chat = source("../../chat/hooks/useChat.ts");
   assert.match(page, /api\.saveNotificationSettings/);
-  for (const preference of ["decision_required", "run_failed", "run_completed"]) {
+  for (const preference of ["decision_required", "run_failed"]) {
     assert.match(page, new RegExp(preference));
     assert.match(chat, new RegExp(preference));
   }
+  // 「执行完成」删了（2026-10-20）：这条流收尾时人正看着回复落下来，弹"跑完了"是复述屏幕。
+  // 判据落在"会话收尾会不会弹成功提示"上，不落在开关名上 —— 换个名字加回来也得转红。
+  const chatCode = chat.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  assert.doesNotMatch(chatCode, /pushSuccess/);
+  assert.doesNotMatch(page, /run_completed|执行完成/);
   assert.match(page, /预算告警/);
   assert.match(page, /没有可用的送达方式/);
   assert.match(page, /永远可见/);
@@ -187,7 +192,7 @@ test("每个角色都够得着「加一个模型」，且这一页不假装能�
   assert.equal(page.includes("canManage"), false, "整段连接区不该再被角色权限一刀切");
   assert.match(page, /actions\.canEdit && <button/);
   // provider 的合法取值必须在控件里给出，不能等存完之后靠一个状态词去发现。
-  assert.match(page, /providerOptions\(form\.provider\)/);
+  assert.match(page, /providerOptions\(form\.provider, lang\)/);
   // 能建就得能删：一条填错的连接不该永远留在列表里。
   assert.match(page, /client\.remove\(backend\.id\)/);
   assert.match(shell, /remove: \(id\) => api\.deleteModelBackend\(id\)/);

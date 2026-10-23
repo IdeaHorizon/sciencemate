@@ -420,3 +420,252 @@ def test_no_bare_Timer_where_two_namespaces_define_one() -> None:
             f"{path.name} 里裸写了 Timer，而这个文件同时 using 了 System.Threading 和 "
             "System.Windows.Forms —— 真 csc 上是 CS0104。写全名。")
 
+
+
+# ── 2026-10-19：高 DPI 屏上挤成一堆 ───────────────────────────────────────────
+#
+# wangd 转来一台 150% 缩放的 Windows 上的截图：标题压着副标题、「浏览…」只剩半截、
+# 「需要约 0.9 GB」压在输入框上。病根是一句许了没兑现的诺：`PrepareUi` 调了
+# `SetProcessDPIAware`（「别替我拉伸，我自己按 DPI 画」），字号是磅、自然放大了 1.5 倍；
+# 而每个坐标是按 96 DPI 写的像素，窗口也没开自动缩放 —— 格子还是原来那么大。
+#
+# 真机上量出来的三条（9800x3d，DPI 144，见 Footprint.BeginLayoutAt96Dpi 的注释）：
+# 不挂起布局就开自动缩放 = 什么都不放大；界面字体在放大之前设 = 固定尺寸的 Label
+# 被放大两次；字体在放大之后设 = 全部恰好一次。顺序收在 Footprint 那一对函数里，
+# 这里查两件事：**许了诺的编译单元里，每个窗口都走那一对**；**那一对里的顺序没被换掉**。
+# 布局本身（有没有叠、有没有截）CI 上量不了 —— 那要真 DPI，见 PR 里的真机探针。
+
+FOOTPRINT_SOURCE = FOOTPRINT.read_text(encoding="utf-8")
+
+#: 声明「我自己按 DPI 画」的写法。这一单元里谁都别想让系统替它拉伸。
+PROMISES_DPI = ("SetProcessDPIAware", "SetProcessDpiAwareness", "SetProcessDpiAwarenessContext")
+
+#: `class X : Form` —— 每一个窗口，不是名单。
+A_FORM = re.compile(r"\bclass[ \t]+(\w+)[ \t]*:[ \t]*Form\b")
+
+
+def _code_only(source: str) -> str:
+    """去掉 `//` 注释：注释里提一句 `Footprint.BeginLayoutAt96Dpi` 不算调用了它。"""
+    return "\n".join(re.sub(r"//.*$", "", line) for line in source.splitlines())
+
+
+def _forms_that_promised_to_scale() -> list[tuple[str, str, str]]:
+    """(单元, 窗口类名, 构造函数正文)，只收许了 DPI 诺的单元里的窗口。"""
+    found: list[tuple[str, str, str]] = []
+    for unit, sources in sorted(_the_compile_units().items()):
+        texts = [source.read_text(encoding="utf-8") for source in sources]
+        if not any(mark in text for text in texts for mark in PROMISES_DPI):
+            continue
+        for text in texts:
+            code = _code_only(text)
+            for match in A_FORM.finditer(code):
+                name = match.group(1)
+                ctor = _body_of(code[match.start():], f"public {name}(")
+                found.append((unit, name, ctor))
+    return found
+
+
+def test_the_dpi_scan_finds_the_windows_it_is_meant_to_guard() -> None:
+    """扫不到就等于没有这道闸 —— 安装向导和卸载确认框都得在里面。"""
+    names = {name for _, name, _ in _forms_that_promised_to_scale()}
+    assert {"WizardForm", "ConfirmUninstall"} <= names, (
+        f"许了 DPI 诺的单元里只扫到 {sorted(names)} —— 扫法塌了，这道闸是空的")
+
+
+@pytest.mark.parametrize(
+    "unit,form,ctor", _forms_that_promised_to_scale(),
+    ids=[f"{unit}:{name}" for unit, name, _ in _forms_that_promised_to_scale()])
+def test_a_window_in_a_dpi_aware_process_scales_its_pixels(unit: str, form: str, ctor: str) -> None:
+    """进程说了「我自己按 DPI 画」，窗口就得把 96 DPI 写的坐标交给 WinForms 放大。"""
+    begin = ctor.find("Footprint.BeginLayoutAt96Dpi(this)")
+    end = ctor.find("Footprint.EndLayoutAt96Dpi(this")
+    assert begin >= 0 and end >= 0, (
+        f"{unit} 里的 {form} 没走 Footprint.BeginLayoutAt96Dpi / EndLayoutAt96Dpi —— "
+        "进程是 DPI 感知的，150% 的屏上字放大了、格子没放大，就是那张挤成一堆的截图")
+    adds = [m.start() for m in re.finditer(r"\bControls\.Add(?:Range)?\(", ctor)]
+    sized = [m.start() for m in re.finditer(r"\bClientSize\s*=", ctor)]
+    assert adds, f"{form} 的构造函数里一个控件都没加 —— 扫法塌了"
+    assert begin < min(adds + sized), (
+        f"{form} 先加了控件 / 定了窗口大小才开始按 96 DPI 摆 —— 挂起布局之前的东西放大不到")
+    assert end > max(adds), (
+        f"{form} 放大完了还在往窗口里加控件 —— 那些控件按原像素摆，150% 下照样挤")
+    # 窗口自己的字体只许在 EndLayoutAt96Dpi 里设。语句形式（以分号结尾）才是窗口的；
+    # 对象初始化器里的 `Font = …,` 是某个 Label 自己的，不算。
+    own_font = re.search(r"^[ \t]*(?:this\.)?Font[ \t]*=[^;\n]*;", ctor, re.MULTILINE)
+    assert not own_font, (
+        f"{form} 在构造函数里自己设了窗口字体 —— 设在放大之前的话，固定尺寸的 Label "
+        "会被放大两次（真机量过：100 → 225）。字体交给 EndLayoutAt96Dpi")
+
+
+def test_the_layout_pair_keeps_the_measured_order() -> None:
+    """Begin：先挂起再开自动缩放；End：先放大再换字体。两条都是真机上量出来的。"""
+    begin = _code_only(_body_of(FOOTPRINT_SOURCE, "public static void BeginLayoutAt96Dpi"))
+    assert "new SizeF(96F, 96F)" in begin and "AutoScaleMode.Dpi" in begin, (
+        "没声明「坐标是按 96 DPI 写的、按 DPI 放大」")
+    suspend = begin.find("SuspendLayout()")
+    assert 0 <= suspend < begin.find("AutoScaleMode"), (
+        "没先挂起布局就开了自动缩放 —— WinForms 当场放大一个空窗口，之后的控件全按原像素摆")
+    end = _code_only(_body_of(FOOTPRINT_SOURCE, "public static void EndLayoutAt96Dpi"))
+    resume = end.find("ResumeLayout(")
+    font = end.find(".Font = ")
+    assert 0 <= resume < font, (
+        "字体在放大之前设了（或者没设）—— 固定尺寸的 Label 会被放大两次")
+
+
+# ── 2026-10-19：安装器两种语言，默认英文 ──────────────────────────────────────
+#
+# wangd：「安装器也可以选语言，默认英文。」安装器是一个不懂中文的人看到的第一个画面 ——
+# 从前它只有中文。现在每一句写成 `Speech.T("中文", "English")`，向导第一页顶上放「中文 |
+# English」。判据扫的是"编进安装器 / 卸载器的源码里出现了中文"这件事本身：每一个带中文的
+# 字面量都必须是 `Speech.T` / `Speech.In` 的中文那个参数，紧跟着的英文参数里不许有中文。
+# 哪个单元算"安装器家族"不列名单：编进了定义 `Speech` 的那份源码的单元都算。
+
+_HAN = re.compile(r"[一-鿿]")
+_STRING_START = re.compile(r'(\$@|@\$|\$|@)?"')
+
+
+def _csharp_strings_and_mask(source: str) -> tuple[list[tuple[int, int]], str]:
+    """(每个字符串字面量的 [起, 止)，以及一份把注释和字符串内容都换成空格的源码)。
+
+    换成空格是为了配括号、拆参数时不被字符串里的括号和逗号骗 —— 位置一个都不挪。
+    """
+    spans: list[tuple[int, int]] = []
+    masked = list(source)
+    i, n = 0, len(source)
+
+    def blank(a: int, b: int) -> None:
+        for k in range(a, b):
+            if masked[k] != "\n":
+                masked[k] = " "
+
+    while i < n:
+        if source.startswith("//", i):
+            j = source.find("\n", i)
+            j = n if j < 0 else j
+            blank(i, j)
+            i = j
+            continue
+        if source.startswith("/*", i):
+            j = source.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            blank(i, j)
+            i = j
+            continue
+        if source[i] == "'":
+            j = i + 1
+            while j < n and source[j] != "'":
+                j += 2 if source[j] == "\\" else 1
+            blank(i, j + 1)
+            i = j + 1
+            continue
+        start = _STRING_START.match(source, i)
+        if start:
+            verbatim = "@" in (start.group(1) or "")
+            j = start.end()
+            while j < n:
+                if verbatim and source[j] == '"' and source[j + 1:j + 2] == '"':
+                    j += 2
+                    continue
+                if not verbatim and source[j] == "\\":
+                    j += 2
+                    continue
+                if source[j] == '"':
+                    break
+                j += 1
+            spans.append((i, j + 1))
+            blank(i, j + 1)
+            i = j + 1
+            continue
+        i += 1
+    return spans, "".join(masked)
+
+
+def _arguments(masked: str, opened: int) -> list[tuple[int, int]]:
+    """从 `(` 开始，按顶层逗号切出每个参数的 [起, 止)。"""
+    depth, start, out = 0, opened + 1, []
+    for k in range(opened, len(masked)):
+        ch = masked[k]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                out.append((start, k))
+                return out
+        elif ch == "," and depth == 1:
+            out.append((start, k))
+            start = k + 1
+    raise AssertionError("括号没配上")
+
+
+def _units_that_speak() -> dict[str, list[Path]]:
+    units = {}
+    for unit, sources in _the_compile_units().items():
+        if any("static class Speech" in s.read_text(encoding="utf-8") for s in sources):
+            units[unit] = sources
+    return units
+
+
+def test_the_installer_family_is_found() -> None:
+    units = _units_that_speak()
+    assert "make_the_installer" in units, f"安装器那个单元没编进 Speech：{sorted(units)}"
+    assert any(any(s.name == "Uninstaller.cs" for s in sources) for sources in units.values()), (
+        "卸载器那个单元没编进 Speech —— 卸载时又是一屏只有中文")
+    assert any(any(s.name == "Shell.cs" for s in sources) for sources in units.values()), (
+        "壳那个单元没编进 Speech —— 后端起不来时弹的对话框又只有中文")
+
+
+def test_every_csharp_source_that_draws_a_window_is_in_a_unit_that_speaks() -> None:
+    """新加一个画窗口的单元而忘了编进 Speech.cs，上面那条判据就看不见它 —— 这一条看得见。"""
+    speaking = {s for sources in _units_that_speak().values() for s in sources}
+    for unit, sources in _the_compile_units().items():
+        texts = {s: s.read_text(encoding="utf-8") for s in sources}
+        draws = any(mark in t for t in texts.values() for mark in DRAWS_A_WINDOW)
+        chinese = any(_HAN.search(t) for t in texts.values())
+        if draws and chinese:
+            assert all(s in speaking for s in sources), f"{unit} 画窗口、带中文，却没编进 Speech.cs"
+
+
+@pytest.mark.parametrize("unit", sorted(_units_that_speak()))
+def test_every_chinese_line_in_the_installer_also_says_it_in_english(unit: str) -> None:
+    offenders: list[str] = []
+    for source_path in _units_that_speak()[unit]:
+        source = source_path.read_text(encoding="utf-8")
+        spans, masked = _csharp_strings_and_mask(source)
+        allowed: list[tuple[int, int]] = []
+        # 写日志的 Console 输出不是界面：整句放行（壳的 stderr 进 shell.log，给找问题的人看）。
+        for call in re.finditer(r"\bConsole\.(?:Error\.)?Write(?:Line)?\s*\(", masked):
+            allowed.append(_arguments(masked, call.end() - 1)[0])
+        for call in re.finditer(r"\bSpeech\.(T|In|Both|Pair)\s*\(", masked):
+            args = _arguments(masked, call.end() - 1)
+            zh = 1 if call.group(1) == "In" else 0
+            if len(args) < zh + 2:
+                offenders.append(f"{source_path.name}:{source.count(chr(10), 0, call.start()) + 1} Speech.{call.group(1)} 少了一个参数")
+                continue
+            allowed.append(args[zh])
+            en_from, en_to = args[zh + 1]
+            if _HAN.search(source[en_from:en_to]):
+                offenders.append(f"{source_path.name}:{source.count(chr(10), 0, en_from) + 1} 英文那一侧写着中文")
+        # 语言自己的名字用它自己的文字写（「中文」）—— 这是唯一一处有意不翻的。
+        name_of = re.search(r"static string NameOf\s*\(", masked)
+        if name_of:
+            body = masked.index("{", name_of.end())
+            allowed.append(_arguments(masked.replace("{", "(").replace("}", ")"), body)[0])
+        for a, b in spans:
+            if _HAN.search(source[a:b]) and not any(x <= a and b <= y for x, y in allowed):
+                offenders.append(f"{source_path.name}:{source.count(chr(10), 0, a) + 1} → {source[a:b][:50]}")
+    assert not offenders, (
+        f"{unit} 里这些话只有中文，英文安装界面上会原样露出来（{len(offenders)} 处）。"
+        "写成 Speech.T(\"中文\", \"English\")：\n" + "\n".join(offenders))
+
+
+def test_the_installer_speaks_english_unless_someone_picks_chinese() -> None:
+    """默认英文（wangd 2026-10-19），第一页顶上能换，换了算这个人选的、交给应用。"""
+    speech = (WINDOWS_SHELL / "Speech.cs").read_text(encoding="utf-8")
+    assert re.search(r"public static string Language\s*=\s*English\s*;", speech), "安装器默认不是英文"
+    switch = _body_of(WIZARD_SOURCE, "private void SwitchTo")
+    assert "Speech.ChosenByThePerson = true" in switch, "向导上换了语言却不算这个人选的 —— 应用第一次打开不会照它"
+    assert "foreach (Action say in _speech) say();" in switch, "换了语言，已经摆出来的字不跟着换"
+    footprint_of_install = _body_of(STUB_SOURCE, "private static void LeaveTheFootprint")
+    assert "language = Speech.Language" in footprint_of_install, "清单没记装的时候的语言 —— 卸载器不知道该说哪种"
+    assert "Footprint.TellTheAppTheLanguage(" in footprint_of_install, "选过的语言没交给应用"

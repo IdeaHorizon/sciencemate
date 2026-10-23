@@ -3834,3 +3834,10 @@ pre {
   .organisation-knowledge-card dl > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
 }
 .organisation-connect { max-width: 560px; }
+
+/* 更新进行中：转圈 + 一句话（横幅与关于页同一个 UpdateProgress）。 */
+.update-progress { display: inline-flex; align-items: center; gap: .45rem; }
+.update-progress .is-spinning { animation: update-progress-spin 1s linear infinite; }
+:root[data-reduce-motion="true"] .update-progress .is-spinning { animation: none; }
+@keyframes update-progress-spin { to { transform: rotate(360deg); } }
+.update-banner a { color: var(--blue); text-decoration: underline; }

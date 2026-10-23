@@ -121,7 +121,7 @@ def _host_has_a_user_systemd_session() -> bool:
     try:
         return subprocess.run(
             ["systemd-run", "--user", "--scope", "--quiet",
-             "-p", "MemoryMax=64M", "-p", "TasksMax=16", "/bin/true"],
+             "-p", "MemoryMax=64M", "-p", "MemorySwapMax=0", "-p", "TasksMax=16", "/bin/true"],
             capture_output=True, timeout=20, check=False,
         ).returncode == 0
     except (OSError, subprocess.TimeoutExpired):

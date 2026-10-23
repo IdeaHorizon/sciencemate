@@ -439,18 +439,28 @@ internal static class Shell
     /// 没出来），一个字都没说 —— 日志明明写着原因，人不知道去哪看。没有交互桌面时（打包器
     /// 经 SSH 自检）MessageBox 会抛，照旧只留日志，和 `Complain` 同一个处理。
     /// </remarks>
-    private static void SayItAndOfferTheLogs(string message)
+    /// <remarks>
+    /// 中英两段并列（`Speech.Both`）：后端起不来的时候界面还没出来，壳不知道这个人要哪种语言
+    /// （wangd 2026-10-19）。每种语言自己是一整段：出了什么事、日志在哪、要不要打开。
+    /// </remarks>
+    private static void SayItAndOfferTheLogs(Words what)
     {
-        Console.Error.WriteLine(message);
+        Console.Error.WriteLine(what.En);
         try
         {
-            var answer = MessageBox.Show(
-                message + "\r\n\r\n日志在 " + LogsDirectory() +
-                "\r\n找人帮忙时，把里面的 backend.log 一起发过去。\r\n\r\n现在打开日志文件夹吗？",
+            var answer = MessageBox.Show(WithTheLogs(what, LogsDirectory()),
                 "ScienceMate", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
             if (answer == DialogResult.Yes) OpenLogsFolder();
         }
         catch (Exception ex) { Console.Error.WriteLine("（连弹窗都失败了：" + ex.Message + "）"); }
+    }
+
+    /// <summary>出了什么事 + 日志在哪 + 要不要打开 —— 中文一段、英文一段。</summary>
+    private static string WithTheLogs(Words what, string logs)
+    {
+        return Speech.Both(
+            what.Zh + "\r\n日志在 " + logs + "\r\n找人帮忙时，把里面的 backend.log 一起发过去。\r\n现在打开日志文件夹吗？",
+            what.En + "\r\nThe logs are in " + logs + "\r\nWhen you ask for help, send backend.log from there.\r\nOpen the logs folder now?");
     }
 
     private static void OpenInBrowser(string url)
@@ -809,13 +819,18 @@ internal static class Shell
                 if (!StillRunning(pi.hProcess))
                 {
                     uint code; GetExitCodeProcess(pi.hProcess, out code);
-                    SayItAndOfferTheLogs("后端没起来就退出了（code " + code + "）。");
+                    SayItAndOfferTheLogs(Speech.Pair("后端没起来就退出了（code " + code + "）。",
+                                                     "The backend exited before it was ready (code " + code + ")."));
                     return 4;
                 }
                 if (HealthReady(url)) { ready = true; break; }
                 Thread.Sleep(300);
             }
-            if (!ready) { SayItAndOfferTheLogs("后端 90 秒内没有准备好。"); return 5; }
+            if (!ready)
+            {
+                SayItAndOfferTheLogs(Speech.Pair("后端 90 秒内没有准备好。", "The backend was not ready within 90 seconds."));
+                return 5;
+            }
 
             // READY 仍然打到 stdout：装完自检靠它认出后端起来了。winexe 没有控制台，
             // 但调用方重定向了 stdout 时这一行照样送得到（打包器自检就是这么读的）。
@@ -844,7 +859,8 @@ internal static class Shell
                 Console.WriteLine("RESTARTING (backend exit code 3)");
                 continue;
             }
-            SayItAndOfferTheLogs("后端意外退出了（code " + exitCode + "）。");
+            SayItAndOfferTheLogs(Speech.Pair("后端意外退出了（code " + exitCode + "）。",
+                                             "The backend stopped unexpectedly (code " + exitCode + ")."));
             return 4;
         }
     }
@@ -875,7 +891,9 @@ internal sealed class ShellWindow : Form
         IntPtr menu = GetSystemMenu(Handle, false);
         if (menu == IntPtr.Zero) return;
         AppendMenuW(menu, MF_SEPARATOR, IntPtr.Zero, null);
-        AppendMenuW(menu, MF_STRING, new IntPtr(SC_OPEN_LOGS), "打开日志文件夹");
+        // 菜单项放不下两行：按这台电脑的系统语言说（同应用第一次打开的判据）。
+        AppendMenuW(menu, MF_STRING, new IntPtr(SC_OPEN_LOGS),
+                    Speech.In(Speech.OfThisSystem(), "打开日志文件夹", "Open logs folder"));
     }
 
     protected override void WndProc(ref Message m)

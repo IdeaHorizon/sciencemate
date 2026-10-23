@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy import delete
 import pytest_asyncio
@@ -94,7 +96,7 @@ async def test_replaying_the_same_engagement_is_idempotent_not_a_500(feed_client
     对象仍留在 session 里，请求收尾那次 commit 会把它再插一遍 —— 抛
     PendingRollbackError，一个幂等重放变成 500。
     """
-    client, db, _current, _users = feed_client
+    client, db, current, users = feed_client
     item_id = "aaaaaaaa-0000-4000-8000-000000000001"
 
     for _ in range(3):
@@ -111,11 +113,53 @@ async def test_replaying_the_same_engagement_is_idempotent_not_a_500(feed_client
     detail = (await client.get(f"/api/v1/feed/items/{item_id}")).json()
     assert detail["saved"] is True
 
+    for _ in range(3):
+        response = await client.post(
+            f"/api/v1/feed/items/{item_id}/engagement", json={"action": "open"}
+        )
+        assert response.status_code == 204, response.text
+    opened = (await db.execute(
+        select(FeedEngagement).where(
+            FeedEngagement.item_id == item_id,
+            FeedEngagement.action == "open",
+        )
+    )).scalars().all()
+    assert len(opened) == 1  # Reopening never accumulates a second vote.
+    assert (await client.get(f"/api/v1/feed/items/{item_id}")).json()["viewed"] is True
+
+    current["user"] = users["colleague"]
+    assert (await client.get(f"/api/v1/feed/items/{item_id}")).json()["viewed"] is False
+    current["user"] = users["me"]
+
     # 撤销必须真的撤销 —— 一个点错了就永久消失的按钮，用户下次就不敢点了。
     assert (await client.delete(
         f"/api/v1/feed/items/{item_id}/engagement/save"
     )).status_code == 204
     assert (await client.get(f"/api/v1/feed/items/{item_id}")).json()["saved"] is False
+
+
+@pytest.mark.asyncio
+async def test_dismissed_card_is_hidden_even_when_pool_snapshot_is_stale(feed_client, monkeypatch) -> None:
+    from app.api.v1 import feed
+    from app.schemas.feed import FeedCard, FeedItemOut, FeedTodayOut
+    from app.services.feed import translation
+
+    client, _db, _current, _users = feed_client
+    item_id = "aaaaaaaa-0000-4000-8000-000000000001"
+    card = FeedCard(item=FeedItemOut(id=item_id, kind="paper", title="A public paper"),
+                    recommendation_sources=["domain"])
+    async def stale_pool(*_args, **_kwargs):
+        return FeedTodayOut(feed=[card])
+    monkeypatch.setattr(feed, "recommendation_pool", stale_pool)
+    monkeypatch.setattr(translation, "translation_ready", lambda _item: True)
+
+    url = "/api/v1/feed/today?limit=21&offset=0&ready_only=true"
+    assert [row["item"]["id"] for row in (await client.get(url)).json()["feed"]] == [item_id]
+    response = await client.post(f"/api/v1/feed/items/{item_id}/engagement", json={"action": "dismiss"})
+    assert response.status_code == 204, response.text
+    after = (await client.get(url)).json()
+    assert after["feed"] == []
+    assert after["has_more"] is False
 
 
 @pytest.mark.asyncio
@@ -188,6 +232,33 @@ async def test_today_says_so_when_it_has_nothing_personal_to_offer(feed_client) 
     body = (await client.get("/api/v1/feed/today")).json()
     assert body["personalized"] is False
     assert body["onboarded"] is False
+
+
+@pytest.mark.asyncio
+async def test_today_pages_recommendations_without_losing_or_repeating_items(feed_client) -> None:
+    client, db, _current, _users = feed_client
+    now = datetime.now(UTC)
+    db.add_all([
+        FeedItem(
+            canonical_key=f"url:https://example.test/daily/{index}",
+            kind="news", title=f"研究动态 {index}",
+            url=f"https://example.test/daily/{index}",
+            published_at=now, authors=[], domains=[],
+            extra={"feed_acquisition_routes": ["bignews"]},
+            visibility=FeedVisibility.PLATFORM,
+        )
+        for index in range(50)
+    ])
+    await db.flush()
+
+    pages = [
+        (await client.get(f"/api/v1/feed/today?limit=21&offset={offset}")).json()
+        for offset in (0, 21, 42)
+    ]
+    assert [len(page["feed"]) for page in pages] == [21, 21, 8]
+    assert [page["has_more"] for page in pages] == [True, True, False]
+    ids = [card["item"]["id"] for page in pages for card in page["feed"]]
+    assert len(ids) == len(set(ids)) == 50
 
 
 @pytest.mark.asyncio
@@ -273,10 +344,12 @@ async def test_an_edition_that_never_collects_does_not_promise_a_first_round(
     assert reason == COPY["empty.no_collector_here"]["zh"]
     assert "几分钟" not in reason, "又在一台不采集的机器上承诺采集时间了"
 
-    # 会采集的那一档照旧：这条修复不许把 org 档的话也改掉。
+    # 会采集的组织档返回真实进度，不再无条件承诺“几分钟内完成”。
     monkeypatch.setattr(assembly, "background_collection_enabled", lambda: True)
-    org_reason = (await client.get("/api/v1/feed/today")).json()["empty_reason"]
-    assert org_reason == COPY["empty.first_round"]["zh"]
+    org_body = (await client.get("/api/v1/feed/today")).json()
+    assert org_body["empty_reason"] == ""
+    assert org_body["progress"]["collected"] == 0
+    assert org_body["progress"]["phase"] == "settled"
 
 
 @pytest.mark.asyncio
@@ -300,8 +373,87 @@ async def test_journal_and_scholar_subscriptions_persist_and_drive_their_own_fee
     }
     saved = await client.put("/api/v1/feed/subscriptions", json=payload)
     assert saved.status_code == 200, saved.text
-    assert (await client.get("/api/v1/feed/subscriptions")).json() == payload
+    fetched = (await client.get("/api/v1/feed/subscriptions")).json()
+    assert fetched["journals"] == payload["journals"]
+    assert fetched["scholars"][0]["identity_status"] == "unresolved"
+    assert fetched["scholars"][0]["key"] == "author:ada lovelace"
 
     cards = (await client.get("/api/v1/feed/subscriptions/items")).json()
     assert [card["item"]["title"] for card in cards] == ["A public paper"]
     assert cards[0]["reason"].startswith("订阅期刊：")
+
+
+@pytest.mark.asyncio
+async def test_every_catalog_parent_can_be_saved_and_matches_its_children(
+    feed_client, harness_domain_registry, monkeypatch,
+) -> None:
+    from app.services.feed import curation, domains
+    from app.services.literature_harvester import literature_index_harvester, _journal_targets
+
+    monkeypatch.setattr(literature_index_harvester, "request_online_refresh", lambda **kwargs: False)
+    client, _db, _current, users = feed_client
+    groups = [group for group in domains.catalog() if group["archive"].startswith("cas:")]
+    assert groups
+    for group in groups:
+        parent = group["archive"]
+        children = tuple(option["domain"] for option in group["categories"])
+        response = await client.put("/api/v1/feed/interests", json={"domains": [parent]})
+        assert response.status_code == 200, (parent, response.text)
+        assert response.json()["domains"] == [parent]
+        assert response.json()["domain_labels"] == [group["label"]]
+        assert (await client.get("/api/v1/feed/interests")).json()["domains"] == [parent]
+        assert curation.effective_domains(users["me"]) == children
+        assert all(parent in domains.ancestors(child) for child in children)
+
+    assert (await client.put("/api/v1/feed/interests", json={"domains": ["cas:9999"]})).status_code == 422
+    response = await client.put("/api/v1/feed/interests", json={"domains": ["cas:0906", "090601", "arxiv"]})
+    assert response.status_code == 200
+    assert curation.effective_domains(users["me"]) == ("090601", "090602", "090603", "arxiv")
+    assert _journal_targets({"cas:0906"}) == _journal_targets({"090601", "090602", "090603"})
+    assert _journal_targets({"cas:0906"}), "Veterinary parent must actually yield journal targets"
+
+
+@pytest.mark.asyncio
+async def test_recommendation_progress_counts_pending_matches_and_distinguishes_waiting(feed_client, monkeypatch):
+    from uuid import uuid4
+    from app.api.v1.feed import _recommendation_progress
+    from app.services.feed import discovery
+    from app.services.feed.profile import Profile
+    from app.services.literature_harvester import literature_index_harvester
+
+    _client, db, _current, users = feed_client
+    me = users['me']
+    profile = Profile(user_id=me.id, domains=('cs.LG',))
+    rows = []
+    for title, domains, ready in [
+        ('Prepared paper', ['cs.LG'], True),
+        ('Pending paper', ['cs.LG'], False),
+        ('Unrelated paper', ['astro-ph.GA'], False),
+        ('Editorial Board', ['cs.LG'], False),
+        ('Issue Information', ['cs.LG'], False),
+    ]:
+        rows.append(FeedItem(
+            id=str(uuid4()), canonical_key=str(uuid4()), kind='paper', title=title,
+            url='https://example.org/paper', authors=[], domains=domains,
+            published_at=datetime.now(UTC), visibility=FeedVisibility.PLATFORM,
+            extra={'literature_catalog': True, 'literature_preparation': 'ready' if ready else 'pending'},
+        ))
+    db.add_all(rows)
+    await db.flush()
+    monkeypatch.setattr(literature_index_harvester, 'is_online_refreshing', lambda _uid: False)
+    monkeypatch.setattr(discovery, '_subscription_inflight', set())
+    monkeypatch.setattr(discovery, '_subscription_asset_inflight', set())
+    progress = await _recommendation_progress(db, me, profile, recommendable=1)
+    assert (progress.collected, progress.prepared, progress.pending, progress.recommendable) == (2, 1, 1, 1)
+    assert progress.phase == 'queued'
+    discovery._subscription_asset_inflight.add(str(me.id))
+    assert (await _recommendation_progress(db, me, profile, recommendable=1)).phase == 'preparing'
+    discovery._subscription_asset_inflight.clear()
+    discovery._subscription_inflight.add(str(me.id))
+    assert (await _recommendation_progress(db, me, profile, recommendable=1)).phase == 'searching'
+    discovery._subscription_inflight.clear()
+    rows[1].extra = {'literature_catalog': True, 'literature_preparation': 'ready'}
+    await db.flush()
+    completed = await _recommendation_progress(db, me, profile, recommendable=1)
+    assert completed.phase == 'settled'
+    assert completed.pending == 0

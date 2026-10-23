@@ -44,3 +44,25 @@ findings 里自然没有 VLM 条目，`vlm_review` 为空 —— 这是可读的
 
 rubric 文件在 `reviewer/rubrics/`。VLM 的机器角色是证人
 （supplementary），不是盖章岗：它不能单独放行图片，也没有科学正确性权限。
+
+## 4. SVG 轨（illustration 家族，AutoFigure 移植）
+
+纯文字描述的示意图请求（无上游数据、无机器可读 spec）走 `render_illustration`
+铸造，审查面与 render_figure 同构，差异点：
+
+- **合同 = 宣言**：`family: "illustration"` 的合同（nodes/edges/groups/
+  assertions，无 bands）由作者手写 SVG 兑现；断言对 **SVG DOM 标记**求值
+  （`svg_vocab` 六属性词表），不是对对象模型。`contract_checks` 里看得到
+  每条断言在 DOM 上的实得值。
+- **渲染源**：`render_code.generator == "frozen-svg"` —— 冻结脚本是框架生成
+  的重放器，SVG 字节内嵌其中；`figure_src/<name>.svg` 是同一份的可读副本。
+  replay 重跑 = 用 cairosvg 把同一份 SVG 重新栅格化。
+- **metadata.track == "svg"**（另有 `genre`）；交付 `files[]` 只挂 PNG。
+- **审计账** `audit.engine == "svg_audit+cairosvg"`：XML/标记完整性/文字政策/
+  印刷字号换算/缺字形为矛盾级（拒绝项），几何出界与重叠是启发式估计
+  （如实标注 est）。
+- **annotated_values 不声明是特性**：图上数字来自文字描述，没有 artifact
+  出处；`annotated_values_check.ran == False` 的缺席披露是预期形态。
+- **enhancement 产物是独立 asset**（`asset_role: "figure_enhancement"`，
+  `evidence_bearing: false`，`enhanced_from` 指回源 figure）：位图文字未经
+  机械复核，源 figure 永远是机械核过的交付品。

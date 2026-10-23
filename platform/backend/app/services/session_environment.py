@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import the_data_root
 from app.models.execution import Run
 from app.services import environment_facts as facts
+from app.services.say import SaidToAPerson
 
 logger = logging.getLogger(__name__)
 
@@ -124,8 +125,8 @@ async def current_environment(db: AsyncSession, *, project_id: str, session_id: 
             "runId": latest.id if latest is not None else None}
 
 
-class RepairRefused(ValueError):
-    """没有这样的提案、或提案不能代执行。"""
+class RepairRefused(SaidToAPerson, ValueError):
+    """没有这样的提案、或提案不能代执行。环境条幅上原话显示（409），两种语言都写。"""
 
 
 async def run_repair(db: AsyncSession, *, project_id: str, session_id: str, code: str,
@@ -139,11 +140,17 @@ async def run_repair(db: AsyncSession, *, project_id: str, session_id: str, code
     matching = [w for w in current["warnings"]
                 if str(w.get("code")) == code and (path is None or str(w.get("path")) == str(path))]
     if not matching:
-        raise RepairRefused(f"这个会话当前没有 {code!r} 这条环境问题")
+        raise RepairRefused(f"这个会话当前没有 {code!r} 这条环境问题",
+                            en=f"This session has no {code!r} environment problem right now")
     warning = matching[0]
     proposal = facts.repair_proposal(code, error=warning.get("error"), data_root=the_data_root())
     if proposal is None or not proposal.get("argv"):
-        raise RepairRefused(f"{code!r} 没有能代执行的修复：{(proposal or {}).get('changes') or '只有事实，没有提案'}")
+        # 唯一不带 argv 的提案是 needs_administrator（`environment_facts.repair_proposal`）。
+        raise RepairRefused(
+            f"{code!r} 没有能代执行的修复：{(proposal or {}).get('changes') or '只有事实，没有提案'}",
+            en=f"{code!r} has no repair that can be run on your behalf: "
+               + ("this is a deployment problem an administrator has to judge (see the backend log)"
+                  if proposal else "there are only facts, no proposal"))
     argv = list(proposal["argv"])
     logger.warning("running environment repair for %s/%s: %s", project_id, session_id, argv)
     result = await asyncio.to_thread(_run_argv, argv)

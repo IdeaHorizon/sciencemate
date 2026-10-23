@@ -1,5 +1,5 @@
 import type { FeedItem, FeedItemKind } from "@/lib/api";
-import type { Language } from "../../../shared/i18n/language.ts";
+import { say, type Language } from "../../../shared/i18n/language.ts";
 import { fc } from "./feed-copy.ts";
 
 /**
@@ -12,7 +12,7 @@ import { fc } from "./feed-copy.ts";
 /**
  * 卡片上的类型徽章。
  *
- * `lang` 一路当参数传，不在函数里读设置 —— 同 `relativeTime` 收 `now`
+ * `lang` 一路当参数传，不在函数里读设置。
  * 的理由（见下）。文案本体在 `feed-copy.ts` 那张表里。
  */
 export function kindLabel(kind: FeedItemKind, lang: Language): string {
@@ -52,24 +52,24 @@ export function authorLine(authors: string[]): string {
   return `${authors.slice(0, 3).join(", ")} et al.`;
 }
 
-/**
- * 相对时间。
- *
- * `now` 必须是**传进来的参数**，不是函数里读的时钟 —— 否则这个判断自己依赖
- * 真实时间，测试就只能在某些时刻通过。
- */
-export function relativeTime(iso: string | null, now: Date, lang: Language): string {
-  if (!iso) return "";
-  const then = new Date(iso);
-  if (Number.isNaN(then.getTime())) return "";
-  const minutes = Math.round((now.getTime() - then.getTime()) / 60000);
-  if (minutes < 1) return fc("time.just_now", lang);
-  if (minutes < 60) return fc("time.minutes", lang, { n: minutes });
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return fc("time.hours", lang, { n: hours });
-  const days = Math.round(hours / 24);
-  if (days < 30) return fc("time.days", lang, { n: days });
-  return then.toISOString().slice(0, 10);
+/** Show the source's calendar date; a YYYY-MM source must not invent day one. */
+export function feedDate(item: FeedItem, lang: Language): string {
+  const published = item.published_at;
+  if (published) {
+    const date = new Date(published);
+    if (!Number.isNaN(date.getTime())) {
+      const day = date.toISOString().slice(0, 10);
+      return item.extra?.["publication_date_precision"] === "month" ? day.slice(0, 7) : day;
+    }
+  }
+  const discovered = item.extra?.["discovered_at"];
+  if (typeof discovered === "string") {
+    const date = new Date(discovered);
+    if (!Number.isNaN(date.getTime())) {
+      return say({ zh: "发现于 {date}", en: "Found {date}" }, lang, { date: date.toISOString().slice(0, 10) });
+    }
+  }
+  return say({ zh: "日期未提供", en: "Date unavailable" }, lang);
 }
 
 /**

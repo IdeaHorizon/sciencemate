@@ -29,12 +29,15 @@ from app.services.feed.profile import (
 from app.services.feed.ranking import (
     matches_subscribed_journal,
     matches_subscribed_scholar,
+    is_journal_notice,
     rank,
     rank_rednote,
 )
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=UTC)
 
+
+TEST_AUTHOR_IDS = {"yoshua bengio": "A123", "heng wang": "A456"}
 
 def _item(
     title: str,
@@ -55,7 +58,7 @@ def _item(
         venue=venue or None,
         domains=list(domains),
         published_at=NOW - timedelta(days=1),
-        extra=extra or {},
+        extra={**(extra or {}), "author_identities": [{"author_id": TEST_AUTHOR_IDS[name.casefold()]} for name in authors or [] if name.casefold() in TEST_AUTHOR_IDS]},
     )
 
 
@@ -65,6 +68,7 @@ def _profile(*, domains=(), journals=(), scholars=()) -> Profile:
         domains=domains,
         journals=frozenset(journals),
         scholars=frozenset(scholars),
+        scholar_identities=tuple({"author_id": TEST_AUTHOR_IDS[name.casefold()]} for name in scholars if name.casefold() in TEST_AUTHOR_IDS),
     )
 
 
@@ -142,6 +146,30 @@ def test_cancelling_a_subscription_drops_the_old_items_immediately() -> None:
     assert rank_rednote([paper], dropped, user_id="u1", now=NOW) == []
 
 
+def test_journal_notices_are_not_recommended() -> None:
+    for title in (
+        'Corrigendum to “A study of microplastics”',
+        "Editor's Note to a published paper",
+        "Editor’s note to a published paper",
+        'Retraction notice to “A study of microplastics”',
+        'Erratum to a published paper',
+        'Expression of concern: a published paper',
+        'Correction to a published paper',
+        'ISSUE INFORMATION',
+        'Issue Information: Volume 76, Issue 4',
+        'Table of Contents',
+        'Front Matter',
+        'Information for Authors',
+        'Cover Image',
+        'Associate Registry',
+        'Insights Into the October 2026 Issue of the JOE',
+    ):
+        assert is_journal_notice(_item(title, venue="Science of The Total Environment"))
+    assert not is_journal_notice(
+        _item("A correction to estimates of microplastic exposure", venue="Science of The Total Environment")
+    )
+
+
 def test_subscriptions_alone_make_the_feed_personalized() -> None:
     """只有订阅（没有学科、没有课题）也是个性画像 —— 否则页面显示"还没被个性化"，
     而用户明明刚关注了一本刊。"""
@@ -159,6 +187,10 @@ def test_journal_matching_normalizes_word_order_and_punctuation() -> None:
     assert matches_subscribed_journal(
         _item("x", venue="The Lancet"),
         _profile(journals=(journal_key("The Lancet"),)),
+    )
+    assert matches_subscribed_journal(
+        _item("x", venue="The Science of the total environment"),
+        _profile(journals=("scienceofthetotalenvironment",)),
     )
     assert matches_subscribed_scholar(
         _item("x", authors=["Yoshua Bengio"]),
@@ -294,3 +326,56 @@ async def test_subscriptions_do_not_remove_the_domain_boundary(db_session) -> No
     assert "A paper in the journal the user follows" in titles
     # 学科边界照旧：既不是订阅学科、也不是订阅期刊的内容不许进候选池。
     assert "A paper in a subject the user never chose" not in titles
+
+
+def test_finished_scholar_lookup_without_abstract_is_recommendable():
+    from app.services.feed.ranking import show_in_feed
+    item = _item('Completed scholar publication', authors=['Heng Wang'], extra={
+        'feed_acquisition_routes': ['scholar'], 'literature_preparation': 'ready',
+        'abstract_enrichment_attempted': True,
+    })
+    item.summary = ''
+    assert show_in_feed(item)
+    assert rank_rednote([item], _profile(scholars=('heng wang',)), user_id='u1', now=NOW)
+    item.extra = {**item.extra, 'literature_preparation': 'pending'}
+    assert not show_in_feed(item)
+
+
+def test_author_match_adds_scholar_membership_to_journal_acquisition():
+    item = _item('Cross-source publication', authors=['Heng Wang'], venue='Unselected Journal',
+                 extra={'feed_acquisition_routes': ['journal']})
+    assert rank_rednote([item], _profile(scholars=('heng wang',)), user_id='u1', now=NOW)
+
+
+def test_cleared_manual_domains_stay_empty_despite_project_inference():
+    from app.services.feed.curation import effective_domains
+    user = User(preferences={'feed': {'domains': [], 'auto_curation': True,
+                                     'inferred_domains': ['physics.flu-dyn']}})
+    assert effective_domains(user) == ()
+
+
+def test_web_title_date_outside_twelve_months_is_not_a_recent_recommendation():
+    from app.services.feed.ranking import show_in_feed
+    item = _item('2024.08.26 Non-spherical particle simulation review',
+                 extra={'feed_acquisition_routes': ['web']})
+    assert not show_in_feed(item)
+
+
+def test_research_about_information_and_contents_is_not_publication_metadata():
+    for title in ("Issue information processing in clinical decision support",
+                  "Information theory for cancer diagnosis", "Contents of microplastics in marine sediments",
+                  "Insights into the mechanisms of endodontic infection"):
+        assert not is_journal_notice(_item(title))
+
+
+def test_journal_reasons_decode_new_and_cached_names():
+    from app.services.feed.ranking import ScoredItem
+    from app.schemas.feed import FeedCard
+    from app.api.v1.feed import _to_out
+    item = _item('Water treatment study', venue='ACS ES&amp;T Water')
+    scored = ScoredItem(item=item, score=1.0, matched_journal=item.venue)
+    expected = '你订阅的期刊 ACS ES&T Water 有新文章'
+    assert scored.reason() == expected
+    cached = FeedCard(item=_to_out(item), reason='你订阅的期刊 ACS ES&amp;T Water 有新文章')
+    assert cached.reason == expected
+    assert FeedCard(item=_to_out(item), reason='你订阅的期刊 ACS ES&amp;amp;T Water 有新文章').reason == expected

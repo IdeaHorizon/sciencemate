@@ -34,8 +34,9 @@ import { LANDING_OPTIONS } from "@/features/settings/lib/landing-options";
 import { api, type DefaultLanding, type ModelRole } from "@/lib/api";
 import { Button } from "@/shared/ui";
 import { pushError } from "@/stores/notification";
-import { useT, type Phrase } from "@/shared/i18n";
+import { useLanguage, useT, type Phrase } from "@/shared/i18n";
 import { useProjectId } from "@/shared/routing/route-params";
+import { LanguageSwitch } from "@/features/settings/components/LanguageSwitch";
 import { GuidedTour } from "./GuidedTour";
 import { WORKSPACE_STOPS } from "./lib/tour-stops";
 import { ModelConnectionFields, draftIsComplete, emptyDraft, type ConnectionDraft } from "./ModelConnectionFields";
@@ -135,6 +136,10 @@ export function FirstRun() {
           </button>
         </header>
 
+        {/* 第一次打开就该知道"语言是能选的"：预选是按系统语言定的，两种都摆着，
+            点了当场换 —— 下面这张卡片随之变成那种语言。 */}
+        <LanguageSwitch variant="both" className="onboarding-language" />
+
         {step === "model" && (
           <ModelStep
             credentialKeyStorage={capabilities.credentialKeyStorage}
@@ -191,11 +196,13 @@ function ModelStep({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // 角色的名字和说明是后端按语言给的：换了语言（第一张卡片顶上就能换）要重取。
+  const language = useLanguage();
   useEffect(() => {
     let active = true;
     void api.listModelRoles().then((list) => { if (active) setRoles(list); }).catch(() => {});
     return () => { active = false; };
-  }, []);
+  }, [language]);
 
   const required = roles.find((role) => role.required);
   const optional = roles.filter((role) => !role.required);

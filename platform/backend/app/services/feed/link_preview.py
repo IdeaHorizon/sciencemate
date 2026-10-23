@@ -44,6 +44,7 @@ from app.services.feed.collectors import (
     _clean_text,
     _summary,
 )
+from app.services.say import SaidToAPerson
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +67,8 @@ _META_REVERSED_RE = re.compile(
 )
 
 
-class LinkRejected(ValueError):
-    """这个链接不能抓。消息会**原样给到用户**，所以要说人话。"""
+class LinkRejected(SaidToAPerson, ValueError):
+    """这个链接不能抓。消息会**原样给到用户**，所以要说人话 —— 两种语言都写。"""
 
 
 @dataclass(slots=True)
@@ -96,25 +97,27 @@ async def _assert_reachable_and_public(url: str) -> None:
     """
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https"):
-        raise LinkRejected("只支持 http/https 链接")
+        raise LinkRejected("只支持 http/https 链接", en="Only http/https links are supported")
     host = parts.hostname
     if not host:
-        raise LinkRejected("链接里没有主机名")
+        raise LinkRejected("链接里没有主机名", en="The link has no host name")
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(
             host, parts.port or (443 if parts.scheme == "https" else 80),
             proto=socket.IPPROTO_TCP,
         )
     except socket.gaierror as exc:
-        raise LinkRejected(f"解析不了这个域名：{host}") from exc
+        raise LinkRejected(f"解析不了这个域名：{host}", en=f"Could not resolve this domain: {host}") from exc
     if not infos:
-        raise LinkRejected(f"解析不了这个域名：{host}")
+        raise LinkRejected(f"解析不了这个域名：{host}", en=f"Could not resolve this domain: {host}")
     for info in infos:
         address = info[4][0]
         if not _is_public_address(str(address)):
             raise LinkRejected(
                 "这个地址指向内网或本机，平台不会去访问它。"
-                "请贴一个公开可访问的链接。"
+                "请贴一个公开可访问的链接。",
+                en="This address points to a private network or this machine, so the platform will "
+                   "not visit it. Please paste a publicly reachable link.",
             )
 
 
@@ -122,7 +125,7 @@ async def fetch_preview(url: str) -> LinkPreview:
     """抓一个用户给的链接，做成卡片素材。"""
     current = (url or "").strip()
     if not current:
-        raise LinkRejected("链接为空")
+        raise LinkRejected("链接为空", en="The link is empty")
 
     async with httpx.AsyncClient(
         timeout=FETCH_TIMEOUT_SECONDS,
@@ -135,17 +138,19 @@ async def fetch_preview(url: str) -> LinkPreview:
             try:
                 response = await client.get(current)
             except httpx.HTTPError as exc:
-                raise LinkRejected(f"打不开这个链接：{type(exc).__name__}") from exc
+                raise LinkRejected(f"打不开这个链接：{type(exc).__name__}",
+                                   en=f"Could not open this link: {type(exc).__name__}") from exc
             if response.is_redirect:
                 location = response.headers.get("location")
                 if not location:
-                    raise LinkRejected("这个链接跳转到了一个空地址")
+                    raise LinkRejected("这个链接跳转到了一个空地址", en="This link redirects to an empty address")
                 current = str(httpx.URL(current).join(location))
                 continue
             if response.status_code >= 400:
-                raise LinkRejected(f"这个链接返回 HTTP {response.status_code}")
+                raise LinkRejected(f"这个链接返回 HTTP {response.status_code}",
+                                   en=f"This link returned HTTP {response.status_code}")
             return _extract(current, response)
-    raise LinkRejected("这个链接跳转太多次了")
+    raise LinkRejected("这个链接跳转太多次了", en="This link redirects too many times")
 
 
 def _extract(url: str, response: httpx.Response) -> LinkPreview:
@@ -165,7 +170,7 @@ def _extract(url: str, response: httpx.Response) -> LinkPreview:
         meta.get("og:title") or meta.get("twitter:title") or _first_title(html)
     )
     if not title:
-        raise LinkRejected("这个页面没有标题，做不成卡片")
+        raise LinkRejected("这个页面没有标题，做不成卡片", en="This page has no title, so it cannot become a card")
     description = (
         meta.get("og:description")
         or meta.get("twitter:description")

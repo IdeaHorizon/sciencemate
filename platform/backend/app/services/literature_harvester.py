@@ -17,6 +17,7 @@ from pathlib import Path
 
 from app.config import settings
 from app.services.feed.literature_projection import publication_datetime
+from app.services.feed import windows
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +26,8 @@ MAX_DOMAINS_PER_JOURNAL = 5
 
 
 def _normal_journal(value: object) -> str:
-    text = str(value or "").strip().lower()
-    # 出版源常在正式刊名里保留冠词，而分区/ISSN 表省略它，例如
-    # “The British Accounting Review” 与 “British Accounting Review”。
-    # 必须在去标点前按完整单词移除，不能把 Theory 等以 the 开头的词截坏。
-    text = re.sub(r"^the\b[\s\W_]*", "", text)
-    return re.sub(r"[^a-z0-9]", "", text)
+    from app.services.feed.profile import journal_key
+    return journal_key(value)
 
 
 def _mapping_evidence_rank(raw: object) -> int:
@@ -84,11 +81,7 @@ def _recent_publication(
         return published, bool(published and cutoff <= published <= now), "day"
     if len(numeric) == 2:
         published = publication_datetime(raw, year)
-        accepted = bool(
-            published
-            and published.year == now.year
-            and published.month == now.month
-        )
+        accepted = bool(published and windows.month_overlaps_window(published, cutoff, now))
         return published, accepted, "month"
     if len(numeric) == 1 or (not text and year not in (None, "")):
         return publication_datetime(raw, year), False, "year"
@@ -99,6 +92,9 @@ def _journal_targets(
     domain_codes: set[str] | None = None,
 ) -> dict[str, dict[str, object]]:
     """读取收敛后的离线期刊映射，而不是直接执行整张候选关系表。"""
+    if domain_codes is not None:
+        from app.services.feed.domains import expand_cas_domains
+        domain_codes = set(expand_cas_domains(domain_codes))
     configured = os.environ.get("HARNESS_JOURNAL_DOMAIN_MAP", "").strip()
     path = Path(configured).expanduser() if configured else Path(__file__).resolve().parents[4] / "docs" / "xiaohongshu_journal_map.tsv"
     candidates: list[dict[str, object]] = []
@@ -108,6 +104,8 @@ def _journal_targets(
                 name = " ".join(str(row.get("journal_name") or "").split())
                 code = str(row.get("二级学科代码") or "").strip()
                 key = _normal_journal(name)
+                if row.get("分类状态") in {"rejected", "scope_pending", "identity_verified"}:
+                    continue
                 if not name or not code:
                     continue
                 if domain_codes is not None and code not in domain_codes:
@@ -130,6 +128,7 @@ def _journal_targets(
                     "quartile": quartile,
                     "rank": (
                         _mapping_evidence_rank(basis),
+                        int(row.get("相关性优先级") or 1),
                         _mapping_confidence_rank(row.get("分类置信度")),
                         quartile,
                         0 if str(row.get("top") or "") == "是" else 1,
@@ -251,7 +250,7 @@ class LiteratureIndexHarvester:
             return
         self._stop.clear()
         self._task = asyncio.create_task(self._run(), name="literature-index-harvester")
-        logger.info("Literature index harvester started (interval=%ss)", settings.literature_harvester_interval_seconds)
+        logger.info("Literature index harvester started (interval=%ss)", settings.feed_refresh_interval_seconds)
 
     async def stop(self) -> None:
         self._stop.set()
@@ -296,6 +295,8 @@ class LiteratureIndexHarvester:
                 limit=settings.literature_asset_completion_max_per_round,
                 budget_seconds=settings.literature_asset_completion_budget_seconds,
             )
+            if int(completion.get("completed") or 0):
+                await self._project(max(100, int(completion["completed"]) * 3))
             logger.info("Literature background asset completion: %s", completion)
         except asyncio.CancelledError:
             raise
@@ -313,8 +314,7 @@ class LiteratureIndexHarvester:
             except Exception:
                 logger.exception("Literature index harvest round failed")
             # 一轮达到批量上限，说明期刊队列很可能还没排空；短暂停顿后继续。
-            # 只有本轮不足一个批次时才进入七天休眠，从而覆盖全部映射期刊，
-            # 而不是每七天只处理前100本。
+            # 未排空的期刊继续分批处理；不足一批时等下一次到期检查。
             delay = (
                 settings.literature_harvester_batch_pause_seconds
                 if processed >= settings.literature_harvester_max_queries_per_round
@@ -426,6 +426,8 @@ class LiteratureIndexHarvester:
             and datetime.now(UTC) - previous[1] < timedelta(minutes=15)
         ):
             return False
+        from app.services.feed import domain_progress
+        domain_progress.mark(user_id, selected, "searching")
         task = asyncio.create_task(
             self._run_online_refresh(user_id=user_id, domains=selected),
             name=f"literature-online-refresh-{key}",
@@ -457,6 +459,7 @@ class LiteratureIndexHarvester:
         self, *, user_id: object, domains: list[str]
     ) -> None:
         """Fetch selected journals first, then the selected-domain + Project route."""
+        from app.services.feed import domain_progress
         started = asyncio.get_running_loop().time()
         try:
             journal = await self.run_once(domain_codes=set(domains), online=True)
@@ -483,6 +486,7 @@ class LiteratureIndexHarvester:
                         )
                     await db.commit()
             project_seconds = asyncio.get_running_loop().time() - project_started
+            domain_progress.mark(user_id, domains, "failed" if journal.get("failed") else "completed")
             logger.info(
                 "Online literature refresh user=%s domains=%s journal=%s "
                 "project=%s timing[journal=%.2fs project=%.2fs total=%.2fs]",
@@ -492,6 +496,7 @@ class LiteratureIndexHarvester:
         except asyncio.CancelledError:
             raise
         except Exception:
+            domain_progress.mark(user_id, domains, "failed")
             logger.exception("Online literature refresh failed for user=%s", user_id)
 
     async def run_once(
@@ -545,7 +550,7 @@ class LiteratureIndexHarvester:
             limit = settings.literature_harvester_max_queries_per_round
             queries = manager.local_index.due_harvest_queries_for(
                 list(targets),
-                settings.literature_harvester_interval_seconds,
+                settings.feed_refresh_interval_seconds,
                 limit,
             )
         totals = {
@@ -562,13 +567,9 @@ class LiteratureIndexHarvester:
             "projected": 0,
         }
         now = datetime.now(UTC)
-        cutoff = now - timedelta(
-            days=max(1, settings.literature_harvester_recent_days)
-        )
-        # 远程层要同时容纳“最近7天的精确日期”和“当前月份精度”。本地再按
-        # 日期精度严格筛选，避免把 YYYY-MM 强行当成当月1日后误删。
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        remote_from = min(cutoff, month_start).date().isoformat()
+        cutoff = windows.web_cutoff(now)
+        # 远程层从截止月份的月初起取，月份精度的记录再按月份区间复核。
+        remote_from = cutoff.replace(day=1).date().isoformat()
         # 期刊采集必须由ISSN/期刊名约束；arXiv和S2不支持这类精确过滤，
         # 把它们混进来只会得到主题结果，而不是指定期刊的近期动态。
         sources = {"crossref"}
@@ -588,11 +589,17 @@ class LiteratureIndexHarvester:
                 totals["failed"] += 1
                 continue
             try:
+                window_key = f"journal-harvest:{query.lower()}"
+                query_from, full_refresh = manager.local_index.harvest_window(window_key, remote_from, now=now)
+                logger.info("Literature harvest window: query=%s from=%s full=%s", query, query_from, full_refresh)
                 results = await manager.search_all(
                     query,
                     max_per_source=settings.literature_harvester_max_per_source,
                     enabled_sources=sources,
-                    date_from=remote_from,
+                    # 关键词检索仍只用 Crossref/OpenAlex；缺摘要时再按 DOI
+                    # 读取出版商落地页的明确摘要字段，补齐索引元数据。
+                    metadata_lookup_sources={*sources, "publisher_landing"},
+                    date_from=query_from,
                     include_local_catalog=False,
                     use_query_cache=False,
                 )
@@ -662,7 +669,18 @@ class LiteratureIndexHarvester:
                     totals["accepted"] += 1
                     try:
                         record = paper.to_dict() if hasattr(paper, "to_dict") else dict(paper)
-                        domains = list(target["domains"])
+                        # ISSN/刊名已经复核，保留当前映射规范名，避免远端旧刊名丢失归属。
+                        record["venue"] = str(target["journal"])
+                        record["abstract_enrichment_attempted"] = True
+                        record["literature_preparation"] = "pending"
+                        from nodes.literature.tools.journal_scope import scope_matches
+                        domains = [
+                            code for code in target["domains"]
+                            if scope_matches(
+                                code, str(record.get("venue") or target["journal"]),
+                                str(record.get("title") or ""), str(record.get("abstract") or ""),
+                            )
+                        ]
                         record["journal_classification"] = {
                             "level2_codes": domains,
                             "reason": "online_journal_mapping" if online else "offline_journal_mapping",
@@ -696,6 +714,7 @@ class LiteratureIndexHarvester:
                     totals["archived"] += len(archived)
                     archived_since_projection += len(archived)
                 manager.local_index.mark_harvest_query(query, "ok", len(results))
+                manager.local_index.mark_harvest_window(window_key, full=full_refresh, now=now)
                 totals["queries"] += 1
                 totals["papers"] += len(results)
                 if archived_since_projection and totals["queries"] % 10 == 0:

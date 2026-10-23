@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { skipToken, useQuery, useQueryClient } from "@tanstack/react-query";
 import { API_BASE_URL, api, type RunDetailResponse } from "@/lib/api";
 import { qk } from "@/lib/query/keys";
 import {
@@ -33,10 +33,7 @@ const DETAIL_REFRESH_EVENT_KINDS = new Set([
 export function useProjectRuns(projectId: string | undefined, limit = 50) {
   return useQuery({
     queryKey: projectId ? qk.runs(projectId, limit) : ["runs", "none"],
-    queryFn: () => projectId
-      ? api.listRuns(projectId, limit)
-      : Promise.reject(new Error("No project id")),
-    enabled: !!projectId,
+    queryFn: projectId ? () => api.listRuns(projectId, limit) : skipToken,
     refetchInterval: 5000,
   });
 }
@@ -60,11 +57,10 @@ export function useSessionRuns(sessionId: string, enabled = true, limit = 10) {
 export function useRunDetail(runId: string | null, enabled = true) {
   return useQuery({
     queryKey: runId ? qk.run(runId) : ["run", "none"],
-    queryFn: async () => {
-      if (!runId) throw new Error("No run id");
-      return assertCanonicalRunDetail(await api.getRun(runId), runId);
-    },
-    enabled: enabled && !!runId,
+    queryFn: runId
+      ? async () => assertCanonicalRunDetail(await api.getRun(runId), runId)
+      : skipToken,
+    enabled,
   });
 }
 

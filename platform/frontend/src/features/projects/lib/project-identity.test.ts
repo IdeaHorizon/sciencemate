@@ -12,7 +12,7 @@ test("project identity uses authoritative project metadata instead of the URL id
     entry_type: null,
     created_at: "2026-08-03T00:00:00Z",
     updated_at: "2026-08-03T00:00:00Z",
-  }, { loading: false, error: false });
+  }, { loading: false, error: false }, "zh");
 
   assert.deepEqual(identity, {
     name: "Robust interatomic potentials",
@@ -22,8 +22,8 @@ test("project identity uses authoritative project metadata instead of the URL id
 });
 
 test("project identity has honest loading and error states", () => {
-  assert.equal(projectIdentity(undefined, { loading: true, error: false }).name, "载入中…");
-  assert.deepEqual(projectIdentity(undefined, { loading: false, error: true }), {
+  assert.equal(projectIdentity(undefined, { loading: true, error: false }, "zh").name, "载入中…");
+  assert.deepEqual(projectIdentity(undefined, { loading: false, error: true }, "zh"), {
     name: "读不到这个项目",
     meta: "项目信息没读出来",
     state: "error",

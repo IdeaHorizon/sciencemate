@@ -823,12 +823,11 @@ def _layout_builtin(contract: dict[str, Any]) -> dict[str, Any]:
         port_marks=_port_at,
         node_rects=node_rects,
         group_rects=group_rects,
-        band_rects=band_rects,
         group_of=group_of,
         band_of_node=band_of_node,
         rank_of=rank_of,
     )
-    _place_edge_labels(edges, list(node_rects.values()), (canvas_w, canvas_h))
+    _place_edge_labels(edges, list(node_rects.values()))
     for item in edges:
         # 边的颜色和边图例必须是同一张表 —— 图例说「红=读写」而边全是黑的，
         # 图例就成了谎话。
@@ -909,7 +908,6 @@ def _layout_builtin(contract: dict[str, Any]) -> dict[str, Any]:
 def _place_edge_labels(
     edges: list[dict[str, Any]],
     boxes: list[_Rect],
-    canvas: tuple[float, float] | list[float] | None = None,
 ) -> None:
     """把边标注挪到不压任何盒子的地方，然后**让同型的标注对齐**。
 
@@ -926,11 +924,6 @@ def _place_edge_labels(
     - 标注之间从不互相避让 —— 判据里根本没有别的标注。已放好的标注加进碰撞
       集合。
     """
-
-    def _orientation(points: list[tuple[float, float]]) -> str:
-        dx = abs(points[-1][0] - points[0][0])
-        dy = abs(points[-1][1] - points[0][1])
-        return "vertical" if dy >= dx else "horizontal"
 
     # 按**边的索引**记账。第一版用一个只含带标注边的 list，索引跟 edges 对不
     # 上，于是「排除自己」排掉的是别人 —— 捆标注居中因此几乎全被挡住
@@ -1222,7 +1215,6 @@ def _route_edges(
     port_marks: dict[tuple[str, str], list[float]] | None = None,
     node_rects: dict[str, _Rect],
     group_rects: dict[str, _Rect],
-    band_rects: list[_Rect],
     group_of: dict[str, str],
     band_of_node: dict[str, int],
     rank_of: dict[str, int],
@@ -1908,7 +1900,7 @@ _TIKZ_TEMPLATE = '''\
 import json
 from pathlib import Path
 
-TEX = r\"\"\"{tex}\"\"\"
+TEX = {tex}
 OUTPUTS = json.loads(r\"\"\"{outputs}\"\"\")
 DPI = {dpi}
 
@@ -2587,8 +2579,12 @@ def compile_render_script(
             "cjk": _tikz_color_defs(geometry) + ("\n" + cjk if cjk else ""),
             "body": _tikz_body(geometry),
         }
+        # tex 走 json 字面量嵌入（与 mpl 通道的 geometry/outputs 同一姿态）：
+        # 此前是 raw 三引号串，合同文字里的三个连续双引号就能逃出字符串 —
+        # 病态输入让框架自己产出 SyntaxError 脚本、白烧一次渲染预算
+        # （2026-10-20 审查实测）。json.dumps 的输出结构上造不出裸引号。
         script = _TIKZ_TEMPLATE.format(
-            tex=doc, outputs=outputs_json, dpi=int(dpi)
+            tex=json.dumps(doc), outputs=outputs_json, dpi=int(dpi)
         )
     return script, geometry
 
@@ -3770,7 +3766,6 @@ def _layout_two_layer(contract: dict[str, Any]) -> dict[str, Any]:
             port_marks=_port_at,
             node_rects=node_rects,
             group_rects={gid: group_rects[gid] for gid in units if gid in group_rects},
-            band_rects=[],
             group_of=unit_of,
             band_of_node=band_of_node,
             rank_of={},
@@ -3843,7 +3838,6 @@ def _layout_two_layer(contract: dict[str, Any]) -> dict[str, Any]:
     _place_edge_labels(
         geometry["edges"],
         [_Rect(*n["rect"]) for n in geometry["nodes"].values()],
-        geometry["canvas"],
     )
     return geometry
 
@@ -4026,33 +4020,6 @@ def _layout_page(contract: dict[str, Any]) -> dict[str, Any]:
     ):
         laid = lay_blocks(page_content_w)
 
-    _unused: list[dict[str, Any]] = []
-    for block in []:
-        if block["kind"] == "diagram":
-            sub = {
-                **contract,
-                "title": "",
-                "notes": [],
-                "nodes": block["nodes"],
-                "groups": block["groups"],
-                "bands": block["bands"],
-                "edges": block["edges"],
-                # 图例在版面级画，block 内不重复；配色也用版面级的同一张表。
-                "_suppress_chrome": True,
-                "_page_roles": roles,
-                "_page_edge_roles": edge_colours,
-            }
-            geo = _layout_two_layer(sub)
-            inner_w = geo["canvas"][0]
-            inner_h = geo["canvas"][1]
-            laid.append({"block": block, "geo": geo, "size": (inner_w, inner_h)})
-        elif block["kind"] == "spec":
-            laid.append({"block": block, "geo": None, "size": _spec_block_size(block)})
-        else:
-            laid.append({"block": block, "geo": None, "size": _note_block_size(block)})
-
-    del _unused
-
     # 有编号，跨栏引用才指得出去。参考图就是这么编的：① 内部拓扑 / ② 集群拓扑。
     _CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫"
     titled = [index for index, item in enumerate(laid) if item["block"].get("title")]
@@ -4138,14 +4105,13 @@ def _layout_page(contract: dict[str, Any]) -> dict[str, Any]:
 
     notes = list(contract.get("notes") or []) + demoted
     has_title = bool(contract.get("title"))
-    # 条件必须是「真会画的东西」而不是「手里有的数据」。这里原本写的是
-    # `legend_entries or edge_colours` —— 版面模式下栏内图例被抑制
-    # （legend_entries 为空），但 edge_colours 是版面级的角色表、永远非空，
-    # 于是每个栏都给一条画不出来的图例留了 56px。empty_rows 十轮卡在 11-12
-    # 就是它（2026-09-17）。
+    # 条件必须与下方 legend_y/legend_box 的画图条件一致（legend_entries 或
+    # edge_colours 非空就真会画页面级图例）—— 这里曾写成未定义的
+    # `legend_sources`（2026-10-20 审查发现），全靠 legend_entries 恒非空
+    # 短路才没炸 NameError。
     legend_h = (
         (LEGEND_GAP + LEGEND_SWATCH + LEGEND_FS)
-        if (legend_entries or legend_sources)
+        if (legend_entries or edge_colours)
         else 0.0
     )
     notes_h = (NOTE_GAP + len(notes) * NOTE_FS * 1.7) if notes else 0.0

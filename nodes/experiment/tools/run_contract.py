@@ -2518,21 +2518,6 @@ def _existing_logs_dir(state: Any) -> Path:
     return legacy if not current.exists() and legacy.exists() else current
 
 
-def _last_logged_return_code(state: Any) -> int | None:
-    logs_dir = _existing_logs_dir(state)
-    if not logs_dir.is_dir():
-        return None
-    latest = sorted(logs_dir.glob("*.log"))[-1:]
-    if not latest:
-        return None
-    try:
-        text = latest[0].read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return None
-    match = re.search(r"^# returncode:\s*(-?\d+)\s*$", text, re.MULTILINE)
-    return int(match.group(1)) if match else None
-
-
 def _index_run_logs(state: Any) -> list[dict[str, Any]]:
     """Index framework-owned logs; do not duplicate their contents."""
     root = Path(getattr(state, "root", "") or "")
@@ -2608,8 +2593,42 @@ def create_run_manifest(
     value rather than reconstructing the on-disk path, which is what made the
     recovery hook read a filename that never existed.
     """
+    from core.task_outcome import status_floor
+    from .contract_audit import audit_experiment_delivery
+    from . import ledger
+
     root = Path(getattr(state, "root", "") or "")
     contract = load_run_contract(state)
+    # C is authoritative even after reopen, when Core's hook-state projection
+    # is absent. Audit is read-only: a missing/drifted closure stays unknown;
+    # writing this index neither replays finish nor admits Core completion.
+    delivery = audit_experiment_delivery(state)
+    task_outcome = (
+        delivery.get("outcome")
+        if delivery.get("passed") and delivery.get("status") == "sealed"
+        else None
+    )
+    lifecycle_status = _run_status(loop_result, override=status)
+
+    jobs: list[dict[str, Any]] = []
+    jobs_error = None
+    try:
+        led = ledger.open_ledger(state, write=False)
+        jobs = list(led.project_jobs().values())
+        if led.tail_report().get("corrupt_tail_bytes"):
+            jobs_error = "job ledger has an incomplete tail; only the complete prefix is indexed"
+    except (ledger.LedgerError, OSError) as exc:
+        jobs_error = f"job facts unavailable: {type(exc).__name__}: {exc}"
+    # Compatibility scalar only for one exactly bound terminal job. A log,
+    # lifecycle status, or one successful job among several is not its exit.
+    return_code = None
+    if not jobs_error and len(jobs) == 1:
+        job = jobs[0]
+        if job.get("external_id") and job.get("state") == "terminal":
+            code = (job.get("terminal") or {}).get("exit_code")
+            if isinstance(code, int) and not isinstance(code, bool):
+                return_code = code
+
     transcript_path = Path(getattr(state, "transcript_path", root / "transcript.jsonl"))
     try:
         transcript_rel = str(transcript_path.relative_to(root))
@@ -2650,8 +2669,12 @@ def create_run_manifest(
         "scope_manifest_id": contract.get("scope_manifest_id"),
         "protocol_amendment_id": contract.get("protocol_amendment_id"),
         "exclusion_reason": contract.get("exclusion_reason"),
-        "status": _run_status(loop_result, override=status),
-        "return_code": _last_logged_return_code(state),
+        "status": status_floor(task_outcome, lifecycle_status),
+        "lifecycle": {"status": lifecycle_status},
+        "task_outcome": task_outcome,
+        "delivery": delivery,
+        "jobs": jobs,
+        "return_code": return_code,
         "result_info": result_info or {},
         "transcript": transcript,
         "logs": _index_run_logs(state),
@@ -2661,6 +2684,8 @@ def create_run_manifest(
         },
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if jobs_error:
+        manifest["jobs_error"] = jobs_error
     if contract.get("run_acceptance_status"):
         manifest["run_acceptance_status"] = contract["run_acceptance_status"]
         manifest["run_acceptance_error"] = contract.get("run_acceptance_error")

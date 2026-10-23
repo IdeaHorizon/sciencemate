@@ -24,7 +24,12 @@ from app.config import settings
 
 
 class HarnessContractUnavailable(RuntimeError):
-    """harness checkout 不可用 —— 契约模块拿不到，不许猜。"""
+    """harness checkout 不可用 —— 契约模块拿不到，不许猜。
+
+    消息是**技术原话**（英文），不是说给人听的那句：调用方把它当证据 `{why}` 填进一句
+    两种语言都写的话里（`say({"zh": "…：{why}", "en": "…: {why}"}, lang, why=exc)`）。
+    所以这里不写中文 —— 写了，英文界面上那句话的尾巴就是中文。
+    """
 
 
 @lru_cache(maxsize=1)
@@ -73,8 +78,8 @@ def _contract_module(dotted_suffix: str, why: str) -> ModuleType:
     where = getattr(module, "__file__", None)
     if not where or root not in Path(where).resolve().parents:
         raise HarnessContractUnavailable(
-            f"{name} 解析到了 {where}，不在 {root} 底下 —— 契约模块必须来自"
-            f"配置的 harness 根，否则两个进程各按各的格式来。"
+            f"{name} resolved to {where}, which is not under {root} — contract modules must come "
+            "from the configured harness root, otherwise two processes each follow their own format"
         )
     return module
 

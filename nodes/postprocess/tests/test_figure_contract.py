@@ -24,6 +24,7 @@ from core.tool_registry import execute
 from nodes.postprocess.contracts import VisualContractError
 from nodes.postprocess.figure_contract import (
     contract_diff,
+    empty_row_findings,
     evaluate_assertions,
     failed_assertions,
     normalize_contract,
@@ -78,6 +79,10 @@ def _state(tmp_path) -> State:
                 "request_id": "topo",
                 "intent": "双CPU服务器插上8张GPU，每4张连一个 PCIe switch，共 2 个",
                 "asset_kind": "schematic",
+                # v2.1 路由拍板后，纯文字 + schematic 会走 SVG 轨；本文件测的是
+                # **编译轨**机制，用 preferred_form 显式钉在编译轨（编译轨的现实
+                # 入口：spec 或 preferred_form，见 contracts.route_track）。
+                "preferred_form": "compiled",
             }
         ]
     }
@@ -700,6 +705,173 @@ def test_the_compiled_render_script_never_trips_the_high_risk_scanner():
             assert match_high_risk(code, mode="python") is None, (f.name, backend)
             seen += 1
     assert seen >= 2
+
+
+def test_cyclic_group_parents_terminate_and_reject():
+    """_group_member_ids 带 visited 集：成环组树不再让 declare 永久挂死
+    （2026-10-20 审查实测 hang；detail_of 检查曾排在成环检查之前调用它）。"""
+
+    from nodes.postprocess.figure_contract import _group_member_ids
+
+    cyclic = {"groups": [
+        {"id": "g1", "ranks": [["a"]], "parent": "g2"},
+        {"id": "g2", "ranks": [], "parent": "g1"},
+    ]}
+    assert _group_member_ids(cyclic, "g1") == {"a"}
+    assert _group_member_ids(cyclic, "g2") == {"a"}
+
+    raw = {
+        "nodes": [{"id": "a", "label": "A", "role": "component"}],
+        "groups": [
+            {"id": "g1", "label": "g1", "ranks": [["a"]], "parent": "g2"},
+            {"id": "g2", "label": "g2", "ranks": [], "parent": "g1"},
+        ],
+        "bands": [["group:g1"]],
+        "edges": [],
+    }
+    with pytest.raises(VisualContractError):
+        normalize_contract(raw, family="schematic")
+
+
+def test_blocks_empty_band_dropped_and_named():
+    """blocks 分支的空 band 与平铺分支同一姿态：丢掉 + 计数点名；
+    不再存活到布局器让 max() 裸崩（2026-10-20 审查实测 ValueError）。"""
+
+    raw = {
+        "blocks": [{
+            "kind": "diagram", "title": "① 拓扑",
+            "nodes": [{"id": "a", "label": "A", "role": "component"},
+                      {"id": "b", "label": "B", "role": "component"}],
+            "groups": [],
+            "edges": [{"from": "a", "to": "b"}],
+            "bands": [["node:a", "node:b"], []],
+        }],
+    }
+    normalized = normalize_contract(raw, family="schematic")
+    assert normalized["dropped_empty_bands"] == 1
+    assert all(band for band in normalized["bands"])
+    hits = empty_row_findings(normalized)
+    assert hits and "空的顶层带子" in hits[0]["detail"]
+
+
+def test_group_endpoints_count_in_degree_neighbors_edge_count():
+    """H3 语义对齐（2026-10-20）：group: 端点 = 连到子树全体成员，与
+    check_structure 的孤儿判定、vlm_extraction 的证人期望同一口径。
+    翻转钉：旧语义按端点字符串字面比对，下面三条断言全部 actual=0。"""
+
+    contract = normalize_contract({
+        "nodes": [
+            {"id": "gw", "label": "网关", "role": "gateway"},
+            {"id": "s1", "label": "svc1", "role": "svc"},
+            {"id": "s2", "label": "svc2", "role": "svc"},
+        ],
+        "groups": [{"id": "biz", "label": "业务层", "ranks": [["s1", "s2"]]}],
+        "bands": [["node:gw"], ["group:biz"]],
+        "edges": [{"from": "gw", "to": "group:biz"}],
+        "assertions": [
+            {"id": "d1", "kind": "degree", "node": "s1", "equals": 1,
+             "derived_from": "网关调用整个业务层"},
+            {"id": "n1", "kind": "neighbors", "node": "gw",
+             "within": {"role": "svc"}, "equals": 2,
+             "derived_from": "网关调用整个业务层（两个服务）"},
+            {"id": "e1", "kind": "edge_count", "equals": 1,
+             "derived_from": "画一条到业务层的线"},
+        ],
+    }, family="schematic")
+    results = {r["id"]: r for r in evaluate_assertions(contract)}
+    assert results["d1"]["holds"] and results["d1"]["actual"] == 1
+    assert results["n1"]["holds"] and results["n1"]["actual"] == 2
+    # edge_count 按**声明的边**计条数（一条到组框的线 = 1），不按成员翻；
+    # 组级边的展开规模在 detail 里注明（detail 只在不成立时带回，故用
+    # equals 2 造一条故意不成立的来验注记）。
+    assert results["e1"]["holds"] and results["e1"]["actual"] == 1
+
+    contract2 = normalize_contract({
+        "nodes": [
+            {"id": "gw", "label": "网关", "role": "gateway"},
+            {"id": "s1", "label": "svc1", "role": "svc"},
+            {"id": "s2", "label": "svc2", "role": "svc"},
+        ],
+        "groups": [{"id": "biz", "label": "业务层", "ranks": [["s1", "s2"]]}],
+        "bands": [["node:gw"], ["group:biz"]],
+        "edges": [{"from": "gw", "to": "group:biz"}],
+        "assertions": [
+            {"id": "e2", "kind": "edge_count", "equals": 2,
+             "derived_from": "画一条到业务层的线"},
+        ],
+    }, family="schematic")
+    failed = evaluate_assertions(contract2)[0]
+    assert not failed["holds"] and "group_edges" in failed["detail"]
+
+
+def test_represents_weights_assertion_counts():
+    """H4 语义对齐（2026-10-20）：represents=N 的边在 edge_count/degree/
+    neighbors 里按 N 计权 —— 与编译器画 N 股、端口对账按 N 同口径。
+    翻转钉：旧语义恒按 1，下面两条断言会被误拒。"""
+
+    contract = normalize_contract({
+        "nodes": [
+            {"id": "srv", "label": "服务器", "role": "server"},
+            {"id": "sw", "label": "交换机", "role": "switch"},
+        ],
+        "groups": [],
+        "bands": [["node:srv"], ["node:sw"]],
+        "edges": [{"from": "srv", "to": "sw", "represents": 2, "label": "2×400G"}],
+        "assertions": [
+            {"id": "e2", "kind": "edge_count", "equals": 2,
+             "derived_from": "2 × 400G 上联"},
+            {"id": "d2", "kind": "degree", "node": "srv", "equals": 2,
+             "derived_from": "服务器出 2 条 400G"},
+        ],
+    }, family="schematic")
+    results = {r["id"]: r for r in evaluate_assertions(contract)}
+    assert results["e2"]["holds"] and results["e2"]["actual"] == 2
+    assert results["d2"]["holds"] and results["d2"]["actual"] == 2
+
+
+def test_group_selector_uses_subtree_membership():
+    """M11（2026-10-20）：选择器 {"group": X} 按子树计成员 —— 嵌套子组的
+    成员也属于祖先组（与 _group_member_ids / 组端点展开同一语义）。
+    翻转钉：旧语义只数直接 ranks，本断言在旧代码下 actual=1（只中 cpu）。"""
+
+    contract = normalize_contract({
+        "nodes": [
+            {"id": "cpu", "label": "CPU", "role": "chip"},
+            {"id": "g0", "label": "GPU0", "role": "gpu"},
+            {"id": "g1", "label": "GPU1", "role": "gpu"},
+        ],
+        "groups": [
+            {"id": "srv", "label": "服务器", "ranks": [["cpu"]]},
+            {"id": "dom", "label": "加速域", "ranks": [["g0", "g1"]], "parent": "srv"},
+        ],
+        "bands": [["group:srv"]],
+        "edges": [{"from": "cpu", "to": "g0"}, {"from": "cpu", "to": "g1"}],
+        "assertions": [
+            {"id": "c1", "kind": "node_count", "selector": {"group": "srv"},
+             "equals": 3, "derived_from": "一台服务器及其加速域共三个组件"},
+        ],
+    }, family="schematic")
+    result = evaluate_assertions(contract)[0]
+    assert result["holds"] and result["actual"] == 3
+
+
+def test_tikz_script_survives_triple_quotes_in_labels():
+    """TikZ 通道的 tex 走 json 字面量嵌入：合同文字里的三连续双引号
+    不再能逃出渲染脚本的字符串（H10，2026-10-20 审查实测 SyntaxError）。"""
+
+    import ast
+
+    from nodes.postprocess.diagram_compiler import compile_render_script
+
+    contract = normalize_contract({
+        "title": 'evil """ title',
+        "nodes": [{"id": "a", "label": 'he said """ boom', "role": "component",
+                   "isolated": True}],
+        "groups": [], "edges": [], "bands": [["node:a"]],
+    }, family="schematic")
+    for backend in ("tikz", "matplotlib"):
+        script, _g = compile_render_script(contract, outputs=["x.pdf"], backend=backend)
+        ast.parse(script)
 
 
 def test_the_audit_sidecar_is_stable_for_the_same_render(tmp_path):
@@ -3756,6 +3928,9 @@ def test_the_purpose_the_caller_gave_reaches_the_readability_check(tmp_path):
                 "request_id": "topo",
                 "intent": "双CPU服务器插上8张GPU，每4张连一个 PCIe switch，共 2 个",
                 "asset_kind": "schematic",
+                # v2.1 路由拍板后编译轨要显式进（spec 或 preferred_form）——
+                # 本测试测的是编译轨的版心机制，钉在编译轨。
+                "preferred_form": "compiled",
                 **({"purpose": purpose} if purpose else {}),
             }]
         }
@@ -3776,6 +3951,7 @@ def test_the_author_still_outranks_the_caller(tmp_path):
         "visual_requests": [{
             "request_id": "topo", "intent": "…", "asset_kind": "schematic",
             "purpose": "presentation",
+            "preferred_form": "compiled",  # v2.1：编译轨要显式进（spec 或 preferred_form）
         }]
     }
     # 作者说的版心是**被判的**（poster 放得下这张 8 GPU 的图；single_column 放不下、
@@ -3805,6 +3981,7 @@ def test_a_derived_medium_is_recorded_but_does_not_judge_the_author(tmp_path):
         "visual_requests": [{
             "request_id": "topo", "intent": "…", "asset_kind": "schematic",
             "purpose": "presentation",
+            "preferred_form": "compiled",  # v2.1：编译轨要显式进（spec 或 preferred_form）
         }]
     }
     _declare(state, _topology_contract())
