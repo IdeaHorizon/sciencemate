@@ -32,7 +32,7 @@ Open a research session inside a project and say what you need in the input box 
 
 | Platform | Download | Size |
 |---|---|---|
-| macOS (Apple Silicon) | [ScienceMate-0.5.9-arm64.dmg](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.9/ScienceMate-0.5.9-arm64.dmg) | 410 MB |
+| macOS (Apple Silicon) | [ScienceMate-0.5.9-arm64.dmg](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.9/ScienceMate-0.5.9-arm64.dmg) | 415 MB |
 | Windows 10 / 11 (64-bit) | [ScienceMate-Setup.exe](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.9/ScienceMate-Setup.exe) | 440 MB |
 
 Checksums: [SHA256SUMS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.9/SHA256SUMS) · all files: [Releases](../../releases/latest)
