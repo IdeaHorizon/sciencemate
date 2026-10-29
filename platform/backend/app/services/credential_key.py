@@ -24,12 +24,6 @@ token，为一件不存在的事要求配密钥就是在教育用户）。
 
 组织档不走这条路：那里的 ``SECRET_KEY`` 由运维配置且必须换掉，多个进程/多台
 机器要能算出同一把密钥 —— 那正是"由操作者管理的密钥"该有的样子。
-
-## 换了密钥，旧密文怎么办
-
-`decrypt_api_key` 会依次试当前密钥与**出厂密钥**；启动时跑一次
-`rekey_legacy_credentials()`，把还用出厂密钥的行重新加密成当前密钥。不这么做的
-话，那些弱密文会一直躺在库里 —— "以后新写的安全了"不是修复。
 """
 from __future__ import annotations
 
@@ -43,10 +37,6 @@ from pathlib import Path
 
 from app.config import settings
 
-#: 出厂密钥。这是**已经泄露**的那一把：它就在仓库里。留着它只为一件事 ——
-#: 把用它加密过的存量解开、换成当前密钥。任何新写入都不许用它。
-_THE_PUBLISHED_CONSTANT = "dev-secret-key-change-in-production"
-
 #: 钥匙串里这条记录的身份。改名 = 换一把密钥 = 所有存量解不开，所以它是常量。
 #: 与 .app 的 BUNDLE_ID 是同一个串（钥匙串条目按服务名取）——
 #: 两边分叉就是一个问题两个答案，由 test_credential_key_service_name 钉住。
@@ -58,11 +48,6 @@ _KEY_FILE_NAME = "credential.key"
 
 def _as_fernet_key(secret: bytes) -> bytes:
     return base64.urlsafe_b64encode(hashlib.sha256(secret).digest())
-
-
-def the_published_constant_key() -> bytes:
-    """出厂密钥派生出来的那把 —— **只用于解开存量**。"""
-    return _as_fernet_key(_THE_PUBLISHED_CONSTANT.encode())
 
 
 # ── 钥匙串 ────────────────────────────────────────────────────────────────────

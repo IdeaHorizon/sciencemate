@@ -444,37 +444,6 @@ async def _snapshot_data_root_permissions() -> None:
         logger.warning("数据根权限在升级前后变了：%s", change.get("consequences"))
 
 
-async def _rekey_credentials_that_used_the_published_constant() -> None:
-    """把还用出厂密钥加密的凭据换成这份安装自己的密钥。
-
-    2026-09-06 之前，个人档的主密钥是 `sha256("dev-secret-key-change-in-production")`
-    —— 源码里的常量，每一份安装都一样。换密钥之后，如果不把存量一并换掉，那些
-    弱密文会一直躺在库里：**"以后新写的安全了"不是修复**，用户已经存进去的那把
-    才是要保护的东西。
-
-    跑不动不拦启动：这是一次加固，不是服务的前提；失败就吵一句，凭据仍然解得开
-    （`decrypt_api_key` 会回退到出厂密钥）。
-    """
-    from app.database import get_session_factory
-    from app.services.model_backends import rekey_legacy_credentials
-
-    try:
-        async with get_session_factory()() as session:
-            rekeyed = await rekey_legacy_credentials(session)
-            if rekeyed:
-                await session.commit()
-    except Exception as exc:  # noqa: BLE001 - 加固失败不该挡住服务
-        logger.warning("凭据换密钥没跑成（不影响使用）：%s", exc)
-        return
-    if rekeyed:
-        from app.services.credential_key import where_the_key_lives
-
-        logger.info(
-            "已把 %d 条用出厂密钥加密的凭据换成本机密钥（存放于 %s）",
-            rekeyed, where_the_key_lives(),
-        )
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan: startup and shutdown."""
@@ -504,7 +473,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from app.database import create_schema_for_unmanaged_databases
 
     await create_schema_for_unmanaged_databases()
-    await _rekey_credentials_that_used_the_published_constant()
     await _refuse_to_serve_a_schema_we_were_not_written_for()
     from app.database import normalise_retired_roles
 

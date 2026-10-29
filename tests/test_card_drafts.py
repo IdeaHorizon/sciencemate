@@ -83,12 +83,6 @@ def test_methodological_needs_no_experiment_link():
     assert card_draft_source_errors({"claim_type": "methodological"}) == []
 
 
-def test_legacy_type_is_normalized_before_the_rule_applies():
-    """旧盘上的 theoretical 归一成 empirical —— 规则得看归一后的值。"""
-    errs = card_draft_source_errors({"claim_type": "theoretical"})
-    assert errs, "归一前是 theoretical 就绕过了实验出处规则"
-
-
 def test_decision_relevance_rule_is_gone():
     """墓碑：原「decision_relevance ≥30 字符」。
 

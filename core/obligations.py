@@ -281,7 +281,7 @@ def _runs_requiring_verdict(worktree) -> dict[str, bool]:
 
     ## 读不到就保守
 
-    没有 manifest 的历史运行（以及 manifest 写失败的运行）一律按 **True** 处理
+    没有 manifest 的运行（manifest 写失败、或字段缺失）一律按 **True** 处理
     —— 少做一次分析的代价远大于多提醒一次。
     """
     import json
@@ -324,21 +324,11 @@ def _runs_requiring_verdict(worktree) -> dict[str, bool]:
             continue
         required = manifest.get("requires_hypothesis_verdict")
         if required is None:
-            # 老 manifest 没这个字段 → 用它的两个组成部分现算，还是没有就保守。
+            # manifest 没这个字段 → 用它的两个组成部分现算；连那两个都没有就保守。
             role = manifest.get("run_role") or meta.get("run_role")
             stage = manifest.get("stage")
             if role is None and stage is None:
-                # ── 兼容分支（owner: framework / wangd；#979 顺带观察）────────
-                # 只对**存量** run_manifest 生效：2026-09-11 之前冻结的那些既没有
-                # `requires_hypothesis_verdict`，也可能没有 run_role/stage，只剩这个
-                # 已删字段。新 run 一律走上面第一级，这条对它们不触发。
-                # 删除条件：项目库里不再有缺 run_role 的 run_manifest —— 在那之前
-                # 删掉它会让历史 run 的"欠不欠裁决"全部退回保守的 True，把一批早已
-                # 结清的义务重新翻出来。
-                eligible = manifest.get("analysis_eligible")
-                if eligible is None:
-                    eligible = meta.get("analysis_eligible")
-                required = True if eligible is None else bool(eligible)
+                required = True
             else:
                 required = (str(role) == "primary"
                             and str(stage or "simulation") == "simulation")

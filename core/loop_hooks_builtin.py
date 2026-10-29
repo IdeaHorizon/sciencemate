@@ -1583,10 +1583,7 @@ def _latest_research_state(state) -> tuple[str | None, str | None]:
         # 与那边按版本号挑是两条会分叉的"最新"规则。
         from core import research_state_reader as _rs
 
-        try:
-            found = _rs.latest_located(worktree)
-        except _rs.UnmigratedWorkspaceError:
-            return None, None
+        found = _rs.latest_located(worktree)
         if found is None:
             return None, None
         _version, record, path = found

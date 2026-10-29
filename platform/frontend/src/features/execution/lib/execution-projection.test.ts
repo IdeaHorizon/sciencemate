@@ -42,16 +42,18 @@ const EVENTS: ExecutionEvent[] = [
   event(8, "tool.failed", {
     stepId: "step-2",
     toolCallId: "tool-2",
-    error: { message: "Unavailable", impact: "Verification blocked" },
+    errorMessage: "Unavailable",
   }),
   event(9, "decision.required", {
     stepId: "step-2",
     title: "Choose recovery",
-    decision: { id: "decision-1", options: [] },
+    decisionId: "decision-1",
+    choices: [],
   }),
   event(10, "artifact.created", {
     stepId: "step-2",
-    artifact: { id: "artifact-1", name: "Partial result" },
+    artifactId: "artifact-1",
+    name: "Partial result",
   }),
   event(11, "session.completed"),
 ];

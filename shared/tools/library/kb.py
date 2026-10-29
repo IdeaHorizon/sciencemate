@@ -1967,7 +1967,7 @@ async def _draft_knowledge_card(
     终态扫盘的 blocked 清单里把"还差什么"显式列出来。草稿位不设配额：真实约束
     是 briefing 注入窗口，在注入侧按预算截断（core/recall）。
     """
-    from shared.lib.kb_schema import card_draft_source_errors, normalize_claim_type
+    from shared.lib.kb_schema import card_draft_source_errors
     from core.kb_promotion import KNOWLEDGE_CARD_FIELDS, check_deprojectified
     from core.domain_registry import validate_domain
 
@@ -2006,7 +2006,7 @@ async def _draft_knowledge_card(
         draft["source_warnings"] = src_errors
         warnings += src_errors
 
-    if normalize_claim_type(str(rec.get("claim_type") or "")) == "dead_end":
+    if str(rec.get("claim_type") or "") == "dead_end":
         # 死路卡缺 trigger 就**送不出去**：reviewer 红旗按它匹配计划正文，
         # 没有它这张卡在新项目面前一次都不会响。撞上死路的当时最清楚
         # 什么样的计划会撞上它 —— 所以缺了要显眼地标出来，而不是拒。

@@ -30,7 +30,6 @@ from app.models.resource import ProjectResource
 from app.models.user import User
 from app.services import run_failures
 from app.services.session_environment import environment_for_run
-from app.services.research_migration import upgrade_records_before_use
 from app.services.execution_ingest import (
     PAUSE_OFFER_KEY,
     DecisionAuthoritySnapshot,
@@ -1189,10 +1188,9 @@ async def execute_local_turn(
     # commit 过（SQLAlchemy 默认让属性过期），再读就要触发一次惰性刷新；
     # 在 async 会话上那是 `MissingGreenlet`。而那次抛出发生在
     # 「fail-loud 记账」的 try 里，被吞掉之后整条记账路径跳过，用户收到的
-    # 是兜底文案 `execution_failed` —— 真实原因（记录升级被拒）连同它的
-    # 可执行建议一起消失。2026-09-16 合 i18n 时实测：
-    # `test_a_refused_upgrade_fails_this_turn_and_hands_over_the_migrator_reason`
-    # 拿到的 code 是 execution_failed。
+    # 是兜底文案 `execution_failed` —— 真实原因连同它的可执行建议一起消失
+    # （2026-09-16 合 i18n 时实测：一条带专属文案的失败拿到的 code 是
+    # execution_failed）。
     #
     # 事实要在它还读得出来的时候取下来。
     language = language_for(user)
@@ -1535,23 +1533,6 @@ async def execute_local_turn(
 
     sandbox_attempt: RunAttempt | None = None
     try:
-        if project is not None and rejoin is None and not is_answer:
-            # 记录格式升级的**唯一**触发点：这个项目要被用了，而 worker 还没起。
-            #
-            # 它曾经挂在 `main.lifespan` 上按进程生命周期扫全部项目 —— 被拒的
-            # 工作区只在日志里留一句话，撞墙的用户读到的是另一套说法，重试要
-            # 退出整个应用。搬到这里之后三件事一起成立：没有旧信封时它只是一次
-            # glob；升不上去就是这一轮的失败，迁移器的原话原样进技术细节；
-            # 「重试」不再需要一条专门的路 —— 发下一条消息就是重试。
-            #
-            # 跳过 rejoin / is_answer 的理由是同一个：那两条路上 worker 已经攥着
-            # 这个工作区了（它读得到才跑得起来），升级只会被自己挡回来。
-            await upgrade_records_before_use(
-                db,
-                conversation,
-                project_id=project_id,
-                owner_user_id=conversation.created_by_user_id or user.id,
-            )
         if rejoin is not None:
             # 发起那几步（冻结沙箱 attempt / 建 command / 落用户消息 / 起标题）
             # 上一个后端做过了。这里只把它留下的 command 找回来（找不到不拦：

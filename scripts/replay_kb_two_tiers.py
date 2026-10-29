@@ -3,7 +3,6 @@
 单测只验我想到的失败方式。这个脚本跑在真 KB 上，用来问单测问不出的问题：
 
   1. 现存 org 层在新规矩下是什么成色（P1 的诊断价值）
-  2. 类型收敛后老数据还进得了晋升分道吗（P5 归一层）
   3. 拿真项目跑终态扫盘，候选清单像不像话（P2）
   4. 真 claim 原样当知识卡投进去，会被哪一条拦下（卡片质量）
   5. 新项目开题机械收到的到底是什么，预算撑不撑得住（P3）
@@ -117,50 +116,6 @@ def audit_existing_org() -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 2. P5：类型收敛后老数据还看得见吗
-# ═══════════════════════════════════════════════════════════════════════════
-def audit_type_convergence(org_claims: list[dict]) -> None:
-    rule("2 · P5 归一层：类型收敛后，老数据还进得了晋升分道吗")
-    from shared.lib.kb_schema import CLAIM_TYPES, normalize_claim_type
-    from core.kb_promotion import KIND_BY_CLAIM_TYPE
-
-    all_claims = list(org_claims)
-    files = sorted(PROJECTS.glob("*/kb_claims.jsonl"))
-    for f in files:
-        all_claims += load(f)
-    print(f"全盘 claim（org + {len(files)} 个项目）：{len(all_claims)} 条")
-
-    raw = Counter(str(c.get("claim_type") or "—") for c in all_claims)
-    sub("盘上的原始类型分布")
-    legacy_total = 0
-    for t, n in raw.most_common():
-        cur = normalize_claim_type(t)
-        if t == "—":
-            mark = "  （记录本身没有 claim_type）"
-        elif t in CLAIM_TYPES:
-            mark = ""
-        else:
-            mark = f"  → 归一为 {cur}"
-            legacy_total += n
-        print(f"  {n:>4}  {t:<18}{mark}")
-
-    print(f"\n旧类型共 {legacy_total} 条（{legacy_total / len(all_claims):.0%}）。")
-    sub("归一层救回了多少条")
-    blind_raw = sum(n for t, n in raw.items() if t not in KIND_BY_CLAIM_TYPE)
-    after = Counter(normalize_claim_type(str(c.get("claim_type") or ""))
-                    for c in all_claims)
-    blind_after = sum(n for t, n in after.items() if t not in KIND_BY_CLAIM_TYPE)
-    by_design = sum(n for t, n in after.items()
-                    if t in CLAIM_TYPES and t not in KIND_BY_CLAIM_TYPE)
-    print(f"  归一前进不了分道：{blind_raw:>4} 条")
-    print(f"  归一后进不了分道：{blind_after:>4} 条")
-    print(f"    其中 {by_design} 条是**设计内不晋升**"
-          f"（hypothesis / synthesis 是项目内的思考与记账，不是跨项目知识）")
-    print(f"  → 归一层救回 {blind_raw - blind_after} 条：它们本来会因为类型改名而")
-    print(f"    从候选清单里静默消失 —— 不报错，只是再也不出现。")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
 # 3+4. P2：真项目终态扫盘 + 知识卡质量
 # ═══════════════════════════════════════════════════════════════════════════
 def replay_terminal_scan() -> None:
@@ -184,11 +139,9 @@ def replay_terminal_scan() -> None:
             print(f"  [{status}] {name}：{chk.reason}")
 
         types = Counter(str(c.get("claim_type") or "—") for c in claims)
-        from shared.lib.kb_schema import normalize_claim_type
         lanes = Counter()
         for c in claims:
-            kind = kb_promotion.KIND_BY_CLAIM_TYPE.get(
-                normalize_claim_type(str(c.get("claim_type") or "")))
+            kind = kb_promotion.KIND_BY_CLAIM_TYPE.get(str(c.get("claim_type") or ""))
             lanes[kb_promotion.LANE_BY_KIND.get(kind, "（无归属）")] += 1
         print(f"  类型：{dict(types)}")
         print(f"  分道：{dict(lanes)}")
@@ -197,7 +150,6 @@ def replay_terminal_scan() -> None:
 def inspect_card_quality() -> None:
     rule("4 · 知识卡质量：六个字段在真数据上填得出来吗")
     from core import kb_promotion
-    from shared.lib.kb_schema import normalize_claim_type
 
     pool: list[tuple[str, dict]] = []
     for f in sorted(PROJECTS.glob("*/kb_claims.jsonl")):
@@ -233,7 +185,7 @@ def inspect_card_quality() -> None:
     print("\n  各类失败的真实样本：")
     for cause, (proj, c, chk) in samples.items():
         text = (c.get("claim_text") or "")[:86].replace("\n", " ")
-        ctype = normalize_claim_type(str(c.get("claim_type") or ""))
+        ctype = str(c.get("claim_type") or "")
         print(f"    · [{cause}] [{ctype}] {text}…")
         print(f"      {chk.reason[:130]}")
 
@@ -359,7 +311,6 @@ def main() -> None:
     print(f"数据源：{_SRC}")
     print(f"副本：  {WORK}（本脚本只读副本，绝不写回原处）")
     org_claims = audit_existing_org()
-    audit_type_convergence(org_claims)
     replay_terminal_scan()
     inspect_card_quality()
     replay_orientation()

@@ -633,37 +633,33 @@ def test_node_checkpoint_rejects_a_commit_created_outside_platform_authority(
         )
 
 
-def test_v1_repository_migrates_to_v2_without_losing_history(tmp_path: Path) -> None:
+def test_a_repository_on_another_schema_is_refused_not_rewritten(tmp_path: Path) -> None:
+    """目录里已有仓库但不是现行版式：报错说明，不悄悄改写它的历史。"""
     repository = _repository(tmp_path)
-    root = repository.project_path("legacy-project")
+    root = repository.project_path("foreign-project")
     root.mkdir(parents=True)
     repository._git(root, "init", "-b", "main")
     repository._configure_identity(root)
-    (root / "PROJECT.yaml").write_text("schema_version: 1\ntitle: Legacy\n")
-    (root / "memory/findings").mkdir(parents=True)
-    (root / "memory/findings/finding.md").write_text("Stable result: 7\n")
-    (root / "artifacts/experiments/run-1").mkdir(parents=True)
-    (root / "artifacts/experiments/run-1/content.txt").write_text("legacy evidence\n")
+    # 不写 PROJECT.yaml：大小写不敏感的文件系统上它就是 project.yaml。
+    (root / "README.md").write_text("# Foreign\n")
     (root / ".research").mkdir()
     (root / ".research/schema-version").write_text("1\n")
     repository._git(root, "add", "--all")
-    repository._git(root, "commit", "-m", "legacy project")
+    repository._git(root, "commit", "-m", "foreign layout")
+    head = repository._git(root, "rev-parse", "HEAD")
 
-    migrated = repository.initialize_project(
-        project_id="legacy-project",
-        name="Legacy",
-        description="Migrated",
-        research_domain="testing",
-        owner_id="owner",
-    )
+    with pytest.raises(ProjectRepositoryError, match="not schema v2"):
+        repository.initialize_project(
+            project_id="foreign-project",
+            name="Foreign",
+            description=None,
+            research_domain=None,
+            owner_id="owner",
+        )
 
-    assert yaml.safe_load((root / "project.yaml").read_text())["schema_version"] == 2
-    assert "Stable result: 7" in (root / "MEMORY.md").read_text()
-    legacy_artifact = root / ".research/legacy/v1/artifacts/experiments/run-1/content.txt"
-    assert legacy_artifact.read_text() == "legacy evidence\n"
-    assert (root / ".research/migrations/project-v2.json").is_file()
-    assert repository._git(root, "rev-list", "--count", "HEAD") == "2"
-    assert migrated.clean is True
+    assert repository._git(root, "rev-parse", "HEAD") == head, "仓库一个 commit 都不许多"
+    assert not (root / "project.yaml").exists()
+    assert not repository._git(root, "status", "--porcelain"), "工作树不许被动过"
 
 
 # ── P6：账本上的冻结事实在 commit 咽喉执法 ─────────────────────────────────

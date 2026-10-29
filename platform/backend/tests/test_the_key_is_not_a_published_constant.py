@@ -14,11 +14,13 @@
 备份/同步/MDM，拿到的都是可解密的密文。而首次运行向导上写着「key 只存在这台
 机器上」—— 就传输而言是真的，读的人会理解成"存得安全"。
 
-## 判据钉住三件事
+## 判据钉住两件事
 
 1. 新写入的密文，**用出厂常量解不开**；
-2. 已经存着的弱密文，启动时被**真的换掉**（"以后新写的安全了"不是修复）；
-3. 数据根与库文件是私有的。
+2. 数据根与库文件是私有的。
+
+这套密钥 2026-09-07 进 main，首发 0.4.3 是 09-10：没有任何装机用出厂常量加密过
+凭据，所以也没有"解开存量再换密钥"那一步。
 """
 from __future__ import annotations
 
@@ -89,60 +91,6 @@ def test_the_key_file_is_not_readable_by_anyone_else(a_personal_install) -> None
     assert key_file.is_file()
     mode = stat.S_IMODE(key_file.stat().st_mode)
     assert mode == 0o600, f"密钥文件是 {oct(mode)}"
-
-
-def test_a_legacy_ciphertext_is_still_readable(a_personal_install) -> None:
-    """换密钥之前存进去的，还解得开 —— 否则对用户就是"我的 key 没了"。"""
-    legacy = _the_published_constant_fernet().encrypt(b"sk-stored-long-ago").decode()
-    assert model_backends.decrypt_api_key(legacy) == "sk-stored-long-ago"
-    assert model_backends.was_encrypted_with_the_published_constant(legacy) is True
-
-
-@pytest.mark.asyncio
-async def test_the_stored_weak_ciphertext_is_actually_replaced(
-    db_session, a_personal_install
-) -> None:
-    """存量**真的被换掉**，不是只对新写入生效。
-
-    这条是这个 PR 的要害：只改新写入的话，用户已经存进去的那把 —— 也就是唯一
-    真正需要保护的那把 —— 会一直用公开常量躺在库里。
-    """
-    from app.models.model_backend import ModelBackendConfig
-
-    legacy = _the_published_constant_fernet().encrypt(b"sk-the-users-real-key").decode()
-    row = ModelBackendConfig(
-        scope_kind="personal", scope_id=str(uuid.uuid4()), provider="deepseek", model="m",
-        base_url="http://x", display_name="d", credential_source="encrypted",
-        encrypted_api_key=legacy, created_by_user_id=str(uuid.uuid4()),
-    )
-    db_session.add(row)
-    await db_session.flush()
-
-    rekeyed = await model_backends.rekey_legacy_credentials(db_session)
-
-    assert rekeyed == 1
-    assert row.encrypted_api_key != legacy
-    assert model_backends.was_encrypted_with_the_published_constant(
-        row.encrypted_api_key) is False
-    # 换完之后内容一字不差
-    assert model_backends.decrypt_api_key(row.encrypted_api_key) == "sk-the-users-real-key"
-
-
-@pytest.mark.asyncio
-async def test_rekeying_is_idempotent(db_session, a_personal_install) -> None:
-    """已经换过的不再换 —— 每次启动都重写一遍等于每次都动一次凭据。"""
-    from app.models.model_backend import ModelBackendConfig
-
-    row = ModelBackendConfig(
-        scope_kind="personal", scope_id=str(uuid.uuid4()), provider="deepseek", model="m",
-        base_url="http://x", display_name="d", credential_source="encrypted",
-        encrypted_api_key=model_backends.encrypt_api_key("sk-already-fine"),
-        created_by_user_id=str(uuid.uuid4()),
-    )
-    db_session.add(row)
-    await db_session.flush()
-
-    assert await model_backends.rekey_legacy_credentials(db_session) == 0
 
 
 def test_the_data_root_is_private(a_personal_install, monkeypatch) -> None:

@@ -14,8 +14,16 @@ echo "构建 $IMAGE ..."
 docker build -f .gitea/Dockerfile.ci -t "$IMAGE" .
 
 echo
-echo "镜像里的依赖指纹：$(docker run --rm "$IMAGE" cat /etc/harness-ci-deps-fingerprint)"
-echo "当前工作区指纹：  $(cat .gitea/ci-deps.sh pyproject.toml | sha256sum | cut -c1-16)"
+for profile in framework backend frontend; do
+    baked="$(docker run --rm "$IMAGE" cat "/etc/harness-ci-deps-$profile")"
+    case "$profile" in
+        framework) now="$(cat .gitea/ci-deps.sh pyproject.toml | sha256sum | cut -c1-16)" ;;
+        backend)   now="$(cat .gitea/ci-deps.sh platform/backend/uv.lock | sha256sum | cut -c1-16)" ;;
+        frontend)  now="$(cat .gitea/ci-deps.sh platform/frontend/package-lock.json | sha256sum | cut -c1-16)" ;;
+    esac
+    [ "$baked" = "$now" ] && verdict="一致" || verdict="不一致（job 会自己补装）"
+    echo "指纹 ${profile}：镜像 ${baked} / 工作区 ${now} → ${verdict}"
+done
 echo
 echo "让 runner 用它：把 ~/services/forgejo-runner/data/.runner 里的"
 echo "  \"ubuntu-latest:docker://node:20-bookworm\""

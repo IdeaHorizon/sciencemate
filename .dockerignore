@@ -1,0 +1,11 @@
+# 仓库根只有一个 Dockerfile 以它为 build context：.gitea/Dockerfile.ci —— 一个依赖
+# 缓存镜像，COPY 的只有下面这几份清单。没有这个文件时 `docker build .` 会把整个
+# 仓库连 .git 一起送进 daemon（几 GB、几分钟），而镜像一个字节都用不上。
+# deploy/imagegen-service 的 Dockerfile 用它自己的目录做 context，不受这里影响。
+*
+!.gitea/ci-deps.sh
+!pyproject.toml
+!platform/backend/pyproject.toml
+!platform/backend/uv.lock
+!platform/frontend/package.json
+!platform/frontend/package-lock.json

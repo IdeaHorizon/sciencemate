@@ -326,8 +326,7 @@ async def get_project_records(
     也不带 research_state 那种结构化 metadata（假说裁决表）。界面此前按文件名
     正则去猜 head 在哪、再拆 JSON 信封拿 metadata —— 两个都不该由界面猜。
 
-    判读全在 harness（`core.ledger`），后端只鉴权 + 端出去。旧布局（信封时代）
-    的工作区回 `legacyLayout: true`，让界面说"这个项目是旧布局"而不是"还没有"。
+    判读全在 harness（`core.ledger`），后端只鉴权 + 端出去。
     """
     await _authorize_repository_read(db, user, project_id, session_id)
 
@@ -363,7 +362,6 @@ async def get_project_records(
         ) from exc
 
     def _read() -> dict:
-        legacy = ledger.old_layout_fragments(root)
         heads = ledger.workspace_store(root).heads()
         rows = []
         for head in heads.values():
@@ -384,7 +382,7 @@ async def get_project_records(
                 "metadata": head.metadata,
             })
         rows.sort(key=lambda r: (r["createdAt"], r["id"]))
-        return {"legacyLayout": bool(legacy), "records": rows}
+        return {"records": rows}
 
     payload = await run_in_repository_thread(_read)
     return {"schemaVersion": 1, "sessionId": session_id, **payload}

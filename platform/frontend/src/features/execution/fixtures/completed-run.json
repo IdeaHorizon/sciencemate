@@ -227,13 +227,10 @@
     "visibility": "summary",
     "payload": {
       "stepId": "step-write",
-      "artifact": {
-        "id": "artifact-research-brief",
-        "name": "Research brief",
-        "mediaType": "text/markdown",
-        "version": 1,
-        "preview": "The reviewed material supports a consistent comparison across four evidence categories. The brief distinguishes direct measurements from secondary interpretation and preserves two limitations as open questions."
-      }
+      "artifactId": "artifact-research-brief",
+      "artifactType": "text/markdown",
+      "name": "Research brief",
+      "version": 1
     }
   },
   {

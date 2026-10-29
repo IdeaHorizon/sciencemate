@@ -234,85 +234,6 @@ _COPY: dict[str, _Copy] = {
         # 这是真结论，不是"不知道"。
         retryable=False,
     ),
-    "workspace_records_need_upgrade": _Copy(
-        # ## 这条曾经叫 `workspace_format_unsupported`，而那句话现在是假的
-        #
-        # 它写于 2026-08-18「删掉迁移工具」那次：当时旧信封工作区确实读不了，
-        # 也确实没有迁移器，所以文案写的是"新建一个项目重跑 / 删掉那些文件"。
-        # 2026-09-14 迁移器回来了（`core.record_migration`），异常正文跟着改了，
-        # 文案表**没有** —— 于是同一个弹窗上半句说"没有迁移工具、重建项目"，
-        # 下半句的技术细节说"会自动升级"。用户照上半句做，就是把自己的 Analysis
-        # 历史删掉（2026-09-15 现场，yuankk）。
-        #
-        # 现在的事实：记录能升级，升级在这个项目下一轮开跑前自动做
-        # （`research_migration.upgrade_records_before_use`）。所以这条文案只在
-        # **还没轮到那道闸**的读取路径上出现（简报、义务账本、离线工具），
-        # 它要说的就一句话：再发一条消息，它会自己好。
-        title={
-            "zh": "这个项目的科研记录要先升级格式",
-            "en": "This Project's research records need a format upgrade first",
-        },
-        body={
-            "zh": (
-                "它是原生记录上线（2026-09-12）之前建的 —— 正文和历史都还在，"
-                "只是还没转成本版本读的格式。"
-            ),
-            "en": (
-                "It was created before native records landed (2026-09-12) — the content "
-                "and history are all still there, they just have not been converted to "
-                "the format this version reads."
-            ),
-        },
-        recovery={
-            "zh": (
-                "发下一条消息：升级会在这一轮开跑前做完，然后接着跑。"
-                "**不要删除项目里的任何文件** —— 升级要靠它们核验历史。"
-            ),
-            "en": (
-                "Send the next message: the upgrade runs before that turn starts and "
-                "then work continues. **Do not delete any file in the Project** — the "
-                "upgrade needs them to verify the history."
-            ),
-        },
-        # 三态里的 True：这正是"再发一次就好"的那种，别把它说成绝路。
-        retryable=True,
-    ),
-    "workspace_record_upgrade_failed": _Copy(
-        # 与上一条分开：那条是"还没升"，这条是"升过了，迁移器不肯"。迁移器对
-        # 历史缺失 / 冻结校验不符 / 身份冲突必须停下 —— 它宁可不迁也不伪造历史。
-        # 用户能做的事完全不同：上一条再发一次即可，这条发一百次都一样。
-        title={
-            "zh": "这个项目的记录升级被拦下了",
-            "en": "This Project's record upgrade was refused",
-        },
-        body={
-            "zh": (
-                "升级前的核验没过 —— 平台不会在历史对不上的情况下改写它。"
-                "原始记录、Git 历史一个字没动，具体是哪一条对不上写在下面的技术细节里。"
-            ),
-            "en": (
-                "The pre-upgrade verification did not pass — the platform will not "
-                "rewrite a history that does not add up. The original records and the "
-                "Git history are untouched; which check failed is in the technical "
-                "details below."
-            ),
-        },
-        recovery={
-            "zh": (
-                "把下面的技术细节交给管理员处理，或直接跑 "
-                "`python -m app.pro.manage migrate-records --worktree <项目目录> --preview` 看全貌。"
-                "**不要删除 artifacts 目录，也不要重跑一份替代历史。**"
-            ),
-            "en": (
-                "Hand the technical details below to an administrator, or run "
-                "`python -m app.pro.manage migrate-records --worktree <project dir> --preview` "
-                "to see the whole picture. **Do not delete the artifacts directory, and "
-                "do not re-run a replacement history.**"
-            ),
-        },
-        # 同一份历史、同一个核验，重发一定还是这个结果。
-        retryable=False,
-    ),
     "storage_conflict": _Copy(
         title={"zh": "这一轮没跑完", "en": "Research stopped before completion"},
         body={
@@ -740,10 +661,6 @@ _BY_TYPE: tuple[tuple[str, str], ...] = (
     ("ProjectBusyError", "project_busy"),
     ("TimeoutError", "harness_operation_timeout"),
     ("JSONDecodeError", "runtime_protocol_error"),
-    # harness 侧的 UnmigratedWorkspaceError 继承 RuntimeError —— 不点名就落进
-    # 兜底文案，用户读到"平台在记录这次运行时撞上了内部错误"，而这既不是内部
-    # 错误，也没说出他还能怎么继续。2026-08-18 实测撞到过。
-    ("UnmigratedWorkspaceError", "workspace_records_need_upgrade"),
 )
 
 #: 上游瞬时故障。判据从**我们自己生成的错误格式**里取 —— `core/llm.py` 抛的是
@@ -874,7 +791,7 @@ def _exception_type_names(exc: BaseException) -> tuple[str, ...]:
     """这个异常声称自己是什么类型 —— 进程内的 MRO **加上**跨进程带过来的名字。
 
     只看 `type(exc).__mro__` 会漏掉半个系统：worker 是另一个进程，它那边的
-    `ProjectBusyError` / `UnmigratedWorkspaceError` 到达这里时一律是
+    `ProjectBusyError` 到达这里时一律是
     `HarnessSessionError`，真实身份在 `error_type` 字段里（worker 出海时写的
     `type(exc).__name__`）。MRO 里找不到它们不是因为判据没写，是因为**判据只
     看了一半的证据**。

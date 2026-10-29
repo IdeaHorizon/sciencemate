@@ -74,22 +74,6 @@ def measure(text: str) -> int:
     return estimate_text_tokens(text or "")
 
 
-def adopt_legacy(value: Any) -> str:
-    """把旧格式（list[str] 追加日志）读成白板正文。
-
-    续连一条旧 checkpoint 时必经此处。旧笔记不丢 —— 但从此刻起它是**一块板子**，
-    模型下一次写入就会整体改写它。超出容量不在这里截断：截断哪一段是语义判断，
-    留给模型第一次改写时决定；注入侧只负责把超容量这件事说清楚（见 `render`）。
-    """
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list | tuple):
-        return "\n".join(str(item).strip() for item in value if str(item).strip())
-    return str(value)
-
-
 def write(state: Any, content: str, *, turn: int = 0) -> dict:
     """整块改写白板。超容量 **拒绝写入且不改动原板** —— 让模型自己取舍。
 

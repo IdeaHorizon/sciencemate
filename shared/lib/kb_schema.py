@@ -115,25 +115,6 @@ CLAIM_TYPES: tuple[str, ...] = (
     "dead_end",         # 已知不通的路 —— 复利最强的一类
 )
 
-#: 读取端兼容：旧数据里的类型映射到现行类型。**只在读取端**，
-#: 写入端不接受旧名 —— 否则收敛等于没做（新数据还会继续长出旧类型）。
-#: 按仓库惯例（PR#505）不写迁移器：不兼容就从头再跑，这张表只保证
-#: 老 checkpoint 读得进来不炸。
-LEGACY_CLAIM_TYPE_ALIASES: dict[str, str] = {
-    "theoretical": "empirical",
-    "causal": "empirical",
-    "assumption": "empirical",
-    "conjecture": "hypothesis",
-    "replication": "empirical",
-}
-
-
-def normalize_claim_type(claim_type: str) -> str:
-    """读取端把旧类型映射到现行类型。写入端不该调它。"""
-    ct = str(claim_type or "")
-    return LEGACY_CLAIM_TYPE_ALIASES.get(ct, ct)
-
-
 # 6 个 claim.status（连续 confidence 之上的 derived）
 CLAIM_STATUSES: tuple[str, ...] = (
     "open",           # 提出但未验证（conjecture / hypothesis 默认）
@@ -891,7 +872,7 @@ def card_draft_source_errors(record: dict) -> list[str]:
             "文献转述类 claim 不起草知识卡：它的来源是论文本身，一次检索即可重新"
             "推导。让书目条目承担该职责；草稿位留给花费真实算力/实验才获得的结论。"
         )
-    ct = normalize_claim_type(str(record.get("claim_type") or ""))
+    ct = str(record.get("claim_type") or "")
     if (ct == "empirical"
             and not record.get("literature_reported")
             and not (record.get("produced_by_experiment_id")

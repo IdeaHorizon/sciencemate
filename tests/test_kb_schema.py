@@ -199,16 +199,6 @@ def test_validate_synthesis_passes_with_two_claims():
 # 替代守卫：test_claim_types_converged_to_five / merge 语义的跨项目复现测试。
 
 
-def test_legacy_claim_types_still_read():
-    """旧数据读得进来 —— 按仓库惯例不写迁移器，但老 checkpoint 不该炸。"""
-    from shared.lib.kb_schema import normalize_claim_type
-
-    assert normalize_claim_type("theoretical") == "empirical"
-    assert normalize_claim_type("conjecture") == "hypothesis"
-    assert normalize_claim_type("replication") == "empirical"
-    assert normalize_claim_type("empirical") == "empirical"
-
-
 def test_claim_types_converged_to_five():
     """存在判据 = 有机械消费者。没有闸区别对待的分类不是信息，是装饰。"""
     from shared.lib.kb_schema import CLAIM_TYPES
@@ -217,10 +207,10 @@ def test_claim_types_converged_to_five():
         "empirical", "methodological", "hypothesis", "synthesis", "dead_end"}
 
 
-def test_legacy_types_are_refused_on_write():
-    """只在读取端兼容 —— 写入端接受旧名等于收敛没做。"""
-    for legacy in ("theoretical", "causal", "assumption", "conjecture", "replication"):
-        rec = _valid_claim_base(claim_type=legacy)
+def test_unknown_claim_types_are_refused_on_write():
+    """不在词表里的类型名写不进去 —— 包括收敛 10→5 时退场的那几个名字。"""
+    for unknown in ("theoretical", "causal", "assumption", "conjecture", "replication", "blah"):
+        rec = _valid_claim_base(claim_type=unknown)
         with pytest.raises(SchemaValidationError):
             validate_record("claims", rec)
 

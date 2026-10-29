@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "harness-framework"
-version = "0.5.8"
+version = "0.5.9"
 description = "Minimal teaching scaffold for the AI4S research platform's node harness layer."
 requires-python = ">=3.11"
 dependencies = [

@@ -179,11 +179,9 @@ def load_conversation(state: State) -> list[LLMMessage] | None:
 
     state.tokens_used = int(data.get("tokens_used", 0) or 0)
     state.tool_calls_made = int(data.get("tool_calls_made", 0) or 0)
-    # 白板从 list[str] 改成 str（2026-08-13）。**存量 checkpoint 里还是 list** ——
-    # 续连时按旧格式读，笔记不丢；从此它是一块板子，模型下一次写入整体改写它。
-    from core.whiteboard import adopt_legacy
-
-    state.scratchpad = adopt_legacy(data.get("scratchpad"))
+    # 白板是一块 str 板子（2026-08-13 起）；不是 str 的值当空板。
+    scratchpad = data.get("scratchpad")
+    state.scratchpad = scratchpad if isinstance(scratchpad, str) else ""
     state.scratchpad_revision = int(data.get("scratchpad_revision", 0) or 0)
     state.scratchpad_revised_turn = int(data.get("scratchpad_revised_turn", 0) or 0)
     state.hook_state.update(data.get("hook_state") or {})

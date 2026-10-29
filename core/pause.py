@@ -154,6 +154,10 @@ class PausedRunContext:
     pause_event: PauseEvent
     parent_run_id: str | None = None
     parent_tool_call_id: str | None = None
+    #: pause 的终点已经记过账：`loop_resume` 已写、注册表已清、磁盘标记已删。
+    #: 由 `agent_loop.end_pause` 置位；`resume_loop` 据此不再记第二次。
+    #: 答复被受理的那一刻就是终点 —— 不是 LLM 续跑的那一刻（见 end_pause）。
+    resume_recorded: bool = False
 
 
 # ── 全局注册表（进程级单例，chat.py / agent_loop / run_node 共用）─────────

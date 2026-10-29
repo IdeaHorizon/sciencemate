@@ -173,7 +173,6 @@ async def test_the_records_endpoint_serves_the_ledger_head(runtime_client) -> No
     )
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["legacyLayout"] is False
     [row] = [r for r in body["records"] if r["type"] == "manuscript"]
     assert row["id"] == "manuscript__podsys"
     assert row["path"] == "paper/manuscript__podsys.tex"

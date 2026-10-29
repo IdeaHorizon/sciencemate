@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 
 import { api } from "@/lib/api";
@@ -48,20 +47,6 @@ export function ResearchStateView({ projectId }: { projectId: string }) {
     );
   }
   const head = researchStateHead(records.data?.records ?? []);
-  if (!head && records.data?.legacyLayout) {
-    // 与后端 research_state_reader 的 UnmigratedWorkspaceError 同一句话：
-    // 不读旧布局，但也不能装作没看见。
-    return (
-      <Empty
-        title={t({ zh: "这个项目用的是迁移前的旧布局", en: "Research state uses a pre-migration layout" })}
-        hint={t({ zh: "这个项目建于记录改成原生文件加账本之前。这个版本读不了它 —— 新建一个项目继续研究。", en: "This Project was created before records became native files with a ledger. This version does not read it — start a new Project to continue the research." })}
-        // 这句话叫人「新建一个项目」，就得给他一条过去的路。扫盘闸
-        // （shared/ui/an-empty-state-that-tells-you-to-act-offers-it）在项目页
-        // 那处同样的毛病被修掉之后，顺手把这一处也揪了出来。
-        action={<Link className="ui-empty-link" href="/projects">{t({ zh: "去新建项目", en: "Go to Projects" })}</Link>}
-      />
-    );
-  }
   if (!head) {
     return (
       <Empty

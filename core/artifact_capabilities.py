@@ -59,7 +59,7 @@ TYPED_ONLY_ARTIFACT_OWNERS: dict[str, frozenset[str]] = {
     # 不是普通文档。它的全部完整性判据（版本链、假说不得消失、裁决必须挂
     # 证据、冻结 prereg 假说必须在册）都在 update_research_state 里；若通用
     # save_artifact 也能造一份，那些判据就只是建议 —— 绕过它只要换个工具名。
-    "research_state": frozenset({"hypothesis", "analysis"}),
+    "research_state": frozenset({"hypothesis"}),
 }
 
 

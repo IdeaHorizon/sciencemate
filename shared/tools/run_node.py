@@ -4111,13 +4111,14 @@ async def _read_own_prior_attempt(
     #
     # 更深一层：v2.1 之后**同一节点的所有 run 写同一个目录**，"上一次 run 的
     # 产物"和"当前产物"是同一个文件路径（历史版本在 Git 里）。所以正确做法是
-    # 走 state 的查找入口拿到当前落点；只有历史遗留的 run 才需要回退到缓存。
+    # 走 state 的查找入口拿到当前落点。没绑 worktree 的 run（CLI / fixture 跑法）
+    # 没有这个共用目录，上一次的产物只在它自己的 run 本地账本里 —— 那条路走下面。
     rec = state.read_artifact(artifact_id)
     if rec is None:
         from core.ledger import RecordStore
 
-        _legacy_store = RecordStore(target.state_dir / "artifacts", target.state_dir / "records.jsonl")
-        rec = _legacy_store.record(artifact_id)
+        _run_local_store = RecordStore(target.state_dir / "artifacts", target.state_dir / "records.jsonl")
+        rec = _run_local_store.record(artifact_id)
     if rec is None:
         have = [a.get("id") for a in target.artifacts if isinstance(a, dict)]
         return {

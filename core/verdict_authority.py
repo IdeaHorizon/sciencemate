@@ -36,7 +36,7 @@ _REQUIRED_ANALYSIS_STATUS = {
 }
 
 #: Analysis 的产物落在项目工作区里这个节点目录下。
-_ANALYSIS_WORKSPACES = ("hypothesis", "analysis")
+_ANALYSIS_WORKSPACES = ("hypothesis",)
 
 
 def _load_latest_research_state(state: Any) -> dict[str, Any] | None:

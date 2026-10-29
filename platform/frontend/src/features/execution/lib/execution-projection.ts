@@ -29,7 +29,8 @@ export type ToolProjection = {
   progress?: EventPayloadView["progress"];
   detail?: string;
   outputLines: string[];
-  error?: EventPayloadView["error"];
+  /** 失败的呈现：标题（impact）、上游原话、下一步 —— 由 `researchToolFailurePresentation` 算出，不是从 payload 读的。 */
+  error?: { message: string; impact: string; recovery?: string };
   events: ExecutionEvent[];
 };
 

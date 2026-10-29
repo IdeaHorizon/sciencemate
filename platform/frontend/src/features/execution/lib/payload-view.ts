@@ -23,7 +23,6 @@ export type UsageView = {
   totalTokens?: number;
   cost?: number | null;
   currency?: string;
-  retries?: number;
   coverage?: "complete" | "partial";
 };
 
@@ -63,7 +62,6 @@ export type EventPayloadView = {
     id?: string;
     name: string;
     mediaType?: string;
-    preview?: string;
     version?: number;
   };
   decision?: {
@@ -72,15 +70,12 @@ export type EventPayloadView = {
     prompt?: string;
     reason?: string;
     recommendation?: string;
-    evidence?: string;
-    reversible?: boolean;
     options: DecisionOption[];
   };
   error?: {
     code?: string;
     message: string;
     retryable?: boolean;
-    impact?: string;
     recovery?: string;
   };
   usage?: UsageView;
@@ -155,22 +150,6 @@ function parseProgress(value: unknown): ProgressView | undefined {
   return undefined;
 }
 
-function parseLegacyOptions(value: unknown): DecisionOption[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((rawOption) => {
-    const option = record(rawOption);
-    const id = string(option?.id);
-    const label = string(option?.label);
-    if (!id || !label) return [];
-    return [{
-      id,
-      label,
-      consequence: string(option?.consequence),
-      recommended: boolean(option?.recommended),
-    }];
-  });
-}
-
 function parseCanonicalChoices(value: unknown, recommendedChoiceId?: string) {
   if (!Array.isArray(value)) return undefined;
   return value.flatMap((rawChoice): DecisionOption[] => {
@@ -182,54 +161,35 @@ function parseCanonicalChoices(value: unknown, recommendedChoiceId?: string) {
   });
 }
 
-function parseUsage(event: ExecutionEvent, legacyUsage?: Record<string, unknown>): UsageView | undefined {
-  if (event.kind === "usage.updated") {
-    const promptTokens = number(event.payload.promptTokens);
-    const completionTokens = number(event.payload.completionTokens);
-    const directTotal = number(event.payload.totalTokens);
-    const totalTokens = directTotal ?? (
-      promptTokens !== undefined && completionTokens !== undefined
-        ? promptTokens + completionTokens
-        : undefined
-    );
-    const directCostPresent = hasOwn(event.payload, "cost");
-    return {
-      promptTokens,
-      completionTokens,
-      totalTokens: totalTokens ?? number(legacyUsage?.tokens),
-      cost: directCostPresent
-        ? nullableNumber(event.payload.cost)
-        : nullableNumber(legacyUsage?.cost),
-      currency: string(event.payload.currency) ?? string(legacyUsage?.currency),
-      retries: number(legacyUsage?.retries),
-      coverage: coverage(event.payload.coverage) ?? coverage(legacyUsage?.coverage),
-    };
-  }
-
-  if (!legacyUsage) return undefined;
+function parseUsage(event: ExecutionEvent): UsageView | undefined {
+  if (event.kind !== "usage.updated") return undefined;
+  const promptTokens = number(event.payload.promptTokens);
+  const completionTokens = number(event.payload.completionTokens);
+  const totalTokens = number(event.payload.totalTokens) ?? (
+    promptTokens !== undefined && completionTokens !== undefined
+      ? promptTokens + completionTokens
+      : undefined
+  );
   return {
-    totalTokens: number(legacyUsage.tokens),
-    cost: nullableNumber(legacyUsage.cost),
-    currency: string(legacyUsage.currency),
-    retries: number(legacyUsage.retries),
-    coverage: coverage(legacyUsage.coverage),
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    cost: nullableNumber(event.payload.cost),
+    currency: string(event.payload.currency),
+    coverage: coverage(event.payload.coverage),
   };
 }
 
 /**
- * Compatibility view for canonical Phase-0 direct payload fields. Direct
- * fields always win. Nested fields remain only for the local UI-demo fixtures
- * and can be removed after those demos migrate to the backend contract.
+ * Typed view over the Phase-0 direct payload fields
+ * (`platform/contracts/payload-conventions.phase0.json`). Only what the backend
+ * writes is read; the UI-demo fixtures use the same fields.
  */
 export function readPayload(event: ExecutionEvent): EventPayloadView {
   const payload = event.payload;
   const role = string(payload.role);
-  const nestedArtifact = record(payload.artifact);
-  const nestedDecision = record(payload.decision);
-  const nestedError = record(payload.error);
-  const nestedUsage = record(payload.usage);
   const toolName = string(payload.toolName);
-  const directArtifact = event.kind.startsWith("artifact.") && string(payload.name)
+  const artifact = event.kind.startsWith("artifact.") && string(payload.name)
     ? {
         id: string(payload.artifactId),
         name: string(payload.name) as string,
@@ -238,43 +198,30 @@ export function readPayload(event: ExecutionEvent): EventPayloadView {
       }
     : undefined;
   const recommendedChoiceId = string(payload.recommendedChoiceId);
-  const directChoices = parseCanonicalChoices(payload.choices, recommendedChoiceId);
-  const hasDirectDecisionFields = event.kind === "decision.required" && [
+  const choices = parseCanonicalChoices(payload.choices, recommendedChoiceId);
+  const hasDecisionFields = event.kind === "decision.required" && [
     "decisionId",
     "subtype",
     "prompt",
     "choices",
     "recommendedChoiceId",
   ].some((key) => hasOwn(payload, key));
-  const directDecision = hasDirectDecisionFields
+  const decision = hasDecisionFields
     ? {
         id: string(payload.decisionId),
         subtype: string(payload.subtype),
         prompt: string(payload.prompt),
         reason: string(payload.prompt),
-        recommendation: directChoices?.find((choice) => choice.recommended)?.label,
-        options: directChoices ?? [],
+        recommendation: choices?.find((choice) => choice.recommended)?.label,
+        options: choices ?? [],
       }
     : undefined;
-  const nestedDecisionView = !hasDirectDecisionFields && nestedDecision
-    ? {
-        id: string(nestedDecision.id),
-        reason: string(nestedDecision.reason),
-        recommendation: string(nestedDecision.recommendation),
-        evidence: string(nestedDecision.evidence),
-        reversible: boolean(nestedDecision.reversible),
-        options: parseLegacyOptions(nestedDecision.options),
-      }
-    : undefined;
-  const decision = directDecision ?? nestedDecisionView;
-  const directErrorMessage = event.kind.endsWith(".failed")
+  const errorMessage = event.kind.endsWith(".failed")
     ? string(payload.errorMessage)
     : undefined;
 
   return {
-    title:
-      humanizeToolName(toolName) ??
-      (hasDirectDecisionFields ? undefined : string(payload.title)),
+    title: humanizeToolName(toolName) ?? string(payload.title),
     summary: string(payload.resultSummary) ?? string(payload.summary),
     detail: string(payload.detail),
     role:
@@ -301,34 +248,19 @@ export function readPayload(event: ExecutionEvent): EventPayloadView {
       string(payload.decisionId) ??
       string(payload.permissionId) ??
       undefined,
-    artifact: directArtifact ?? (nestedArtifact && string(nestedArtifact.name)
-      ? {
-          id: string(nestedArtifact.id),
-          name: string(nestedArtifact.name) as string,
-          mediaType: string(nestedArtifact.mediaType),
-          preview: string(nestedArtifact.preview),
-          version: number(nestedArtifact.version),
-        }
-      : undefined),
+    artifact,
     decision,
-    error: directErrorMessage
+    error: errorMessage
       ? {
           code: string(payload.errorCode),
-          message: directErrorMessage,
+          message: errorMessage,
           retryable: boolean(payload.retryable),
           // 工具失败走的就是这条扁平分支（`_tool_failure_fields`）。以前这里没有
           // recovery，于是工具写的"下一步"到不了人手上，界面只能用兜底文案。
           recovery: string(payload.errorRecovery),
         }
-      : nestedError && string(nestedError.message)
-        ? {
-            code: string(nestedError.code) ?? string(payload.errorCode),
-            message: string(nestedError.message) as string,
-            impact: string(nestedError.impact),
-            recovery: string(nestedError.recovery),
-          }
-        : undefined,
-    usage: parseUsage(event, nestedUsage),
+      : undefined,
+    usage: parseUsage(event),
   };
 }
 
@@ -355,19 +287,15 @@ export function summarizeSessionResources(
     : usage.every((item) => item.coverage === "complete")
       ? "complete"
       : "partial";
-  const observedRetryEvents = events.filter((event) =>
+  const observedRetries = events.filter((event) =>
     event.kind === "run.retrying" || event.kind === "tool.retrying"
   ).length;
-  const legacyRetryCount = usage.reduce(
-    (maximum, item) => Math.max(maximum, item.retries ?? 0),
-    0,
-  );
 
   return {
     totalTokens,
     cost,
     currency: currencyCompatible ? currencies[0] : undefined,
     coverage: resourceCoverage,
-    observedRetries: Math.max(observedRetryEvents, legacyRetryCount),
+    observedRetries,
   };
 }

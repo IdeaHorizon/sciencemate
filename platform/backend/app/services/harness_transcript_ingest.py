@@ -42,10 +42,10 @@ MAX_TRANSCRIPT_RECORD_BYTES = 5_000_000
 def _session_runtime_root(project_id: str, session_id: str) -> Path:
     from app.services.project_repository import get_project_repository
 
-    from app.services.session_runtime_paths import resolve_existing
+    from app.services.session_runtime_paths import runtime_path
 
     worktree = get_project_repository().session_path(project_id, session_id)
-    return resolve_existing(worktree, "runs").resolve()
+    return runtime_path(worktree, "runs").resolve()
 
 
 def _approved_runtime_root(path: Path, project_id: str, session_id: str) -> Path | None:

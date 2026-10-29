@@ -98,20 +98,10 @@ def test_capacity_is_configurable_but_never_unbounded(monkeypatch):
         assert whiteboard.capacity_tokens() == 1000      # 落回默认，永远有限
 
 
-def test_legacy_append_log_is_adopted_not_dropped():
-    """续连旧 checkpoint：639 条笔记读成一块板子，内容不丢。"""
-    legacy = [f"笔记 {i}" for i in range(639)]
-    board = whiteboard.adopt_legacy(legacy)
-    assert board.startswith("笔记 0")
-    assert board.endswith("笔记 638")
-    assert whiteboard.adopt_legacy(None) == ""
-    assert whiteboard.adopt_legacy("已经是板子") == "已经是板子"
-
-
-def test_oversized_legacy_board_says_so_instead_of_silently_truncating(tmp_path):
-    """旧板超容量：注入侧**说清楚**，不偷偷截断（截断哪段是语义判断）。"""
+def test_oversized_board_says_so_instead_of_silently_truncating(tmp_path):
+    """板子超容量（容量被调小后续连）：注入侧**说清楚**，不偷偷截断（截断哪段是语义判断）。"""
     state = _state(tmp_path)
-    state.scratchpad = whiteboard.adopt_legacy([f"第 {i} 条笔记，内容若干。" for i in range(639)])
+    state.scratchpad = "\n".join(f"第 {i} 条笔记，内容若干。" for i in range(639))
     rendered = whiteboard.render(state, turn=5)
     assert rendered and "超出容量" in rendered
 

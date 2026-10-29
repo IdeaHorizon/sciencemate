@@ -1,4 +1,4 @@
-"""Pure contract tests for frozen RunAttempt capabilities (manifest v4 + legacy)."""
+"""Pure contract tests for frozen RunAttempt capabilities (manifest v4)."""
 
 from __future__ import annotations
 
@@ -41,28 +41,13 @@ def test_backend_is_part_of_the_frozen_capability(tmp_path) -> None:
     assert "image_id" not in darwin.canonical_payload(), "v4 不再有镜像字段"
 
 
-def test_legacy_manifest_keeps_its_hardened_meaning(tmp_path) -> None:
-    """v1 payload 是 Docker 年代的形状：解析仍认、hash 不变、hardened 语义不变。"""
-    legacy = sandbox.SandboxManifest(
-        attempt_id="attempt-legacy",
-        run_id="run-1",
-        mounts=((str(tmp_path.resolve()), "rw"),),
-        backend="image",
-        version=1,
-        image_id="sha256:" + "a" * 64,
-        security_profile="hardened",
-    ).canonical_payload()
-    legacy.pop("security_profile", None)  # v1 payload 里没有这个字段
-
-    parsed = sandbox.parse_manifest(legacy)
-
-    assert parsed.security_profile == "hardened"
-    assert parsed.backend == "image"
-    assert parsed.canonical_payload() == legacy
-
-    legacy["security_profile"] = "portable"
-    with pytest.raises(sandbox.SandboxContractError, match="legacy.*hardened"):
-        sandbox.parse_manifest(legacy)
+def test_only_v4_payloads_parse(tmp_path) -> None:
+    """Docker 年代的 v1–v3 形状在 0.4.3 发布前就已不再写出 —— 不认、不回退。"""
+    payload = _manifest(tmp_path).canonical_payload()
+    assert sandbox.parse_manifest(payload).version == 4
+    for version in (1, 2, 3):
+        with pytest.raises(sandbox.SandboxContractError, match="unsupported sandbox manifest version"):
+            sandbox.parse_manifest({**payload, "version": version})
 
 
 def test_a_v4_manifest_cannot_name_the_removed_image_backend(tmp_path) -> None:

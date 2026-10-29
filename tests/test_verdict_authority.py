@@ -101,7 +101,7 @@ def test_non_verdict_statuses_untouched(tmp_path):
 def test_architecture_nodes_and_analysis_itself_exempt(tmp_path):
     root = _worktree(tmp_path)
     _write_state(root, 1, [{"id": "H1", "status": "active"}])
-    for node in ("_curator", "_reviewer", "hypothesis", "analysis"):
+    for node in ("_curator", "_reviewer", "hypothesis"):
         assert scientific_verdict_block(
             _S(root, node), hypothesis_id="H1", new_status="refuted") is None
 
@@ -146,6 +146,6 @@ def test_the_block_message_names_the_node_and_target_status(tmp_path):
 
 def test_exempt_nodes_are_unaffected_by_the_worktree_rule(tmp_path):
     """别把治理/架构路径一起拦了 —— 它们本来就不受这道门约束。"""
-    for node in ("_curator", "_reviewer", "_orchestrator", "hypothesis", "analysis"):
+    for node in ("_curator", "_reviewer", "_orchestrator", "hypothesis"):
         assert scientific_verdict_block(
             _S(None, node), hypothesis_id="H1", new_status="refuted") is None

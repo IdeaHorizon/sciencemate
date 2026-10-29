@@ -62,7 +62,6 @@ test("completed direct payloads produce tool, artifact, message, and usage views
     name: "Sampling methods survey",
     version: 1,
     frozen: false,
-    artifact: { id: "legacy-artifact", name: "Legacy artifact" },
   }));
   const usageEvent = event(4, "usage.updated", {
     promptTokens: 1820,
@@ -70,7 +69,6 @@ test("completed direct payloads produce tool, artifact, message, and usage views
     totalTokens: 2460,
     cost: null,
     coverage: "partial",
-    usage: { tokens: 9999, cost: 42, coverage: "complete" },
   });
   const usage = readPayload(usageEvent);
   const resources = summarizeSessionResources([usageEvent]);
@@ -154,7 +152,8 @@ test("active tool.failed direct fields produce a forced-open error view", () => 
   assert.equal(resources.observedRetries, 1);
 });
 
-test("nested UI demo Decision falls back without losing its five options", () => {
+test("the UI demo Decision fixture speaks the backend contract", () => {
+  // 演示夹具和后端写的是同一套直接字段 —— 没有第二套只给演示用的形状。
   const fixture = JSON.parse(readFileSync(
     new URL("../fixtures/decision-run.json", import.meta.url),
     "utf8",
@@ -176,24 +175,6 @@ test("nested UI demo Decision falls back without losing its five options", () =>
     "redirect_upstream",
   );
   assert.equal(projection.decisions[0].payload.decision?.options.length, 5);
-});
-
-test("canonical direct Decision fields never merge with nested demo fields", () => {
-  const view = readPayload(event(1, "decision.required", {
-    title: "Legacy title",
-    prompt: "Canonical prompt",
-    choices: [{ choiceId: "proceed", label: "Continue" }],
-    decision: {
-      id: "legacy-decision",
-      reason: "Legacy reason",
-      options: [{ id: "legacy-option", label: "Legacy option" }],
-    },
-  }));
-
-  assert.equal(view.title, undefined);
-  assert.equal(view.decision?.reason, "Canonical prompt");
-  assert.deepEqual(view.decision?.options.map((choice) => choice.id), ["proceed"]);
-  assert.equal(view.correlationId, undefined);
 });
 
 test("post-node direct decision exposes all five choices and resolves by decisionId", () => {

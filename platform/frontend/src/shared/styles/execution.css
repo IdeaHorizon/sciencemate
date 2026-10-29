@@ -446,11 +446,6 @@
   font-weight: 550;
 }
 
-.execution-decision-evidence {
-  padding-top: 5px;
-  font-size: var(--font-size-control) !important;
-}
-
 .execution-decision-options {
   display: grid;
   gap: 2px;

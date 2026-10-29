@@ -1,4 +1,8 @@
-"""Resolve old name subscriptions, preserving ambiguous choices for confirmation."""
+"""Resolve old name subscriptions, preserving ambiguous choices for confirmation.
+
+存量来自：0.5.7 及更早版本写下的按名字订阅（身份解析 2026-10-19 进 main，在 0.5.7 导出之后）。
+删除条件：没有 0.5.7 及更早的装机还会升上来之后（0.5.8 发布后再隔一版）。
+"""
 from __future__ import annotations
 import asyncio
 import logging

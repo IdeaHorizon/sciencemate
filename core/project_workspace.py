@@ -241,19 +241,6 @@ def bind_project_workspace(state: Any, project_worktree: Path | str | None) -> N
     top = Path(_git(root, "rev-parse", "--show-toplevel").strip()).resolve()
     if top != root:
         raise ProjectWorkspaceError("Project workspace must be the Git worktree root")
-    # 旧布局闸：工作区若还是信封时代的形状（`<节点>/artifacts/*.json`），
-    # **当场拒绝开跑**。放这里是因为它是每个绑 Project 的 run 的必经点；
-    # 让它 fail-closed 而不是让读取层返回"没有记录"——后者是个静默的错答案
-    # （义务账本会认为 Analysis 从没跑过、目录页空空如也）。
-    from core.research_state_reader import (
-        UnmigratedWorkspaceError,
-        _unmigrated_message,
-        legacy_fragments,
-    )
-
-    fragments = legacy_fragments(root)
-    if fragments:
-        raise UnmigratedWorkspaceError(_unmigrated_message(fragments))
     owned = _NODE_WORKSPACES.get(str(state.node_type))
     if owned is None:
         # Unknown extension nodes get an isolated run directory.  They cannot
@@ -282,32 +269,6 @@ def bind_project_workspace(state: Any, project_worktree: Path | str | None) -> N
     # run 本地（None 表示"没有 Git 内的记录目录"）。
     state.workspace_records_dir = None if file_scoped else working
     state.hook_state["_project_workspace_expected_head"] = _git(root, "rev-parse", "HEAD").strip()
-    _heal_legacy_readonly(root)
-
-
-def _heal_legacy_readonly(root: Path) -> None:
-    """迁移 shim：旧版 chmod 守卫（2026-08-11 ~ 08-13）崩溃时会把兄弟节点
-    目录留在只读态，而它的自愈随那套机制一起删了。存量 worktree 撞上就是
-    "权限不足"指向假原因。只修**明显是旧守卫手笔**的形状（owner 写位被清），
-    等存量 worktree 都翻新过一轮后整个函数可删。
-    """
-    try:
-        for entry in root.iterdir():
-            if not entry.is_dir() or entry.is_symlink() or entry.name == ".git":
-                continue
-            try:
-                mode = entry.stat().st_mode
-                if not mode & 0o200:
-                    for path in [entry, *entry.rglob("*")]:
-                        try:
-                            if not path.is_symlink():
-                                path.chmod(path.stat().st_mode | 0o200)
-                        except OSError:
-                            continue
-            except OSError:
-                continue
-    except OSError:
-        pass
 
 
 def working_directory(state: Any) -> Path:

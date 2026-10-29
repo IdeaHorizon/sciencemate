@@ -756,11 +756,3 @@ def ensure_dirs() -> None:
     runs_anon_root().mkdir(parents=True, exist_ok=True)    # v0.8 新
     projects_root().mkdir(parents=True, exist_ok=True)
     user_root().mkdir(parents=True, exist_ok=True)
-
-
-# ── Backward-compat：保留 <repo>/output/ 作 fallback fixture root ────────────
-def legacy_output_root() -> Path | None:
-    """旧 `<repo>/output/`。仅 migration 脚本用，正常路径走 runs_root。"""
-    repo_root = Path(__file__).resolve().parent.parent
-    legacy = repo_root / "output"
-    return legacy if legacy.exists() else None

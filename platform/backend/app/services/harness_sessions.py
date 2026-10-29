@@ -2475,39 +2475,6 @@ class HarnessSessionManager:
             return False
         return not session.backend_fingerprint
 
-    async def prepare_workspace_upgrade(self, project_id: str, session_id: str, *, owner_user_id: str) -> None:
-        """记录格式升级前的**只读**核验：没有任何 worker 还在写这个会话的工作区。
-
-        有活 worker —— 不论在飞、停在问题上、还是空闲 —— 都抛 HarnessSessionError，
-        让调用方这次跳过。这里**不终止任何进程**：启动对账刚把幸存的 worker 接回
-        注册表，它可能正跑着几小时的研究；空闲的也没必要杀 —— 等它自己退场、
-        下次启动再迁，或由操作者停掉后手动 `python -m app.pro.manage migrate-records`。
-        旧 stdio worker 接不回来，但锁文件里的 pid 若还是我们的 worker，它仍是
-        一个写者。
-        """
-        async with self._registry_lock:
-            key = self._key(project_id, session_id)
-            session = self._sessions.get(key)
-            if session is None:
-                session = await self._adopt_locked(project_id, session_id, owner_user_id=owner_user_id)
-            if session is not None and session.alive:
-                if session.paused or self._occupied(session, project_id, session_id):
-                    raise HarnessSessionError(
-                        "Finish or cancel the active research task before upgrading its record format"
-                    )
-                raise HarnessSessionError(
-                    "A research worker still holds this workspace; it is left running and "
-                    "the record upgrade waits for a start when it is gone"
-                )
-        lock_path = _session_lock_path(project_id, session_id)
-        if lock_path is not None and lock_path.is_file():
-            try:
-                pid = json.loads(lock_path.read_text()).get("pid")
-            except (ValueError, OSError, AttributeError) as exc:
-                raise HarnessSessionError("Cannot verify the old research worker is stopped") from exc
-            if isinstance(pid, int) and _process_is_a_runtime_worker(pid):
-                raise HarnessSessionError("Close the old research worker before upgrading this project")
-
     async def retire_paused_worker(self, project_id: str, session_id: str) -> AppRunBinding | None:
         """让停在问题上的旧一代 worker 体面退场；它挂着的 pause 按 respawn 同一条路
         标成可恢复。返回被送走的绑定（None = 没有可退的）。"""
@@ -2970,8 +2937,8 @@ class HarnessSessionManager:
                 # 之后**一个都没 detach**，收尾报 `Application shutdown failed`，
                 # 而"部署不动 worker"的承诺就是在这里被静默作废的（9 次）。
                 #
-                # 与 `research_migration` 同一条规矩：一个工作区（这里是一个
-                # worker）的判决不是整个后端的。失败要出声、但只赔上它自己。
+                # 一个工作区（这里是一个 worker）的判决不是整个后端的。
+                # 失败要出声、但只赔上它自己。
                 logger.exception(
                     "detach failed for %s/%s — 其余 worker 照常放手",
                     session.project_id, session.session_id,
@@ -3388,10 +3355,9 @@ def _session_runtime_dir(project_id: str, session_id: str) -> Path | None:
         return None
     if not worktree.is_dir():
         return None
-    # 读路径：现行位置优先，存量会话回落老位置（续跑是全函数）。
-    from app.services.session_runtime_paths import resolve_existing
+    from app.services.session_runtime_paths import runtime_path
 
-    return resolve_existing(
+    return runtime_path(
         worktree, "runs",
         _RUNTIME_DIR_TEMPLATE.format(project_id=project_id, session_id=session_id),
     )

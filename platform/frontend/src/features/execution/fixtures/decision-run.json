@@ -120,11 +120,9 @@
       "toolCallId": "tool-open-primary-source",
       "title": "Could not open primary source",
       "durationMs": 7000,
-      "error": {
-        "message": "The source requires access that is not available in this environment.",
-        "impact": "The central claim cannot be verified from the primary record.",
-        "recovery": "Continue with the accessible secondary evidence, or pause until access is provided."
-      }
+      "errorCode": "source_unavailable",
+      "errorMessage": "The source requires access that is not available in this environment.",
+      "errorRecovery": "Continue with the accessible secondary evidence, or pause until access is provided."
     }
   },
   {
@@ -162,41 +160,18 @@
     "payload": {
       "stepId": "step-validate-evidence",
       "title": "Primary evidence is unavailable",
-      "decision": {
-        "id": "decision-evidence-access",
-        "reason": "Continuing now would require clearly qualifying the conclusion.",
-        "recommendation": "Go back upstream and provide access to the primary source.",
-        "evidence": "One primary record is inaccessible; three secondary sources agree on direction but omit the decisive measurement.",
-        "reversible": true,
-        "options": [
-          {
-            "id": "proceed",
-            "label": "Continue",
-            "consequence": "Proceed using secondary evidence and mark the conclusion as provisional."
-          },
-          {
-            "id": "revise",
-            "label": "Revise this step",
-            "consequence": "Revise the evidence review before continuing."
-          },
-          {
-            "id": "redirect_upstream",
-            "label": "Go back upstream",
-            "consequence": "Provide source access, then resume primary verification.",
-            "recommended": true
-          },
-          {
-            "id": "abort",
-            "label": "Stop research",
-            "consequence": "Keep the current record without producing a final brief."
-          },
-          {
-            "id": "edit",
-            "label": "Edit manually",
-            "consequence": "Edit the research direction before resuming."
-          }
-        ]
-      }
+      "decisionId": "decision-evidence-access",
+      "subtype": "post_node",
+      "prompt": "One primary record is inaccessible; three secondary sources agree on direction but omit the decisive measurement. Continuing now would require clearly qualifying the conclusion. How should the research continue?",
+      "choices": [
+        { "choiceId": "proceed", "label": "Continue" },
+        { "choiceId": "revise", "label": "Revise this step" },
+        { "choiceId": "redirect_upstream", "label": "Go back upstream" },
+        { "choiceId": "abort", "label": "Stop research" },
+        { "choiceId": "edit", "label": "Edit manually" }
+      ],
+      "recommendedChoiceId": "redirect_upstream",
+      "requiredApprovalCount": 1
     }
   },
   {

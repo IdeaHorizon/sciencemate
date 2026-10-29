@@ -217,15 +217,13 @@ def _run_manifest(root: Path, run_id: str, *, run_role: str, stage: str,
         "run_id": run_id,
         "run_role": run_role,
         "stage": stage,
-        "analysis_eligible": run_role == "primary",
         "requires_hypothesis_verdict": run_role == "primary" and stage == "simulation",
         "status": "completed",
     }
     return write_record(
         root, artifact_type="run_manifest", name=f"run_manifest_{run_id}",
         content=json.dumps(manifest, ensure_ascii=False), directory=_DIRS["experiment"],
-        metadata={"run_id": run_id, "run_role": run_role,
-                  "analysis_eligible": manifest["analysis_eligible"]},
+        metadata={"run_id": run_id, "run_role": run_role},
         produced_by_node_type="experiment", produced_by_run_id=run_id,
         created_at=created_at,
     )

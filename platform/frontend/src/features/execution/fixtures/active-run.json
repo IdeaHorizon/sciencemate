@@ -177,8 +177,6 @@
     "source": { "rawEvent": "llm_response.usage", "fileRef": "fixture-active-transcript", "byteOffset": 1370 },
     "kind": "usage.updated",
     "visibility": "trace",
-    "payload": {
-      "usage": { "tokens": 6842, "retries": 0, "coverage": "partial" }
-    }
+    "payload": { "totalTokens": 6842, "cost": null, "coverage": "partial" }
   }
 ]

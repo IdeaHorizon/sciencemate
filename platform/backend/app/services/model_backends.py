@@ -41,77 +41,15 @@ def _fernet() -> Fernet:
     return Fernet(master_key())
 
 
-def _the_legacy_fernet() -> Fernet:
-    """出厂常量派生的那把 —— **只用于解开存量**，任何新写入都不许用它。"""
-    from app.services.credential_key import the_published_constant_key
-
-    return Fernet(the_published_constant_key())
-
-
 def encrypt_api_key(value: str) -> str:
     return _fernet().encrypt(value.encode()).decode()
 
 
 def decrypt_api_key(value: str) -> str:
-    """先试当前密钥，再试出厂密钥。
-
-    换密钥不能让已经存着的凭据变成"解不开" —— 那对用户就是"我的 key 没了"。
-    存量由启动时的 `rekey_legacy_credentials()` 换成当前密钥；这里的回退是为了
-    换完之前的那一小段时间，以及换失败时不至于让人用不了。
-    """
     try:
         return _fernet().decrypt(value.encode()).decode()
-    except InvalidToken:
-        pass
-    try:
-        return _the_legacy_fernet().decrypt(value.encode()).decode()
     except InvalidToken as exc:
         raise RuntimeError("Stored model credential cannot be decrypted") from exc
-
-
-def was_encrypted_with_the_published_constant(value: str) -> bool:
-    """这条密文是不是还用着源码里那个常量。"""
-    try:
-        _fernet().decrypt(value.encode())
-        return False
-    except InvalidToken:
-        pass
-    try:
-        _the_legacy_fernet().decrypt(value.encode())
-        return True
-    except InvalidToken:
-        return False
-
-
-async def rekey_legacy_credentials(db) -> int:
-    """把还用出厂密钥的凭据重新加密成当前密钥，返回换掉的条数。
-
-    启动时跑一次。不跑的话那些弱密文会一直躺在库里 —— **"以后新写的安全了"
-    不是修复**，用户已经存进去的那把才是要保护的东西。
-    """
-    from sqlalchemy import select
-
-    from app.models.model_backend import ModelBackendConfig
-
-    rows = (
-        await db.scalars(
-            select(ModelBackendConfig).where(
-                ModelBackendConfig.encrypted_api_key.is_not(None)
-            )
-        )
-    ).all()
-    rekeyed = 0
-    for row in rows:
-        blob = row.encrypted_api_key
-        if not blob or not was_encrypted_with_the_published_constant(blob):
-            continue
-        row.encrypted_api_key = encrypt_api_key(
-            _the_legacy_fernet().decrypt(blob.encode()).decode()
-        )
-        rekeyed += 1
-    if rekeyed:
-        await db.flush()
-    return rekeyed
 
 
 def environment_api_key(provider: str) -> str | None:

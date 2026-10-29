@@ -9,7 +9,7 @@ cgroup），Docker 一行不留。本模块只剩三样与后端无关的东西�
   模型选 ``resource_profile``，linux 后端把它翻成 cgroup 的 MemoryMax / TasksMax / CPUQuota。
 * **attempt 能力记录**（:class:`SandboxManifest`）：一个 RunAttempt 出生时冻结"谁来守、
   哪些根可写、天花板多高、授权了哪些高危类"。平台冻一份进 DB，worker 校验 hash。
-  v1–v3 是 Docker 年代的 payload（含 image_id 等），解析仍认、hash 不变，新铸的是 v4。
+  只有 v4 一种形状（Docker 年代的 v1–v3 在 0.4.3 发布前就已不再写出）。
 * **可写根**（:func:`write_roots_for` 等）：自己的节点目录 + run-local（+ manifest 里
   显式 rw 的项目资源）；整个 worktree 是拒写层。
 
@@ -319,16 +319,11 @@ def _validate_mount(path: Path) -> None:
 
 # ── attempt 能力记录 ──────────────────────────────────────────────────────────
 
-_LEGACY_IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
-
-
 @dataclass(frozen=True)
 class SandboxManifest:
     """Immutable capability contract owned by one RunAttempt.
 
-    v4（现行）：attempt_id / run_id / mounts / ceiling / authorized_risk_classes / backend。
-    v1–v3 是 Docker 年代的 payload，多出 image_id / network_mode / security_profile /
-    queue_limit；解析仍接受、canonical payload 按版本原样重放，所以老 attempt 的 hash 不变。
+    v4（唯一形状）：attempt_id / run_id / mounts / ceiling / authorized_risk_classes / backend。
     """
 
     attempt_id: str
@@ -338,35 +333,26 @@ class SandboxManifest:
     authorized_risk_classes: tuple[str, ...] = ()
     backend: str = "auto"
     version: int = 4
-    # ── v1–v3 遗留字段，只为重放老 payload 的 hash ──
+    # ── 下面四个字段不进 payload。platform/backend（harness_sessions 复制 attempt）与
+    # nodes/experiment（预检读 security_profile）仍按名取它们，所以属性留着。
     image_id: str = ""
     network_mode: str = "none"
     security_profile: str = "hardened"
-    """v4 不进 payload。含义沿用 Docker 年代：hardened = 每条命令按自己的根收窄写面 ——
-    原生后端（seatbelt / Landlock / bwrap）本来就是逐条命令构造墙，所以恒为 hardened；
+    """含义沿用 Docker 年代：hardened = 每条命令按自己的根收窄写面 —— 原生后端
+    （seatbelt / Landlock / bwrap）本来就是逐条命令构造墙，所以恒为 hardened；
     experiment 的预检认的就是这个词。"""
     queue_limit: int = 8
 
     def canonical_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+        return {
             "version": self.version,
             "attempt_id": self.attempt_id,
             "run_id": self.run_id,
             "mounts": [{"path": path, "mode": mode} for path, mode in self.mounts],
             "ceiling": asdict(self.ceiling),
             "authorized_risk_classes": list(self.authorized_risk_classes),
+            "backend": self.backend,
         }
-        if self.version <= 3:
-            payload["image_id"] = self.image_id
-            payload["network_mode"] = self.network_mode
-            payload["queue_limit"] = self.queue_limit
-            if self.version >= 2:
-                payload["security_profile"] = self.security_profile
-            if self.version >= 3:
-                payload["backend"] = self.backend
-        else:
-            payload["backend"] = self.backend
-        return payload
 
     @property
     def sha256(self) -> str:
@@ -376,17 +362,11 @@ class SandboxManifest:
         return hashlib.sha256(encoded).hexdigest()
 
     def validate(self) -> None:
-        if self.version not in {1, 2, 3, 4}:
+        if self.version != 4:
             raise SandboxContractError("unsupported sandbox manifest version")
         if not self.backend or "\x00" in self.backend:
             raise SandboxContractError("invalid sandbox backend")
-        if self.version <= 3:
-            # Docker 年代的 payload：只校验它自己的形状，不再要求镜像真的存在。
-            if self.backend == "image" and not _LEGACY_IMAGE_ID.fullmatch(self.image_id):
-                raise SandboxContractError("sandbox manifest has no immutable image id")
-            if self.backend != "image" and self.version < 3:
-                raise SandboxContractError("non-image backends need a v3 sandbox manifest")
-        elif self.backend == "image":
+        if self.backend == "image":
             raise SandboxContractError(
                 "the image backend was removed; a v4 manifest names a native backend"
             )
@@ -436,12 +416,6 @@ def parse_manifest(payload: Mapping[str, Any]) -> SandboxManifest:
         raw_path = str(item.get("path") or "")
         path = _canonical_existing(raw_path)
         mounts.append((str(path) if path is not None else raw_path, str(item.get("mode") or "")))
-    version = int(payload.get("version") or 0)
-    legacy_profile = str(payload.get("security_profile") or ("hardened" if version == 1 else ""))
-    if version <= 3 and version >= 2 and legacy_profile not in {"portable", "hardened", "native"}:
-        raise SandboxContractError("invalid sandbox security profile")
-    if version == 1 and legacy_profile != "hardened":
-        raise SandboxContractError("legacy sandbox manifests require hardened security")
     manifest = SandboxManifest(
         attempt_id=str(payload.get("attempt_id") or ""),
         run_id=str(payload.get("run_id") or ""),
@@ -452,12 +426,8 @@ def parse_manifest(payload: Mapping[str, Any]) -> SandboxManifest:
         authorized_risk_classes=tuple(
             str(item) for item in (payload.get("authorized_risk_classes") or [])
         ),
-        backend=str(payload.get("backend") or ("image" if version <= 3 else "")),
-        version=version,
-        image_id=str(payload.get("image_id") or ""),
-        network_mode=str(payload.get("network_mode") or "none"),
-        security_profile=legacy_profile or "hardened",
-        queue_limit=int(payload.get("queue_limit") or 8),
+        backend=str(payload.get("backend") or ""),
+        version=int(payload.get("version") or 0),
     )
     manifest.validate()
     return manifest

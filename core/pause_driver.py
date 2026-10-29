@@ -21,7 +21,7 @@ import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .agent_loop import resume_loop, run_loop
+from .agent_loop import end_pause, reinstate_pause, resume_loop, run_loop
 from .llm import LLMMessage
 from .pause import (
     PauseEvent,
@@ -594,6 +594,16 @@ def _resolve_offered_choice(
     return "\n\n".join(parts), label
 
 
+def _answer_text(answer: AnswerValue) -> str:
+    """resume 回填给 LLM 的必须是文本。结构化答复在这里收敛 —— 权威动作由
+    describe_recorded_decision 单独带过去，LLM 不需要再解读一遍。"""
+    if isinstance(answer, dict):
+        return " ".join(
+            x for x in (str(answer.get("choice_id") or ""),
+                        str(answer.get("note") or "")) if x).strip()
+    return str(answer or "")
+
+
 async def _settle_decision_answer(
     ctx, ask: "AskFn", answer: AnswerValue,
 ) -> tuple[str, str | None, bool]:
@@ -620,6 +630,17 @@ async def _settle_decision_answer(
             return answer, None, True
         rejection = (entry or {}).get("decision_rejection")
         if not rejection:
+            # ── 答复被受理 = pause 结束 ────────────────────────────────────
+            #
+            # 下面那一步（运行时执行人授权的动作）可以跑几小时。在那之前就把
+            # pause 的终点记下来：注册表清掉、pause_pending.json 删掉、transcript
+            # 写 `loop_resume`。否则这几小时里每个投影都还说「在等人」，而人
+            # （或连续档替人）早就答过了 —— 卡片挂一整个重跑，插话只能进收件箱
+            # （2026-10-28 qinp 现场）。EDIT 例外：它的语义就是"停在这里等你改"。
+            recorded = describe_recorded_decision(entry)
+            if (entry or {}).get("decision_state") != "awaiting_manual_edit":
+                end_pause(ctx, response_preview=_answer_text(answer),
+                          recorded_decision=recorded, answer_accepted=True)
             # ── 人的决定由**运行时**执行（Move 1d 续）─────────────────────
             #
             # 此前这里只记账就 resume，把"去起哪个节点"还给调度器 —— 于是它又
@@ -630,9 +651,11 @@ async def _settle_decision_answer(
             # 时刻（`authorized_target_node` 就在手上）。把执行也放在这里，那个
             # 窗口就不存在了 —— 不是拦住调度器起错，是它根本没有起的机会。
             if not await _execute_authorized_action(ctx, entry):
-                # 运行时没能执行人的决定 —— 保持 pause，把失败带回给人重新裁决。
+                # 运行时没能执行人的决定 —— **重新**停下来，把失败带回给人重新裁决。
                 # 交回调度器等于把一个不一致的状态甩给它，然后再用一道墙拦它。
-                answer = await ask(PauseEvent.from_payload({
+                # 上面已经把 pause 记成结束了，所以这里是一次新的 pause：注册表、
+                # 磁盘标记、transcript 三处都要重新挂上，人看到的那张卡带着失败原因。
+                retry_event = PauseEvent.from_payload({
                     **payload,
                     "question": "上一次授权的动作没能执行，请重新裁决。",
                     "context": (f"⚠️ 运行时尝试执行你选的 "
@@ -640,7 +663,9 @@ async def _settle_decision_answer(
                                 f"（目标 {(entry or {}).get('authorized_target_node')!r}）"
                                 f"但失败了：{(entry or {}).get('action_last_failure')}\n\n"
                                 + str(payload.get("context") or "")),
-                }, pending_tool_call_id=ctx.pause_event.pending_tool_call_id))
+                }, pending_tool_call_id=ctx.pause_event.pending_tool_call_id)
+                reinstate_pause(ctx, retry_event, reason="authorized_action_dispatch_failed")
+                answer = await ask(retry_event)
                 if answer:
                     continue
                 return answer, None, False
@@ -668,11 +693,8 @@ async def _settle_decision_answer(
                 return answer, None, False
             # resume 回填给 LLM 的必须是文本。结构化答复在这里收敛 —— 权威动作
             # 由 describe_recorded_decision 单独带过去，LLM 不需要再解读一遍。
-            if isinstance(answer, dict):
-                answer = " ".join(
-                    x for x in (str(answer.get("choice_id") or ""),
-                                str(answer.get("note") or "")) if x).strip()
-            return answer, describe_recorded_decision(entry), True
+            answer = _answer_text(answer)
+            return answer, recorded, True
 
         legal = ", ".join(rejection.get("legal_choice_ids") or []) or "（本次呈递没有可选项）"
         note = (f"⚠️ 上一个答复没被受理：{rejection.get('error')}\n"

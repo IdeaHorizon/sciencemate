@@ -540,10 +540,10 @@ def session_runs_root(project_id: str, session_id: str) -> Path | None:
     """这个会话的 runs 根（调度器目录和每个子 run 的父目录）。没有工作树就是 None。
 
     与 `harness_sessions._session_runtime_dir` 同一条路：工作树位置归仓库答，
-    现行/存量两个位置归 `session_runtime_paths.resolve_existing` 答。
+    运行时记录在工作树里的位置归 `session_runtime_paths.runtime_path` 答。
     """
     from app.services.project_repository import get_project_repository
-    from app.services.session_runtime_paths import resolve_existing
+    from app.services.session_runtime_paths import runtime_path
 
     try:
         worktree = get_project_repository().session_path(project_id, session_id)
@@ -551,7 +551,7 @@ def session_runs_root(project_id: str, session_id: str) -> Path | None:
         return None
     if not worktree.is_dir():
         return None
-    return resolve_existing(worktree, "runs")
+    return runtime_path(worktree, "runs")
 
 
 def build_for_session(

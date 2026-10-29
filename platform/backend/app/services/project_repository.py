@@ -329,21 +329,6 @@ def _is_bookkeeping(relative: str) -> bool:
     return any(part.startswith(".") for part in PurePosixPath(remainder).parts)
 
 
-#: 建仓样板 README 的开头 —— 与 `core.loop_hooks_builtin._BOILERPLATE_README`
-#: 认的是同一段文字。那边把它从"节点自述"里滤掉，这边不再生成它。
-_OWNER_BOILERPLATE = re.compile(
-    r"\A# [^\n]+\n\nOwner: `[\w_]+`\.\n(\nThe owner controls the internal layout\.)?"
-)
-
-
-def _is_untouched_owner_boilerplate(path: Path) -> bool:
-    """这份 README 还是建仓那天写下的样板，一个字没改过。"""
-    try:
-        return bool(_OWNER_BOILERPLATE.match(path.read_text(encoding="utf-8")))
-    except OSError:
-        return False
-
-
 #: 根这一层的顺序 = 研究流程的顺序，从 `NODE_WORKSPACES` 派生。
 #:
 #: 前端原来自己拿一份 `ROOT_ORDER` 名单排。2026-09-10 真机看出来：那份名单
@@ -1091,14 +1076,7 @@ class GitProjectRepository:
         destination = self.project_path(project_id)
         with self._project_lock(project_id):
             if (destination / ".git").is_dir():
-                self._migrate_existing_project_v2(
-                    destination,
-                    project_id=project_id,
-                    name=name,
-                    description=description,
-                    research_domain=research_domain,
-                    owner_id=owner_id,
-                )
+                self._require_current_schema(destination, project_id=project_id)
                 return self.status(project_id)
             if destination.exists() and any(destination.iterdir()):
                 raise ProjectRepositoryError(
@@ -1173,9 +1151,7 @@ class GitProjectRepository:
                     # `.research/runtime/` 不进版本，但**不是缓存**：一次研究
                     # 到底发生了什么（transcript / events / checkpoint / 工具
                     # 原文）全部在那下面，没有任何一步能把它重算回来。
-                    # `.research/cache/` 是它 2026-08-27 之前的名字，存量会话
-                    # 还在用，所以两条都要忽略。
-                    ".research/runtime/\n.research/cache/\n.research/locks/\n"
+                    ".research/runtime/\n.research/locks/\n"
                     "**/__pycache__/\n**/.pytest_cache/\n**/.venv/\n"
                     "**/build/\n**/cache/\n"
                     "*.tmp\n*.swp\n.DS_Store\n",
@@ -1208,7 +1184,6 @@ class GitProjectRepository:
                     "runs",
                     ".research/orchestration/sessions",
                     ".research/releases",
-                    ".research/migrations",
                 ):
                     # 目录靠 `.gitkeep` 占位，**不**再写一份 README 所有权样板。
                     #
@@ -1253,155 +1228,24 @@ class GitProjectRepository:
                     shutil.rmtree(temporary, ignore_errors=True)
                 raise
 
-    def _migrate_existing_project_v2(
-        self,
-        root: Path,
-        *,
-        project_id: str,
-        name: str,
-        description: str | None,
-        research_domain: str | None,
-        owner_id: str,
-    ) -> None:
-        """Upgrade a v1 Project without discarding historical Git content."""
+    def _require_current_schema(self, root: Path, *, project_id: str) -> None:
+        """这个目录里已经有仓库：它必须就是现行版式，否则报错，不悄悄改写。
+
+        这里曾经有一台 v1→v2 迁移器（把 `PROJECT.yaml`/`memory/`/`artifacts/`
+        搬进 `.research/legacy/v1/`、重写 `MEMORY.md`、再提交一个迁移 commit）。
+        v1 版式只在 2026-08-06 之前的内部开发数据里出现过，没有任何发出去的
+        版本写过它，所以迁移器连同它的服务对象一起拆了。
+        """
         marker = root / ".research/schema-version"
         try:
             current = int(marker.read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
-            current = 1
-        if current >= PROJECT_SCHEMA_VERSION and (root / "project.yaml").is_file():
+            current = 0
+        if current == PROJECT_SCHEMA_VERSION and (root / "project.yaml").is_file():
             return
-        if self._git(root, "status", "--porcelain"):
-            raise ProjectRepositoryError(
-                "Cannot migrate a canonical Project repository with uncommitted changes"
-            )
-
-        legacy_root = root / ".research/legacy/v1"
-        legacy_root.mkdir(parents=True, exist_ok=True)
-        memory_entries: list[str] = []
-        old_memory = root / "memory"
-        if old_memory.is_dir():
-            for item in sorted(path for path in old_memory.rglob("*") if path.is_file()):
-                if item.name == ".gitkeep":
-                    continue
-                try:
-                    content = item.read_text(encoding="utf-8", errors="replace").strip()
-                except OSError:
-                    continue
-                if content:
-                    memory_entries.append(
-                        f"- Migrated from `{item.relative_to(root).as_posix()}`: "
-                        f"{content[:2000].replace(chr(10), ' ')}"
-                    )
-
-        for legacy in ("PROJECT.yaml", "README.md"):
-            source = root / legacy
-            if source.exists():
-                target = legacy_root / legacy
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(source), str(target))
-        for legacy in ("memory", "artifacts", "documents", "receipts", "sessions", "workflows"):
-            source = root / legacy
-            if source.exists():
-                target = legacy_root / legacy
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(source), str(target))
-        for legacy in ("node-capabilities.yaml", "artifact-types.yaml", "branch-protection.yaml"):
-            source = root / "access" / legacy
-            if source.exists():
-                target = legacy_root / "access" / legacy
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(source), str(target))
-
-        self._write(
-            root,
-            "project.yaml",
-            _yaml_mapping(
-                {
-                    "schema_version": PROJECT_SCHEMA_VERSION,
-                    "project_id": project_id,
-                    "title": name,
-                    "description": description,
-                    "research_domain": research_domain,
-                    "status": "active",
-                    "default_branch": DEFAULT_BRANCH,
-                    "publication_mode": "interactive",
-                }
-            ),
-        )
-        self._write(
-            root,
-            "PROJECT.md",
-            f"# {name}\n\n{description or 'Git-native scientific research project.'}\n\n"
-            "## Research objective\n\nDefine the falsifiable objective.\n\n"
-            "## Scope and constraints\n\nRecord the Project constraints.\n\n"
-            "## Acceptance criteria\n\nDefine the required evidence.\n",
-        )
-        self._write(
-            root,
-            "MEMORY.md",
-            "# Project memory\n\n## Goals\n\n## Decisions\n\n## Findings\n\n"
-            + ("\n".join(memory_entries) if memory_entries else "<!-- no migrated entries -->")
-            + "\n\n## Constraints\n\n## Open questions\n",
-        )
-        self._write(root, "access/nodes.yaml", _nodes_yaml())
-        if not (root / "access/members.yaml").is_file():
-            self._write(
-                root,
-                "access/members.yaml",
-                "schema_version: 1\nmembers:\n"
-                f'  - user_id: {_yaml_scalar(owner_id)}\n    role: "lead"\n',
-            )
-        if not (root / "access/roles.yaml").is_file():
-            self._write(
-                root,
-                "access/roles.yaml",
-                "schema_version: 1\nroles:\n"
-                "  lead: [read, propose, review, merge, administer]\n"
-                "  researcher: [read, propose]\n  reviewer: [read, review]\n  viewer: [read]\n",
-            )
-        self._write(root, "access/artifact-types.yaml", _artifact_type_policy_yaml())
-        for directory in (*NODE_WORKSPACES.values(), *SYSTEM_WORKSPACES.values(), "runs"):
-            readme = root / directory / "README.md"
-            if readme.is_file() and _is_untouched_owner_boilerplate(readme):
-                # 只删**一个字都没改过**的那种。节点自己写过的 README 是它的
-                # 自述，会被带给所有后续节点看 —— 那是真内容，不许动。
-                readme.unlink()
-            elif not readme.is_file():
-                self._write(root, f"{directory}/.gitkeep", "")
-        self._write(root, ".research/schema-version", f"{PROJECT_SCHEMA_VERSION}\n")
-        self._write(
-            root,
-            ".research/repository.yaml",
-            "schema_version: 2\nauthority: platform_git\n"
-            "session_isolation: worktree\ncheckpoint: every_run_outcome\n"
-            "interactive_publish: manual\ncontinuous_publish: automatic\n"
-            "artifact_transport: disabled\n",
-        )
-        self._write(
-            root,
-            ".research/migrations/project-v2.json",
-            json.dumps(
-                {
-                    "schema_version": 2,
-                    "migration": "project-v1-to-v2",
-                    "legacy_root": ".research/legacy/v1",
-                    "migrated_memory_entries": len(memory_entries),
-                },
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
-        )
-        self._git(root, "add", "--all")
-        self._git(
-            root,
-            "commit",
-            "-m",
-            "migration: upgrade Project repository to schema v2",
-            "-m",
-            f"Project-ID: {project_id}\nSchema-Version: {PROJECT_SCHEMA_VERSION}",
+        raise ProjectRepositoryError(
+            f"Project repository {project_id} is not schema v{PROJECT_SCHEMA_VERSION} "
+            f"(found v{current or 'unknown'} at {root}); it will not be rewritten in place"
         )
 
     def status(self, project_id: str) -> RepositoryStatus:

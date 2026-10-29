@@ -598,28 +598,6 @@ def iter_heads(worktree: Path | str | None, *, artifact_type: str | None = None)
     yield from heads
 
 
-def old_layout_fragments(worktree: Path | str | None) -> list[Path]:
-    """信封时代的残留：`*/artifacts/*.json`、`.frozen.jsonl`、`.versions/`。
-
-    升级由 core.record_migration 一次性转换并校验。迁移前拒绝把旧记录
-    当成不存在；普通读取路径不再携带第二套信封解析器。
-    """
-    if not worktree:
-        return []
-    root = Path(worktree)
-    out: list[Path] = []
-    try:
-        for node_dir in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")):
-            artifacts = node_dir / "artifacts"
-            if artifacts.is_dir():
-                out.extend(sorted(artifacts.glob("*.json")))
-                if (artifacts / ".frozen.jsonl").exists():
-                    out.append(artifacts / ".frozen.jsonl")
-    except OSError:
-        return out
-    return out[:12]
-
-
 def write_record(worktree: Path | str, *, artifact_type: str, name: str, content: str,
                  directory: str, metadata: dict | None = None,
                  produced_by_node_type: str = "", produced_by_run_id: str = "",

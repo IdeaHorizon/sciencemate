@@ -223,31 +223,6 @@ def test_the_reader_hands_back_the_source_path(tmp_path: Path) -> None:
     assert source.is_file() and source.relative_to(tmp_path)
 
 
-def test_an_unmigrated_workspace_is_loud_not_silent(tmp_path: Path) -> None:
-    """旧式信封的碎片 = 这个项目是原语上线前建的。**必须吵**。
-
-    静默的代价是错答案：义务账本会认为 Analysis 从没跑过、简报里整段研究状态
-    消失，而没有任何东西报错。报错文案要带可直接执行的迁移命令。
-    """
-    import json as _json
-
-    from core.research_state_reader import UnmigratedWorkspaceError, latest_located
-
-    art = tmp_path / "plan" / "artifacts"
-    art.mkdir(parents=True)
-    (art / "research_state__v1.json").write_text(_json.dumps({
-        "type": "research_state", "name": "v1",
-        "metadata": {"version": 1, "verdict": "continue"},
-    }, ensure_ascii=False), encoding="utf-8")
-
-    with pytest.raises(UnmigratedWorkspaceError) as exc:
-        latest_located(tmp_path)
-    message = str(exc.value)
-    assert "research_state__v1.json" in message, "要指名是哪些文件"
-    assert "migrate-records" in message
-    assert "不要删除" in message
-
-
 def test_a_migrated_workspace_reads_head_and_snapshots(tmp_path: Path) -> None:
     """新布局的形状：head 是当前版本（原生文件），历史版本在账本里。"""
     from core import research_state_reader as rs

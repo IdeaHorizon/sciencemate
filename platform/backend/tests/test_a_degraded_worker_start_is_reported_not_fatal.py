@@ -130,21 +130,28 @@ async def test_a_private_runtime_root_is_trusted_only_from_the_temp_dir(tmp_path
     assert normal.private_runtime_root is None
 
 
-def test_resolve_existing_treats_a_denied_stat_as_absent(tmp_path, monkeypatch):
+def test_runtime_path_never_asks_the_filesystem(tmp_path, monkeypatch):
+    """lujy 2026-10-15 现场：run 目录 stat 被拒（`[WinError 5]`）曾把接回 worker、回收孤儿、
+    转录摄取三条路一路炸到顶。答案是纯路径运算 —— 这里钉住它连 stat 都不做。"""
     from app.services import session_runtime_paths as srp
 
     worktree = tmp_path / "wt"
     (worktree / ".research" / "runtime" / "runs").mkdir(parents=True)
-    assert srp.resolve_existing(worktree, "runs") == worktree / ".research" / "runtime" / "runs"
-    real_exists = Path.exists
+    real_exists, real_stat = Path.exists, Path.stat
 
     def denied(self, *a, **k):
         if "runtime" in str(self):
             raise PermissionError(5, "拒绝访问。", str(self))
         return real_exists(self, *a, **k)
 
+    def denied_stat(self, *a, **k):
+        if "runtime" in str(self):
+            raise PermissionError(5, "拒绝访问。", str(self))
+        return real_stat(self, *a, **k)
+
     monkeypatch.setattr(Path, "exists", denied)
-    assert srp.resolve_existing(worktree, "runs") == worktree / ".research" / "runtime" / "runs", "读不到按不在：拿现行位置继续，不抛"
+    monkeypatch.setattr(Path, "stat", denied_stat)
+    assert srp.runtime_path(worktree, "runs") == worktree / ".research" / "runtime" / "runs", "纯路径运算：stat 被拒也不抛"
 
 
 def test_ingest_approves_the_live_private_root_and_nothing_else(tmp_path, monkeypatch):

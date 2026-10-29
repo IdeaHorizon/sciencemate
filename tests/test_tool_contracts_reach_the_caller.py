@@ -36,6 +36,7 @@ dict key 读过**的标识符（`.get("x")` / `["x"]`）—— 否则护栏自�
 from __future__ import annotations
 
 import ast
+import functools
 import importlib
 import pathlib
 import re
@@ -102,8 +103,14 @@ def _own_executors(module_path: pathlib.Path, source: str) -> list[str]:
     return tools
 
 
-def _imported_module_stems(path: pathlib.Path) -> set[str]:
+@functools.lru_cache(maxsize=None)
+def _imported_module_stems(path: pathlib.Path) -> frozenset[str]:
     """这个文件 import 了同节点 tools/ 里的哪些模块（按末段名）。
+
+    结果按路径缓存：`_executing_tools` 沿 import 关系向外找执行者时，对同一节点下
+    每个候选文件都要问一遍「你 import 了谁」，于是同一份几千行的源文件被反复
+    AST 解析 —— 2026-10-28 量过，一次测试 735 次 parse + walk，10.9 s（本机），
+    runner 上四个 job 并发时 16–18 s，撞 15 s 单测闸。文件在一次测试里不会变。
 
     节点里三种写法都认：`from .ledger import …`、`from tools.ledger import …`
     （standalone 兜底）、`from . import delivery_transaction as _dt`。按 AST 取，
@@ -112,7 +119,7 @@ def _imported_module_stems(path: pathlib.Path) -> set[str]:
     try:
         tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
     except SyntaxError:
-        return set()
+        return frozenset()
     stems: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -122,7 +129,7 @@ def _imported_module_stems(path: pathlib.Path) -> set[str]:
                 stems.update(alias.name for alias in node.names)
         elif isinstance(node, ast.Import):
             stems.update(alias.name.rsplit(".", 1)[-1] for alias in node.names)
-    return stems
+    return frozenset(stems)
 
 
 def _executing_tools(module_path: pathlib.Path, source: str) -> list[str]:

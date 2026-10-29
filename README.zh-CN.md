@@ -7,7 +7,7 @@
 数据和计算都在**你自己的机器上**：项目是本地 git 仓库，模型 key 加密后只存在本机。
 Python、git、LaTeX（tectonic）、跑实验用的 bash 都随包带，**不用先装任何东西**。
 
-- 当前版本：[v0.5.8](../../releases/tag/v0.5.8) · [下载 macOS 版](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.8/ScienceMate-0.5.8-arm64.dmg) · [下载 Windows 版](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.8/ScienceMate-Setup.exe) · 更新日志见 [Releases](../../releases)
+- 当前版本：[v0.5.9](../../releases/tag/v0.5.9) · [下载 macOS 版](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.9/ScienceMate-0.5.9-arm64.dmg) · [下载 Windows 版](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.9/ScienceMate-Setup.exe) · 更新日志见 [Releases](../../releases)
 - 本仓库放的是个人版的**源码**和它的**发布件**（安装包与更新）。安装包就是从这棵树打出来的；从源码运行见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 - 这是**个人版**：全部在你自己的机器上运行。团队共用的组织服务器属于专业版，不在这里发布。
 
@@ -33,10 +33,10 @@ Python、git、LaTeX（tectonic）、跑实验用的 bash 都随包带，**不�
 
 | 平台 | 下载 | 大小 |
 |---|---|---|
-| macOS（Apple Silicon） | [ScienceMate-0.5.8-arm64.dmg](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.8/ScienceMate-0.5.8-arm64.dmg) | 410 MB |
-| Windows 10 / 11（64 位） | [ScienceMate-Setup.exe](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.8/ScienceMate-Setup.exe) | 440 MB |
+| macOS（Apple Silicon） | [ScienceMate-0.5.9-arm64.dmg](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.9/ScienceMate-0.5.9-arm64.dmg) | 410 MB |
+| Windows 10 / 11（64 位） | [ScienceMate-Setup.exe](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.9/ScienceMate-Setup.exe) | 440 MB |
 
-校验和：[SHA256SUMS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.8/SHA256SUMS) · 全部文件：[Releases](../../releases/latest)
+校验和：[SHA256SUMS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.9/SHA256SUMS) · 全部文件：[Releases](../../releases/latest)
 
 - **macOS**：打开 dmg，把 ScienceMate 拖进「应用程序」。应用还没签名，第一次打开会被拦一次：**系统设置 → 隐私与安全性 → 拉到最下面「仍要打开」**，再确认一次。每台机器只需一次。
 - **Windows**：运行 `ScienceMate-Setup.exe`。若 SmartScreen 提示「Windows 已保护你的电脑」，点 **更多信息 → 仍要运行**。每台机器只需一次。

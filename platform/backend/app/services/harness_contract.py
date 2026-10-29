@@ -223,8 +223,3 @@ def dreaming_scheduler() -> ModuleType:
     读到空就当"没有 pending"）。
     """
     return _contract_module("dreaming_scheduler", "dreaming pending 的存储位置")
-
-
-def record_migration_module() -> ModuleType:
-    """信封记录 → 原生文件的一次性迁移器（core/record_migration.py）。"""
-    return _contract_module("record_migration", "native research record migration")

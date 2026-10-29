@@ -373,13 +373,14 @@ def node_owes_post_node_flow(node_type: str) -> bool:
     ## 第 3 条原来是一张手写名单，而名单会烂
 
     原文写的是"读不到 harness（测试假节点 / yaml 损坏）就回退 PRODUCING_NODE_TYPES，
-    回退偏保守：宁可多要一次审查"。那张名单里躺着 `analysis`（节点早已删除）、
-    `literature`、`data`（两个都已改成服务）—— 于是
+    回退偏保守：宁可多要一次审查"。那张名单里躺着 `literature`、`data`（两个都已
+    改成服务），还有早已删除的节点名 —— 于是
 
-        node_owes_post_node_flow("analysis") → True
+        node_owes_post_node_flow("literature") → True
 
-    也就是说 reviewer 点名一个**不存在的节点**，三道 redirect 闸会一致放行它，
-    直到 run_node 起的时候才炸。这正是本轮刚修完的那个病的同一个形状
+    也就是说 reviewer 点名一个**服务节点**（它跑完不产出需要审查的东西），三道
+    redirect 闸会一致放行它，flow 却永远关不掉；点名一个已删节点时则直到 run_node
+    起的时候才炸。这正是本轮刚修完的那个病的同一个形状
     （[[feedback_guardrails_must_scan_not_list]]）：护栏内部藏着一张需要有人记得更新的名单。
 
     ## 为什么正解是 False 而不是"换一张新名单"

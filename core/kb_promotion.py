@@ -421,10 +421,7 @@ def promotion_scan(state: Any, *, drafts: dict[str, dict] | None = None) -> dict
     for rec in _list_kb(state, "claims"):
         if rec.get("scope") != "project":
             continue
-        from shared.lib.kb_schema import normalize_claim_type
-
-        kind = KIND_BY_CLAIM_TYPE.get(
-            normalize_claim_type(str(rec.get("claim_type") or "")))
+        kind = KIND_BY_CLAIM_TYPE.get(str(rec.get("claim_type") or ""))
         if kind is None:
             continue
         cid = str(rec.get("id") or "")

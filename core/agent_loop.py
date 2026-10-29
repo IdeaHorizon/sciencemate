@@ -1464,20 +1464,7 @@ async def _run_loop_body(
             # v3.1（审计）：pause registry 是进程内存 —— 进程崩溃后等 HITL 的
             # run 无从发现。落一个 pause_pending.json 标记（resume 时删），
             # `hf` / driver 崩溃重启后能列出悬空 pause + 用 messages checkpoint 恢复。
-            try:
-                (state.root / "pause_pending.json").write_text(
-                    json.dumps({
-                        "run_id": state.run_id,
-                        "node_type": state.node_type,
-                        "question": pause_event.question,
-                        "options": pause_event.options,
-                        "asking_node_type": pause_event.asking_node_type,
-                        "pending_tool_call_id": pause_event.pending_tool_call_id,
-                        "paused_at_turn": turn,
-                        "paused_at": datetime.utcnow().isoformat() + "Z",
-                    }, ensure_ascii=False, indent=1), encoding="utf-8")
-            except Exception as e:
-                log.debug("pause_pending.json 写入失败：%s", e)
+            write_pause_pending(state, pause_event, turn)
             return LoopResult(
                 max_turns=_max_turns,
                 final_text="",
@@ -1806,6 +1793,89 @@ def _brief(result: Any) -> Any:
 
 # ── Resume API ──────────────────────────────────────────────────────────────
 
+def write_pause_pending(state: State, pause_event: PauseEvent, turn: int) -> None:
+    """落 pause_pending.json —— 进程崩溃后还能列出悬空 pause 的磁盘标记。
+
+    写点只此一处：首次 pause（run_loop 内）与派发失败后的重新挂起
+    （`reinstate_pause`）写的是同一份文件。
+    """
+    try:
+        (state.root / "pause_pending.json").write_text(
+            json.dumps({
+                "run_id": state.run_id,
+                "node_type": state.node_type,
+                "question": pause_event.question,
+                "options": pause_event.options,
+                "asking_node_type": pause_event.asking_node_type,
+                "pending_tool_call_id": pause_event.pending_tool_call_id,
+                "paused_at_turn": turn,
+                "paused_at": datetime.utcnow().isoformat() + "Z",
+            }, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as e:
+        log.debug("pause_pending.json 写入失败：%s", e)
+
+
+def end_pause(ctx: PausedRunContext, *, response_preview: str,
+              recorded_decision: str | None = None, **fields: Any) -> None:
+    """pause 的终点 —— **答复被受理的那一刻**，不是 LLM 续跑的那一刻。
+
+    三件事一起做、只做一次：transcript 写 `loop_resume`、注册表清掉、磁盘
+    标记删掉。三件事此前都在 `resume_loop` 里，而 decision package 的答复
+    受理之后、`resume_loop` 之前，运行时还要先把人授权的 REVISE / REDIRECT
+    目标节点整个跑完（`pause_driver._execute_authorized_action`，几十分钟到
+    几小时）。这段时间里：
+
+      · 注册表里 pause 还在、pause_pending.json 还在；
+      · transcript 里最后一条状态事件是 `loop_pause`，平台据此把 run 投成
+        waiting_human，界面一直画着「等你回答」的卡片；
+      · 而人的答复（或连续档替人做的选择）早已被受理并正在执行。
+
+    2026-10-28 实测（qinp，0.5.7 Windows，连续档）：卡片从 15:22 挂到 writing
+    重跑结束，用户连打三句「继续」「你让我回答什么呢」都只能进收件箱。
+    同一个洞在级联路径上修过一次（#1083，`drive_pause_chain` 给父 run 补写
+    `loop_resume`），顶层路径一直没补 —— 因为"pause 什么时候结束"没有一个
+    地方说了算。现在这里说了算。
+
+    `resume_recorded` 置位后再调是空操作，所以 `resume_loop` 照旧调它：
+    不经过受理路径的 pause（request_human_input / highrisk_confirm …）仍由
+    `resume_loop` 在这一处记账，两条路写的是同一个事件。
+    """
+    if ctx.resume_recorded:
+        return
+    ctx.resume_recorded = True
+    ctx.state.append_transcript(
+        "loop_resume", pending_tool_call_id=ctx.pending_tool_call_id,
+        response_preview=str(response_preview or "")[:200],
+        recorded_decision=recorded_decision,      # #183 审计：权威动作是否已回填
+        **fields,
+    )
+    clear_pause(ctx.run_id)
+    try:
+        (ctx.state.root / "pause_pending.json").unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def reinstate_pause(ctx: PausedRunContext, pause_event: PauseEvent, *, reason: str) -> None:
+    """答复受理后运行时没能执行它 → 这个 run **重新**停下来等人。
+
+    对所有投影来说这是一次新的 pause：注册表重新登记、磁盘标记重写、
+    transcript 再写一条 `loop_pause`（平台据此再投成 waiting_human）。
+    `pause_event` 带着失败原因，是接下来呈给人的那一张。
+    """
+    ctx.pause_event = pause_event
+    ctx.pending_tool_call_id = pause_event.pending_tool_call_id or ctx.pending_tool_call_id
+    ctx.resume_recorded = False
+    register_pause(ctx)
+    ctx.state.append_transcript(
+        "loop_pause", turn=getattr(ctx.state, "turn", None),
+        question=pause_event.question[:200],
+        pending_tool_call_id=ctx.pending_tool_call_id,
+        reinstated=True, reason=reason,
+    )
+    write_pause_pending(ctx.state, pause_event, getattr(ctx.state, "turn", 0) or 0)
+
+
 async def resume_loop(ctx: PausedRunContext, response_text: str,
                       *, recorded_decision: str | None = None) -> LoopResult:
     """用 user 回答 resume 一个 paused 节点 run。
@@ -1867,18 +1937,8 @@ async def resume_loop(ctx: PausedRunContext, response_text: str,
             status="failed",
         )
 
-    ctx.state.append_transcript(
-        "loop_resume", pending_tool_call_id=target_id,
-        response_preview=response_text[:200],
-        recorded_decision=recorded_decision,      # #183 审计：权威动作是否已回填
-    )
-
-    # 2. 清掉 pause registry（同一 run 不会被再次找到）+ 磁盘 pending 标记
-    clear_pause(ctx.run_id)
-    try:
-        (ctx.state.root / "pause_pending.json").unlink(missing_ok=True)
-    except Exception:
-        pass
+    # 2. pause 的终点记账（已在答复受理时记过的，这里是空操作）
+    end_pause(ctx, response_preview=response_text, recorded_decision=recorded_decision)
 
     # 3. 继续 run_loop
     return await run_loop(ctx.harness, ctx.state, ctx.messages, ctx.llm)

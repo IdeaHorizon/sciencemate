@@ -35,7 +35,10 @@ from core.paths import (
 
 
 def _project_root(project_id: str | None) -> Path | None:
-    """thin wrapper over `core.paths.project_dir` 保持旧调用点兼容。"""
+    """`core.paths.project_dir` + **机械建目录**：项目根与 `workspace/`。
+
+    不是纯转发 —— `State.new` / `reopen` 靠它保证项目目录存在。
+    """
     p = _paths_project_dir(project_id)
     if p is not None:
         p.mkdir(parents=True, exist_ok=True)
@@ -828,20 +831,9 @@ class State:
     # 的 claim_type 字段（10 个 claim_type）。
 
     def _read_kb_records(self, path: Path) -> list[dict]:
-        """KB 读取的唯一咽喉 —— 旧 claim_type 在这里归一。
-
-        类型从 10 收敛到 5（2026-08-21）。按仓库惯例不写迁移器，但旧盘上的
-        `theoretical` / `conjecture` / `replication` 等值必须读得进来，否则
-        它们对晋升管线**静默隐身**：`KIND_BY_CLAIM_TYPE` 查不到这些键，
-        老 claim 就再也不会出现在候选清单里 —— 不报错，只是消失。
-
-        归一只在读取端；写入端仍然拒收旧名（见 test_legacy_types_are_refused_on_write）。
-        接在这一层而不是各调用方：读者有十几个，逐个接就是十几份会各自演化的抄件。
-        """
+        """KB 读取的唯一咽喉：读者有十几个，逐个解析就是十几份会各自演化的抄件。"""
         if not path.exists():
             return []
-        from shared.lib.kb_schema import normalize_claim_type
-
         out: list[dict] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -851,14 +843,6 @@ class State:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(rec, dict) and rec.get("claim_type"):
-                legacy = str(rec["claim_type"])
-                current = normalize_claim_type(legacy)
-                if current != legacy:
-                    rec["claim_type"] = current
-                    # 留痕：归一是解读，不是事实。原值保留，免得日后想追
-                    # 「这条当年是按什么类型写的」时无从查起。
-                    rec.setdefault("legacy_claim_type", legacy)
             out.append(rec)
         return out
 

@@ -1,10 +1,9 @@
 """attempt 出生时冻的「谁来守」：manifest v4 只记后端名。
 
-Docker 年代 manifest 认镜像身份，没有 sha256 就不合法；PR C 之后 backend 是 manifest
-的一部分，镜像字段只在解析 v1–v3 老 payload 时还认（DB 里存量 attempt 的 hash 不能变）。
+Docker 年代 manifest 认镜像身份；PR C 之后 backend 是 manifest 的一部分，镜像字段
+不再进 payload。
 
-变异判据：把 parse_manifest 的 v≤3 默认 backend 改掉，v2 那条红；把 v4 拒绝 image 的
-分支去掉，"removed image backend" 那条红。
+变异判据：把 v4 拒绝 image 的分支去掉，"removed image backend" 那条红。
 """
 
 from __future__ import annotations
@@ -55,34 +54,9 @@ def test_native_manifest_says_who_guards_it_and_roundtrips(tmp_path) -> None:
     assert parsed.backend == "darwin" and parsed.sha256 == manifest.sha256
 
 
-def test_v2_and_v3_payloads_still_parse_with_their_old_hash(tmp_path) -> None:
-    v2 = sandbox.SandboxManifest(
-        attempt_id="a", run_id="r", mounts=((str(tmp_path.resolve()), "rw"),),
-        backend="image", version=2, image_id="sha256:" + "a" * 64, security_profile="portable")
-    v3 = sandbox.SandboxManifest(
-        attempt_id="a", run_id="r", mounts=((str(tmp_path.resolve()), "rw"),),
-        backend="darwin", version=3, image_id="", security_profile="native")
-    for legacy in (v2, v3):
-        payload = legacy.canonical_payload()
-        parsed = sandbox.parse_manifest(payload)
-        assert parsed.version == legacy.version
-        assert parsed.backend == legacy.backend
-        assert parsed.sha256 == legacy.sha256, "存量 attempt 的 hash 不能因为删了 Docker 而变"
-    assert "backend" not in v2.canonical_payload()
-    assert v3.canonical_payload()["backend"] == "darwin"
-
-
 def test_v4_refuses_the_removed_image_backend(tmp_path) -> None:
     with pytest.raises(sandbox.SandboxContractError, match="image backend was removed"):
         _manifest(tmp_path, backend="image").validate()
-
-
-def test_legacy_image_manifest_still_requires_its_sha256(tmp_path) -> None:
-    broken = sandbox.SandboxManifest(
-        attempt_id="a", run_id="r", mounts=((str(tmp_path.resolve()), "rw"),),
-        backend="image", version=2, image_id="", security_profile="portable")
-    with pytest.raises(sandbox.SandboxContractError, match="immutable image id"):
-        broken.validate()
 
 
 def test_attempt_capability_is_just_the_backend_name(monkeypatch) -> None:

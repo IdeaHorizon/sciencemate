@@ -347,7 +347,6 @@ function DecisionSection({
       {decision.recommendation && (
         <p><strong>{t({ zh: "推荐：", en: "Recommended:" })}</strong> {decision.recommendation}</p>
       )}
-      {decision.evidence && <p className="execution-decision-evidence">Basis: {decision.evidence}</p>}
       <div className="execution-decision-options">
         {decision.options.map((option) => readOnly ? (
           <div
@@ -397,7 +396,6 @@ function ResultSection({ payload }: { payload: EventPayloadView }) {
         </div>
         {artifact.version !== undefined && <span>v{artifact.version}</span>}
       </div>
-      {artifact.preview && <p>{artifact.preview}</p>}
       <div className="execution-result-actions">
         <button type="button">{t({ zh: "打开结果", en: "Open result" })}</button>
         <button type="button">{t({ zh: "看出处", en: "View provenance" })}</button>

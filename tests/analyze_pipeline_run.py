@@ -61,7 +61,7 @@ def analyze_orchestrator_routing(events: list[dict]) -> dict:
 
 def analyze_curator_timing(routing: dict) -> dict:
     """检查 curator 在 producing 节点之后多久被调起。"""
-    PRODUCING = {"literature", "hypothesis", "experiment", "analysis",
+    PRODUCING = {"literature", "hypothesis", "experiment",
                  "writing", "data", "postprocess"}
 
     calls = routing["calls"]

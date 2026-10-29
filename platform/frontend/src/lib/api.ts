@@ -479,7 +479,7 @@ export class ApiClient {
     }
   }
 
-  // ── Legacy Knowledge (KBEntry) ───────────────────────────────
+  // ── Knowledge ────────────────────────────────────────────────
 
   /**
    * 组织层那一份知识 —— 晋升上去的、全组织共读的。
@@ -492,10 +492,6 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify({ query, project_id: projectId }),
     });
-  }
-
-  async getKBEntryChunks(entryId: string) {
-    return this.request<ChunkResponse[]>(`/knowledge/entries/${entryId}/chunks`);
   }
 
   // ── KB Concepts ──────────────────────────────────────────────
@@ -1826,8 +1822,6 @@ export interface RecordHead {
 export interface ProjectRecordsPayload {
   schemaVersion: number;
   sessionId: string | null;
-  /** 旧布局（信封时代）的工作区：本版本不读它，界面要说清而不是显示"还没有"。 */
-  legacyLayout: boolean;
   records: RecordHead[];
 }
 
@@ -1976,24 +1970,6 @@ export interface ComputeInventory {
     }>;
   };
   limitations: string[];
-}
-
-// Legacy — retained for existing KBEntry-based pages
-export interface KBEntry {
-  id: string;
-  title: string;
-  source_type: string;
-  scope: string;
-  quality_tier: string;
-  source_ref: string | null;
-  doi: string | null;
-  authors: string[] | null;
-  abstract: string | null;
-  venue: string | null;
-  tags: string[] | null;
-  added_by: string;
-  added_at: string;
-  chunk_count: number;
 }
 
 export interface ChunkResponse {
