@@ -22,6 +22,9 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
+import uuid
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -80,7 +83,82 @@ _BUILD_RUN_RE = re.compile(
     r"autogen|git\s+clone|git\s+submodule)\b", re.I)
 
 
-def _run(cmd: str | list[str], timeout: int = 10) -> str:
+class EnvironmentProbeError(RuntimeError):
+    """A selected environment could not be observed through the Core boundary."""
+
+
+_PROFILE_ENV: ContextVar[tuple[Any, str] | None] = ContextVar("experiment_profile_env", default=None)
+
+
+def _run_under_env(cmd: str | list[str], *, state: Any, env_path: str, timeout: int) -> str:
+    """Source model-editable setup only inside Core's read-only execution boundary."""
+    from core.sandbox import SandboxLimits, prepare_attempt_command
+    from shared.lib.shell import bash_shell
+    try:
+        from .path_roles import sandbox_mount_roots
+        from .env_provision import source_prefix
+    except ImportError:
+        from tools.path_roles import sandbox_mount_roots
+        from tools.env_provision import source_prefix
+
+    launch = None
+    scratch = None
+    scratch_parent = Path(state.root) / "ledger" / "environment_probe_scratch"
+    marker = "HF_ENV_PROBE_READY_" + uuid.uuid4().hex
+    try:
+        writable, readonly = sandbox_mount_roots(state)
+        script = Path(env_path).expanduser().resolve(strict=True)
+        roots = list(dict.fromkeys([*writable, *readonly, script.parent]))
+        # Core requires one writable root. It is a private disposable scratch,
+        # never the script, source, deliverable or any other application root.
+        scratch_parent.mkdir(parents=True, exist_ok=True)
+        scratch = tempfile.TemporaryDirectory(prefix="probe-", dir=scratch_parent)
+        command = shlex.join(cmd) if isinstance(cmd, list) else cmd
+        # Setup stdout goes to stderr; only command stdout becomes probe facts.
+        # The witness distinguishes a setup exit/failure from a missing tool.
+        wrapped = (f"{{ {source_prefix(script)}; }} 1>&2 && "
+                   f"{{ printf '\\n%s\\n' {shlex.quote(marker)} >&2; {command}\n}}")
+        launch = prepare_attempt_command(
+            [bash_shell(), "-o", "pipefail", "-c", wrapped],
+            state=state, cwd=script.parent, writable_roots=[Path(scratch.name)], readonly_roots=roots,
+            limits=SandboxLimits(memory_bytes=1024**3, cpus=1, pids=64,
+                walltime_seconds=timeout, storage_bytes=64*1024**2, output_bytes=2*1024**2),
+        )
+        # Like the shared subprocess collector, spool to files rather than
+        # buffering untrusted setup output in the framework process. Backend
+        # output limits are not assumed to be enforced on every native host.
+        with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+            done = subprocess.run(launch.argv, stdout=stdout_file, stderr=stderr_file,
+                                  timeout=timeout+5, stdin=subprocess.DEVNULL, env=launch.env)
+            size = stdout_file.seek(0, os.SEEK_END) + stderr_file.seek(0, os.SEEK_END)
+            if size > 2*1024**2:
+                raise EnvironmentProbeError("selected environment probe output exceeded 2 MiB limit")
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read(2*1024**2).decode("utf-8", errors="replace")
+            stderr = stderr_file.read(2*1024**2).decode("utf-8", errors="replace")
+        if marker not in stderr.splitlines():
+            raise EnvironmentProbeError(f"selected environment setup did not reach probe (exit={done.returncode})")
+        return stdout.strip() if done.returncode == 0 else ""
+    except subprocess.TimeoutExpired as exc:
+        if launch is not None:
+            launch.terminate()
+        raise EnvironmentProbeError("selected environment probe timed out") from exc
+    except EnvironmentProbeError:
+        raise
+    except Exception as exc:
+        raise EnvironmentProbeError(f"selected environment probe unavailable: {type(exc).__name__}: {exc}") from exc
+    finally:
+        if launch is not None:
+            launch.cleanup()
+        if scratch is not None:
+            if not Path(scratch.name).resolve().is_relative_to(scratch_parent.resolve()):
+                raise EnvironmentProbeError("unexpected environment-probe scratch location")
+            scratch.cleanup()
+
+
+def _run(cmd: str | list[str], timeout: int = 10, *, env_path: str | None = None,
+         state: Any = None) -> str:
     """跑一条只读探测命令，返回它的 stdout（失败返回空串，不抛）。
 
     「失败」按返回码判，stderr 一律不当输出（#943）。旧版不看返回码、stdout 为空就
@@ -90,20 +168,17 @@ def _run(cmd: str | list[str], timeout: int = 10) -> str:
 
     ``cmd`` 是 list 时按 argv 直接起、不经 shell（git 探针走这条，见 ``_git``）。
     """
-    shell = isinstance(cmd, str)
-    env_path = os.environ.get("EXPERIMENT_ACTIVE_BUILD_ENV")
-    if shell and env_path:
-        try:
-            from tools.env_provision import wrap_command
-        except Exception:
-            try:
-                from .env_provision import wrap_command
-            except Exception:
-                wrap_command = None
-        if wrap_command is not None:
-            cmd = wrap_command(cmd, env_path)
+    selected = (state, env_path) if env_path else _PROFILE_ENV.get()
+    if selected is not None:
+        owner, script = selected
+        if owner is None:
+            raise EnvironmentProbeError("selected environment probe requires its State and Core execution boundary")
+        return _run_under_env(cmd, state=owner, env_path=script, timeout=timeout)
+    if isinstance(cmd, str):
+        from shared.lib.shell import bash_shell
+        cmd = [bash_shell(), "-o", "pipefail", "-c", cmd]
     try:
-        r = subprocess.run(cmd, shell=shell, capture_output=True,
+        r = subprocess.run(cmd, shell=False, capture_output=True,
                            text=True, timeout=timeout)
     except Exception:
         return ""
@@ -680,9 +755,13 @@ def collect_snapshot(repo_paths: list[str] | None = None,
     snap["toolchain"] = toolchain
 
     # ② 可复现相关环境变量（只记非空的）
-    snap["env_vars"] = {
-        k: os.environ[k] for k in _PROBE_ENV_VARS if os.environ.get(k)
-    }
+    if _PROFILE_ENV.get() is not None:
+        values = _run("printf '%s\\0' " + " ".join('"${' + k + '-}"' for k in _PROBE_ENV_VARS)).split("\0")
+        if len(values) != len(_PROBE_ENV_VARS) + 1:
+            raise EnvironmentProbeError("selected environment variables could not be observed")
+        snap["env_vars"] = {k: v for k, v in zip(_PROBE_ENV_VARS, values) if v}
+    else:
+        snap["env_vars"] = {k: os.environ[k] for k in _PROBE_ENV_VARS if os.environ.get(k)}
 
     # ③ 硬件 / OS
     snap["hardware"] = {
@@ -849,7 +928,7 @@ def _platform_domains(base: dict[str, Any], mpi: dict[str, dict],
     }
 
 
-def collect_platform_profile(env_path: str | None = None) -> dict[str, Any]:
+def collect_platform_profile(env_path: str | None = None, *, state: Any = None) -> dict[str, Any]:
     """构建前平台画像（第2步主任务）。
 
     在 collect_snapshot 基础上加：MPI wrapper 底层 compiler / Conda MPI 污染 /
@@ -862,17 +941,16 @@ def collect_platform_profile(env_path: str | None = None) -> dict[str, Any]:
     （如是否需并行 IO）判断（留给第3步 gate 的 compatibility_questions / LLM）。
     """
     if env_path:
-        old = os.environ.get("EXPERIMENT_ACTIVE_BUILD_ENV")
-        os.environ["EXPERIMENT_ACTIVE_BUILD_ENV"] = str(env_path)
+        if state is None:
+            raise EnvironmentProbeError("selected environment probe requires its State and Core execution boundary")
+        token = _PROFILE_ENV.set((state, str(env_path)))
         try:
             return collect_platform_profile()
         finally:
-            if old is None:
-                os.environ.pop("EXPERIMENT_ACTIVE_BUILD_ENV", None)
-            else:
-                os.environ["EXPERIMENT_ACTIVE_BUILD_ENV"] = old
+            _PROFILE_ENV.reset(token)
 
-    active_env_path = os.environ.get("EXPERIMENT_ACTIVE_BUILD_ENV")
+    selected = _PROFILE_ENV.get()
+    active_env_path = selected[1] if selected else None
     base = collect_snapshot()
     prof: dict[str, Any] = {
         "schema_version": "1.0",
@@ -881,7 +959,7 @@ def collect_platform_profile(env_path: str | None = None) -> dict[str, Any]:
         "hardware": base.get("hardware", {}),
     }
     risks: list[str] = []
-    conda_prefix = os.environ.get("CONDA_PREFIX", "")
+    conda_prefix = str(base.get("env_vars", {}).get("CONDA_PREFIX") or "")
 
     # ① MPI wrapper 底层 compiler
     #    含 Intel oneAPI/classic wrapper：classic（mpiicc/mpiicpc/mpiifort）默认调用

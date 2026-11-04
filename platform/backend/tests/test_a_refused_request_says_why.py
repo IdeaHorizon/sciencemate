@@ -47,8 +47,11 @@ def test_every_refusal_in_get_current_user_goes_through_the_one_place_that_speak
     名单式判据的毛病是新加的那条分支默认不在名单上，而漏掉的症状正是这个 bug
     最贵的部分 —— 一个不带任何信息的 401。
     """
-    tree = ast.parse(inspect.getsource(auth.get_current_user))
-    raises = [node for node in ast.walk(tree) if isinstance(node, ast.Raise) and node.exc]
+    # 判据在 `_the_user_this_token_belongs_to` 里；`get_current_user` 只把那句话换成这一屏的语言。
+    raises = [node
+              for function in (auth.get_current_user, auth._the_user_this_token_belongs_to)
+              for node in ast.walk(ast.parse(inspect.getsource(function)))
+              if isinstance(node, ast.Raise) and node.exc]
     assert raises, "扫描本身落空了（函数里一条 raise 都没找到）"
 
     offenders = [
@@ -63,3 +66,16 @@ def test_every_refusal_in_get_current_user_goes_through_the_one_place_that_speak
     assert not offenders, (
         f"这些拒绝路径绕过了 `_refuse`，于是它们发出的 401 不说为什么：{offenders}"
     )
+
+
+async def test_the_person_is_told_in_their_own_language_and_not_the_reason(client, caplog):
+    """说给人的那句只有「登录已失效」，按发问那一屏的语言；为什么拒（哪条判据）只进日志。"""
+    caplog.set_level(logging.WARNING, logger="app.auth")
+    said = {}
+    for lang in ("zh", "en"):
+        refused = await client.get("/api/v1/auth/me", headers={
+            "Authorization": "Bearer not-a-real-token", "X-Interface-Language": lang})
+        assert refused.status_code == 401
+        said[lang] = refused.json()["detail"]
+    assert said == {"zh": "登录已失效，请重新登录。", "en": "Your sign-in has expired. Sign in again."}
+    assert "did not decode" in caplog.text, "判据没进日志"

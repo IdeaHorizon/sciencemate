@@ -27,7 +27,7 @@ def choose(entry, candidates):
         return {**exact[0], 'identity_candidates': [], 'identity_message': '旧订阅已自动匹配唯一作者身份'}
     return {**entry, 'identity_status': 'ambiguous' if exact else 'unavailable',
             'identity_candidates': exact,
-            'identity_message': ('发现多个同名作者，请选择机构和方向相符的具体学者' if len(exact) > 1 else '已找到候选身份，请核对机构和方向后绑定') if exact else '尚未找到可确认身份，请补充机构或重新搜索'}
+            'identity_message': ('发现多个同名作者，请选择机构和方向相符的具体学者' if len(exact) > 1 else '找到一位可能的学者，请核对机构和研究方向后确认。') if exact else '没有找到这位学者，请补充机构信息或重新搜索。'}
 
 
 async def migrate(user_id):
@@ -48,7 +48,7 @@ async def migrate(user_id):
                 return entry['key'], choose(entry, rows)
             except Exception:
                 logger.warning('Legacy scholar identity lookup unavailable for %r', entry.get('name'))
-                return entry['key'], {**entry, 'identity_status': 'unavailable', 'identity_message': '身份检索暂不可用，后台会重试', 'identity_candidates': []}
+                return entry['key'], {**entry, 'identity_status': 'unavailable', 'identity_message': '暂时无法查询学者信息，稍后会自动重试。', 'identity_candidates': []}
     updates = dict(await asyncio.gather(*(resolve(entry) for entry in pending)))
     resolved = []
     async with factory() as db:

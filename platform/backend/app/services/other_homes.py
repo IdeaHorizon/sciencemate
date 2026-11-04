@@ -89,5 +89,6 @@ async def create_it_elsewhere(home: str, payload: dict, *, lang: str) -> dict:
         if provider.knows(home):
             return await provider.create_project(home, payload, lang)
     raise ThereIsNoSuchHomeError(
-        "没有这个家 —— 它可能已经被退出了，或者这个版本装不了别处的家",
-        en="There is no such home — it may have been left, or this edition cannot use homes elsewhere")
+        "找不到要创建项目的位置。你可能已退出该组织，或当前版本不支持。",
+        en="Could not find where to create this project. You may have left that organisation, or this "
+           "edition does not support it.")

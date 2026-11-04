@@ -9,6 +9,7 @@ from app.services.feed.profile import Profile, ProjectSignal, extract_terms
 from app.services.feed.ranking import candidate_items
 from app.services.feed.windows import academic_cutoff, web_cutoff
 from app.services.literature_harvester import _recent_publication
+from tests._clock import just_now
 
 
 @pytest.mark.asyncio
@@ -49,7 +50,7 @@ def test_previous_month_without_day_overlaps_31_day_window() -> None:
 
 @pytest.mark.asyncio
 async def test_owned_project_survives_large_recent_journal_pool(db_session) -> None:
-    now = datetime.now(UTC)
+    now = just_now()
     db_session.add_all([
         FeedItem(
             canonical_key=f"url:https://example.test/journal-{index}",
@@ -80,7 +81,7 @@ async def test_owned_project_survives_large_recent_journal_pool(db_session) -> N
 
 @pytest.mark.asyncio
 async def test_selected_domain_survives_recent_owned_discoveries(db_session) -> None:
-    now = datetime.now(UTC)
+    now = just_now()
     db_session.add_all([
         FeedItem(
             canonical_key=f"url:https://example.test/owned-{index}",
@@ -111,7 +112,7 @@ async def test_selected_domain_survives_recent_owned_discoveries(db_session) -> 
 
 @pytest.mark.asyncio
 async def test_journal_and_scholar_scan_past_unrelated_batches(db_session):
-    now = datetime.now(UTC)
+    now = just_now()
     rows = [FeedItem(canonical_key=f'url:https://example.test/noise-{n}', kind='paper',
         title=f'Unrelated paper {n}', url=f'https://example.test/noise-{n}',
         summary='Valid abstract.', published_at=now - timedelta(minutes=n),

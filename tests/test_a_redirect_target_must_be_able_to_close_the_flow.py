@@ -340,7 +340,9 @@ def _present(tmp_path, *, target: str, action: str = "redirect_upstream",
         "curator_state": "done", "decision_state": "pending"}]
     res = asyncio.run(execute_tool(
         "present_decision_package", state, source_node_type="writing",
-        producing_run_id="run-w-1", review_critique_artifact_id=art["id"]))
+        producing_run_id="run-w-1", review_critique_artifact_id=art["id"],
+        human_decision_reason="需要负责人确认本次研究取舍。",
+    ))
     return state, res["pause_event"]
 
 

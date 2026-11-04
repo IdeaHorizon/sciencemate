@@ -18,7 +18,7 @@ from pydantic import ValidationError
 
 from app.models.user import User
 from app.schemas.settings import InterfaceSettings
-from app.services.say import SaidToAPerson, in_both_languages, said_of, say  # noqa: F401 —— 端点从这里拿，见 services/say.py
+from app.services.say import SaidToAPerson, in_both_languages, in_either_language, readable_size, said_of, say, spoken  # noqa: F401 —— 端点从这里拿，见 services/say.py
 
 Language = Literal["zh", "en"]
 

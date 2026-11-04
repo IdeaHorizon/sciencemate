@@ -163,7 +163,7 @@ async def test_the_receipt_survives_the_read_path(db_session) -> None:
     )
     assert event is not None
 
-    response = _event_response(event)
+    response = _event_response(event, "zh")
     assert response.kind == "interject.queued", (
         "读取端必须原样交出这条事件的 kind —— 换成任何别的值，"
         "客户端的 kind 词表就对不上，整页照样作废"

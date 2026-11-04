@@ -97,7 +97,7 @@ function ConnectionDialog({
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header>
-          <div><h2 id="connection-dialog-title">{form.id ? t({ zh: "编辑连接", en: "Edit connection" }) : t({ zh: "添加模型连接", en: "Add model connection" })}</h2><p>{form.id ? t({ zh: "密钥只写不读，接口永远不会把它回传。", en: "Credentials are write-only and never returned by the API." }) : t({ zh: `存成 ${scopeLabel}，马上就能用。密钥只写不读，接口永远不会把它回传。`, en: `Saved as ${scopeLabel} and usable right away. Credentials are write-only and never returned by the API.` })}</p></div>
+          <div><h2 id="connection-dialog-title">{form.id ? t({ zh: "编辑连接", en: "Edit connection" }) : t({ zh: "添加模型连接", en: "Add model connection" })}</h2><p>{form.id ? t({ zh: "密钥保存后不会再显示。", en: "Keys are not shown again after saving." }) : t({ zh: `保存为${scopeLabel}，保存后即可使用。密钥保存后不会再显示。`, en: `Saved as ${scopeLabel} and ready to use. Keys are not shown again after saving.` })}</p></div>
           <button type="button" onClick={onClose} aria-label={t({ zh: "关闭模型连接对话框", en: "Close model connection dialog" })}><X size={16} /></button>
         </header>
         <form onSubmit={(event) => { event.preventDefault(); onSave(); }}>
@@ -120,7 +120,7 @@ function ConnectionDialog({
                 required={needsBaseUrl}
                 value={form.base_url}
                 onChange={(event) => onChange({ ...form, base_url: event.target.value })}
-                placeholder={needsBaseUrl ? "https://host/v1" : t({ zh: "由厂商托管的连接可以不填", en: "Optional for provider-managed connections" })}
+                placeholder={needsBaseUrl ? "https://host/v1" : t({ zh: "使用厂商官方地址时可不填", en: "Optional when using the provider's official address" })}
               />
               {needsBaseUrl && <small>{t({ zh: "OpenAI 兼容接口，以 /v1 结尾。", en: "An OpenAI-compatible endpoint, ending in /v1." })}</small>}
             </label>
@@ -134,9 +134,9 @@ function ConnectionDialog({
                 type="number" min={8000} max={2000000} step={1000}
                 value={form.context_window_tokens}
                 onChange={(event) => onChange({ ...form, context_window_tokens: event.target.value })}
-                placeholder={t({ zh: "留空 = 用平台默认（256000）", en: "Leave blank to use the platform default (256000)" })}
+                placeholder={t({ zh: "留空则使用默认值 256000", en: "Leave blank to use the default (256000)" })}
               />
-              <small>{t({ zh: "决定摘要器何时压缩上下文（阈值为窗口的 70%）。按这个模型的真实窗口填 —— 兜底值对 128K 的模型偏大，对 1M 的模型偏小。", en: "Decides when the summarizer compacts context (at 70% of the window). Use this model's real window; the fallback is too large for 128K models and too small for 1M ones." })}</small>
+              <small>{t({ zh: "填这个模型实际的上下文长度。对话超过它的 70% 时会自动压缩。", en: "Enter this model's actual context length. The conversation is compacted automatically once it passes 70% of it." })}</small>
             </label>
             {/* 角色授权。没有这一段，一条连接永远只能当主模型 —— 审图 VLM
                 在界面上就是不存在的（2026-08-22 的实际状态）。 */}
@@ -159,14 +159,14 @@ function ConnectionDialog({
                     />
                     <span>
                       {role.title}
-                      {role.modality === "vision" && ` · ${t({ zh: "要能收图片", en: "needs image input" })}`}
+                      {role.modality === "vision" && ` · ${t({ zh: "需要支持图片", en: "needs image support" })}`}
                     </span>
                   </label>
                 ))}
                 <small>
                   {t({
-                    zh: "勾选只是声明，保存时才真的去探一次。视觉这一项拿一张真的 1×1 图去试 —— 「这个模型不收图片」要在这里暴露，而不是跑到一半才发现。",
-                    en: "Authorizing is a declaration; saving probes it. A vision role is checked with a real 1×1 image, so \"this model does not accept images\" shows up here rather than mid-run.",
+                    zh: "保存时会实际测试一次；需要图片的工作会用一张测试图检查模型是否支持。",
+                    en: "Saving runs a real test. Work that needs images is checked with a test image.",
                   })}
                 </small>
               </fieldset>
@@ -186,17 +186,17 @@ function ConnectionDialog({
                 onChange={(event) => onChange({ ...form, api_key: event.target.value })}
                 placeholder={
                   keptCredential
-                    ? t({ zh: "留空就沿用已存的那把", en: "Leave blank to keep the stored credential" })
+                    ? t({ zh: "留空则保留已保存的密钥", en: "Leave blank to keep the saved key" })
                     : credentialIsOptional(form.base_url)
-                      ? t({ zh: "自建端点不鉴权就留空", en: "Leave blank if your endpoint needs no key" })
-                      : t({ zh: "只写密钥", en: "Write-only credential" })
+                      ? t({ zh: "自建服务不需要密钥时可留空", en: "Leave blank if your service needs no key" })
+                      : t({ zh: "输入 API 密钥", en: "Enter the API key" })
                 }
               />
               {!keptCredential && credentialIsOptional(form.base_url) && (
                 <small>
                   {t({
-                    zh: "自建端点（vLLM / SGLang / Ollama…）多半不鉴权，可以留空 —— 保存时会不带 Authorization 头去探一次，端点收了就是 Ready。要鉴权的话探针会直接说出来。",
-                    en: "Self-hosted endpoints (vLLM / SGLang / Ollama…) usually need no key — leave it blank and the probe will try once without an Authorization header. If the endpoint does want a key, the probe says so.",
+                    zh: "自建服务（vLLM、SGLang、Ollama 等）通常不需要密钥，可以留空。保存时会测试一次连接，需要密钥的话会提示你。",
+                    en: "Self-hosted services (vLLM, SGLang, Ollama and so on) usually need no key, so you can leave this blank. Saving tests the connection once and tells you if a key is needed.",
                   })}
                 </small>
               )}
@@ -267,7 +267,7 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
       ]);
       setEditing(null);
     },
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "模型连接没能保存", en: "Model connection could not be saved" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "保存失败", en: "Model connection could not be saved" })),
   });
 
   const remove = useMutation({
@@ -275,7 +275,7 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: keys.backends });
     },
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "模型连接没能删除", en: "Model connection could not be removed" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "删除失败", en: "Model connection could not be removed" })),
   });
 
   // 手动探活。看得见就能点 —— 研究员改不了机构那条连接，但"它现在还能不能
@@ -290,7 +290,7 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: keys.backends });
     },
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "连接测试没跑起来", en: "Connection could not be tested" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "连接测试失败", en: "Connection could not be tested" })),
   });
 
   // 禁用比删除温和：坏掉的连接先关掉，已建好的会话不受影响（它们记着自己
@@ -300,7 +300,7 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: keys.backends });
     },
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "连接没能切换", en: "Connection could not be switched" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "切换失败", en: "Connection could not be switched" })),
   });
 
   // 角色目录 + 当下绑定。前端不枚举角色，这份返回是唯一来源。
@@ -317,7 +317,7 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
         queryClient.invalidateQueries({ queryKey: keys.roles }),
       ]);
     },
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "角色分配没能更新", en: "Role assignment could not be updated" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "保存失败", en: "Role assignment could not be updated" })),
   });
 
   const visibleBackends = useMemo(() => deduplicateModelBackends(backends.data ?? []), [backends.data]);
@@ -348,7 +348,7 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
         <div className="settings-compact-heading">
           <div>
             <h2>{t({ zh: "模型角色", en: "Model roles" })}</h2>
-            <p>{t({ zh: "每个角色是一个位置，平台拿一条模型连接去填它。改动只对新会话生效；已经在跑的会话保持它建立时冻结的绑定。这一页不会新建会话。", en: "Each role is a capability slot the platform fills with a model connection. Changes affect new Sessions only; existing Sessions keep their frozen bindings. This page does not create Sessions." })}</p>
+            <p>{t({ zh: "为每项工作指定一个模型。改动只对新会话生效。", en: "Choose a model for each kind of work. Changes apply to new sessions only." })}</p>
           </div>
         </div>
         <div className="settings-row-group">
@@ -357,7 +357,7 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
               像"这套部署没有角色"，人会去找一个根本不存在的开关。 */}
           {roles.isError && (
             <div className="settings-row settings-error-row" role="alert">
-              {roles.error instanceof Error ? roles.error.message : t({ zh: "读不到模型角色。", en: "Model roles could not be loaded." })}
+              {roles.error instanceof Error ? roles.error.message : t({ zh: "无法加载模型角色。", en: "Model roles could not be loaded." })}
             </div>
           )}
           {(roles.data ?? []).map((role) => {
@@ -376,7 +376,7 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
             return (
               <div className="settings-row" key={role.id}>
                 <span>
-                  <strong>{role.title}{role.required ? "" : " · optional"}</strong>
+                  <strong>{role.title}{role.required ? "" : ` · ${t({ zh: "可选", en: "optional" })}`}</strong>
                   <small>{role.description}</small>
                 </span>
                 <span className="settings-control-stack">
@@ -390,7 +390,7 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
                     }}
                   >
                     <option value="">
-                      {candidates.length === 0 ? t({ zh: "这个角色还没有可用的连接", en: "No connection authorized for this role" }) : t({ zh: "还没指定", en: "Not assigned" })}
+                      {candidates.length === 0 ? t({ zh: "这个角色还没有可用的连接", en: "No connection authorized for this role" }) : t({ zh: "未指定", en: "Not assigned" })}
                     </option>
                     {candidates.map((backend) => (
                       <option key={backend.id} value={backend.id}>
@@ -419,7 +419,7 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
 
       <section className="settings-compact-section">
         <div className="settings-compact-heading">
-          <div><h2>{t({ zh: "模型连接", en: "Gateway connections" })}</h2><p>{t({ zh: "连接是否健康、属于哪个治理范围、有没有存着一份只写的凭据。", en: "Connection health, governance scope, and whether a write-only credential is stored." })}</p></div>
+          <div><h2>{t({ zh: "模型连接", en: "Model connections" })}</h2></div>
           {/* 加一条连接此前要 `model_backends.manage` —— 研究员永远没有这个
               权限，于是整段（列表 + Add）对他们不存在，界面上没有任何"加个模型"
               的入口。而后端 POST /model-backends 从来不查这个权限：它把新连接
@@ -428,8 +428,8 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
         </div>
         <div className="settings-row-group model-connection-group">
           {backends.isLoading && !backends.data && <div className="settings-row"><Skeleton height={34} /></div>}
-          {backends.isError && <div className="settings-row settings-error-row" role="alert">{t({ zh: "读不到模型连接。", en: "Model connections could not be loaded." })}</div>}
-          {visibleBackends.length === 0 && !backends.isLoading && !backends.isError && <div className="settings-row settings-empty-row">{t({ zh: "还没有配过模型连接。", en: "No model connections configured." })}</div>}
+          {backends.isError && <div className="settings-row settings-error-row" role="alert">{t({ zh: "无法加载模型连接。", en: "Model connections could not be loaded." })}</div>}
+          {visibleBackends.length === 0 && !backends.isLoading && !backends.isError && <div className="settings-row settings-empty-row">{t({ zh: "还没有模型连接。", en: "No model connections yet." })}</div>}
           {sharedBackendCount > 0 && (
             <div className="settings-row settings-disabled-row">
               <span><strong><LockKeyhole size={14} /> {t({ zh: "{n} 条由管理员维护", en: "{n} maintained by an administrator" }, { n: sharedBackendCount })}</strong><small>{t({ zh: "组织的连接在这里只读，由组织管理员维护。", en: "Organisation connections are read-only here and maintained by an organisation administrator." })}</small></span>
@@ -444,7 +444,7 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
                 <span className={cn("model-status-dot", `status-${backend.status}`)} title={modelBackendStatusLabel(backend.status, lang)} aria-label={modelBackendStatusLabel(backend.status, lang)} />
                 <span className="model-connection-identity"><strong>{modelBackendDisplayName(backend, lang)}</strong><small>{modelBackendModelLabel(backend, lang)} · {modelBackendStatusLabel(backend.status, lang)}</small></span>
                 <span className="model-connection-fact"><small>{t({ zh: "范围", en: "Scope" })}</small><strong>{managementLabel(backend, lang)}</strong></span>
-                <span className="model-connection-fact"><small>{t({ zh: "密钥", en: "Credential" })}</small><strong><KeyRound size={11} /> {backend.has_api_key ? t({ zh: "已存", en: "Stored" }) : t({ zh: "没存", en: "Not stored" })}</strong></span>
+                <span className="model-connection-fact"><small>{t({ zh: "密钥", en: "Credential" })}</small><strong><KeyRound size={11} /> {backend.has_api_key ? t({ zh: "已保存", en: "Saved" }) : t({ zh: "未保存", en: "Not saved" })}</strong></span>
                 {/* status 是判决，这里是**证据有多旧**。两个都给，人才判断得了
                     那句 Ready 值不值得信 —— 从前只有前者，于是三周前的快照和
                     当前事实长得一模一样。 */}
@@ -464,7 +464,7 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
                     disabled={probe.isPending}
                     onClick={() => probe.mutate(backend)}
                   >
-                    Test
+                    {t({ zh: "测试", en: "Test" })}
                   </button>
                   {actions.canEdit && (
                     <button
@@ -472,7 +472,7 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
                       disabled={toggleEnabled.isPending}
                       onClick={() => toggleEnabled.mutate(backend)}
                     >
-                      {backend.is_enabled === false ? "Enable" : "Disable"}
+                      {backend.is_enabled === false ? t({ zh: "启用", en: "Enable" }) : t({ zh: "停用", en: "Disable" })}
                     </button>
                   )}
                   {actions.canEdit && <button type="button" onClick={() => editBackend(backend)}>{t({ zh: "编辑", en: "Edit" })}</button>}
@@ -482,11 +482,11 @@ export function ModelConnections({ client, keys, canSelect, canAdd, newConnectio
                       className="is-danger"
                       disabled={remove.isPending}
                       onClick={() => {
-                        if (!globalThis.confirm(t({ zh: `确定删除模型连接「${modelBackendDisplayName(backend, lang)}」吗？已经建好的会话不受影响，它们记着自己当时用的模型。`, en: `Delete the model connection "${modelBackendDisplayName(backend, lang)}"? Existing sessions are unaffected; each records the model it actually used.` }))) return;
+                        if (!globalThis.confirm(t({ zh: `删除模型连接「${modelBackendDisplayName(backend, lang)}」？已有会话不受影响。`, en: `Delete the model connection "${modelBackendDisplayName(backend, lang)}"? Existing sessions are unaffected.` }))) return;
                         remove.mutate(backend);
                       }}
                     >
-                      Delete
+                      {t({ zh: "删除", en: "Delete" })}
                     </button>
                   )}
                 </span>

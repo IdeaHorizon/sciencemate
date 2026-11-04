@@ -20,6 +20,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from string import Template
 from typing import Any
@@ -28,7 +29,10 @@ from core.state import State
 from core.tool_registry import contract_requirement
 from nodes.data.pipeline_contract import needs_input_result
 from nodes.data.progress import emit_progress
-from .geometry_assets import canonical_mesh_controls, flatten_parameter_groups, geometry_file_from_params
+from .geometry_assets import (
+    canonical_mesh_controls, coordinate_profile_from_params,
+    flatten_parameter_groups, geometry_file_from_params,
+)
 from .parametric_mesh_adapters import (
     generate_cantilever_beam_mesh,
     generate_converging_diverging_nozzle_mesh,
@@ -76,6 +80,9 @@ from ..review.mesh_reviewer import semantic_mesh_review
 #: 立的闸）。
 MESH_PARAMETER_CONTRACT: dict[str, str] = {
     "domain_type": "The coordinate-profile adapter supports c (C-shaped) and o (circular) far-field domains. For other domain shapes use an explicit geometry recipe; never silently substitute a different shape.",
+    "far_field": "Coordinate-profile adapter: C-domain upstream arc radius and top/bottom coordinates +/-far_field; O-domain radius about (0.5, 0), in normalized chord units. This is not minimum distance from the body surface. Translate a requested surface clearance using the actual profile extent. far_field_ratio overrides far_field_chord_ratio, which overrides far_field; keep supplied aliases consistent.",
+    "required_far_field": "Minimum clearance from the actual profile to every outer boundary, in normalized chord units. The coordinate-profile adapter expands its domain to satisfy this lower bound and measures the generated boundary separation. Omit for a prescribed radius/coordinate without a body-clearance requirement.",
+    "wake_length": "Coordinate-profile adapter: C-domain outlet x coordinate (also the wake refinement endpoint), in normalized chord units, not distance from the trailing edge. For requested downstream clearance add the actual trailing-edge x coordinate. wake_length_ratio overrides wake_length_chord_ratio, which overrides wake_length; keep supplied aliases consistent.",
     "characteristic_length": "Absolute target mesh size in geometry units (Gmsh -clmax), not a scaling factor. Preserve supplied units and local refinement.",
     "minimum_length": "Optional lower bound on Gmsh mesh sizing (-clmin), in the same units as characteristic_length; not a guarantee that every edge exceeds this length.",
     "length_unit": "Optional CAD import target unit (m, mm, cm, etc.). STEP/IGES are converted by OpenCASCADE before meshing; express mesh sizes in this unit. Omit to preserve native coordinates.",
@@ -565,8 +572,26 @@ _GMSH_ELEMENT_FAMILIES: dict[int, tuple[int, str, int]] = {
 }
 
 
-def _parse_gmsh_msh2_quality(mesh_path: str) -> dict[str, Any]:
+def _parse_gmsh_msh2_quality(
+    mesh_path: str, *, clearance_groups: tuple[str, list[str]] | None = None,
+    surface_regions: list[dict[str, Any]] | None = None,
+    geometry_constraints: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Parse an ASCII MSH2 file and compute simple 2D quality statistics."""
+    regions = surface_regions or []
+    if len(regions) > 8:
+        raise ValueError("At most eight surface measurement regions are supported.")
+    for region in regions:
+        if (not isinstance(region, dict) or not isinstance(region.get("name"), str)
+                or not region["name"] or any(not isinstance(region.get(key), list) or len(region[key]) != 3
+                                            for key in ("min", "max"))
+                or any(type(v) not in (int, float) or not math.isfinite(v)
+                       for key in ("min", "max") for v in region[key])
+                or any(a > b for a, b in zip(region["min"], region["max"]))):
+            raise ValueError("Surface regions need a name and finite ordered min/max XYZ coordinates.")
+    if len({region["name"] for region in regions}) != len(regions):
+        raise ValueError("Surface region names must be unique.")
+    region_samples: dict[str, list[tuple[float, float]]] = {region["name"]: [] for region in regions}
     text = Path(mesh_path).read_text(encoding="utf-8", errors="ignore").splitlines()
     from .scientific_assets import validate_format_version
 
@@ -589,6 +614,10 @@ def _parse_gmsh_msh2_quality(mesh_path: str) -> dict[str, Any]:
     nodes_by_dimension: dict[int, set[int]] = {}
     element_keys: set[tuple[int, tuple[int, ...]]] = set()
     duplicate_elements = 0
+    tet_edges: list[float] = []
+    tet_max_edges: list[float] = []
+    tet_volumes: list[float] = []
+    boundary_segments: dict[str, list[Any]] = {}
 
     i = 0
     while i < len(text):
@@ -629,6 +658,13 @@ def _parse_gmsh_msh2_quality(mesh_path: str) -> dict[str, Any]:
                 element_keys.add(element_key)
                 corner_ids = node_ids[:family[2]] if family else node_ids
                 pts = [nodes[nid] for nid in corner_ids if nid in nodes]
+                if clearance_groups and tags and dimension in {1, 2}:
+                    name = physical_names.get((dimension, tags[0]), "")
+                    if name in {clearance_groups[0], *clearance_groups[1]}:
+                        projected = list(dict.fromkeys((p[0], p[1]) for p in pts))
+                        # Native 2-D edges or lateral faces of a thin extrusion.
+                        if len(projected) == 2:
+                            boundary_segments.setdefault(name, []).append(projected)
                 if dimension is not None and tags and pts:
                     stats = physical_geometry.setdefault((dimension, tags[0]), {
                         "dimension": dimension,
@@ -645,6 +681,14 @@ def _parse_gmsh_msh2_quality(mesh_path: str) -> dict[str, Any]:
                 if family and family[0] == 3:
                     if family[1] == "tetrahedron":
                         tet_count += 1
+                        if len(pts) == 4:
+                            tet_edges.extend(math.dist(pts[a], pts[b]) for a, b in
+                                             ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)))
+                            tet_max_edges.append(max(tet_edges[-6:]))
+                            a, b, c = [[p[i] - pts[0][i] for i in range(3)] for p in pts[1:]]
+                            tet_volumes.append((a[0] * (b[1]*c[2] - b[2]*c[1])
+                                                - a[1] * (b[0]*c[2] - b[2]*c[0])
+                                                + a[2] * (b[0]*c[1] - b[1]*c[0])) / 6)
                     elif family[1] == "hexahedron":
                         hex_count += 1
                     elif family[1] == "prism":
@@ -657,6 +701,12 @@ def _parse_gmsh_msh2_quality(mesh_path: str) -> dict[str, Any]:
                 if len(pts) != len(corner_ids):
                     continue
                 area = _area_3d(pts)
+                if regions:
+                    center = [sum(point[axis] for point in pts) / len(pts) for axis in range(3)]
+                    edge = max(math.dist(pts[j], pts[(j + 1) % len(pts)]) for j in range(len(pts)))
+                    for region in regions:
+                        if all(a <= v <= b for a, v, b in zip(region["min"], center, region["max"])):
+                            region_samples[region["name"]].append((area, edge))
                 areas.append(area)
                 aspects.append(_aspect_ratio_3d(pts))
                 surface_cells.append(corner_ids)
@@ -668,16 +718,76 @@ def _parse_gmsh_msh2_quality(mesh_path: str) -> dict[str, Any]:
         i += 1
 
     finite_aspects = [a for a in aspects if math.isfinite(a)]
+    mesh_dimension = 3 if (tet_count + hex_count + prism_count + pyramid_count) > 0 else 2
     topology = {
-        **surface_topology_metrics(surface_cells),
-        "mesh_dimension": 3 if (tet_count + hex_count + prism_count + pyramid_count) > 0 else 2,
+        **surface_topology_metrics(
+            surface_cells, node_positions=nodes if mesh_dimension == 2 else None,
+            cell_areas=areas if mesh_dimension == 2 else None,
+        ),
+        "mesh_dimension": mesh_dimension,
     }
+    clearance = {}
+    if clearance_groups:
+        def point_segment(p, a, b):
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            t = max(0.0, min(1.0, ((p[0]-a[0])*dx + (p[1]-a[1])*dy) / (dx*dx + dy*dy)))
+            return math.hypot(p[0]-a[0]-t*dx, p[1]-a[1]-t*dy)
+
+        def segment_distance(a, b, c, d):
+            def cross(p, q, r):
+                return (q[0]-p[0])*(r[1]-p[1]) - (q[1]-p[1])*(r[0]-p[0])
+            if cross(a, b, c)*cross(a, b, d) < 0 and cross(c, d, a)*cross(c, d, b) < 0:
+                return 0.0
+            return min(point_segment(a, c, d), point_segment(b, c, d),
+                       point_segment(c, a, b), point_segment(d, a, b))
+
+        body, outer = clearance_groups
+        distances = {name: min(segment_distance(a, b, c, d)
+                              for a, b in boundary_segments[body]
+                              for c, d in boundary_segments[name])
+                     for name in dict.fromkeys(outer)
+                     if boundary_segments.get(body) and boundary_segments.get(name)}
+        clearance = {"boundary_clearance": {
+            "body_group": body, "outer_groups": list(dict.fromkeys(outer)),
+            "method": "minimum XY segment separation on materialized boundary elements",
+            "by_outer_group": distances,
+            "minimum": min(distances.values()) if len(distances) == len(set(outer)) else None,
+        }}
+    from .planar_geometry import check_planar_geometry
+
+    geometry_check = check_planar_geometry(nodes, surface_cells, {"geometry": geometry_constraints}) if geometry_constraints else None
     return {
+        "measurement_source": {"path": str(Path(mesh_path).resolve()), "format": "msh2",
+                               "method": "ASCII MSH2 reader",
+                               "sha256": hashlib.sha256(Path(mesh_path).read_bytes()).hexdigest()},
+        **({"geometry_check": geometry_check} if geometry_check else {}),
+        **({"surface_region_measurements": {
+            "method": "ASCII MSH2 surface elements selected by corner centroid in inclusive XYZ boxes; "
+                      "areas and maximum perimeter edges use 3D corner geometry. Counts are surface faces, "
+                      "not volume cells. Select one extrusion plane with the Z bounds for a 2D section. "
+                      "Empty regions yield null statistics; observations are not acceptance verdicts.",
+            "regions": [{**region, "count": len(region_samples[region["name"]]),
+                         **{key: (sorted(sample[index] for sample in region_samples[region["name"]])[
+                             (len(region_samples[region["name"]]) - 1) // 2] if region_samples[region["name"]] else None)
+                            for key, index in (("lower_median_area", 0), ("lower_median_max_edge", 1))}}
+                        for region in regions],
+        }} if regions else {}),
+        **clearance,
         "n_nodes": len(nodes),
         "n_triangles": tri_count,
         "n_quads": quad_count,
         "n_2d_elements": tri_count + quad_count,
         "n_tets": tet_count,
+        **({"tetrahedral_measurements": {
+            "method": "MSH2 tetrahedron corner coordinates; six edges per cell (shared edges repeated). "
+                      "Signed corner volumes do not establish high-order Jacobian validity.",
+            "edge_min": min(tet_edges), "edge_mean": sum(tet_edges) / len(tet_edges),
+            "edge_max": max(tet_edges), "min_signed_corner_volume": min(tet_volumes),
+            "cell_max_edge_min": min(tet_max_edges),
+            "cell_max_edge_mean": sum(tet_max_edges) / len(tet_max_edges),
+            "cell_max_edge_max": max(tet_max_edges),
+            "nonpositive_corner_volumes": sum(v <= 0 for v in tet_volumes),
+        }} if tet_edges else {}),
         "n_hexes": hex_count,
         "n_prisms": prism_count,
         "n_pyramids": pyramid_count,
@@ -704,6 +814,24 @@ def _parse_gmsh_msh2_quality(mesh_path: str) -> dict[str, Any]:
         },
         "topology": topology,
     }
+
+
+def read_gmsh_mesh_quality(mesh_path: str, *, gmsh_binary: str = "gmsh", timeout: int = 120,
+                           surface_regions: list[dict] | None = None) -> dict[str, Any]:
+    """Use Gmsh's format reader and the shared topology/geometry measurements."""
+    with tempfile.TemporaryDirectory(prefix="data-mesh-readback-") as directory:
+        readback = Path(directory) / "readback.msh"
+        command = [gmsh_binary, mesh_path, "-format", "msh2", "-setnumber", "Mesh.Binary", "0",
+                   "-save", "-o", str(readback)]
+        checked = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
+        if checked.returncode != 0 or not readback.is_file():
+            raise ValueError(f"Gmsh export read-back failed: {checked.stderr[-1200:]}")
+        quality = _parse_gmsh_msh2_quality(str(readback), surface_regions=surface_regions)
+    quality["measurement_source"] = {"path": str(Path(mesh_path).resolve()),
+        "sha256": hashlib.sha256(Path(mesh_path).read_bytes()).hexdigest(),
+        "method": "Gmsh read-back into ASCII MSH2"}
+    quality["readback"] = {"cmd": command, "returncode": checked.returncode, "inspection_format": "gmsh_msh2"}
+    return quality
 
 
 def _extrude_msh2_surface_to_thin_3d(mesh_path: str, out_path: str, span: float = 0.1) -> dict[str, Any]:
@@ -885,6 +1013,36 @@ def _as_bool(value: Any, default: bool = True) -> bool:
     return default
 
 
+def _parse_check_mesh_observations(output: str) -> dict[str, Any]:
+    """Expose reported native facts without treating absent lines as passes.
+
+    This is a log reader, not a second mesh parser or acceptance policy. Keep
+    exact topology/geometry observations so semantic review can reuse checkMesh
+    instead of inventing a Python reader to repeat its work.
+    """
+    observations: dict[str, Any] = {}
+    counts = {}
+    for field in ("points", "faces", "internal faces", "cells", "boundary patches",
+                  "hexahedra", "prisms", "wedges", "pyramids", "tet wedges", "tetrahedra", "polyhedra"):
+        match = re.search(r"^\s*" + re.escape(field) + r":\s*(\d+)\s*$", output, re.MULTILINE)
+        if match:
+            counts[field.replace(" ", "_")] = int(match.group(1))
+    if counts:
+        observations["counts"] = counts
+    lines = [line.strip() for line in output.splitlines()]
+    geometry = [line for line in lines if line.startswith((
+        "Overall domain bounding box ", "Mesh has ", "Minimum face area = ",
+        "Min volume = ", "Max aspect ratio = ", "Mesh non-orthogonality ", "Max skewness = "))]
+    if geometry:
+        observations["geometry"] = geometry
+    checks = [line for line in lines if re.fullmatch(
+        r"(?:Boundary definition|Cell to face addressing|Point usage|Upper triangular ordering|"
+        r"Face vertices|Topological cell zip-up check|Face-face connectivity) OK\.", line)]
+    if checks:
+        observations["topology_checks"] = checks
+    return observations
+
+
 def _parse_check_mesh_anomalies(output: str, returncode: int = 0) -> dict[str, Any]:
     """Parse topology/geometry failures that OpenFOAM may print before ``Mesh OK``."""
     failed_match = re.search(r"Failed\s+(\d+)\s+mesh checks", output, flags=re.IGNORECASE)
@@ -910,6 +1068,7 @@ def _parse_check_mesh_anomalies(output: str, returncode: int = 0) -> dict[str, A
         "under_determined_cells": int(under_determined.group(1)) if under_determined else 0,
         "low_interpolation_weight_faces": int(low_weights.group(1)) if low_weights else 0,
         "cells_with_two_non_boundary_faces": int(two_internal_faces.group(1)) if two_internal_faces else 0,
+        "observations": _parse_check_mesh_observations(output),
     }
     fatal_anomaly = any(
         values[key]
@@ -988,6 +1147,9 @@ def run_openfoam_check_mesh(
         )
         output = f"{proc.stdout}\n{proc.stderr}"
         result = _parse_check_mesh_anomalies(output, proc.returncode)
+        result["measurement_sources"] = {str((poly_path / name).resolve()): hashlib.sha256(
+            (poly_path / name).read_bytes()).hexdigest()
+            for name in ("points", "faces", "owner", "neighbour", "boundary")}
         result["output_tail"] = output[-5000:]
         log_path = Path(str(case_dir)).expanduser() / "checkMesh.log"
         if retain_output or result.get("status") != "pass":
@@ -1039,7 +1201,8 @@ def _review_gmsh_mesh(result: dict[str, Any], requested: dict[str, Any]) -> dict
     issues: list[dict[str, Any]] = []
     checks: dict[str, bool] = {}
 
-    poly_dir = result.get("polyMesh_dir")
+    openfoam_requested = _as_bool(requested.get("convert_to_openfoam"), True)
+    poly_dir = result.get("polyMesh_dir") if openfoam_requested else None
     boundary_contract = _build_openfoam_boundary_contract(poly_dir, requested)
     check_mesh: dict[str, Any] = (
         run_openfoam_check_mesh(
@@ -1048,7 +1211,7 @@ def _review_gmsh_mesh(result: dict[str, Any], requested: dict[str, Any]) -> dict
             timeout=int(requested.get("check_mesh_timeout") or 120),
             retain_output=_as_bool(requested.get("retain_validation_log"), False),
         )
-        if poly_dir else {"status": "skipped"}
+        if poly_dir else {"status": "skipped" if openfoam_requested else "not_applicable"}
     )
     if check_mesh.get("log_file"):
         result["check_mesh_log"] = check_mesh["log_file"]
@@ -1098,7 +1261,7 @@ def _review_gmsh_mesh(result: dict[str, Any], requested: dict[str, Any]) -> dict
                     "Re-export from the OpenFOAM cell plane/volume topology before delivery.",
                 )
 
-    if _as_bool(requested.get("convert_to_openfoam"), True):
+    if openfoam_requested:
         boundary = Path(str(poly_dir or "")) / "boundary"
         ok = bool(poly_dir and boundary.exists() and (result.get("openfoam") or {}).get("status") == "success")
         checks["openfoam_polymesh_exists"] = ok
@@ -1241,19 +1404,25 @@ def _review_gmsh_mesh(result: dict[str, Any], requested: dict[str, Any]) -> dict
         required_far_field = float(requested.get("required_far_field") or 0.0)
     except (TypeError, ValueError):
         required_far_field = 0.0
+    measurement = quality.get("boundary_clearance")
     if required_far_field > 0:
+        plan_contract["required_far_field"] = required_far_field
+        plan_contract["configured_far_field"] = grid.get("far_field") or requested.get("far_field")
+        # Adapters without this measurement leave the condition to authority
+        # review; a configured extent is never a measured clearance receipt.
+    if required_far_field > 0 and isinstance(measurement, dict):
         try:
-            actual_far_field = float(grid.get("far_field") or requested.get("far_field") or 0.0)
+            actual_far_field = float(measurement.get("minimum"))
         except (TypeError, ValueError):
             actual_far_field = 0.0
-        plan_contract["required_far_field"] = required_far_field
         plan_contract["actual_far_field"] = actual_far_field
+        plan_contract["far_field_evidence"] = measurement
         checks["plan_far_field_satisfied"] = actual_far_field >= required_far_field
         if not checks["plan_far_field_satisfied"]:
             add_issue(
                 "plan_far_field_below_target",
                 "major",
-                f"far_field={actual_far_field} is below approved-plan requirement {required_far_field}.",
+                f"Verified boundary extent/clearance={actual_far_field} is below approved-plan requirement {required_far_field}.",
                 "Expand the computational domain without changing the embedded geometry.",
             )
 
@@ -1410,7 +1579,8 @@ def _review_gmsh_mesh(result: dict[str, Any], requested: dict[str, Any]) -> dict
                 "requested_boundary_groups_missing",
                 "critical",
                 "The mesh has no elements in requested physical boundary groups: " + ", ".join(missing),
-                "Repair the geometry selections and regenerate the mesh, preserving the requested boundary names. "
+                "Create named physical groups with the requested names and regenerate the mesh. "
+                "Numeric physical tags and comments alone do not define names. Check group membership; "
                 "For bounding-box selections, expand both lower and upper bounds by the CAD tolerance; "
                 "a bound exactly on the nominal surface may exclude its entities.",
                 {
@@ -1539,6 +1709,9 @@ def _openfoam_boundary_names(poly_dir: Any) -> list[str]:
 
 def _build_openfoam_boundary_contract(poly_dir: Any, requested: dict[str, Any]) -> dict[str, Any]:
     """Compare explicit user/plan patch names with converted OpenFOAM patches."""
+    if not _as_bool(requested.get("convert_to_openfoam"), True):
+        return {"status": "not_applicable", "expected_boundaries": [],
+                "actual_boundaries": [], "missing_boundaries": [], "additional_boundaries": []}
     expected: list[str] = []
     for field in (
         "expected_boundaries", "required_boundaries", "boundary_names", "patch_names",
@@ -1837,6 +2010,17 @@ def _supported_parameters(generator: Any, values: dict[str, Any]) -> dict[str, A
     """Keep only parameters accepted by the selected producer callable."""
     signature = inspect.signature(generator)
     values = canonical_mesh_controls(values, signature.parameters)
+    invalid = {
+        key: value for key, value in values.items()
+        if key in signature.parameters
+        and str(signature.parameters[key].annotation).split(" | ")[0] in {"int", "float"}
+        and isinstance(value, (list, dict))
+    }
+    if invalid:
+        raise ValueError(
+            f"{generator.__name__} requires scalar numeric controls, not ranges/objects: {invalid}. "
+            "Select executable values against the original request; retain ranges as constraints."
+        )
     if any(
         item.kind == inspect.Parameter.VAR_KEYWORD
         for item in signature.parameters.values()
@@ -1894,6 +2078,9 @@ def _generate_gmsh_mesh_with_review(
         review_path = _write_mesh_review(result["case_dir"], review)
         result["mesh_review"] = review
         result["mesh_review_report"] = review_path
+        # This is computed evidence, not model-editable content. Repair the
+        # measured input when it is wrong; report-only bugs belong to the tool.
+        result["derived_report_files"] = [review_path]
         result["written_files"] = [*result.get("written_files", []), review_path]
         observed = result.get("grid_params")
         effective = {
@@ -2105,15 +2292,11 @@ def generate_coordinate_profile_gmsh_mesh(
     if not profile_path:
         raise ValueError("coordinate_profile_path or airfoil_dat_path is required")
     compatible_name = kwargs.pop("airfoil_name", "")
-    # These options belong to cascade/reference-domain generators and are not
-    # accepted by the isolated-profile Gmsh implementation.
-    for incompatible_key in ("preserve_input_scale", "spanwise_layers", "front_back_patch_type"):
-        kwargs.pop(incompatible_key, None)
     result = generate_airfoil_gmsh_mesh(
         case_dir=case_dir,
         airfoil_name=profile_name or compatible_name or "coordinate_profile",
         airfoil_dat_path=profile_path,
-        **kwargs,
+        **_supported_parameters(generate_airfoil_gmsh_mesh, kwargs),
     )
     result["mesh_type"] = "coordinate_profile_gmsh"
     result["coordinate_profile_path"] = profile_path
@@ -2469,13 +2652,30 @@ def _turbomachinery_cascade_domain_reference_request(spec: str, params: dict[str
 def _text_error_context(path: Path, diagnostic: str, radius: int = 3) -> str:
     """Return the cited source lines for a text-tool diagnostic."""
     match = re.search(rf"['\"]{re.escape(str(path))}['\"],\s*line\s+(\d+)\b", diagnostic, flags=re.I)
-    if not match:
-        return ""
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return ""
-    line_number = int(match.group(1))
+    if match:
+        line_number = int(match.group(1))
+    else:
+        # Native tools can cite an invalid identifier without a line number.
+        # Bind it only when it occurs on exactly one non-comment source line;
+        # ambiguous/runtime diagnostics must remain with the consumer.
+        identifiers = re.findall(r"['\"]([A-Za-z_][\w.:-]*)['\"]", diagnostic)
+        # An expression-string error cites the quoted use, not every valid
+        # declaration/use of the same identifier elsewhere in the script.
+        for pattern in (r"['\"]{}['\"]", r"(?<![\w.]){}(?![\w.])"):
+            cited_lines = {
+                index for index, line in enumerate(lines, 1)
+                if not line.lstrip().startswith(("//", "#", "!"))
+                and any(re.search(pattern.format(re.escape(name)), line) for name in identifiers)
+            }
+            if cited_lines:
+                break
+        if len(cited_lines) != 1:
+            return ""
+        line_number = cited_lines.pop()
     if not 1 <= line_number <= len(lines):
         return ""
     start = max(1, line_number - radius)
@@ -2483,6 +2683,44 @@ def _text_error_context(path: Path, diagnostic: str, radius: int = 3) -> str:
     return "\nsource context:\n" + "\n".join(
         f"{index}: {lines[index - 1]}" for index in range(start, end + 1)
     )
+
+
+def _cad_entity_bounds(source: Path, gmsh: str, length_unit: str, timeout: int) -> dict[str, Any]:
+    """Measure imported CAD entities, not STEP control points or coordinate systems."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="data-cad-bounds-") as directory:
+            root = Path(directory)
+            script = root / "bounds.geo"
+            script.write_text(
+                'SetFactory("OpenCASCADE");\n'
+                + (f'Geometry.OCCTargetUnit={json.dumps(length_unit.upper())};\n' if length_unit else "")
+                + f'Merge {json.dumps(str(source.resolve()), ensure_ascii=False)};\n'
+                + 'v()=Volume{:}; s()=Surface{:};\n'
+                + '\n'.join(
+                    f'Geometry.OCCBoundsUseStl={mode};\n'
+                    'If (#v()>0)\n b()=BoundingBox Volume{v()};\n'
+                    'Else\n b()=BoundingBox Surface{s()};\nEndIf\n'
+                    f'Printf("DATA_BOUNDS_{mode} %.17g %.17g %.17g %.17g %.17g %.17g",'
+                    'b(0),b(1),b(2),b(3),b(4),b(5));'
+                    for mode in (0, 1)
+                ), encoding="utf-8",
+            )
+            result = subprocess.run([gmsh, str(script), "-0", "-o", str(root / "bounds.brep")],
+                                    capture_output=True, text=True, timeout=timeout)
+            bounds = {}
+            for mode, name in ((0, "conservative"), (1, "tessellated")):
+                match = re.search(rf"^DATA_BOUNDS_{mode} (.+)$", result.stdout, re.MULTILINE)
+                values = [float(v) for v in match[1].split()] if match else []
+                if (result.returncode or len(values) != 6 or not all(math.isfinite(v) for v in values)
+                        or any(a > b for a, b in zip(values[:3], values[3:]))):
+                    raise ValueError("Gmsh did not return finite CAD entity bounds: " + result.stderr[-500:])
+                bounds[name] = {"min": values[:3], "max": values[3:]}
+            return {"status": "success", "length_unit": length_unit or "native",
+                    "method": "Gmsh/OpenCASCADE imported volumes, or surfaces when no volume exists. "
+                              "Conservative bounds include CAD tolerances; tessellated bounds approximate "
+                              "curved extrema and need not exactly equal mesh-node extrema.", **bounds}
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        return {"status": "unavailable", "error": str(exc)}
 
 
 def generate_geometry_file_gmsh_mesh(
@@ -2575,6 +2813,8 @@ def generate_geometry_file_gmsh_mesh(
             directives.append(f"Mesh.MeshSizeMin={float(minimum_length)};")
         if element_order is not None:
             directives.append(f"Mesh.ElementOrder={int(element_order)};")
+        if re.fullmatch(r"(?i)(?:CPS|CPE|CAX|DC2D|S|M3D)8R?", str(domain_params.get("element_type") or "")):
+            directives.extend(["Mesh.ElementOrder=2;", "Mesh.SecondOrderIncomplete=1;"])
         if mesh_size_factor is not None:
             directives.append(f"Mesh.MeshSizeFactor={float(mesh_size_factor)};")
         # Gmsh reads .geo options after CLI options. Apply explicit controls
@@ -2622,7 +2862,10 @@ def generate_geometry_file_gmsh_mesh(
         gmsh_stdout = proc.stdout
         gmsh_stderr = proc.stderr
         if proc.returncode != 0 or not msh_path.exists():
-            diagnostic = proc.stderr[-1200:]
+            # Parser cascades end in secondary errors; preserve the first
+            # failure as well as the tail instead of hiding the root cause.
+            diagnostic = (proc.stderr if len(proc.stderr) <= 3000 else
+                          proc.stderr[:1800] + "\n[... diagnostics omitted ...]\n" + proc.stderr[-1200:])
             source_context = _text_error_context(copied_geometry, proc.stderr)
             failure = _failed_gmsh_generation_result({"case_dir": out_dir}, RuntimeError(
                 "gmsh failed for geometry_file with returncode="
@@ -2636,7 +2879,21 @@ def generate_geometry_file_gmsh_mesh(
             return failure
         written_files.append(str(msh_path))
 
-    quality = _parse_gmsh_msh2_quality(str(msh_path))
+    quality = _parse_gmsh_msh2_quality(str(msh_path), geometry_constraints=domain_params.get("geometry"))
+    if (quality.get("geometry_check") or {}).get("status") == "fail":
+        check = quality["geometry_check"]
+        issue = {"code": "geometry_contract_mismatch", "severity": "critical",
+                 "repair_kind": "producer_controls", "source_file": str(src),
+                 "message": "Materialized mesh violates the constructive geometry: "
+                            + ", ".join(name for name, passed in check["checks"].items() if not passed),
+                 "observed": check["observed"],
+                 "required_change": "Correct the geometry construction and regenerate; preserve the requested dimensions and voids."}
+        quality_path = out_dir / "mesh_quality.json"
+        quality_path.write_text(json.dumps(quality, indent=2), encoding="utf-8")
+        return {"status": "needs_revision", "mesh_type": "geometry_file_gmsh", "geometry_file": str(src),
+                "mesh_file": str(msh_path), "quality": quality, "quality_report": str(quality_path),
+                "error": issue["message"], "issues": [issue],
+                "revision_contract": {"scope": "asset", "issues": [issue]}}
     has_cells = bool(quality.get("n_3d_elements") or quality.get("n_2d_elements"))
     if not has_cells or (int(mesh_dimension or 0) == 3 and not quality.get("n_3d_elements")):
         failure = _failed_gmsh_generation_result({"case_dir": out_dir}, ValueError(
@@ -2672,11 +2929,18 @@ def generate_geometry_file_gmsh_mesh(
     quality["source_geometry"] = {
         key: source_profile.get(key) for key in ("path", "sha256", "size_bytes")
     }
-    quality_path.write_text(json.dumps(quality, indent=2, ensure_ascii=False), encoding="utf-8")
-    written_files.append(str(quality_path))
-
+    if suffix in {".step", ".stp", ".iges", ".igs", ".brep"}:
+        quality["source_geometry"]["entity_bounds"] = _cad_entity_bounds(
+            copied_geometry, str(gmsh_path), length_unit, min(timeout, 60),
+        )
+    quality["mesh_sizing_semantics"] = {
+        "characteristic_length": "Gmsh target size; not an exact value for every element edge.",
+        "minimum_length": MESH_PARAMETER_CONTRACT["minimum_length"],
+    }
     solver_mesh_file = ""
+    solver_export: dict[str, Any] = {}
     solver_format = str(solver_mesh_format or "").strip().lower().lstrip(".")
+    solver_format = solver_format.removeprefix("gmsh_")
     if solver_format:
         if not re.fullmatch(r"[a-z0-9]+", solver_format):
             raise ValueError(f"invalid solver_mesh_format: {solver_mesh_format!r}")
@@ -2684,11 +2948,12 @@ def generate_geometry_file_gmsh_mesh(
         solver_path = out_dir / f"{copied_geometry.stem}.{solver_suffix}"
         if solver_path.resolve() in {src.resolve(), copied_geometry.resolve()}:
             solver_path = out_dir / f"{copied_geometry.stem}_export.{solver_suffix}"
-        export_proc = subprocess.run(
-            [
+        export_cmd = [
                 str(gmsh_path), str(msh_path), "-format", solver_format,
                 "-setnumber", "Mesh.SaveGroupsOfNodes", "1", "-save", "-o", str(solver_path),
-            ],
+            ]
+        export_proc = subprocess.run(
+            export_cmd,
             cwd=str(out_dir),
             text=True,
             capture_output=True,
@@ -2702,11 +2967,30 @@ def generate_geometry_file_gmsh_mesh(
         from .scientific_assets import validate_format_version
 
         with solver_path.open(encoding="utf-8", errors="replace") as exported:
-            version_error = validate_format_version(exported.read(512), solver_format)
+            exported_header = exported.read(512)
+            version_error = validate_format_version(exported_header, solver_format)
         if version_error:
             raise RuntimeError(version_error)
         solver_mesh_file = str(solver_path)
+        solver_export = {"cmd": export_cmd, "source_file": str(msh_path),
+                         "output_file": solver_mesh_file, "format": solver_format,
+                         "header": exported_header.splitlines()[:3], "returncode": export_proc.returncode}
         written_files.append(solver_mesh_file)
+        if solver_format.startswith("msh"):
+            # Measure the delivered export through Gmsh's reader, rather than
+            # asking review to reimplement MSH4 or trusting pre-export counts.
+            quality.update(read_gmsh_mesh_quality(solver_mesh_file, gmsh_binary=str(gmsh_path), timeout=timeout))
+            solver_export["readback"] = quality.pop("readback")
+
+    quality["measurement_source"] = {"path": solver_mesh_file if solver_export.get("readback") else str(msh_path),
+                                      "format": solver_format if solver_export.get("readback") else "msh2",
+                                      "method": "Gmsh read-back into ASCII MSH2" if solver_export.get("readback") else "ASCII MSH2 reader"}
+    quality["measurement_source"]["sha256"] = hashlib.sha256(
+        Path(quality["measurement_source"]["path"]).read_bytes()).hexdigest()
+    if solver_export:
+        quality["solver_export"] = solver_export
+    quality_path.write_text(json.dumps(quality, indent=2, ensure_ascii=False), encoding="utf-8")
+    written_files.append(str(quality_path))
 
     tecplot_result: dict[str, Any] = {"requested": write_tecplot, "status": "skipped"}
     tecplot_files: list[str] = []
@@ -2793,6 +3077,7 @@ def generate_geometry_file_gmsh_mesh(
         "copied_geometry_file": str(copied_geometry),
         "mesh_file": solver_mesh_file if solver_format.startswith("msh") else str(msh_path),
         "solver_mesh_file": solver_mesh_file or None,
+        "solver_export": solver_export,
         "grid_params": {
             "solver_mesh_format": solver_format or "msh2",
             "mesh_dimension": int(mesh_dimension or 0),
@@ -2834,6 +3119,34 @@ def generate_geometry_file_gmsh_mesh(
             "Boundary patch semantics may require later user confirmation if physical names are absent.",
         ],
     }
+
+
+def render_cad_mesh_reproduction(execution: dict[str, Any]) -> str | None:
+    """Replay a completed CAD import/export, preserving its actual options."""
+    command = execution.get("gmsh_cmd") or []
+    source = str(execution.get("geometry_file") or "")
+    copied = str(execution.get("copied_geometry_file") or "")
+    export = (execution.get("solver_export") or {}).get("cmd") or []
+    if (Path(source).suffix.lower() not in {".step", ".stp", ".iges", ".igs"}
+            or copied not in command or "-o" not in command
+            or (export and ("-o" not in export or not str((execution.get("solver_export") or {}).get("format", "")).startswith("msh")))):
+        return None  # Other workflows need their own producer, not a guessed replay.
+    intermediate = command[command.index("-o") + 1]
+    destination = export[export.index("-o") + 1] if export else intermediate
+    replacements = {copied: '"$geometry"', intermediate: '"$work/mesh.msh"',
+                    destination: '"$output"'}
+    def replay(args):
+        return '"$gmsh" ' + " ".join(replacements.get(arg, shlex.quote(arg)) for arg in args[1:])
+    return "\n".join([
+        "#!/bin/sh", "set -eu",
+        "# Generated from the successful native Gmsh command, including CAD units.",
+        "# Usage: sh generate_mesh.sh [source.step] [output.msh]",
+        "default_geometry=" + shlex.quote(source),
+        'geometry=${1:-${GEOMETRY_FILE:-$default_geometry}}',
+        'output=${2:-${OUTPUT_MESH:-mesh.msh}}', 'gmsh=${GMSH:-gmsh}',
+        'test -f "$geometry"', 'work=$(mktemp -d)', 'trap \'rm -rf "$work"\' EXIT HUP INT TERM',
+        replay(command), *([replay(export)] if export else []), 'test -s "$output"', "",
+    ])
 
 
 def _read_foam_list(path: Path, item_pattern: str) -> list[Any]:
@@ -3425,6 +3738,7 @@ def write_tecplot_volume_from_msh2(mesh_path: str, tecplot_path: str) -> dict[st
     n_hex = 0
     n_prism = 0
     skipped: dict[int, int] = {}
+    linearized: set[int] = set()
 
     i = 0
     while i < len(text):
@@ -3447,12 +3761,16 @@ def write_tecplot_volume_from_msh2(mesh_path: str, tecplot_path: str) -> dict[st
                 refs = [int(v) for v in parts[3 + n_tags:]]
                 if any(r < 1 or r not in nodes for r in refs):
                     raise ValueError(f"Invalid Tecplot connectivity in element row: {row[:160]}")
-                if elem_type == 4 and len(refs) == 4:
+                family = _GMSH_ELEMENT_FAMILIES.get(elem_type)
+                if family and family[0] == 3 and len(refs) > family[2]:
+                    linearized.add(elem_type)
+                    refs = refs[:family[2]]
+                if family and family[1] == "tetrahedron" and len(refs) == 4:
                     tetrahedra.append(refs)
-                elif elem_type == 5 and len(refs) == 8:
+                elif family and family[1] == "hexahedron" and len(refs) == 8:
                     bricks.append(refs)
                     n_hex += 1
-                elif elem_type == 6 and len(refs) == 6:
+                elif family and family[1] == "prism" and len(refs) == 6:
                     # Gmsh prism: bottom tri (1,2,3), top tri (4,5,6).
                     # Degenerate brick: duplicate the third and sixth vertices.
                     bricks.append([refs[0], refs[1], refs[2], refs[2], refs[3], refs[4], refs[5], refs[5]])
@@ -3465,12 +3783,14 @@ def write_tecplot_volume_from_msh2(mesh_path: str, tecplot_path: str) -> dict[st
     if not bricks and not tetrahedra:
         raise ValueError(f"No supported tetrahedral/hex/prism volume elements found in {mesh_path}")
 
-    ordered_ids = sorted(nodes)
+    ordered_ids = sorted({node for cell in bricks + tetrahedra for node in cell})
     id_map = {old: new for new, old in enumerate(ordered_ids, start=1)}
     path = Path(tecplot_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         f.write('TITLE = "Volume mesh"\n')
+        if linearized:
+            f.write('# Corner-linearized visualization only; original high-order solver mesh is unchanged.\n')
         f.write('VARIABLES = "X" "Y" "Z"\n')
         for zone_type, cells in (("FEBRICK", bricks), ("FETETRAHEDRON", tetrahedra)):
             if not cells:
@@ -3490,6 +3810,7 @@ def write_tecplot_volume_from_msh2(mesh_path: str, tecplot_path: str) -> dict[st
         "n_hexes": n_hex,
         "n_prisms_as_degenerate_bricks": n_prism,
         "skipped_element_types": skipped,
+        "linearized_element_types": sorted(linearized),
     }
 
 
@@ -3527,6 +3848,7 @@ def write_tecplot_surface_from_msh2(mesh_path: str, tecplot_path: str) -> dict[s
     all_nodes: dict[int, tuple[float, float, float]] = {}
     tri_refs: list[list[int]] = []
     quad_refs: list[list[int]] = []
+    linearized: set[int] = set()
 
     i = 0
     while i < len(text):
@@ -3552,9 +3874,13 @@ def write_tecplot_surface_from_msh2(mesh_path: str, tecplot_path: str) -> dict[s
                 # Keep only the front z=0 face to avoid duplicate overlaid surfaces.
                 if any(abs(all_nodes[r][2]) > 1e-12 for r in refs):
                     continue
-                if elem_type == 2 and len(refs) == 3:
+                family = _GMSH_ELEMENT_FAMILIES.get(elem_type)
+                if family and family[0] == 2 and len(refs) > family[2]:
+                    linearized.add(elem_type)
+                    refs = refs[:family[2]]
+                if family and family[1] == "triangle" and len(refs) == 3:
                     tri_refs.append(refs)
-                elif elem_type == 3 and len(refs) == 4:
+                elif family and family[1] == "quadrilateral" and len(refs) == 4:
                     quad_refs.append(refs)
             i += n_elem + 2
         i += 1
@@ -3567,6 +3893,8 @@ def write_tecplot_surface_from_msh2(mesh_path: str, tecplot_path: str) -> dict[s
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         f.write('TITLE = "Gmsh airfoil surface mesh"\n')
+        if linearized:
+            f.write('# Corner-linearized visualization only; original high-order solver mesh is unchanged.\n')
         f.write('VARIABLES = "X" "Y"\n')
         if tri_refs:
             f.write(
@@ -3596,6 +3924,7 @@ def write_tecplot_surface_from_msh2(mesh_path: str, tecplot_path: str) -> dict[s
         "n_triangles": len(tri_refs),
         "n_quads": len(quad_refs),
         "n_elements": len(tri_refs) + len(quad_refs),
+        "linearized_element_types": sorted(linearized),
     }
 
 
@@ -3609,6 +3938,7 @@ def write_tecplot_boundary_surface_from_msh2(mesh_path: str, tecplot_path: str) 
     all_nodes: dict[int, tuple[float, float, float]] = {}
     tri_refs: list[list[int]] = []
     quad_refs: list[list[int]] = []
+    linearized: set[int] = set()
 
     i = 0
     while i < len(text):
@@ -3631,9 +3961,13 @@ def write_tecplot_boundary_surface_from_msh2(mesh_path: str, tecplot_path: str) 
                 refs = [int(v) for v in parts[3 + n_tags:]]
                 if any(r not in all_nodes for r in refs):
                     continue
-                if elem_type == 2 and len(refs) == 3:
+                family = _GMSH_ELEMENT_FAMILIES.get(elem_type)
+                if family and family[0] == 2 and len(refs) > family[2]:
+                    linearized.add(elem_type)
+                    refs = refs[:family[2]]
+                if family and family[1] == "triangle" and len(refs) == 3:
                     tri_refs.append(refs)
-                elif elem_type == 3 and len(refs) == 4:
+                elif family and family[1] == "quadrilateral" and len(refs) == 4:
                     quad_refs.append(refs)
             i += n_elem + 2
         i += 1
@@ -3646,6 +3980,8 @@ def write_tecplot_boundary_surface_from_msh2(mesh_path: str, tecplot_path: str) 
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         f.write('TITLE = "Gmsh boundary surface mesh"\n')
+        if linearized:
+            f.write('# Corner-linearized visualization only; original high-order solver mesh is unchanged.\n')
         f.write('VARIABLES = "X" "Y" "Z"\n')
         if tri_refs:
             f.write(
@@ -3674,6 +4010,7 @@ def write_tecplot_boundary_surface_from_msh2(mesh_path: str, tecplot_path: str) 
         "n_triangles": len(tri_refs),
         "n_quads": len(quad_refs),
         "n_elements": len(tri_refs) + len(quad_refs),
+        "linearized_element_types": sorted(linearized),
     }
 
 
@@ -4886,15 +5223,10 @@ def generate_airfoil_gmsh_mesh(
         or _parse_airfoil_coordinates(airfoil_coordinate_text)
         or _parse_airfoil_coordinates(airfoil_dat_path)
     )
-    naca_hint = re.search(r"\bNACA\s*[-_ ]?(\d{4})\b", str(airfoil_name), flags=re.IGNORECASE)
-    if naca_hint and not raw_coords:
-        naca_code = naca_hint.group(1)
-    if airfoil_name and not raw_coords and not naca_hint:
-        raise ValueError(
-            f"Non-NACA airfoil {airfoil_name!r} requires airfoil_dat_path, "
-            "airfoil_coordinate_text, or airfoil_coordinates. Refusing to fall back to NACA0012."
-        )
-    naca_code = _normalise_naca_code(naca_code, case_dir) if raw_coords is None else ""
+    naca_code = (
+        (_extract_explicit_naca_code(naca_code, airfoil_name) or "")
+        if raw_coords is None else ""
+    )
     if raw_coords is None and not naca_code:
         raise ValueError(
             "Explicit naca_code or airfoil/profile coordinates are required for airfoil_gmsh; "
@@ -4982,6 +5314,20 @@ def generate_airfoil_gmsh_mesh(
                 / (boundary_layer_ratio - 1.0)
             )
 
+    if required_far_field is not None and float(required_far_field) > 0:
+        profile = (_normalise_airfoil_coordinates(raw_coords) if raw_coords is not None
+                   else naca_4digit_closed_loop(naca_code, n_surface=n_surface))
+        profile = _rotate_points_2d(profile, resolved_aoa, rotation_center_x, rotation_center_y)
+        clearance = float(required_far_field)
+        # Leave a curvature-scale allowance for straight mesh edges replacing
+        # CAD arcs; the final mesh is measured independently below.
+        padding = h_farfield ** 2 / (2.0 * clearance)
+        radius_offset = (max(abs(y) for x, y in profile) if domain_type == "c"
+                         else max(math.hypot(x - 0.5, y) for x, y in profile))
+        far_field = max(float(far_field), clearance + radius_offset + padding)
+        if domain_type == "c":
+            wake_length = max(float(wake_length), max(x for x, y in profile) + clearance)
+
     gmsh_path = shutil.which(gmsh_binary) or shutil.which("gmsh")
     if not gmsh_path:
         raise RuntimeError("gmsh executable not found on PATH")
@@ -5043,7 +5389,14 @@ def generate_airfoil_gmsh_mesh(
             f"{proc.returncode}; stderr_tail={proc.stderr[-1200:]}"
         )
 
-    quality = _parse_gmsh_msh2_quality(str(msh_path))
+    roles = boundary_role_names or {}
+    farfield_name = _boundary_role_name(roles, "farfield", default="farfield")
+    outer_names = [_boundary_role_name(roles, key, default=farfield_name) for key in ("top", "bottom")]
+    if domain_type == "c":
+        outer_names.extend(_boundary_role_name(roles, key, default=key) for key in ("inlet", "outlet"))
+    quality = _parse_gmsh_msh2_quality(str(msh_path), clearance_groups=(
+        _boundary_role_name(roles, "airfoil", "wall", default="airfoil"), outer_names,
+    ))
     quality["checks"] = {
         "has_2d_elements": quality["n_2d_elements"] > 0,
         "has_3d_elements": quality["n_3d_elements"] > 0 if extrude_to_3d else True,
@@ -5188,6 +5541,12 @@ def generate_airfoil_gmsh_mesh(
             "boundary_layer_layers": boundary_layer_layers,
             "mesh_algorithm": mesh_algorithm,
             "near_wall_refinement_mode": near_wall_refinement_mode,
+            "near_wall_control_semantics": (
+                "boundary_layer_first is the distance-field SizeMin, not measured first-cell height; "
+                "boundary_layer_ratio/layers do not describe generated layers in this mode."
+                if near_wall_refinement_mode == "distance_field" else
+                "Boundary-layer controls are configured targets, not measured cell-center wall distances."
+            ),
             "mesh_family_contract": mesh_family_contract,
             "lock_near_wall_topology": _as_bool(lock_near_wall_topology, False),
             "target_cell_count": target_cell_count,
@@ -5715,75 +6074,6 @@ def generate_cylinder_gmsh_mesh(
     }
 
 
-# ── 2. 圆柱绕流 ─────────────────────────────────────────────────────────────
-
-def generate_cylinder_flow_mesh(
-    radius: float = 0.5,
-    domain_lx: float = 20.0,
-    domain_ly: float = 10.0,
-    center_x: float = 0.0,
-    center_y: float = 0.0,
-    nr: int = 40,
-    ntheta: int = 120,
-    nx_wake: int = 80,
-    ny_above: int = 40,
-    ny_below: int = 40,
-    delta0: float = 1e-4,
-    stretch_r: float = 1.15,
-) -> dict[str, Any]:
-    """为圆柱绕流生成 O-grid + 远场矩形混合网格。
-
-    圆柱附近为极坐标 O-grid，远场为矩形补充区域。
-    """
-    # O-grid 区域
-    ogrid_r_max = radius + 3.0  # O-grid 外径
-
-    # O-grid 点
-    # O-grid 点: X[j][i], j=0..ntheta 是环向, i=0..nr 是径向
-    X_og = [[0.0] * (nr + 1) for _ in range(ntheta + 1)]
-    Y_og = [[0.0] * (nr + 1) for _ in range(ntheta + 1)]
-
-    for j in range(ntheta + 1):
-        theta = 2.0 * math.pi * j / ntheta
-        for i in range(nr + 1):
-            if i == 0:
-                r = radius
-            else:
-                r = radius + (ogrid_r_max - radius) * i / nr
-            X_og[j][i] = center_x + r * math.cos(theta)
-            Y_og[j][i] = center_y + r * math.sin(theta)
-
-    # 构建网格: nj=ntheta, ni=nr
-    # bottom(j=0) = 圆柱壁面，top(j=ntheta) = 远场
-    mesh_data = _build_2d_structured_mesh(
-        X_og, Y_og, ntheta, nr,
-        boundary_patches={
-            "bottom": {"type": "wall"},     # cylinder surface
-            "top":    {"type": "patch"},    # farfield
-            "left":   {"type": "patch"},    # inlet/outlet slit
-            "right":  {"type": "patch"},    # inlet/outlet slit
-        },
-    )
-
-    # 重命名边界
-    mesh_data["boundary"] = {
-        "cylinder":   mesh_data["boundary"]["bottom"],
-        "farfield":   mesh_data["boundary"]["top"],
-        "slit":       mesh_data["boundary"]["left"],
-        "slit_2":     mesh_data["boundary"]["right"],
-        "frontAndBack": mesh_data["boundary"]["frontAndBack"],
-    }
-    mesh_data["boundary"]["cylinder"]["type"] = "wall"
-    mesh_data["boundary"]["farfield"]["type"] = "patch"
-
-    mesh_data["grid_params"] = {
-        "radius": radius, "nr": nr, "ntheta": ntheta,
-        "ogrid_r_max": ogrid_r_max, "delta0": delta0, "stretch_r": stretch_r,
-    }
-    mesh_data["mesh_type"] = "cylinder_flow"
-    return mesh_data
-
-
 # ── 3. 管道流动 ─────────────────────────────────────────────────────────────
 
 def generate_pipe_flow_mesh(
@@ -6286,7 +6576,11 @@ async def _generate_computational_mesh(
         mesh_type = "airfoil_gmsh"
         params["mesh_type"] = mesh_type
     provided_geometry_file = geometry_file_from_params(params)
-    if discipline == "cfd" and not provided_geometry_file and str(params.get("geometry_source_policy") or "").startswith("public_reference"):
+    profile_path = coordinate_profile_from_params(params)
+    if provided_geometry_file == profile_path:
+        # Coordinates describe a contour, not an executable Gmsh/CAD model.
+        provided_geometry_file = ""
+    if discipline == "cfd" and not provided_geometry_file and not profile_path and str(params.get("geometry_source_policy") or "").startswith("public_reference"):
         reference_candidates = [
             path for suffix in ("*.cas", "*.msh", "*.cgns")
             for path in Path(str(state.root)).rglob(suffix)
@@ -6341,7 +6635,8 @@ async def _generate_computational_mesh(
         _apply_profile_defaults(params, matched_profile)
     if discipline in {"cfd", "csm", "cem", "heat_transfer", "multiphysics"} and provided_geometry_file:
         mesh_type = "geometry_file_gmsh"
-    if discipline == "cfd" and not provided_geometry_file and (params.get("coordinate_profile_path") or params.get("profile_dat_path")):
+    if discipline == "cfd" and not provided_geometry_file and profile_path:
+        params["coordinate_profile_path"] = profile_path
         mesh_type = "coordinate_profile_gmsh"
         if _is_turbomachinery_blade_case(intent_geometry, params) and _has_turbomachinery_cascade_domain(params):
             mesh_type = "coordinate_profile_cascade_gmsh"
@@ -6413,18 +6708,20 @@ async def _generate_computational_mesh(
         if mesh_type == "structured_rect":
             generator_func = generate_structured_rect_mesh
         else:
+            message = f"学科 {discipline!r} 不支持网格类型 {mesh_type!r}。支持: {list(disc_generators.keys())}"
             return {
-                "status": "error",
-                "error": (
-                    f"学科 {discipline!r} 不支持网格类型 {mesh_type!r}。"
-                    f"支持: {list(disc_generators.keys())}"
-                ),
+                "status": "needs_revision", "failure_category": "plan_contract_error", "error": message,
+                "revision_contract": {"scope": "plan", "issues": [{
+                    "code": "unsupported_mesh_type", "message": message,
+                    "required_change": "Select a supported mesh_type and bind its required geometry inputs, or replace this producer. Changing nested sizing parameters cannot repair an unsupported adapter selection.",
+                }]},
             }
 
     # 从 geometry 提取参数。只有显式出现 NACAxxxx 时才补 naca_code；
     # 非 NACA 翼型必须保留为 airfoil_name 并要求用户提供坐标。
     explicit_naca = _extract_explicit_naca_code(
         params.get("naca_code"),
+        params.get("airfoil_name"),
         params.get("airfoil"),
         params.get("geometry"),
         geometry,
@@ -6503,6 +6800,7 @@ async def _generate_computational_mesh(
                 "minimum_length",
                 "length_unit",
                 "element_order",
+                "element_type",
                 "mesh_size_factor",
                 "pitch",
                 "pitch_chord_ratio",
@@ -6804,6 +7102,7 @@ async def _generate_computational_mesh(
             return public_geometry_reference_request(intent_geometry, params, case_type="public_geometry")
         if (
             params.get("airfoil_name")
+            and not explicit_naca
             and not _extract_explicit_naca_code(params.get("airfoil_name"))
             and not _has_airfoil_coordinate_input(params)
         ):

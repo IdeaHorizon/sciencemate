@@ -36,6 +36,6 @@ export function curationStatusLine(
   if (!state.last_run_at) {
     return { tone: "idle", text: fc("curation.first_run", lang) };
   }
-  // 跑过、没报错、也没推断出东西：多半是课题描述太笼统。说实话，并给出下一步。
+  // 跑过、没报错、也没推断出东西：项目描述太笼统，或者还没有进行中的项目。说实话，并给出下一步。
   return { tone: "idle", text: fc("curation.nothing_inferred", lang) };
 }

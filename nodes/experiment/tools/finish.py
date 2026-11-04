@@ -6,8 +6,8 @@
 1. 读冻结的 required obligations（A）与账本（B），为每一项找**正面证据**：
    文件在、非空、且账本里有本 run 的某个 action 的 observation 记录它被写出；
    检查命令由框架自己跑（受沙箱、只读、记账约束）；
-2. 找**确定性矛盾**：开放 / unknown 的作业；失败且没有成功重试的作业；当前
-   required 检查失败；适用的 fatal 信号；产物身份对不上
+2. 找**确定性矛盾**：开放 / unknown 的作业；当前 required 检查失败；
+   适用的 fatal 信号；产物身份对不上
    observation；
 3. success 谓词 = 每个 required 都有正面证据 ∧ 没有矛盾。谓词不成立而模型要
    success：**一次**返回缺口与可达的诚实 outcome，不冻结；partial / failed /
@@ -432,11 +432,14 @@ async def _check_evidence(state: Any, led: _ledger.Ledger, ob: dict[str, Any]) -
 # ── 矛盾 ─────────────────────────────────────────────────────────────────────
 
 def _job_contradictions(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Require settled ownership, not a successful outcome for every attempt.
+
+    Authoritative terminal facts remain in B and the delivery's job references.
+    Current task requirements, output identity and applicable fatal evidence
+    decide acceptance; terminal failure history is disclosed, never rewritten.
+    A later success alone does not prove a failed job repaired or unrelated.
+    """
     jobs = _ledger.project_jobs(records)
-    retries: dict[str, list[str]] = {}
-    for row in records:
-        if row.get("kind") == "intent" and row.get("retry_of"):
-            retries.setdefault(str(row["retry_of"]), []).append(str(row.get("nonce")))
     out: list[dict[str, Any]] = []
     for nonce, job in jobs.items():
         if job["state"] in {"intent", "submitted"}:
@@ -444,16 +447,6 @@ def _job_contradictions(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         "reason": "作业尚未终态"})
         elif job["state"] == "unknown":
             out.append({"name": "jobs_unknown", "job": nonce, "reason": job.get("unknown_reason")})
-        elif job["state"] == "terminal":
-            derived = str((job.get("terminal") or {}).get("derived_state") or "")
-            if derived in _SUCCESS_STATES:
-                continue
-            superseded = any(jobs.get(r, {}).get("state") == "terminal"
-                             and str((jobs[r].get("terminal") or {}).get("derived_state") or "") in _SUCCESS_STATES
-                             for r in retries.get(nonce, []))
-            if not superseded:
-                out.append({"name": "job_failed_unsuperseded", "job": nonce, "external_id": job.get("external_id"),
-                            "derived_state": derived, "reason": "作业以非成功终态结束且没有成功的重试"})
     return out
 
 
@@ -1059,6 +1052,22 @@ def _delivery_and_evaluation(
             "A later check alone does not prove those failures unrelated or repaired: arbitrary shell read dependencies "
             "are not observed. Mechanical provenance guarantees cover current explicit "
             "objects and formal conditions; task coverage remains the model's interpretation.")
+    terminal_failures = [
+        (nonce, job) for nonce, job in _ledger.project_jobs(records).items()
+        if job.get("state") == "terminal"
+        and str((job.get("terminal") or {}).get("derived_state") or "").lower() not in _SUCCESS_STATES
+    ]
+    if terminal_failures:
+        examples = ", ".join(
+            f"{nonce}={job.get('terminal', {}).get('derived_state')}"
+            for nonce, job in terminal_failures[:5]
+        )
+        relevance_limitations.append(
+            f"Historical non-success job terminals remain in raw_results and external_job_refs "
+            f"({len(terminal_failures)}; examples: {examples}). Task acceptance does not rewrite "
+            "their scheduler states or exit facts, establish successful retry, or prove those "
+            "failures unrelated or repaired. Current required checks and output provenance "
+            "decide the delivered task claim; natural-language coverage remains model interpretation.")
     execution_status = _execution_status(records, evaluation)
     delivery = {
         "schema": _delivery_transaction.DELIVERY_SCHEMA,

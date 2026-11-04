@@ -38,7 +38,7 @@ test("每一步都能跳过", () => {
 });
 
 test("跳过模型的代价说出了口，而且盯的是真实状态", () => {
-  assert.match(FIRST_RUN, /没有模型开不了会话|without a model you cannot start a session/,
+  assert.match(FIRST_RUN, /没有模型将无法开始会话|sessions cannot start without a model/,
     "「先跳过」旁边没说清代价 —— 用户会在一个跑不动的工作区里点来点去");
   assert.match(SHELL, /<MissingModelBanner\s*\/>/, "缺口提示没挂上");
   assert.doesNotMatch(BANNER, /onboarding_done/,
@@ -180,10 +180,10 @@ test("开场能再走一遍", () => {
 
 test("气泡说的是这块地方替你做什么，不是它叫什么", () => {
   // 侧栏上已经写着名字了，再念一遍等于什么都没说。
-  for (const stop of ["每天按你选的方向", "研究在这里发生", "会话能用到的机器"]) {
+  for (const stop of ["根据你订阅的学科", "每项研究对应一个项目", "可供会话使用的"]) {
     assert.ok(STOPS.includes(stop), `工作区那一圈少了一站：${stop}`);
   }
-  for (const stop of ["干活的地方", "你交给它的数据", "做出来的东西在这儿", "这个课题现在推到哪了"]) {
+  for (const stop of ["在这里新建会话", "你添加的资料", "项目的成果都在这里", "这个项目目前的进展"]) {
     assert.ok(STOPS.includes(stop), `项目那一圈少了一站：${stop}`);
   }
 });

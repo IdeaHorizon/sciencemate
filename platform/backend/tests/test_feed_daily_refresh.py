@@ -98,7 +98,7 @@ async def test_empty_keywords_are_reported_instead_of_a_success(monkeypatch):
                         lambda: SimpleNamespace(spine_categories=lambda: ["engineering"]))
     monkeypatch.setattr(curation.bridge, "call", AsyncMock(return_value={"domains": [], "projects": []}))
     assert await curation.curate(AsyncMock(), user=user, force=True) is None
-    assert "未返回有效检索词" in curation.stored(user)["curated_error"]
+    assert "没有返回有效的检索词" in curation.stored(user)["curated_error"]
 
 
 @pytest.mark.asyncio
@@ -127,6 +127,19 @@ async def test_profile_state_commits_before_remote_search(monkeypatch):
     monkeypatch.setattr(discovery, "_prebuild_digests", AsyncMock(return_value=0))
     got = await discovery.curate_one(object(), db, user=make_user())
     assert got["found"] == 2
+
+
+def test_baidu_search_reads_titles_with_nested_div() -> None:
+    from app.services.feed.web_search import _parse_baidu_results
+
+    html = (
+        '<h3 class="t editorial"><div class="title">'
+        '<a href="https://example.org/news">线控底盘国标发布</a>'
+        '</div></h3>'
+    )
+    assert _parse_baidu_results(html, 5) == [
+        {"title": "线控底盘国标发布", "url": "https://example.org/news", "snippet": ""}
+    ]
 
 
 @pytest.mark.asyncio

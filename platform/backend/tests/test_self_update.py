@@ -346,7 +346,7 @@ def test_an_unreachable_source_is_reported_not_raised(tmp_path) -> None:
 
     status, manifest, *_ = su.check_for_update(tmp_path, harness, "https://h/x/manifest.json", _boom, _boom, lang="zh")
     assert manifest is None and status.reachable is False
-    assert "拿不到更新信息" in (status.error or "")
+    assert "无法连接更新服务器" in (status.error or "")
     assert status.available_version is None
     # 界面按种类用看的人的语言说头一句；英文界面要的是不带中文前缀的那段原文。
     assert status.error_kind == "unreachable"

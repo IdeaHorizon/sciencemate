@@ -168,8 +168,18 @@ def test_commit_succeeded_then_raised_recovers_exactly_one_finish(tmp_path, monk
         return row
 
     monkeypatch.setattr(led, "append_once", append_then_raise)
-    with pytest.raises(OSError, match="injected after commit"):
+    with pytest.raises(tx.DeliveryTransactionError, match="injected after commit") as caught:
         tx.settle_delivery(state, led, _manifest(state))
+    assert caught.value.code == "closure_ledger_persist_failed"
+    assert caught.value.facts["commit_visibility"] == "unknown"
+    assert caught.value.facts["frozen_artifacts_preserved"] is True
+    assert caught.value.facts["retryable"] is False
+    assert caught.value.facts["retryable_after_change"] is True
+    assert caught.value.facts["owner"] == "experiment_runtime"
+    pending = tx.read_manifest(state)
+    assert pending["commit"] is None
+    assert all(state.artifact_head(spec["id"]).frozen
+               for spec in pending["artifacts"].values())
     reopened = ledger.open_ledger(state, write=True)
     recovered = tx.settle_delivery(state, reopened, _manifest(state, summary="ignored"))
     assert recovered["status"] == "success"

@@ -13,11 +13,11 @@ export default function ProjectMemoryPage() {
     <div className="page">
       <header className="page-header">
         <div>
-          <h1 className="page-title">{t({ zh: "项目记忆", en: "Memory" })}</h1>
+          <h1 className="page-title">{t({ zh: "项目记忆", en: "Project memory" })}</h1>
           <p className="page-subtitle">
             {t({
-              zh: "项目记忆就是仓库根上的 MEMORY.md —— 一份跟着 Git 走、看得见改动的正文，由 curator 写。",
-              en: "Project memory lives in MEMORY.md at the repository root — one tracked, diffable source written by the curator.",
+              zh: "助手在这个项目中积累的决策和发现，保存在 MEMORY.md 中，每次修改都有记录。",
+              en: "Decisions and findings the assistant has gathered in this project, kept in MEMORY.md with every change recorded.",
             })}
           </p>
         </div>

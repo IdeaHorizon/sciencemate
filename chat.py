@@ -467,7 +467,7 @@ HELP = """\
   /attach <path>           把本地文件交进项目工作区 sources/（模型每轮自动看到）
   /answer <text>           答复正在等输入的后台子节点（后台 run pause 时用）
   /btw <text>              软注入：作为 system message 插到下一轮 LLM 之前
-  /autonomy <档>           切档位：assisted（每处都问）| autonomous（只在高危点停）
+  /autonomy <档>           切档位：assisted（需要用户判断时再问）| autonomous（只在高危点停）
                            | continuous（预授权全部高危类别，不停）。与 UI 三档同一份词表。
   /continuous on|off       切**自动续轮**（跑完一轮自己接着跑）；on 会把档位一并提到 continuous
   /skip-dreaming           跳过本次 dreaming pending
@@ -781,7 +781,7 @@ def _autonomy_label(state: State) -> str:
         return "continuous（连续：预授权全部高危类别，不停）"
     if mode == "autonomous":
         return f"autonomous（自主：非高危决策自动放行；已授权 {declared}，其余高危点仍会停）"
-    return "assisted（协作：每个决策点都停下来问你）"
+    return "assisted（协作：已授权工作继续，需要你的判断时再问）"
 
 
 def _continuous_status(reply: str) -> str | None:
@@ -1202,6 +1202,21 @@ def _unpark_if_blocked(state: State) -> None:
     state.hook_state.pop("continuous_park", None)
 
 
+def _nothing_to_continue(state: State) -> str | None:
+    """连续档此刻有没有东西可续；没有则返回给人看的理由。
+
+    续的是**已经开始的研究**（判据见 `core.research_situation.research_under_way`）。
+    `next_action` 与本文件里不经它的两处续轮（会话启动、后台子节点结束）都经
+    `_continuous_followup` 问到这里 —— 一个判据，不各判各的。
+    """
+    from core.research_situation import research_under_way
+
+    if research_under_way(state):
+        return None
+    return ("项目里还没有研究可续：连续档只接着跑已经开始的研究，"
+            "研究什么要等你说。")
+
+
 def _continuous_followup(state: State, reply: str, *, reason: str) -> tuple[str | None, float]:
     """更新 continuous 状态并返回下一轮内部 prompt + 退避秒数。"""
     if not _continuous_running(state):
@@ -1219,6 +1234,14 @@ def _continuous_followup(state: State, reply: str, *, reason: str) -> tuple[str 
         return _VOID_RETRY_PROMPT, delay
     if state.hook_state.pop("continuous_void_rounds", None):
         state.append_transcript("continuous_void_replay_recovered")
+
+    # ── 没有研究可续 → 不续，等用户 ───────────────────────────────────────────
+    # 不改 continuous_phase：这不是停机，用户给了目标之后照常续。
+    nothing = _nothing_to_continue(state)
+    if nothing:
+        state.append_transcript("continuous_followup_withheld",
+                                reason="no_research_yet", trigger=reason)
+        return None, 0.0
 
     status = _continuous_status(reply)
     runnable_steps = _continuous_project_actions(state)
@@ -2260,7 +2283,10 @@ async def _ask_pause_via_queue(pe: PauseEvent, chat_state: ChatState) -> str:
     chat_state.paused.set()
     try:
         _print_pause_prompt(pe)
-        if pause_driver.AUTO_APPROVE_ENABLED:
+        if pause_driver.needs_a_person(pe):
+            _emit_above_prompt(
+                f"⏸ 这一问要你本人答：{pause_driver.needs_a_person(pe)}")
+        elif pause_driver.AUTO_APPROVE_ENABLED and not pause_driver.must_ask_a_person(pe):
             automatic = pause_driver.auto_approve_answer(pe)
             if (pe.metadata or {}).get("type") in {
                 "decision_package",
@@ -2378,45 +2404,45 @@ async def _run_dreaming_background(state: State, llm: LLMClient,
         # 提示符由 _print_speaker → _emit_above_prompt 已重画，无需再补打。
 
 
-#: 待命轮最多跑几个来回 —— 够它"查一下再答"，又不至于跑成一整轮研究。
-_STANDBY_MAX_TURNS = 5
 #: 带进待命轮的对话尾巴长度（条）。给足语境，又不至于顶爆窗口。
 _STANDBY_CONTEXT_MESSAGES = 30
+
+# These operations transfer ownership of the serial session loop to another run
+# or a pause. Keep them on that loop; other tools retain their normal scopes.
+_SERIAL_SESSION_TOOLS = frozenset({
+    "run_node", "request_human_input", "present_decision_package",
+})
 
 
 async def _handle_interrupt(state: State, harness, llm: LLMClient,
                               user_interrupt: str,
                               chat_state: ChatState | None = None,
-                              reply_to_message_id: str | None = None) -> None:
-    """跑轮期间用户说话 → 调度器的**待命轮**：带完整语境正常回答。
+                              reply_to_message_id: str | None = None,
+                              pending_pause: dict | None = None) -> list[str]:
+    from core.cancellation import bind_run
+    from core.session_inbox import interjection_turn
 
-    ## 为什么不是"mini 决策轮"了（wangd 2026-08-18）
+    with bind_run(state):
+        async with interjection_turn(state):
+            return await _handle_interrupt_turn(
+                state, harness, llm, user_interrupt, chat_state, reply_to_message_id,
+                pending_pause,
+            )
 
-        「只要调度器没有在忙碌，就应该能跟调度器非常非常顺畅地讨论这个研究
-          正在做什么，各种问题啊，或者各种调整啊。别搞得那么不灵活。」
 
-    旧实现是一个**fork 出来的单轮**：系统提示重写成"打断决策模式"、只给
-    `runtime_control` 一个工具、没有任何对话历史。于是用户问"文献那边找到
-    什么了"，它既看不到之前聊过什么，也没有工具去读产物 —— 只能干答一句
-    或者盲目 inject。那不叫讨论。
+async def _handle_interrupt_turn(state: State, harness, llm: LLMClient,
+                                user_interrupt: str,
+                                chat_state: ChatState | None,
+                                reply_to_message_id: str | None,
+                                pending_pause: dict | None = None) -> list[str]:
+    """子节点独立执行时，用调度器自己的语境和工具接话。
 
-    现在跑的是一轮**真实的调度器轮次**：
-      · 语境 = 它自己的对话尾巴（checkpoint 里的持久对话，最多 30 条）；
-      · 工具 = 全部**只读**工具（`replayable_read=True` 机械筛出，共 11 个：
-        读产物 / 查 KB / 看文件 / 查项目状态…）+ `runtime_control`
-        （问进度 / 注入方向 / 取消子节点）；
-      · 允许多个来回（上限 5）—— 它可以"先查一下再回答"。
-
-    **写工具一律不给**：子节点此刻正持有这个 Session worktree 的 Git
-    mutation lane，待命轮再去写就是并发改同一棵树。判据用 `replayable_read`
-    这个**声明属性**扫出来，不写工具名单（名单对新工具默认漏过）。
-
-    ## 永不丢弃
-
-    无论有没有活跃子节点，用户这句话都会进主对话（`injected_messages`，
-    agent_loop 每轮开头机械 drain）。旧实现在没有 active child 时直接
-    `已忽略` —— 用户对着调度器自己干活的时候说的每一句都蒸发了。
+    工具继续走既有权限、写作用域和沙箱；只有切换主循环归属的派发/提问留到
+    当前子节点返回后处理。交流记录经现有 injected_messages 交回主循环，
+    不把「回答过」当成「工作完成」，也不为每条子节点进度唤醒模型。
     """
+    from itertools import count
+
     from core.pause import list_active_runs
     from core.tool_registry import (
         execute as execute_tool,
@@ -2426,6 +2452,8 @@ async def _handle_interrupt(state: State, harness, llm: LLMClient,
         list_tools_for_node,
         to_openai_schema,
     )
+
+    visible_replies: list[str] = []
 
     def _reply_to_user(text: str) -> None:
         # 决策轮的回答有两个观众：CLI 终端（打印）和平台 UI（transcript →
@@ -2438,6 +2466,7 @@ async def _handle_interrupt(state: State, harness, llm: LLMClient,
         # 答复挂进 run 的活动窗口 —— 而活动窗口锚在开启这一轮的那条消息下，
         # 于是答案渲染在提问上面（2026-08-18 实测）。CLI 投递没有消息行，空。
         _emit_above_prompt(text)
+        visible_replies.append(text)
         state.append_transcript(
             "interrupt_reply", text=text,
             replies_to_message_id=reply_to_message_id or "")
@@ -2446,14 +2475,19 @@ async def _handle_interrupt(state: State, harness, llm: LLMClient,
     #
     # 待命轮答完之后，注入的是**这次交流的记录**（问了什么 / 已经答了什么），
     # 不是原话 —— 否则主循环会把已经答过的问题再答一遍。
-    def _remember_in_main_conversation(content: str) -> None:
+    def _remember_in_main_conversation(
+        content: str, dialogue: list[dict] | None = None,
+    ) -> None:
         state.hook_state.setdefault("injected_messages", []).append({
             "content": content,
             "source": "user_interject",
+            # The main loop is still waiting on its child. A second interjection
+            # must see this exchange before that loop drains the notice queue.
+            "dialogue": dialogue or [{"role": "user", "content": user_interrupt}],
         })
 
     active = list_active_runs()
-    if not active:
+    if not active and pending_pause is None:
         # 没有活跃子节点 = 调度器在自己干活。这句话交给它下一轮读 —— 那本来
         # 就是最顺畅的路径（同一个对话、全部工具）。旧实现在这里直接
         # "已忽略"，用户说的每一句都蒸发。
@@ -2469,20 +2503,11 @@ async def _handle_interrupt(state: State, harness, llm: LLMClient,
         state.append_transcript(
             "interrupt_deferred",
             replies_to_message_id=reply_to_message_id or "")
-        return
+        return []
 
-    # 给 LLM 看的 child 信息（最近一个，多个时让 LLM 自己挑）
-    child_info_lines = []
-    for r in active[-5:]:
-        child_info_lines.append(
-            f"- run_id={r.run_id} node_type={r.node_type} "
-            f"sub_run_id={r.sub_run_id or '-'} started_at={r.started_at}"
-        )
-    child_info = "\n".join(child_info_lines)
-
-    sys_prompt = (
-        "你是本项目的主调度器，现在处于**待命**：你派出去的子节点正在干活，"
-        "用户想跟你说话。你没有在忙 —— 正常回答他。\n\n"
+    sys_prompt = harness.system_prompt + "\n\n" + (
+        "用户现在发来了新消息；子节点如在执行，会继续独立运行。"
+        "正常接话、处理独立工作、安排后续工作；不需要一直盯着子节点。\n\n"
         "## 你现在能做什么\n"
         "  · **回答问题**：项目进展、之前的决定、某个产物写了什么、下一步打算 ——"
         "用只读工具去查（读产物 / 查 KB / 看文件 / 查项目状态），"
@@ -2491,25 +2516,42 @@ async def _handle_interrupt(state: State, harness, llm: LLMClient,
         "  · **调整方向**：`runtime_control(action='inject', child_run_id=..., "
         "content='<按子节点类型包装成它能直接执行的清晰指令>', source='orchestrator_relay')`。\n"
         "  · **停掉某个子节点**：`runtime_control(action='cancel', child_run_id=..., reasoning=...)`。\n\n"
-        "## 边界（重要）\n"
-        "子节点此刻持有这个工作区的写入权，所以你**现在只有只读工具**："
-        "不能存产物、不能派新节点、不能改配置。用户要求的这类改动，"
-        "如实告诉他"
-        "「等这个节点跑完我就做」——它会自动进入你的下一轮，你不会忘。\n\n"
+        "## 执行与安排\n"
+        "使用你正常获准的工具，按工具本身的作用域和沙箱执行：可以查资料、"
+        "轻量计算、写自己的记录和安排任务。不能因为子节点在跑就声称自己只有只读工具。"
+        "run_node、request_human_input、present_decision_package 会把请求交回主循环，"
+        "等当前子节点交还执行权后处理，返回 deferred 仅代表已安排，尚未执行。"
+        "需要调整当前子节点时优先 runtime_control；独立工作正常处理。"
+        "既有权限或网络限制照旧，工具报错时说明真实原因并保留未完成请求。\n\n"
         "## 语气\n"
-        "像一个正在盯着实验的同事那样直接回答，别复述这些规则，别打印思考过程。"
+        "直接回答，别复述这些规则，别打印思考过程。"
+        "用户的简短答复要承接最近一次提议：同意、选择、补充都按已有对话理解，"
+        "先确认采纳了什么，再说明接下来做什么，不重讲已经回答过的背景。"
+        "运行状态以本次快照和工具结果为准；已经在跑的任务要继续或调整，"
+        "不要再问是否启动，也不要声称刚启动了它。"
+        "入队或注入成功只代表请求已送达，不代表子节点已执行、完成或验证成功。"
+        "具体完成数量、失败原因和报告是否更新，必须读取对应产物或执行结果，"
+        "不能用旧报告或猜测代替。"
         "要调工具核实之前，先用一句话告诉用户你打算查什么"
         "（比如「我去看下子节点进度」），再发工具调用 —— 用户在等，"
         "别让他对着空屏猜你在不在。"
-        "\n\n## 当前 active / paused child runs"
-        f"\n{child_info}"
+        "\n\n当前子任务状态由每次调用前刷新的运行快照提供。"
     )
+    if pending_pause is not None:
+        sys_prompt += (
+            "\n现在是在讨论一个待答问题。正常回答追问、接受补充或处理独立工作；"
+            "选项是快捷操作，不限制讨论。追问原因、澄清和新增背景都不代表同意。"
+            "用户明确作出决定或回答了问题时，用 runtime_control(action='answer', "
+            "child_run_id=<asking_run_id>, offer_id=<当前 offer_id>, "
+            "choice_id=<选项 id>, content=<自由文本原话>) 交回答复；"
+            "没有作出决定时继续对话，保留原问题，不催用户选按钮，不替用户授权。"
+        )
 
     # 语境：调度器自己的对话尾巴（持久 checkpoint，最多落后一轮）。
     # 没有语境的"打断决策"答不了"文献那边找到什么了"这种最常见的问题。
     context_messages: list[LLMMessage] = []
     try:
-        persisted = _load_conversation(state) or []
+        persisted = _load_conversation(state, restore_state=False) or []
     except Exception:  # noqa: BLE001 —— 读不到语境不该让插话失败
         persisted = []
     if persisted:
@@ -2520,13 +2562,38 @@ async def _handle_interrupt(state: State, harness, llm: LLMClient,
         _repair_message_tool_protocol(tail)
         context_messages = tail
 
+    for notice in state.hook_state.get("injected_messages", []):
+        if notice.get("source") != "user_interject":
+            continue
+        dialogue = notice.get("dialogue")
+        if dialogue:
+            context_messages.extend(
+                LLMMessage(role=m["role"], content=m["content"])
+                for m in dialogue if m.get("role") in {"user", "assistant"}
+            )
+        else:
+            context_messages.append(framework_notice(notice.get("content") or ""))
+        if notice.get("control_actions"):
+            context_messages.append(framework_notice(
+                "此前控制请求的结果（送达不代表执行完成）：\n"
+                + json.dumps(notice["control_actions"], ensure_ascii=False)
+            ))
+        if notice.get("tool_results"):
+            context_messages.append(framework_notice(
+                "此前插话中的工具结果（deferred/error/pause 不代表工作完成）：\n"
+                + json.dumps(notice["tool_results"], ensure_ascii=False, default=str)
+            ))
+    context_messages = context_messages[-_STANDBY_CONTEXT_MESSAGES:]
+    _repair_message_tool_protocol(context_messages)
+
     forked_messages = [
         opening_system_prompt(sys_prompt),
+        framework_notice(""),  # Replaced with fresh, read-only runtime facts below.
         *context_messages,
         LLMMessage(role="user", content=user_interrupt),
     ]
-    # 工具面 = 只读（`replayable_read` 声明属性机械筛出）+ runtime_control。
-    # 不写工具名单：名单对**新加的工具**默认漏过，而漏过的方向是"给了写权限"。
+    # Use the normal authorized surface. Each tool retains its own sandbox
+    # and workspace boundary; replayable_read is a compression hint, not a lock.
     tool_schemas = []
     try:
         available = list_tools_for_node(
@@ -2535,10 +2602,16 @@ async def _handle_interrupt(state: State, harness, llm: LLMClient,
     except Exception:  # noqa: BLE001
         available = []
     for td in available:
-        if td.replayable_read:
-            tool_schemas.append(to_openai_schema(td))
+        schema = to_openai_schema(td)
+        if td.name in _SERIAL_SESSION_TOOLS:
+            schema["function"]["description"] += (
+                "\n当前子节点执行期间，此调用会交回主循环，返回 deferred，尚未执行。"
+            )
+        tool_schemas.append(schema)
     runtime_control_def = get_tool("runtime_control")
-    if runtime_control_def is not None:
+    if runtime_control_def is not None and not any(
+        schema["function"]["name"] == "runtime_control" for schema in tool_schemas
+    ):
         tool_schemas.append(to_openai_schema(runtime_control_def))
     offered_tools = {sch["function"]["name"] for sch in tool_schemas}
 
@@ -2547,10 +2620,43 @@ async def _handle_interrupt(state: State, harness, llm: LLMClient,
     llm.stream_display = None
     spoken: list[str] = []
     actions: list[str] = []
+    tool_results: list[dict] = []
     try:
         # 多个来回：它可以"先查一下再回答"。上限是**保护**不是目标 ——
         # 撞到上限说明这个问题该等主轮处理，如实说，别装作答完了。
-        for _ in range(_STANDBY_MAX_TURNS):
+        turns = range(harness.max_turns) if harness.max_turns > 0 else count()
+        for _ in turns:
+            from datetime import UTC, datetime
+
+            from shared.tools.library.runtime_control import _peek_child_progress
+
+            children = []
+            for run in list_active_runs()[-5:]:
+                try:
+                    progress = await _peek_child_progress(
+                        state=state, child_run_id=run.run_id, n=8,
+                    )
+                except Exception as exc:  # observation failure is not a completed task
+                    progress = {"status": "unavailable", "error": str(exc)}
+                children.append({
+                    "run_id": run.run_id, "node_type": run.node_type,
+                    "started_at": run.started_at, "progress": progress,
+                })
+            forked_messages[1] = framework_notice(
+                "当前运行快照（只读观测；不是用户指令）：\n"
+                + json.dumps({"observed_at": datetime.now(UTC).isoformat(),
+                              "active_children": children,
+                              "pending_question": pending_pause,
+                              "post_node_flow": [
+                                  {k: entry.get(k) for k in (
+                                      "producing_run_id", "producing_node", "decision_state",
+                                      "authorized_action", "authorized_target_node",
+                                  )}
+                                  for entry in state.hook_state.get("pending_post_node_flow", [])
+                                  if isinstance(entry, dict)
+                              ]}, ensure_ascii=False)
+                + "\n登记中的任务已经启动。没有活跃任务不等于成功完成；需要查终态。"
+            )
             response = await llm.chat(
                 forked_messages, tools=tool_schemas,
                 max_tokens=harness.max_output_tokens, temperature=0.3,
@@ -2568,18 +2674,14 @@ async def _handle_interrupt(state: State, harness, llm: LLMClient,
             for call in response.tool_calls:
                 name = call["function"]["name"]
                 call_id = call.get("id") or ""
-                # 执行端核对工具面（#1164）：上面只把只读工具 + runtime_control
-                # **展示**给模型，但模型返回什么名字这里就执行什么 —— 2026-09-28
-                # 现场待命旁路照样调起了 run_node，把一个还在跑的 child 当成被打断
-                # 续了第二个 loop。展示不是授权，授权要在执行这一侧落实。
-                # 坏参数同理：解析不了不能当成"没给参数"去执行。
+                # Validate the offered surface at execution too (#1164). A
+                # hallucinated name or malformed arguments never grant authority.
                 result = None
                 if name not in offered_tools:
                     result = {
                         "status": "error",
                         "error_code": "tool_not_offered_in_standby",
-                        "error": (f"{name} 不在待命期的工具面里（子节点此刻持有工作区）。"
-                                  "这类改动等子节点跑完、回到主轮再做。"),
+                        "error": f"{name} 不是当前调度器获准使用的工具，没有执行。",
                     }
                     args = {}
                 else:
@@ -2592,37 +2694,46 @@ async def _handle_interrupt(state: State, harness, llm: LLMClient,
                                   "error": f"工具参数解析不了，没有执行：{e}"}
                         args = {}
                 if result is None:
-                    try:
-                        result = await execute_tool(name, state, **args)
-                    except Exception as e:  # noqa: BLE001 —— 工具炸了不该带走这次对话
-                        result = {"status": "error", "error": f"{type(e).__name__}: {e}"}
-                # runtime_control 是**对子节点的动作**，用户必须看见它发生了。
-                # 只读工具的原始结果不刷屏 —— 模型下一轮会把它讲成人话。
+                    if name in _SERIAL_SESSION_TOOLS:
+                        result = {
+                            "status": "deferred",
+                            "note": "请求已交回主循环，当前子节点返回后继续处理；尚未执行。",
+                        }
+                    else:
+                        try:
+                            result = await execute_tool(name, state, **args)
+                        except Exception as e:  # noqa: BLE001
+                            result = {"status": "error", "error": f"{type(e).__name__}: {e}"}
+                tool_results.append({"tool": name, "arguments": args, "result": result})
+                state.append_transcript(
+                    "interrupt_tool", tool_name=name, arguments=args, result=result,
+                    replies_to_message_id=reply_to_message_id or "",
+                )
+                # Keep transport/control receipts in the execution record. The
+                # model sees the result and explains the actual outcome normally.
                 if name == "runtime_control":
                     act = args.get("action", "?")
                     crun = args.get("child_run_id", "?")
                     ok = result.get("status") == "success"
-                    if act == "inject":
-                        actions.append(f"已把方向注入 {crun}：{(args.get('content') or '')[:120]}")
-                        _reply_to_user(
-                            f"[→ {crun}] {'✓ 已注入方向' if ok else '✗ 注入失败'}："
-                            f"{(args.get('content') or '')[:120]}"
+                    if act in {"inject", "cancel"}:
+                        outcome = "请求已送达，执行结果尚未确认" if ok else "请求失败"
+                        actions.append(f"{act} {crun}：{outcome}")
+                        state.append_transcript(
+                            "interrupt_control", action=act, child_run_id=crun,
+                            status=result.get("status"), result=result,
+                            replies_to_message_id=reply_to_message_id or "",
                         )
-                    elif act == "cancel":
-                        actions.append(f"已取消 {crun}：{(args.get('reasoning') or '')[:120]}")
-                        _reply_to_user(
-                            f"[→ {crun}] {'⛔ 已请求取消' if ok else '✗ 取消失败'}："
-                            f"{(args.get('reasoning') or '')[:120]}"
-                        )
-                    elif not ok:
-                        _reply_to_user(f"[→ {crun}] ✗ {act} 失败：{result.get('error', '?')}")
                 forked_messages.append(LLMMessage(
                     role="tool", tool_call_id=call_id, name=name,
                     content=json.dumps(result, ensure_ascii=False, default=str)[:8000],
                 ))
+            if pending_pause is not None and (
+                state.hook_state.get("_pause_dialogue") or {}
+            ).get("answer") is not None:
+                break
         else:
             _reply_to_user(
-                f"（这个问题我在待命轮里查了 {_STANDBY_MAX_TURNS} 轮还没查完，"
+                f"（这个问题处理了 {harness.max_turns} 轮还没完成，"
                 "等当前子节点跑完我接着处理。）"
             )
     except Exception as e:  # noqa: BLE001
@@ -2641,12 +2752,28 @@ async def _handle_interrupt(state: State, harness, llm: LLMClient,
     # 交流记录回主对话：主循环得知道用户问过什么、我已经答了什么，
     # 否则子节点跑完之后它会把答过的问题再答一遍（或者矛盾）。
     summary = f"（用户在子节点跑的时候问）{user_interrupt}"
-    if spoken:
-        summary += f"\n（你在待命轮里已经答复）{' '.join(spoken)[:800]}"
+    if visible_replies:
+        summary += f"\n（你在待命轮里已经答复）{' '.join(visible_replies)}"
     if actions:
         summary += "\n（你在待命轮里做了）" + "；".join(actions)
-    summary += "\n这件事已经处理过，除非用户又问，别重复答一遍。"
-    _remember_in_main_conversation(summary)
+    if tool_results:
+        summary += "\n（实际工具调用与结果）\n" + json.dumps(
+            tool_results, ensure_ascii=False, default=str,
+        )
+    summary += (
+        "\n以上是已经发生的对话，不代表用户要求的工作已经完成。"
+        "按实际工具结果继续处理尚未完成的请求；deferred/error/pause 都不算完成，"
+        "控制请求送达不代表子节点执行完成。已经回答的问题无需重复讲述。"
+    )
+    _remember_in_main_conversation(summary, [
+        {"role": "user", "content": user_interrupt},
+        *({"role": "assistant", "content": text} for text in visible_replies),
+    ])
+    if actions:
+        state.hook_state["injected_messages"][-1]["control_actions"] = actions
+    if tool_results:
+        state.hook_state["injected_messages"][-1]["tool_results"] = tool_results
+    return visible_replies
 
 
 # ── slash command handlers ─────────────────────────────────────────────────
@@ -2901,7 +3028,7 @@ async def _main() -> int:
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--autonomy", choices=("assisted", "autonomous", "continuous"),
                         default=None,
-                        help="启动档位，与 UI 三档同一份词表。assisted=每处都问；"
+                        help="启动档位，与 UI 三档同一份词表。assisted=需要用户判断时再问；"
                              "autonomous=只在高危点停；continuous=⚠️ 预授权全部高危类别、"
                              "不停。REPL 中可用 /autonomy 切换。"
                              "不给则沿用这个会话上次的声明。")
@@ -3122,7 +3249,8 @@ async def _main() -> int:
         daemon=True,
     ).start()
     # 续连项目在 continuous=running 时无需等人再敲一句“继续”。冷启动项目尚无
-    # objective，仍等第一条真实 user prompt；该 turn 结束后自动续。
+    # objective，仍等第一条真实 user prompt；那一轮**起了研究**之后才自动续 ——
+    # 第一句话不一定是目标（「你好」），见 `_nothing_to_continue`。
     if is_continue and _continuous_running(state):
         boot_prompt, _ = _continuous_followup(
             state, "CONTINUOUS_STATUS: continue", reason="session_start"

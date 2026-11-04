@@ -41,6 +41,8 @@ _SENSITIVE_PATH_RE = re.compile(
   | /\.git-credentials$
   | /\.npmrc$
   | /\.pypirc$
+  | /private/ssh(?:/|$)
+  | /credential\.key$
     """,
 )
 # .env / .env.local / .env.production …（目录名叫 .environment 之类的不算）
@@ -86,6 +88,14 @@ def is_secret_name(name: str) -> bool:
     return bool(_SECRET_NAME_RE.search(name))
 
 _MASK = "«REDACTED:{name}»"
+_REGISTERED_SECRETS: dict[str, str] = {}
+
+
+def register_secret(value: str) -> None:
+    """Remember a credential explicitly supplied to a typed resource tool."""
+    from shared.lib.secret_values import MIN_SECRET_CHARS
+    if len(value) >= MIN_SECRET_CHARS:
+        _REGISTERED_SECRETS[value] = 'SSH_PASSWORD'
 
 
 def secret_values() -> dict[str, str]:
@@ -94,7 +104,7 @@ def secret_values() -> dict[str, str]:
     每次现算，不缓存：`.env` 可能在 run 中途被重新加载，缓存住的旧集合会漏掉
     新出现的凭据 —— 这里宁可多花几十微秒。
     """
-    out: dict[str, str] = {}
+    out: dict[str, str] = dict(_REGISTERED_SECRETS)
     for name, value in os.environ.items():
         if not value or len(value) < _MIN_SECRET_LEN:
             continue
@@ -111,20 +121,28 @@ def redact(obj: Any, *, secrets: dict[str, str] | None = None) -> Any:
     """
     if secrets is None:
         secrets = secret_values()
-    if not secrets:
-        return obj
     return _walk(obj, secrets)
 
 
 def _walk(obj: Any, secrets: dict[str, str]) -> Any:
     if isinstance(obj, str):
+        # Function-call arguments are serialized JSON inside a transcript.
+        if obj.lstrip().startswith('{') and ('"password"' in obj or '"passwd"' in obj):
+            import json
+            try:
+                return json.dumps(_walk(json.loads(obj), secrets), ensure_ascii=False)
+            except ValueError:
+                # Progress previews may end in the middle of the JSON value.
+                obj = re.sub(r'("(?:password|passwd)"\s*:\s*")(?:\\.|[^"\\])*(?:"|$)',
+                             r'\1«REDACTED:PASSWORD»"', obj)
         out = obj
         for value, name in secrets.items():
             if value in out:
                 out = out.replace(value, _MASK.format(name=name))
         return out
     if isinstance(obj, dict):
-        return {k: _walk(v, secrets) for k, v in obj.items()}
+        return {k: '«REDACTED:PASSWORD»' if str(k).lower() in ('password', 'passwd') and v
+                else _walk(v, secrets) for k, v in obj.items()}
     if isinstance(obj, list | tuple):
         walked = [_walk(v, secrets) for v in obj]
         return type(obj)(walked) if isinstance(obj, tuple) else walked

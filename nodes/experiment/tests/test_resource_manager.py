@@ -419,14 +419,23 @@ def test_managed_job_confirmation_category_matrix(
 # ── #893 节点侧：本地 GPU 在确认卡之前说清 ────────────────────────────────────
 
 
+def _gpu_not_schedulable(monkeypatch):
+    # 能不能分卡是 Core 的回答，跟跑测试的机器有没有卡无关（#893 阶段 1 起 Linux 上会是 True）。
+    from core import sandbox
+
+    monkeypatch.setattr(sandbox, "gpu_capability", lambda: sandbox.GpuCapability(
+        visible=4, schedulable=False, isolated=False, reason="测试：后端不给 CUDA 开口"))
+
+
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_local_gpu_request_is_refused_before_the_confirmation_card(
-    tmp_path, trusted_sandbox, dry_run,
+    tmp_path, trusted_sandbox, monkeypatch, dry_run,
 ):
-    """原生后端不提供本地 GPU：同一个事实不能拖到人批准之后才由 Core 说出来。
+    """本机分不出 GPU：同一个事实不能拖到人批准之后才由 Core 说出来。
 
     修复前真实提交会先返回 pause（弹确认卡），批准后才在 prepare_launch 被拒。
     """
+    _gpu_not_schedulable(monkeypatch)
     state = _planned_state(tmp_path)
 
     result = asyncio.run(_submit_job(
@@ -440,6 +449,94 @@ def test_local_gpu_request_is_refused_before_the_confirmation_card(
     assert any("gpus 改为 0" in step for step in result["next_actions"])
     assert any("slurm" in step for step in result["next_actions"])
     assert state.list_artifacts("job_submission") == []
+
+
+def test_schedulable_gpu_is_asked_for_by_the_framework_then_submitted(
+    tmp_path, trusted_sandbox, monkeypatch,
+):
+    """#893 阶段 1（框架侧代改）：卡分得出来、本 run 还没批 → submit_job 自己交回那张
+    GPU 授权卡（框架替模型问，RFC_CAPABILITY_GRANTS_LAYERING §3.2），零副作用；人批了，
+    原样重提就提交，而且这个 run 手里正好是批到的卡。"""
+    from core import capability_grants as cg
+    from core import gpu, sandbox
+
+    monkeypatch.setenv("HARNESS_JOBS_ROOT", str(tmp_path / "jobs"))
+    monkeypatch.setattr(gpu, "visible_indices", lambda: [0, 1, 2, 3])
+    monkeypatch.setattr(sandbox, "_gpu_backend", lambda: ("linux", ""))
+    submitted: list[object] = []
+
+    def fake_submit(*_args, **_kwargs):
+        submitted.append(cg.gpu_lease(_kwargs.get("state")))
+        return {"status": "success", "scheduler": "local", "dry_run": False,
+                "job_name": "experiment_job", "job_id": "gpu-job",
+                "submission_nonce": "gpu-job-receipt"}
+
+    monkeypatch.setattr(rm, "_submit_sync", fake_submit)
+    state = _planned_state(tmp_path)
+
+    def submit():
+        return asyncio.run(_submit_job(
+            state=state, command="python train.py", scheduler="local", gpus=2,
+            dry_run=False, execution_params={"case": "test"},
+        ))
+
+    asked = submit()
+    assert asked["status"] == "pause", asked
+    meta = asked["pause_event"]["metadata"]
+    assert meta["capability"] == cg.GPU_CAPABILITY and meta["gpus"] == 2
+    assert submitted == [] and state.list_artifacts("job_submission") == []
+
+    assert cg.grant_gpu_from_answer(state, meta["gpus"], "允许") is True
+    result = submit()
+    assert result["status"] == "success", result
+    assert len(submitted) == 1 and submitted[0].indices == (0, 1)
+    cg.release_gpu(state)
+
+
+def test_the_local_job_carries_the_runs_cards_to_the_launch():
+    """批到的卡要一路送到 prepare_launch —— 否则作业起来看不见卡，卡也不归作业。"""
+    import inspect
+
+    from core import gpu
+    from core.capability_grants import GpuGrant
+
+    class _S:
+        pass
+
+    state = _S()
+    lease = gpu.GpuLease((1,), "r")
+    state._capability_gpu = GpuGrant(requested=1, lease=lease)
+    assert rm._gpu_lease_for(state, 1) is lease
+    assert rm._gpu_lease_for(state, 0) is None
+    assert '"gpu_lease": _gpu_lease_for(state, gpus)' in inspect.getsource(rm._submit_sync_impl)
+    assert 'gpu_lease=spec.get("gpu_lease")' in inspect.getsource(rm)
+
+
+@pytest.mark.parametrize("runs", [False, True])
+def test_a_multi_rank_local_job_is_checked_against_the_wall_before_the_card(
+    tmp_path, trusted_sandbox, monkeypatch, runs,
+):
+    """#1166（框架侧代改）：本机多进程要作业内回环 TCP。墙给不了就在确认卡之前、零副作用地说清；
+    给得了就不在这里拦。"""
+    from core import sandbox
+
+    monkeypatch.setattr(sandbox, "job_tcp_capability", lambda: sandbox.JobTcpCapability(
+        runs=runs, contained=runs, loopback="private_netns" if runs else "denied",
+        reason="测试：作业有自己的网络命名空间" if runs else "测试：墙把回环也断了"))
+    monkeypatch.setattr(rm, "_submit_sync", lambda *_a, **_k: {
+        "status": "success", "scheduler": "local", "dry_run": False,
+        "job_name": "experiment_job", "job_id": "mpi-job", "submission_nonce": "mpi"})
+    state = _planned_state(tmp_path)
+    result = asyncio.run(_submit_job(
+        state=state, command="mpirun -np 4 ./solver", scheduler="local", mpi_ranks=4,
+        dry_run=False, execution_params={"case": "test"},
+    ))
+    if runs:
+        assert result.get("error_code") != "local_mpi_unsupported", result
+    else:
+        assert result["error_code"] == "local_mpi_unsupported", result
+        assert result["side_effects"] == "none" and result["requested_mpi_ranks"] == 4
+        assert state.list_artifacts("job_submission") == []
 
 
 def test_discovery_does_not_report_visible_gpus_as_locally_executable(monkeypatch):

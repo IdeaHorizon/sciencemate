@@ -6,6 +6,7 @@ from app.models.artifact import (
     ArtifactVersion,
 )
 from app.models.authentication import RevokedAccessToken
+from app.models.cnki import CnkiDevice, CnkiJob, CnkiPaper, CnkiJobPaper
 from app.models.execution import (
     Command,
     Decision,
@@ -33,6 +34,7 @@ from app.models.resource import ProjectResource
 from app.models.user import User, UserRole
 
 __all__ = [
+    "CnkiDevice", "CnkiJob", "CnkiPaper", "CnkiJobPaper",
     "Invitation",
     # Artifact
     "Artifact",

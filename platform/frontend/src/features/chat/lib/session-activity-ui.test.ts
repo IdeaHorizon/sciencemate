@@ -44,7 +44,7 @@ test("completed tools fold and artifacts link to their canonical Project record"
 test("failure is one primary explanation with folded technical history", () => {
   assert.match(component, /chat-run-primary-error/);
   assert.match(component, /<FailedToolHistory tools=\{failedTools\} steps=\{failedSteps\}/);
-  assert.match(component, /去执行历史看原始记录/);
+  assert.match(component, /在执行历史中查看原始记录/);
   assert.equal(component.includes("tool.error.code"), false);
   assert.equal(component.includes("Stale Unknown"), false);
   assert.match(messagesComponent, /systemRunOwnedByCanonicalActivity/);
@@ -57,7 +57,7 @@ test("terminal parent status reconciles unfinished activity instead of rendering
   // interrupts unfinished children…"）；这里只守它确实被接了上去。
   assert.match(component, /projectRunActivity\(\s*eventsQuery\.data,[\s\S]{0,200}?view\.phase === "interrupted"/);
   assert.match(component, /tool\.status === "interrupted"/);
-  assert.match(component, /这一轮被取消了，没做完的研究活动中断在这里。/);
+  assert.match(component, /这次执行已取消，未完成的操作已停止。/);
 });
 
 test("HITL requires an explicit confirmation and supports durable canonical pauses", () => {
@@ -66,12 +66,14 @@ test("HITL requires an explicit confirmation and supports durable canonical paus
   assert.match(component, /canonicalRunPause\(detail\)/);
   assert.match(component, /<PausedRecord/);
   assert.doesNotMatch(component, /<HumanInputPrompt/);
-  assert.match(humanInput, /你不点，它就一直等着。/);
+  assert.match(humanInput, /该操作会等你授权/);
+  assert.match(humanInput, /直接在对话里讨论或说明决定/);
+  assert.doesNotMatch(humanInput, /Nothing continues until you confirm/);
   assert.match(humanInput, /回答并继续/);
   // 谁在问仍然要显示 —— 位置从「Asked by X」独占一行改成标题右侧的一行 meta，
   // 但这条信息不能消失。
   assert.match(humanInput, /human-input-from/);
-  assert.match(humanInput, /nodeLabel\(pause\.askingNodeType, t\)/);
+  assert.match(humanInput, /nodeLabel\(pause\.askingNodeType, t, lang\)/);
   assert.match(humanInput, /zh: "背景"/);
   assert.match(humanInput, /role="radiogroup"/);
   assert.match(humanInput, /disabled=\{!interactive\}/);
@@ -86,15 +88,15 @@ test("能操作的东西排在次要材料前面 —— 否则要划过一整屏
   // 实测（1440×900，面板宽 680）：重排前面板高 578px，context 原始 dump 独占
   // 224px，选项排在顶部往下 368px 处。
   const optionsAt = humanInput.indexOf('role="radiogroup"');
-  const contextAt = humanInput.indexOf('<summary>{t({ zh: "背景"');
-  const freeformAt = humanInput.indexOf("或者自己写一个答案");
+  const contextAt = humanInput.indexOf('<summary>{pause.kind === "permission"');
+  const freeformAt = humanInput.indexOf("补充说明，或写下你自己的回答");
   assert.ok(optionsAt > -1 && contextAt > -1 && freeformAt > -1, "三块都要在");
   assert.ok(optionsAt < contextAt, "选项必须排在 context 之前");
   assert.ok(optionsAt < freeformAt, "选项必须排在自由文本框之前");
   // 次要材料折起来，别常驻。permission 类是例外 —— 被批的命令默认可见
   // （见 permission-context-visible.test.ts），所以这里只锁"是折面"，
   // 不锁 open 属性的有无。
-  assert.match(humanInput, /<details className="human-input-detail"[^>]*>\s*<summary>\{t\(\{ zh: "背景"/);
+  assert.match(humanInput, /<details className="human-input-detail"[^>]*>\s*<summary>\{pause\.kind === "permission"/);
 });
 
 test("short user messages size to content while long and multiline text wraps", () => {

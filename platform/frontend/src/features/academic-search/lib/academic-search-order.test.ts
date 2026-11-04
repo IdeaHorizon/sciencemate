@@ -8,6 +8,12 @@ const paper = (ranking_score: number, score: number) => ({
   pub_date: null, year: 2025,
 });
 
+test("background references follow direct results despite higher scores or merged positions", () => {
+  const background={...paper(1,1),federated_rank:0,relevance_assessment:{tier:"background"}};
+  const direct={...paper(.6,.6),federated_rank:1,relevance_assessment:{tier:"direct"}};
+  assert.ok(compareAcademicPapers(background,direct,"recommendation") > 0);
+});
+
 test("default recommendation order preserves the backend ranking score", () => {
   const intentMatch = paper(0.9, 0.5);
   const broadHighQuality = paper(0.7, 0.95);

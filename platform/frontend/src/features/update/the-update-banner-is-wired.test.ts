@@ -35,7 +35,7 @@ test("install happens before restart, never the other way round", () => {
 });
 
 test("the restart copy says the window comes back by itself", () => {
-  assert.match(SAYS, /窗口会自动回来/, "重启时用户看到的那句话没说清楚：端口会变、壳会重新指窗口");
+  assert.match(SAYS, /窗口会自动重新打开/, "重启时用户看到的那句话没说清楚：端口会变、壳会重新指窗口");
   assert.match(BANNER, /phase === "installing" \|\| phase === "restarting" \? \(\s*<UpdateProgress /,
     "横幅装与重启时没画 UpdateProgress —— 又回到「一行小字换个内容」");
 });

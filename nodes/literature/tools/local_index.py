@@ -14,6 +14,7 @@ import json
 import re
 import os
 import time
+import unicodedata
 from datetime import UTC, datetime, timedelta
 from typing import Optional
 from pathlib import Path
@@ -121,6 +122,14 @@ class LocalPaperIndex:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            for table, column in (
+                ("paper_index", "title"), ("paper_index", "title_zh"),
+                ("title_translations", "translated_title"),
+            ):
+                conn.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{table}_{column}_lookup "
+                    f"ON {table}({column} COLLATE NOCASE)"
+                )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS ai_summaries (
                     title_key TEXT PRIMARY KEY,
@@ -345,6 +354,49 @@ class LocalPaperIndex:
             if key:
                 found[key] = paper
         return found
+
+    @staticmethod
+    def _exact_title_text(value: str) -> str:
+        """Normalize typography only; keep words, scientific symbols and order."""
+        text = unicodedata.normalize("NFKC", LocalPaperIndex._translation_text(value))
+        text = text.translate(str.maketrans({char: "-" for char in "‐‑﹣－"}))
+        return text.strip(' "\'“”‘’《》').casefold()
+
+    def find_exact_title(self, query: str) -> list[Paper]:
+        """Resolve a complete original/translated title to indexed identities.
+
+        Prefix indexes narrow the SQL scan; the final predicate is full-title
+        equality, never a keyword/fuzzy match. Historical translation-cache
+        entries work even before title_zh has been copied into paper_index.
+        """
+        normalized = self._exact_title_text(query)
+        if not normalized:
+            return []
+        with sqlite3.connect(self.db_path) as conn:
+            conn.create_function("exact_title_text", 1, self._exact_title_text)
+
+            def matching_rows(table: str, column: str, value: str) -> list[tuple]:
+                key = self._exact_title_text(value)
+                # Stop before punctuation, which may differ in source typography.
+                prefix_match = re.match(r"[\w]+(?: [\w]+)*", key)
+                prefix = prefix_match.group(0)[:40] if prefix_match else ""
+                prefix = prefix.replace("\\", "\\\\").replace("_", "\\_")
+                return conn.execute(
+                    f"SELECT * FROM {table} WHERE {column} LIKE ? ESCAPE '\\' "
+                    f"AND exact_title_text({column}) = ?",
+                    (prefix + "%", key),
+                ).fetchall()
+
+            rows = matching_rows("paper_index", "title", query)
+            for row in matching_rows("paper_index", "title_zh", query):
+                # Ignore stale translated columns after an original-title change.
+                paper = self._row_to_paper(row)
+                if paper.title_zh and self._exact_title_text(paper.title_zh) == normalized:
+                    rows.append(row)
+            translations = matching_rows("title_translations", "translated_title", query)
+            for row in translations:
+                rows.extend(matching_rows("paper_index", "title", row[1]))
+        return self._merge_local([], [self._row_to_paper(row) for row in rows])
 
     def add_papers(self, papers: list[Paper], search_query: str = ""):
         """批量添加论文到索引，自动去重（基于 DOI）"""

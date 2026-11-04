@@ -21,15 +21,15 @@ export function FrozenLockBadge({
   const frozenAt = typeof extraData.frozen_at === "string" ? extraData.frozen_at : "";
   const frozenBy = typeof extraData.frozen_by === "string" ? extraData.frozen_by : "";
   const tooltip = [
-    t({ zh: "已冻结 —— 不可更改", en: "Frozen — immutable" }),
-    frozenBy && `by: ${frozenBy}`,
-    frozenAt && `at: ${frozenAt.slice(0, 19)}`,
+    t({ zh: "已定稿，不能修改", en: "Finalized; can't be edited" }),
+    frozenBy && t({ zh: "定稿人：{who}", en: "by: {who}" }, { who: frozenBy }),
+    frozenAt && t({ zh: "定稿时间：{time}", en: "at: {time}" }, { time: frozenAt.slice(0, 19) }),
   ]
     .filter(Boolean)
     .join("\n");
   return (
     <span className="frozen-lock-badge" title={tooltip}>
-      <Lock size={size} /> frozen
+      <Lock size={size} /> {t({ zh: "已定稿", en: "Finalized" })}
     </span>
   );
 }

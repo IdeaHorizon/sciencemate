@@ -209,11 +209,14 @@ def test_no_new_tools_were_added():
 
     判据仍然是那句：**agent 自己能做的，框架不代劳；只有框架才能持有的状态，
     才配一个入口。** 见 core/jobs.py 的模块文档（E2E-7 实测现场）。
+
+    `answer` 同样只交还框架持有的当前 pause 身份与用户答复，不恢复循环；
+    恢复仍由原暂停驱动器负责，shell 无法代替这次交接。
     """
     from shared.tools.library import runtime_control as rc
     assert "tail_file" not in rc._RC_ACTIONS
     assert set(rc._RC_ACTIONS) == {
-        "inject", "cancel", "list_active", "progress", "jobs"}
+        "inject", "cancel", "list_active", "progress", "jobs", "answer"}
 
 
 def test_every_action_param_is_declared_in_schema():

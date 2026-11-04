@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import platform
+import posixpath
 import re
 import shlex
 import shutil
@@ -25,7 +26,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, runtime_checkable
 
 log = logging.getLogger(__name__)
@@ -430,11 +431,12 @@ async def _probe_external_job_health_cancellable(
     scheduler: str,
     job_id: str,
     namespace: str | None = None,
+    *, submission_nonce: str | None = None,
 ) -> dict:
     """Query scheduler health without making cancellation wait for its CLI timeout."""
     _raise_if_external_wait_cancelled(state)
     probe_task = asyncio.create_task(asyncio.to_thread(
-        probe_external_job_health, state, scheduler, job_id, namespace,
+        probe_external_job_health, state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce),
     ))
     try:
         while True:
@@ -868,9 +870,11 @@ def _record_job_lifecycle(
     return payload
 
 def _normalize_output_roots(output_paths: list[str] | None, workdir: str | None,
-                            fallback: str | Path) -> list[str]:
+                            fallback: str | Path, *, remote: bool = False) -> list[str]:
     """Reserve explicit output roots; workdir is the conservative fallback."""
     values = list(output_paths or []) or [workdir or str(fallback)]
+    if remote:
+        return sorted({_slurm_transport().normalize_path(v, base=workdir) for v in values})
     base = os.path.expanduser(workdir or str(fallback))
     roots: list[str] = []
     for value in values:
@@ -883,11 +887,11 @@ def _normalize_output_roots(output_paths: list[str] | None, workdir: str | None,
     return sorted(set(roots))
 
 
-def _path_is_within(path: str, roots: list[str]) -> bool:
+def _path_is_within(path: str, roots: list[str], *, remote: bool = False) -> bool:
     """True only when ``path`` is contained in one declared managed root."""
     for root in roots:
         try:
-            if os.path.commonpath([path, root]) == root:
+            if (posixpath if remote else os.path).commonpath([path, root]) == root:
                 return True
         except ValueError:
             continue
@@ -897,7 +901,7 @@ def _path_is_within(path: str, roots: list[str]) -> bool:
 def _health_contract(
     health_check: dict[str, Any] | None,
     *, workdir: str | None, output_roots: list[str], scheduler_output_dir: Path,
-    expected_duration_s: int | None,
+    expected_duration_s: int | None, remote: bool = False,
 ) -> dict[str, Any]:
     """Validate a declarative, read-only health probe contract.
 
@@ -924,8 +928,15 @@ def _health_contract(
     if stall_after_s < poll_interval_s * 2:
         raise ValueError(
             f"health_check.stall_after_s 必须 ≥ 2×poll_interval_s（≥ {poll_interval_s * 2}）")
-    allowed_roots = list(output_roots) + [os.path.realpath(str(scheduler_output_dir))]
-    base = os.path.expanduser(workdir or str(scheduler_output_dir))
+    normalize = (_slurm_transport().normalize_path if remote else os.path.realpath)
+    allowed_roots = list(output_roots) + [normalize(str(scheduler_output_dir))]
+    base = workdir or str(scheduler_output_dir)
+
+    def normalized_path(value: str) -> str:
+        if remote:
+            return _slurm_transport().normalize_path(value, base=base)
+        raw = os.path.expandvars(os.path.expanduser(value))
+        return os.path.realpath(raw if os.path.isabs(raw) else os.path.join(base, raw))
 
     def paths(name: str) -> list[str]:
         normalized: list[str] = []
@@ -933,9 +944,8 @@ def _health_contract(
             text = str(value or "").strip()
             if not text:
                 continue
-            raw = os.path.expandvars(os.path.expanduser(text))
-            candidate = os.path.realpath(raw if os.path.isabs(raw) else os.path.join(base, raw))
-            if not _path_is_within(candidate, allowed_roots):
+            candidate = normalized_path(text)
+            if not _path_is_within(candidate, allowed_roots, remote=remote):
                 raise ValueError(f"health_check.{name} 路径必须位于声明的 output_paths/output_dir 内: {value}")
             normalized.append(candidate)
         return sorted(set(normalized))
@@ -951,8 +961,7 @@ def _health_contract(
         text = str(value or "").strip()
         if not text:
             continue
-        raw = os.path.expandvars(os.path.expanduser(text))
-        candidate = os.path.realpath(raw if os.path.isabs(raw) else os.path.join(base, raw))
+        candidate = normalized_path(text)
         completion_kinds[candidate] = _output_postconditions.declared_output_kind(text)
     contract = {
         "version": _HEALTH_CONTRACT_VERSION,
@@ -1810,7 +1819,16 @@ def _adopt_dead_foreign_intent(state: Any, reservation: dict[str, Any]) -> dict[
     return {"adopted": True, "adoption_artifact_id": adoption.get("artifact_id")}
 
 
-def _active_output_conflicts(state: Any, output_roots: list[str]) -> list[dict[str, Any]]:
+def _active_output_conflicts(state: Any, output_roots: list[str], *,
+                             slurm_target: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    def same_target(row):
+        previous = row.get("slurm_target")
+        if previous is None or slurm_target is None:
+            return previous is None and slurm_target is None
+        keys = ("host", "user", "port")
+        return all(previous.get(k, 22 if k == "port" else "") == slurm_target.get(k, 22 if k == "port" else "") for k in keys)
+    remote = slurm_target is not None
+    overlap = (lambda a, b: _path_is_within(a, [b], remote=True) or _path_is_within(b, [a], remote=True)) if remote else _paths_overlap
     lifecycle = _job_lifecycle_states(state)
     candidates = _submission_payloads(state) + _task_external_jobs(state)
     conflicts: list[dict[str, Any]] = []
@@ -1832,6 +1850,8 @@ def _active_output_conflicts(state: Any, output_roots: list[str]) -> list[dict[s
             "output_roots": [],
         }]
     for reservation in unresolved:
+        if reservation.get("status") != "ledger_invalid" and not same_target(reservation):
+            continue
         if reservation.get("foreign_run"):
             adoption_probe = _adopt_dead_foreign_intent(state, reservation)
             if adoption_probe.get("adopted"):
@@ -1842,7 +1862,7 @@ def _active_output_conflicts(state: Any, output_roots: list[str]) -> list[dict[s
                            f"{adoption_probe.get('reason')}"),
             }
         old_roots = [
-            os.path.realpath(os.path.expanduser(str(item)))
+            (_slurm_transport().normalize_path(str(item)) if remote else os.path.realpath(os.path.expanduser(str(item))))
             for item in reservation.get("output_roots") or []
             if str(item).strip()
         ]
@@ -1853,7 +1873,7 @@ def _active_output_conflicts(state: Any, output_roots: list[str]) -> list[dict[s
                 (new, old)
                 for new in output_roots
                 for old in old_roots
-                if _paths_overlap(new, old)
+                if overlap(new, old)
             ]
         if overlaps:
             conflicts.append({
@@ -1865,8 +1885,8 @@ def _active_output_conflicts(state: Any, output_roots: list[str]) -> list[dict[s
                 "overlaps": overlaps,
                 "do_not_resubmit": True,
             })
-    for orphan in _unknown_orphan_records(state):
-        overlaps = [(new, old) for new in output_roots for old in orphan.get("output_roots", []) if _paths_overlap(new, old)]
+    for orphan in ([] if remote else _unknown_orphan_records(state)):
+        overlaps = [(new, old) for new in output_roots for old in orphan.get("output_roots", []) if overlap(new, old)]
         if overlaps:
             conflicts.append({
                 "kind": "unknown_orphan", "artifact_id": orphan.get("artifact_id"),
@@ -1885,6 +1905,8 @@ def _active_output_conflicts(state: Any, output_roots: list[str]) -> list[dict[s
             })
     seen: set[tuple[str, str]] = set()
     for candidate in candidates:
+        if not same_target(candidate):
+            continue
         scheduler, job_id = str(candidate["scheduler"]), str(candidate["job_id"])
         identity = _job_key_for_record(candidate)
         if identity in seen:
@@ -1896,9 +1918,9 @@ def _active_output_conflicts(state: Any, output_roots: list[str]) -> list[dict[s
         if lifecycle_resolution.get("resolution") == "legacy_lifecycle_scope_ambiguous":
             old_roots = _normalize_output_roots(candidate.get("output_roots"),
                                                 candidate.get("workdir"),
-                                                candidate.get("workdir") or ".")
+                                                candidate.get("workdir") or ".", remote=remote)
             overlaps = [(new, old) for new in output_roots for old in old_roots
-                        if _paths_overlap(new, old)]
+                        if overlap(new, old)]
             if overlaps:
                 conflicts.append({
                     "kind": "legacy_lifecycle_scope_ambiguous",
@@ -1919,15 +1941,15 @@ def _active_output_conflicts(state: Any, output_roots: list[str]) -> list[dict[s
         # corrupt scientific files.
         live = _external_job_is_active(
             scheduler, job_id, candidate.get("namespace"),
-            candidate.get("launch_host"), candidate.get("container_runtime_id"),
+            candidate.get("launch_host"), candidate.get("container_runtime_id"), **_slurm_kwargs(candidate),
         )
         if not live:
             continue
         old_roots = _normalize_output_roots(candidate.get("output_roots"),
                                             candidate.get("workdir"),
-                                            candidate.get("workdir") or ".")
+                                            candidate.get("workdir") or ".", remote=remote)
         overlaps = [(new, old) for new in output_roots for old in old_roots
-                    if _paths_overlap(new, old)]
+                    if overlap(new, old)]
         if overlaps:
             conflicts.append({"scheduler": scheduler, "job_id": job_id,
                               "task_id": candidate.get("task_id"), "overlaps": overlaps})
@@ -1935,11 +1957,13 @@ def _active_output_conflicts(state: Any, output_roots: list[str]) -> list[dict[s
 
 def _external_job_is_active(scheduler: str, job_id: str, namespace: str | None,
                             remote_host: str | None = None,
-                            container_runtime_id: str | None = None) -> bool:
+                            container_runtime_id: str | None = None,
+                            slurm_target: dict[str, Any] | None = None, expected_cluster: str | None = None, submission_nonce: str | None = None, scheduler_submit_time: str | None = None) -> bool:
     """Whether a prior job must still reserve outputs; unknown is unsafe."""
     result = _job_status_sync(
         scheduler, job_id, namespace, remote_host=remote_host,
         container_runtime_id=container_runtime_id,
+        **({"slurm_target": slurm_target, "expected_cluster": expected_cluster, "submission_nonce": submission_nonce, "scheduler_submit_time": scheduler_submit_time} if slurm_target is not None else {}),
     )
     raw = result.get("raw") or {}
     stdout = str(raw.get("stdout") or "")
@@ -1948,7 +1972,11 @@ def _external_job_is_active(scheduler: str, job_id: str, namespace: str | None,
         return stdout.strip() == "RUNNING" or not raw.get("ok")
     if kind == "slurm":
         # squeue prints no row after a completed/cancelled job.
-        return not raw.get("ok") or bool(stdout.strip())
+        if not raw.get("ok") or stdout.strip():
+            return True
+        if slurm_target is not None:
+            return _remote_job_ended_on_its_own("slurm", raw, job_id, slurm_target=slurm_target, expected_cluster=expected_cluster, submission_nonce=submission_nonce, scheduler_submit_time=scheduler_submit_time) is None
+        return False
     if kind == "kubernetes" and raw.get("ok"):
         try:
             status = json.loads(stdout).get("status") or {}
@@ -1980,7 +2008,7 @@ def pending_external_jobs(state: Any) -> list[dict[str, Any]]:
             continue
         result = _job_status_sync(scheduler, job_id, submission.get("namespace"),
                                   remote_host=submission.get("launch_host"),
-                                  container_runtime_id=submission.get("container_runtime_id"))
+                                  container_runtime_id=submission.get("container_runtime_id"), **_slurm_kwargs(submission))
         raw = result.get("raw") or {}
         stdout = str(raw.get("stdout") or "")
         if scheduler.lower() == "local":
@@ -2014,6 +2042,155 @@ def _run(args: list[str], timeout: int = 10) -> dict[str, Any]:
         return {"ok": False, "returncode": None, "stdout": "", "stderr": "timeout"}
     except Exception as e:
         return {"ok": False, "returncode": None, "stdout": "", "stderr": f"{type(e).__name__}: {e}"}
+
+
+
+def _slurm_transport():
+    try:
+        from . import slurm_ssh
+    except ImportError:  # pragma: no cover
+        from tools import slurm_ssh
+    return slurm_ssh
+
+
+def _slurm_files():
+    try:
+        from . import slurm_files
+    except ImportError:  # pragma: no cover
+        from tools import slurm_files
+    return slurm_files
+
+
+def _slurm_run(argv: list[str], *, slurm_target: dict[str, Any] | None = None,
+               timeout: int = 20, expected_cluster: str | None = None) -> dict[str, Any]:
+    # Pin cluster selection explicitly; login defaults and *_CLUSTERS must not
+    # route a persisted job identity to another controller. Identity is checked
+    # in the SAME SSH connection before the command is started.
+    if slurm_target is not None:
+        if not expected_cluster or not slurm_target.get("user"):
+            return {"ok": False, "returncode": None, "stdout": "", "stderr": "Persisted remote user/cluster is missing.",
+                    "transport_error": "target_identity_missing", "remote_effects": "not_sent"}
+        selected = list(argv)
+        if expected_cluster and selected and selected[0] in {"sbatch", "squeue", "sacct", "scancel", "scontrol", "sinfo"}:
+            selected.insert(1, "--clusters=" + expected_cluster)
+        identity = ({"user": str(slurm_target.get("user") or ""), "cluster": expected_cluster}
+                    if expected_cluster else None)
+        return _slurm_transport().run(slurm_target, selected, timeout=timeout, expected_identity=identity)
+    return _run(argv, timeout=timeout)
+
+
+def _slurm_kwargs(record: dict[str, Any]) -> dict[str, Any]:
+    return ({"slurm_target": record["slurm_target"], "expected_cluster": record.get("scheduler_cluster"),
+             "submission_nonce": record.get("submission_nonce"), "scheduler_submit_time": record.get("scheduler_submit_time")}
+            if record.get("slurm_target") is not None else {})
+
+
+def _nonce_kwargs(value: Any) -> dict[str, Any]:
+    return {"submission_nonce": str(value)} if value else {}
+
+
+def _job_path(record: dict[str, Any], value: str) -> str:
+    if record.get("slurm_target") is not None:
+        return _slurm_transport().normalize_path(value, base=record.get("workdir"))
+    return os.path.realpath(value)
+
+
+def _job_snapshot(record: dict[str, Any], value: str) -> dict[str, Any]:
+    if record.get("slurm_target") is not None:
+        return _slurm_files().health_snapshot(record, value)
+    return _health_file_snapshot(value)
+
+
+def _job_tail(record: dict[str, Any], value: str) -> str:
+    if record.get("slurm_target") is not None:
+        return _slurm_files().tail(record, value)
+    return _tail_for_health(value)
+
+
+def _job_output_identity(record: dict[str, Any], value: str) -> dict[str, Any]:
+    if record.get("slurm_target") is not None:
+        return _slurm_files().output_identity(record, value)
+    return _output_postconditions.output_identity(value)
+
+
+def _ssh_submission_path_guard(workdir: str, output_dir: str,
+                               output_roots: list[str], command: str | None = None) -> dict[str, Any] | None:
+    """Remote coordinates are authorized by the existing exact submit approval.
+
+    This is lexical protection, not a remote filesystem sandbox or a grant to
+    local files. The scheduler account and site remain the physical boundary.
+    """
+    protected = ("/etc", "/bin", "/sbin", "/usr", "/boot", "/proc", "/sys", "/dev")
+    for value in [workdir, output_dir, *output_roots]:
+        p = _slurm_transport().normalize_path(value)
+        parts = PurePosixPath(p).parts
+        if (p == "/" or any(p == root or p.startswith(root + "/") for root in protected)
+                or any(part in {".git", ".ssh", ".research"} for part in parts)):
+            return {"status": "error", "reason": "protected_remote_path",
+                    "error": f"Remote job output must use an application directory: {p}",
+                    "job_submitted": False}
+    if command:
+        try:
+            from .bash_semantics import analyze_bash
+        except ImportError:  # pragma: no cover
+            from tools.bash_semantics import analyze_bash
+        analysis = analyze_bash(command)
+        if analysis.analyzer_unavailable or analysis.parse_error:
+            return {"status": "error", "reason": "remote_path_analysis_unavailable",
+                    "error": "The remote command could not be parsed for protected-path writes; check shell syntax and the installed Bash parser before retrying.",
+                    "job_submitted": False}
+        for event in analysis.static_path_events:
+            targets = []
+            if event.kind == "redirect" and ">" in event.redirect_operator:
+                targets.extend(event.target_values)
+            elif event.kind == "command":
+                args = list(event.args)
+                operands = [a for a in args if a != "--" and not a.startswith("-")]
+                head = posixpath.basename(event.head or "")
+                if head in {"cd", "pushd", "rm", "touch", "mkdir", "rmdir", "truncate", "shred", "tee", "mv"}:
+                    targets.extend(operands)
+                elif head in {"chmod", "chown", "chgrp"}:
+                    targets.extend(operands[1:])
+                elif head in {"cp", "ln", "install"}:
+                    targets.extend(operands if head == "install" and any(a in {"-d", "--directory"} for a in args) else operands[-1:])
+                    for i, value in enumerate(args):
+                        if value in {"-t", "--target-directory"} and i + 1 < len(args):
+                            targets.append(args[i + 1])
+                        elif value.startswith("--target-directory="):
+                            targets.append(value.split("=", 1)[1])
+                elif head == "dd":
+                    targets.extend(a[3:] for a in args if a.startswith("of="))
+                # Common explicit compiler/build/download output switches.
+                if head in {"gcc", "g++", "cc", "c++", "clang", "clang++", "cmake", "curl", "wget"}:
+                    flags = {"-o", "--output", "-O", "-B", "--build", "--prefix", "--output-document", "-P", "--directory-prefix"}
+                    for i, value in enumerate(args):
+                        if value in flags and i + 1 < len(args):
+                            targets.append(args[i + 1])
+                        elif any(value.startswith(flag + "=") for flag in flags if flag.startswith("--")):
+                            targets.append(value.split("=", 1)[1])
+            for target in targets:
+                if not target or target in {"-", "&1", "&2", "/dev/null"} or "$" in target or "`" in target:
+                    continue
+                # Absolute literals and protected components remain meaningful
+                # even when cwd is dynamic; do not invent a local grant.
+                path = posixpath.normpath(target if target.startswith("/") else posixpath.join(workdir, target))
+                blocked = _ssh_submission_path_guard(path, path, [])
+                if blocked is not None:
+                    return {**blocked, "reason": "protected_remote_command_path", "command_fragment": event.raw}
+    return None
+
+
+_SLURM_TARGET_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "description": "Optional personal SSH login target using existing SSH config/agent. No password or private key. Paths are absolute Linux paths; the target is frozen with each submitted job.",
+    "properties": {
+        "host": {"type": "string", "minLength": 1},
+        "user": {"type": "string", "minLength": 1},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "login_shell": {"type": "boolean", "default": True},
+    },
+    "required": ["host"],
+}
 
 
 def _first_line(text: str, max_len: int = 500) -> str:
@@ -2088,16 +2265,24 @@ def _to_int(v: str) -> int | None:
         return None
 
 
-def _detect_slurm() -> dict[str, Any]:
-    available = bool(shutil.which("sinfo") and shutil.which("sbatch"))
+def _detect_slurm(slurm_target: dict[str, Any] | None = None) -> dict[str, Any]:
+    probe = _slurm_transport().probe(slurm_target) if slurm_target is not None else None
+    tools = (probe or {}).get("tools") or {}
+    available = (bool(probe.get("ok") and tools.get("sinfo") and tools.get("sbatch"))
+                 if probe is not None else bool(shutil.which("sinfo") and shutil.which("sbatch")))
     out = {
         "scheduler": "slurm",
         "available": available,
-        "commands": {k: bool(shutil.which(k)) for k in ("sinfo", "squeue", "sbatch", "sacct", "scancel")},
+        "commands": {k: bool(tools.get(k)) if probe is not None else bool(shutil.which(k)) for k in ("sinfo", "squeue", "sbatch", "sacct", "scancel")},
     }
+    if probe is not None:
+        out.update({"slurm_target": slurm_target, "remote_user": probe.get("user"),
+                    "scheduler_cluster": probe.get("cluster"), "probe": probe})
     if not available:
         return out
-    sinfo = _run(["sinfo", "-h", "-o", "%P|%a|%D|%t|%c|%m|%G"], timeout=12)
+    observed_target = {**slurm_target, "user": probe["user"]} if probe is not None else None
+    sinfo = _slurm_run(["sinfo", "-h", "-o", "%P|%a|%D|%t|%c|%m|%G"], timeout=12,
+                       slurm_target=observed_target, expected_cluster=(probe or {}).get("cluster"))
     partitions = []
     if sinfo["ok"]:
         for line in sinfo["stdout"].splitlines()[:80]:
@@ -2234,8 +2419,8 @@ def _submission_candidates(resources: list[dict[str, Any]], *, gpus: int = 0) ->
     ]
 
 
-def _discover(namespace: str | None = None) -> dict[str, Any]:
-    schedulers = [_local_resources(), _detect_slurm(), _detect_pbs(), _detect_k8s(namespace)]
+def _discover(namespace: str | None = None, *, slurm_target: dict[str, Any] | None = None) -> dict[str, Any]:
+    schedulers = [_local_resources(), _detect_slurm(slurm_target) if slurm_target is not None else _detect_slurm(), _detect_pbs(), _detect_k8s(namespace)]
     for resource in schedulers:
         scheduler = resource["scheduler"]
         resource["availability_basis"] = (
@@ -2299,11 +2484,13 @@ async def _discover_resources(
     state: State,
     namespace: str | None = None,
     save_artifact: bool = True,
+    slurm_target: dict[str, Any] | None = None,
     **_: Any,
 ) -> dict:
     """Discover live resources while carrying Core-owned host declarations."""
     try:
-        result = _discover(namespace)
+        target = _slurm_transport().normalize_target(slurm_target) if slurm_target is not None else None
+        result = _discover(namespace, **({"slurm_target": target} if target is not None else {}))
         if save_artifact:
             name = f"resource_profile_{state.run_id}"
             state.save_artifact(
@@ -2627,7 +2814,7 @@ def _safe_job_name(name: str) -> str:
 
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="\n")
 
 
 def _scheduler_path_block(
@@ -2958,7 +3145,7 @@ def _stage_in_readable(state: State, source: Path) -> bool:
     return bool(matching_path_roles(source, state))
 
 
-def _validate_stage_in(state: State, stage_in: Any) -> list[dict[str, str]]:
+def _validate_stage_in(state: State, stage_in: Any, *, remote: bool = False) -> list[dict[str, str]]:
     """Validate file-only staging without granting a new remote write root.
 
     每一项都带上 `sha256` 与 `mode`：两者都进提交确认的 payload，所以**批准之后
@@ -2983,13 +3170,17 @@ def _validate_stage_in(state: State, stage_in: Any) -> list[dict[str, str]]:
         source = source.resolve(strict=True)
         if not _stage_in_readable(state, source):
             raise ValueError(f"stage_in[{index}].src is outside this run's readable roots")
-        target = Path(dst)
+        target = PurePosixPath(dst) if remote else Path(dst)
+        if remote and ("\\" in dst or re.match(r"^[A-Za-z]:", dst)):
+            raise ValueError(f"stage_in[{index}].dst must use relative POSIX syntax")
         if (not dst.strip() or target.is_absolute() or ".." in target.parts
                 or str(target) in {".", ""}):
             raise ValueError(f"stage_in[{index}].dst must be a non-empty relative path without ..")
         # 可执行位保留，其余位不继承。固定 0644 会让暂存的求解器/脚本丢掉 +x，
         # 作业以 Permission denied 挂掉 —— 而那条错误正好落在重定向之前的
         # bootstrap 日志里，最难查的位置。
+        if remote and any(part in {".git", ".ssh", ".research"} for part in target.parts):
+            raise ValueError(f"stage_in[{index}].dst refers to a protected remote directory")
         mode = "0755" if os.stat(source).st_mode & 0o111 else "0644"
         digest = hashlib.sha256(source.read_bytes()).hexdigest()
         validated.append({"src": str(source), "dst": target.as_posix(),
@@ -2997,17 +3188,69 @@ def _validate_stage_in(state: State, stage_in: Any) -> list[dict[str, str]]:
     return validated
 
 
-def _stage_in_lines(workdir: str | None, stage_in: list[dict[str, str]]) -> list[str]:
+def _stage_in_lines(workdir: str | None, stage_in: list[dict[str, str]], *, remote: bool = False) -> list[str]:
     if not workdir or not stage_in:
         return []
+    if remote:
+        payload = json.dumps({"workdir": workdir, "files": stage_in}, ensure_ascii=True)
+        program = r'''import hashlib, json, os, shutil, stat, sys, uuid
+request = json.loads(sys.argv[1])
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+root = os.open("/", flags)
+try:
+    for part in request["workdir"].split("/"):
+        if not part:
+            continue
+        next_fd = os.open(part, flags, dir_fd=root)
+        os.close(root)
+        root = next_fd
+    for item in request["files"]:
+        parts = item["dst"].split("/")
+        if any(part in {"", ".", ".."} for part in parts) or "\\" in item["dst"]:
+            raise ValueError("invalid remote stage destination")
+        source = os.open(item["src"], os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(source, "rb") as source_stream:
+            if not stat.S_ISREG(os.fstat(source_stream.fileno()).st_mode):
+                raise ValueError("stage source must be a regular file")
+            digest = hashlib.sha256()
+            for block in iter(lambda: source_stream.read(1024 * 1024), b""):
+                digest.update(block)
+            if digest.hexdigest() != item["sha256"]:
+                raise ValueError("staged input changed after approval")
+            source_stream.seek(0)
+            parent = os.dup(root)
+            temporary = ".harness-stage-" + uuid.uuid4().hex
+            try:
+                for part in parts[:-1]:
+                    try:
+                        os.mkdir(part, 0o700, dir_fd=parent)
+                    except FileExistsError:
+                        pass
+                    next_fd = os.open(part, flags, dir_fd=parent)
+                    os.close(parent)
+                    parent = next_fd
+                output = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+                with os.fdopen(output, "wb") as output_stream:
+                    shutil.copyfileobj(source_stream, output_stream)
+                    os.fchmod(output_stream.fileno(), int(item.get("mode", "0644"), 8))
+                    output_stream.flush()
+                    os.fsync(output_stream.fileno())
+                os.replace(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent)
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=parent)
+                except FileNotFoundError:
+                    pass
+                os.close(parent)
+finally:
+    os.close(root)
+'''
+        return ["python3 -c " + shlex.quote(program) + " " + shlex.quote(payload) + " || exit 89"]
     lines: list[str] = []
     for item in stage_in:
         src = shlex.quote(item["src"])
         dst = shlex.quote(os.path.join(os.path.expanduser(workdir), item["dst"]))
-        lines += [
-            f'test ! -L {dst} || exit 89',
-            f'install -D -m {item.get("mode", "0644")} {src} {dst}',
-        ]
+        lines += [f'test ! -L {dst} || exit 89', f'install -D -m {item.get("mode", "0644")} {src} {dst}']
     return lines
 
 
@@ -3413,9 +3656,10 @@ def _script_for(
     bootstrap_dir: str | None = None,
     submission_nonce: str | None = None,
     hard_deadline_s: int | None = None,
+    remote: bool = False,
 ) -> str:
     quoted = command.strip()
-    stage_lines = _stage_in_lines(workdir, stage_in or [])
+    stage_lines = _stage_in_lines(workdir, stage_in or [], remote=remote)
     bootstrap = _bootstrap_lines(workdir, output_dir, scheduler, job_name)
     cd_line = f"cd {shlex.quote(os.path.expanduser(workdir))}" if workdir else None
     boot_dir = shlex.quote(os.path.expanduser(bootstrap_dir)) if bootstrap_dir else None
@@ -4127,6 +4371,7 @@ class _NativeLocalJobLaunchAdapter:
             stdout_path=spec["stdout_path"],
             stderr_path=spec["stderr_path"],
             gpus=spec["gpus"],
+            gpu_lease=spec.get("gpu_lease"),
         )
         return _PreparedSubmissionLaunch(
             intent_fields={
@@ -4307,6 +4552,15 @@ def _close_unbound_intent(state: Any, nonce: str, result: Any) -> None:
         return
 
 
+def _gpu_lease_for(state: State | None, gpus: int | None) -> Any:
+    """本 run 经人批准分到的卡（``core.gpu.GpuLease``）；不要 GPU 的作业不带。"""
+    if not int(gpus or 0):
+        return None
+    from core.capability_grants import gpu_lease
+
+    return gpu_lease(state)
+
+
 def _submit_sync(*args: Any, **kwargs: Any) -> dict[str, Any]:
     """提交入口：intent 落盘后没有拿到 ACK 的每条出路都关闭 intent（含异常）。"""
     import uuid as _uuid
@@ -4393,9 +4647,21 @@ def _submit_sync_impl(
     hard_deadline_s: int | None = None,
     payload_executables: list[dict[str, str]] | None = None,
     input_observation: dict[str, Any] | None = None,
+    slurm_target: dict[str, Any] | None = None,
+    slurm_probe: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     job_name = _safe_job_name(job_name)
     scheduler = scheduler.lower()
+    remote = slurm_target is not None
+    if remote:
+        if scheduler != "slurm":
+            return {"status": "error", "reason": "slurm_target_requires_slurm", "job_submitted": False}
+        slurm_target = _slurm_transport().normalize_target(slurm_target)
+        workdir = _slurm_transport().normalize_path(workdir)
+        output_dir = _slurm_transport().normalize_path(output_dir or workdir)
+        if not dry_run and not (slurm_probe or {}).get("ok"):
+            return {"status": "error", "reason": "slurm_target_probe_required", "job_submitted": False}
+
     if scheduler == "local":
         workdir = os.path.realpath(os.path.expanduser(workdir)) if workdir else None
         output_dir = os.path.realpath(os.path.expanduser(output_dir)) if output_dir else None
@@ -4412,10 +4678,13 @@ def _submit_sync_impl(
         walltime_minutes=walltime_minutes,
     )
     job_dir = runtime_root / "jobs" / f"{submission_nonce}_{job_name}"
-    sched_output_dir = _scheduler_output_dir(scheduler, workdir, job_dir, output_dir)
+    sched_output_dir = (PurePosixPath(output_dir) if remote else
+                        _scheduler_output_dir(scheduler, workdir, job_dir, output_dir))
     output_patterns = _output_path_patterns(scheduler, sched_output_dir, job_name)
     bootstrap_log_dir = job_dir
-    if scheduler == "slurm" and not dry_run:
+    if remote:
+        bootstrap_log_dir = PurePosixPath(_slurm_files().bootstrap_path(submission_nonce, job_name, output_dir))
+    elif scheduler == "slurm" and not dry_run:
         # The ledger and script may live on the submit host; Slurm's stdout
         # target must exist on the compute host before the script starts.
         # Use the already-authorized output directory, with a nonce-specific
@@ -4440,7 +4709,7 @@ def _submit_sync_impl(
                 "job_submitted": False,
             }
     output_patterns.update(_bootstrap_log_patterns(scheduler, bootstrap_log_dir))
-    output_roots = _normalize_output_roots(output_paths, workdir, runtime_root)
+    output_roots = _normalize_output_roots(output_paths, workdir, runtime_root, remote=remote)
     try:
         from .ledger import try_record as _ledger_try_record, v3_active as _v3_active
     except ImportError:  # pragma: no cover
@@ -4476,6 +4745,9 @@ def _submit_sync_impl(
                 state, "intent", nonce=submission_nonce, scheduler=scheduler, job_name=job_name,
                 output_root=str(job_dir), output_roots=[str(r) for r in output_roots],
                 workdir=workdir, queue=queue, route_attempt_id=route_attempt_id,
+                **({"slurm_target": slurm_target, "remote_user": (slurm_probe or {}).get("user"),
+                    "launch_host": slurm_target["host"], "scheduler_cluster": (slurm_probe or {}).get("cluster"),
+                    "scheduler_output_dir": str(sched_output_dir), "bootstrap_log_dir": str(bootstrap_log_dir)} if remote else {}),
                 requested_resources=requested_resources,
                 execution_context=capture_context(
                     state, execution_params=execution_params, input_observation=input_observation),
@@ -4586,8 +4858,9 @@ def _submit_sync_impl(
     script = _script_for(
         scheduler, command, job_name, mpi_ranks, cpus_per_rank, gpus,
         memory_gb, walltime_minutes, queue, nodelist, image, workdir, str(sched_output_dir),
-        stage_in, str(bootstrap_log_dir), submission_nonce,
-        hard_deadline_s=hard_deadline_s,
+        (_slurm_files().remote_stage_in(stage_in or [], str(bootstrap_log_dir)) if remote else stage_in),
+        str(bootstrap_log_dir), submission_nonce,
+        hard_deadline_s=hard_deadline_s, remote=remote,
     )
     _write(script_path, script)
     if scheduler != "kubernetes":
@@ -4602,6 +4875,10 @@ def _submit_sync_impl(
         # inspect the submission without depending on the original shell.
         "submitted_at": datetime.now(timezone.utc).isoformat(),
         "submission_nonce": submission_nonce,
+        **({"slurm_target": slurm_target, "remote_user": (slurm_probe or {}).get("user"),
+            "launch_host": slurm_target["host"], "scheduler_cluster": (slurm_probe or {}).get("cluster"),
+            "remote_write_isolation": "missing",
+            "remote_script_path": str(bootstrap_log_dir / "job.sh")} if remote else {}),
         "script_sha256": hashlib.sha256(script.encode("utf-8")).hexdigest(),
         "command": command,
         "execution_class": execution_class,
@@ -4678,7 +4955,7 @@ def _submit_sync_impl(
     try:
         base["health_contract"] = _health_contract(
             health_check, workdir=workdir, output_roots=output_roots,
-            scheduler_output_dir=sched_output_dir, expected_duration_s=expected_duration_s,
+            scheduler_output_dir=sched_output_dir, expected_duration_s=expected_duration_s, remote=remote,
         )
     except ValueError as exc:
         return {"status": "error", "error": str(exc), "scheduler": scheduler,
@@ -4723,7 +5000,7 @@ def _submit_sync_impl(
                     "pids", "disk_pressure_monitoring", "filesystem_quota"],
             }
     if dry_run:
-        base["submit_command"] = _submit_command(scheduler, script_path, namespace, workdir, bootstrap_log_dir)
+        base["submit_command"] = _submit_command(scheduler, PurePosixPath(base["remote_script_path"]) if remote else script_path, namespace, workdir, bootstrap_log_dir)
         if scheduler == "local":
             # 信号反转防线：dry_run 只渲染脚本，不跑 payload 可执行目标预检；
             # 说清楚这一点，agent 才不会把"dry_run 成功"记成"预检通过"，
@@ -4786,6 +5063,7 @@ def _submit_sync_impl(
                 "stdout_path": out,
                 "stderr_path": err,
                 "gpus": gpus,
+                "gpu_lease": _gpu_lease_for(state, gpus),
             })
         except Exception as exc:
             # prepare 失败发生在 intent 与 launch 之前：零执行的准入拒绝，
@@ -4881,17 +5159,35 @@ def _submit_sync_impl(
     if intent.get("status") != "success":
         return {**base, **intent}
     base["submission_intent_artifact_id"] = intent["artifact_id"]
+    if remote:
+        prepared = _slurm_files().prepare_submission(
+            state, slurm_target, nonce=submission_nonce, job_name=job_name,
+            workdir=workdir, output_dir=output_dir, stage_in=stage_in or [], script_path=script_path,
+            remote_user=(slurm_probe or {}).get("user"), scheduler_cluster=(slurm_probe or {}).get("cluster"))
+        if not prepared.get("ok"):
+            terminal = _terminalize_submission_intent(
+                state, base, route_attempt_id=route_attempt_id,
+                intent_status="aborted_before_submit", submission_boundary_crossed=False,
+                terminal_reason="ssh_staging_failed", terminal_evidence={"prepare": prepared})
+            return {**base, "status": "error", "reason": "slurm_staging_failed",
+                    "job_submitted": False, "preparation": prepared,
+                    "intent_status": terminal.get("intent_status"), "do_not_resubmit": True,
+                    "retry_requires_new_attempt": True}
+        base["remote_script_path"] = prepared["remote_script_path"]
+        cmd = _submit_command(scheduler, PurePosixPath(prepared["remote_script_path"]), namespace,
+                              workdir, PurePosixPath(prepared["bootstrap_log_dir"]))
     marker_refusal = _submission_attempt_marker_refusal(
         state, nonce=submission_nonce, scheduler=scheduler)
     if marker_refusal is not None:
         return {**base, **marker_refusal}
     # marker durable 之后 ACK 可能已经发生；任何异常都只能是 unknown，不能猜 absent。
-    submitted = _run(cmd, timeout=20)
+    submitted = _slurm_run(cmd, slurm_target=slurm_target, timeout=20, expected_cluster=(slurm_probe or {}).get("cluster")) if remote else _run(cmd, timeout=20)
     if not submitted["ok"]:
         returncode = submitted.get("returncode")
         command_not_found = (
             returncode is None
             and str(submitted.get("stderr") or "") == "not found"
+            and not remote
         )
         stderr_text = str(submitted.get("stderr") or "").casefold()
         # A nonzero client exit alone is not proof the controller rejected
@@ -4904,6 +5200,7 @@ def _submit_sync_impl(
             returncode is not None and int(returncode) > 0
             and not str(submitted.get("stdout") or "").strip()
             and not uncertainty_signal
+            and not submitted.get("transport_error")
             and (
                 "rejected" in stderr_text
                 or (scheduler == "slurm" and stderr_text.lstrip().startswith("sbatch: error:"))
@@ -4977,7 +5274,19 @@ def _submit_sync_impl(
             "error": "scheduler accepted the submission but no machine-readable job identity was parsed",
             "do_not_resubmit": True,
         }
+    if remote and identity.get("scheduler_cluster") not in {None, base["scheduler_cluster"]}:
+        _ledger_try_record(state, "job_unknown", nonce=submission_nonce, scheduler=scheduler,
+                           reason="Slurm ACK cluster differs from the approved target; do not resubmit",
+                           submit_stdout=str(submitted.get("stdout") or "")[-500:])
+        return {**base, "status": "submission_outcome_unknown", "job_id": None,
+                "reason": "slurm_ack_cluster_mismatch", "acknowledged_identity": identity,
+                "submit_command": cmd, "submit_result": submitted, "do_not_resubmit": True,
+                "error": "Scheduler reported acceptance on a different cluster; retain the intent for reconciliation."}
     job_id = str(identity["job_id"])
+    if remote:
+        witness = _slurm_submission_witness(job_id, slurm_target, (slurm_probe or {}).get("cluster"), submission_nonce)
+        if witness is not None:
+            base["scheduler_submit_time"] = witness["SubmitTime"]
     resolved_namespace = base.get("namespace") or identity.get("namespace")
     if state is not None and not dry_run:
         bound = _ledger_try_record(
@@ -5217,6 +5526,53 @@ def _slurm_accounting_argv(job_id: str) -> list[str]:
     ]
 
 
+def _slurm_submission_witness(job_id: str, target: dict[str, Any], cluster: str | None,
+                               nonce: str | None) -> dict[str, str] | None:
+    result = _slurm_run(["scontrol", "show", "job", "-o", str(job_id)], slurm_target=target, expected_cluster=cluster)
+    rows = [dict(re.findall(r"(?:^|\s)([A-Za-z][A-Za-z0-9]*)=([^\s]*)", line))
+            for line in str(result.get("stdout") or "").splitlines() if line.strip()]
+    if not result.get("ok") or len(rows) != 1 or not nonce:
+        return None
+    row = rows[0]
+    if (row.get("JobId") != str(job_id) or row.get("Comment") != "ai4s:" + nonce
+            or row.get("UserId", "").split("(", 1)[0] != target.get("user")
+            or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", row.get("SubmitTime", ""))):
+        return None
+    return row
+
+
+def _slurm_accounting_result(job_id: str, *, slurm_target: dict[str, Any] | None = None,
+                             expected_cluster: str | None = None, submission_nonce: str | None = None,
+                             scheduler_submit_time: str | None = None) -> dict[str, Any]:
+    if slurm_target is None:
+        return _slurm_run(_slurm_accounting_argv(job_id), timeout=10)
+    fields = (*_SLURM_ACCOUNTING_FIELDS, "User", "Comment", "Submit", "Cluster")
+    result = _slurm_run(["sacct", "--duplicates", "-n", "-P", "-j", str(job_id),
+                         "--user=" + str(slurm_target.get("user") or ""), "-o", ",".join(fields)],
+                        timeout=10, slurm_target=slurm_target, expected_cluster=expected_cluster)
+    if not result.get("ok"):
+        return result
+    rows = [dict(zip(fields, (line.split("|") + [""] * len(fields))[:len(fields)]))
+            for line in str(result.get("stdout") or "").splitlines() if line.strip()]
+    def identity(row):
+        if row.get("User") != slurm_target.get("user") or row.get("Cluster") != expected_cluster:
+            return False
+        comment = row.get("Comment", "")
+        if comment:
+            return bool(submission_nonce and comment == "ai4s:" + submission_nonce)
+        return bool(scheduler_submit_time and row.get("Submit") == scheduler_submit_time)
+    allocations = [row for row in rows if row.get("JobIDRaw") == str(job_id) and identity(row)]
+    if len(allocations) != 1:
+        return {**result, "ok": False, "stdout": "", "identity_unconfirmed": True,
+                "stderr": "Accounting has no unique exact job/user/cluster/nonce or frozen submit-time match."}
+    allocation = allocations[0]
+    selected = [allocation] + [row for row in rows if row.get("JobIDRaw", "").startswith(str(job_id) + ".")
+                              and identity(row) and row.get("Submit") == allocation.get("Submit")]
+    return {**result, "stdout": "\n".join("|".join(row.get(key, "") for key in _SLURM_ACCOUNTING_FIELDS)
+                                           for row in selected),
+            "identity_verified": True, "scheduler_submit_time": allocation.get("Submit")}
+
+
 def _slurm_state_name(value: Any) -> str:
     text = str(value or "").strip().upper()
     return (text.split()[0] if text else "").rstrip("+")
@@ -5353,11 +5709,14 @@ def _slurm_accounting_facts(
     }
 
 
-def _scheduler_environment_snapshot(scheduler: str, job_id: str | None, namespace: str | None) -> dict[str, Any]:
+def _scheduler_environment_snapshot(scheduler: str, job_id: str | None, namespace: str | None, *, slurm_target: dict[str, Any] | None = None, expected_cluster: str | None = None, submission_nonce: str | None = None, scheduler_submit_time: str | None = None) -> dict[str, Any]:
     scheduler = str(scheduler or "").lower()
     if scheduler == "slurm":
+        probe = (lambda argv: _slurm_run(argv, slurm_target=slurm_target, timeout=12, expected_cluster=expected_cluster)) if slurm_target is not None else _execution_probe
         accounting = (
-            _execution_probe(_slurm_accounting_argv(str(job_id)))
+            (_slurm_accounting_result(str(job_id), slurm_target=slurm_target, expected_cluster=expected_cluster,
+                                      submission_nonce=submission_nonce, scheduler_submit_time=scheduler_submit_time)
+             if slurm_target is not None else probe(_slurm_accounting_argv(str(job_id))))
             if job_id else None
         )
         accounting_facts = (
@@ -5365,9 +5724,10 @@ def _scheduler_environment_snapshot(scheduler: str, job_id: str | None, namespac
             if job_id and accounting is not None else None
         ) or {}
         return {
-            "runtime_version": _execution_probe(["scontrol", "--version"]),
+            "runtime_version": probe(["scontrol", "--version"]),
             "job_snapshot": (
-                _execution_probe(["scontrol", "show", "job", "-o", str(job_id)])
+                (_slurm_submission_witness(str(job_id), slurm_target, expected_cluster, submission_nonce)
+                 if slurm_target is not None else probe(["scontrol", "show", "job", "-o", str(job_id)]))
                 if job_id else None
             ),
             "accounting_snapshot": accounting,
@@ -5441,7 +5801,7 @@ def _persist_execution_environment_evidence(state: State, result: dict[str, Any]
                 # POSIX 上 platform.uname() 就是读 os.uname()，值逐字不变。
                 "host": {"hostname": platform.uname().node, "kernel": platform.uname().release,
                          "gpu": host_gpu},
-                "scheduler_snapshot": _scheduler_environment_snapshot(str(result.get("scheduler") or ""), result.get("job_id"), result.get("namespace")),
+                "scheduler_snapshot": _scheduler_environment_snapshot(str(result.get("scheduler") or ""), result.get("job_id"), result.get("namespace"), **_slurm_kwargs(result)),
                 "container": container or {"status": "not_applicable", "reason": "payload is not a recognized container run/exec"}}
     state.save_artifact("execution_environment_evidence", f"execution_environment_{state.run_id}_{result.get('job_id') or time.time_ns()}_{phase}", json.dumps(evidence, ensure_ascii=False, indent=2), metadata={"phase": phase, "scheduler": str(result.get("scheduler") or ""), "job_id": str(result.get("job_id") or ""), "image_digest": (container or {}).get("image_digest")})
     state.append_transcript("execution_environment_evidence", phase=phase, job_id=result.get("job_id"), scheduler=result.get("scheduler"))
@@ -6611,6 +6971,7 @@ async def _submit_job(
     stage_in: list[dict[str, str]] | None = None,
     route_step_id: str | None = None,
     expected_termination: dict[str, Any] | None = None,
+    slurm_target: dict[str, Any] | None = None,
     **_: Any,
 ) -> dict:
     """Render or submit a job through local/SLURM/PBS/Kubernetes."""
@@ -6699,6 +7060,25 @@ async def _submit_job(
             "error": "foreground_wait_s 只适用于 dry_run=false 的真实提交。",
         }
     scheduler = str(scheduler or "").strip().lower()
+    remote = slurm_target is not None
+    slurm_probe = None
+    if remote:
+        if scheduler not in {"auto", "slurm"}:
+            return {"status": "error", "reason": "slurm_target_requires_slurm", "job_submitted": False}
+        scheduler = "slurm"
+        try:
+            slurm_target = _slurm_transport().normalize_target(slurm_target)
+            workdir = _slurm_transport().normalize_path(workdir)
+            output_dir = _slurm_transport().normalize_path(output_dir or workdir)
+            output_paths = [_slurm_transport().normalize_path(p, base=workdir) for p in output_paths or []]
+            path_block = _ssh_submission_path_guard(workdir, output_dir, output_paths, command=command)
+            if path_block is not None:
+                return path_block
+        except (TypeError, ValueError) as exc:
+            return {"status": "error", "reason": "invalid_slurm_target_or_path",
+                    "error": str(exc), "job_submitted": False,
+                    "next_action": "Use an SSH host or alias and absolute Linux work/output paths."}
+
     if scheduler == "auto":
         try:
             candidate = _discover(namespace)["recommended_default"]
@@ -6734,28 +7114,65 @@ async def _submit_job(
                 "the deployment-pinned sandbox image is mandatory"
             ),
         }
+    if scheduler == "local" and int(mpi_ranks or 1) > 1:
+        # 本机多进程通信（#1166；框架侧代改，owner: lujy）。MPI_Init 要在作业里 bind/connect
+        # 回环 TCP；这台机器的墙给不给，是 core 的事实（`job_tcp_capability`，开局说明读的是同
+        # 一个）。给不了就在确认卡之前、零副作用地说清 —— 不然作业批准之后在 MPI_Init 上失败，
+        # 是 09-28 node20 FVCOM 那次的形状（`bind(): Permission denied`）。
+        from core.sandbox import job_tcp_capability
+
+        job_tcp = job_tcp_capability()
+        if not job_tcp.runs:
+            return {
+                "status": "error",
+                "error_code": "local_mpi_unsupported",
+                "error": (
+                    f"scheduler=local 跑不了 mpi_ranks={int(mpi_ranks)} 的作业：{job_tcp.sentence()} "
+                    "本次未生成脚本、未弹确认卡、未提交。"
+                ),
+                "requested_mpi_ranks": int(mpi_ranks),
+                "job_tcp": job_tcp.as_dict(),
+                "side_effects": "none",
+                "retryable": False,
+                "retryable_after_change": True,
+                "next_actions": [
+                    "作业确实只需要单进程：把 mpi_ranks 改为 1 后重新调用",
+                    "需要多进程：如实报告能力缺口（部署需要 bubblewrap 可用），或在站点与账号已获授权时"
+                    "显式选择 scheduler=slurm；不要降低任务要求。",
+                ],
+            }
     if scheduler == "local" and int(gpus or 0) > 0:
-        # 本机原生隔离后端不提供 GPU 执行：core/sandbox.prepare_launch 对 gpus>0 直接抛
-        # SandboxContractError。那道拒绝发生在人批准之后（#893）——确认卡白弹，批准的
-        # 是一个注定起不来的作业。同一个物理事实挪到这里、确认卡之前说清楚，零副作用。
+        # 本机 GPU（#893 阶段 1，wangd 10-21 裁决；框架侧代改，owner: lujy）。能不能用由
+        # core 判：这台机器看不看得见卡、墙放不放得开 CUDA 运行时、还有没有空闲的卡
+        # （``gpu_capability``，开局说明与 discover_resources 读的是同一个）。两种拒绝都在
+        # 确认卡之前、零副作用 —— 批准一个注定起不来的作业是 #893 的原始病症。
         # dry_run 同样拒：渲染一份本地永远起不来的脚本只会让"dry_run 成功"误导人。
-        return {
-            "status": "error",
-            "error_code": "local_gpu_execution_unsupported",
-            "error": (
-                "scheduler=local 不能申请 GPU：本机原生隔离后端不提供 GPU 执行，这样的作业"
-                "会在批准之后被拒。本次未生成脚本、未弹确认卡、未提交。"
-            ),
-            "requested_gpus": int(gpus),
-            "side_effects": "none",
-            "retryable": True,
-            "next_actions": [
-                "作业确实不需要 GPU：把 gpus 改为 0 后重新调用",
-                "需要 GPU：保留资源要求；若站点和账号已获授权，显式选择 scheduler=slurm "
-                "提交单任务、单 GPU 作业。auto 不会转远端；PBS dry_run 只渲染脚本，"
-                "不能代替 Slurm 的真实提交、分配与实算证据。",
-            ],
-        }
+        from core.sandbox import gpu_capability
+
+        requested_gpus = int(gpus)
+        gpu_cap = gpu_capability()
+        if not gpu_cap.schedulable:
+            return {
+                "status": "error",
+                "error_code": "local_gpu_execution_unsupported",
+                "error": (
+                    f"scheduler=local 现在申请不到 GPU：{gpu_cap.sentence()} "
+                    "本次未生成脚本、未弹确认卡、未提交。"
+                    "相同参数重复调用不会改变结果；需改变执行目标或补齐后端能力后再试。"
+                ),
+                "requested_gpus": requested_gpus,
+                "gpu": gpu_cap.as_dict(),
+                "side_effects": "none",
+                "retryable": False,
+                "retryable_after_change": True,
+                "next_actions": [
+                    "作业确实不需要 GPU：把 gpus 改为 0 后重新调用",
+                    "需要 GPU：保留资源要求；若目标支持所需资源且站点和账号已获授权，"
+                    "可显式选择 scheduler=slurm 提交当前支持的单任务、单 GPU 作业。"
+                    "不匹配时报告能力缺口，不要降低任务要求。auto 不会转远端；PBS dry_run 只渲染脚本，"
+                    "不能代替 Slurm 的真实提交、分配与实算证据。",
+                ],
+            }
     normalized_expected_termination, termination_refusal = _anchored_expected_termination(
         state, expected_termination)
     if termination_refusal is not None:
@@ -6962,9 +7379,40 @@ async def _submit_job(
     if scheduler == "local":
         workdir = os.path.realpath(os.path.expanduser(workdir))
         output_dir = os.path.realpath(os.path.expanduser(output_dir))
-    output_roots = _normalize_output_roots(output_paths, workdir, runtime_root)
+    if remote and not dry_run:
+        slurm_probe = await asyncio.to_thread(_slurm_transport().probe, slurm_target)
+        tools = slurm_probe.get("tools") or {}
+        if (not slurm_probe.get("ok") or not slurm_probe.get("user") or not slurm_probe.get("cluster")
+                or not all(tools.get(name) for name in ("sbatch", "squeue", "sacct", "scancel", "scontrol"))):
+            return {"status": "error", "reason": "slurm_target_unavailable", "job_submitted": False,
+                    "probe": slurm_probe, "next_action": "Check the selected SSH login and its Slurm tools; the submit host was not used as a fallback."}
+        # Freeze the observed remote account rather than the Windows login or
+        # an SSH configuration default that might change before cancellation.
+        slurm_target = {**slurm_target, "user": slurm_probe["user"]}
+        paths = await asyncio.to_thread(_slurm_files().check_paths, slurm_target, workdir, output_dir,
+                                       expected_identity={"user": slurm_probe["user"], "cluster": slurm_probe["cluster"]})
+        if not paths.get("ok"):
+            return {"status": "error", "reason": "slurm_path_not_ready", "job_submitted": False,
+                    "error": paths.get("error"), "path_check": paths}
+        old_workdir, old_output_dir = workdir, output_dir
+        workdir = _slurm_transport().normalize_path(paths["workdir"])
+        output_dir = _slurm_transport().normalize_path(paths["output_dir"])
+        def canonical_root(value):
+            for old, new in sorted([(old_workdir, workdir), (old_output_dir, output_dir)], key=lambda row: -len(row[0])):
+                if value == old or value.startswith(old + "/"):
+                    return new + value[len(old):]
+            return value
+        output_paths = [canonical_root(value) for value in output_paths or []]
+        if isinstance(health_check, dict):
+            health_check = {**health_check, **{key: [canonical_root(value) for value in health_check[key]]
+                                  for key in ("completion_paths", "progress_paths") if isinstance(health_check.get(key), list)}}
+        path_block = _ssh_submission_path_guard(workdir, output_dir, output_paths, command=command)
+        if path_block is not None:
+            return path_block
+        route_decision["resolved_workdir"] = workdir
+    output_roots = _normalize_output_roots(output_paths, workdir, runtime_root, remote=remote)
     try:
-        validated_stage_in = _validate_stage_in(state, stage_in)
+        validated_stage_in = _validate_stage_in(state, stage_in, remote=remote)
     except ValueError as exc:
         return {"status": "error", "error": str(exc)}
     try:
@@ -6972,7 +7420,7 @@ async def _submit_job(
             from .safe_bash import _observed_workdir_roles
         except ImportError:
             from tools.safe_bash import _observed_workdir_roles
-        route_action["workdir_roles"] = _observed_workdir_roles(state, workdir)
+        route_action["workdir_roles"] = [] if remote else _observed_workdir_roles(state, workdir)
     except Exception:
         route_action["workdir_roles"] = []
     route_decision = dict(route_decision)
@@ -6986,7 +7434,8 @@ async def _submit_job(
         {
             "command": command,
             "scheduler": scheduler,
-            "cwd": str(Path(str(workdir)).resolve(strict=False)),
+            "cwd": workdir if remote else str(Path(str(workdir)).resolve(strict=False)),
+            **({"slurm_target": slurm_target} if remote else {}),
             "mpi_ranks": int(mpi_ranks),
             "cpus_per_rank": int(cpus_per_rank),
             "gpus": int(gpus),
@@ -7000,7 +7449,7 @@ async def _submit_job(
             "execution_params": execution_params,
             "stage_in": validated_stage_in,
             # K9 改法 1：命令引用的脚本改了才算载荷变了（见 safe_bash._referenced_file_fingerprints）。
-            **_referenced_files_payload(command, workdir, state),
+            **({} if remote else _referenced_files_payload(command, workdir, state)),
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -7019,7 +7468,7 @@ async def _submit_job(
                 REMOTE_SCRATCH, UNRESOLVED, _activity_path_role_guard,
                 _analyze_shell_path_effects, _bash_path_effects_guard,
                 _sandbox_roots_for_payload)
-        if scheduler != "kubernetes":
+        if scheduler != "kubernetes" and not remote:
             path_effect_block = _bash_path_effects_guard(
                 state, command, cwd=workdir,
                 remote=scheduler in {"slurm", "pbs"},
@@ -7036,7 +7485,7 @@ async def _submit_job(
                 state, str(workdir), sandbox_profile="bash",
                 authorized_targets=authorized_targets,
             )
-        activity_block = _activity_path_role_guard(
+        activity_block = None if remote else _activity_path_role_guard(
             state, command, cwd=workdir, route_decision=route_decision,
             sandbox_roots=build_sandbox_roots, local_write_boundary=scheduler == "local")
         if activity_block is not None:
@@ -7080,12 +7529,12 @@ async def _submit_job(
     # redirection to write elsewhere, so it must pass the same node-local
     # path-role guard as safe_run_bash. This is a validity gate, never a bypass
     # permission.
-    role_block = _scheduler_role_guard(
+    role_block = None if remote else _scheduler_role_guard(
         state, scheduler, command, workdir, output_dir, output_roots,
         build_sandbox_roots=build_sandbox_roots)
     if role_block is not None:
         return role_block
-    if scheduler == "slurm" and not dry_run:
+    if scheduler == "slurm" and not dry_run and not remote:
         # Slurm opens stdout/stderr before the script body runs.  A nonexistent
         # output directory cannot be created by that same script.
         for label, path in (("workdir", workdir), ("output_dir", output_dir)):
@@ -7260,7 +7709,7 @@ async def _submit_job(
                 "unexpected_execution_parameters": execution_contract.get("unexpected_execution_parameters"),
             }
     if not dry_run:
-        conflicts = _active_output_conflicts(state, output_roots)
+        conflicts = _active_output_conflicts(state, output_roots, **({"slurm_target": slurm_target} if remote else {}))
         if conflicts:
             return {
                 "status": "error",
@@ -7373,6 +7822,17 @@ async def _submit_job(
                 "network_isolation": "unverified",
                 "resource_limits": "scheduler_requested_not_independently_verified",
             }
+        if scheduler == "local" and int(gpus or 0) > 0:
+            # 本机 GPU 卡还没批：框架替它问（#893 阶段 1，RFC_CAPABILITY_GRANTS_LAYERING §3.2
+            # —— 要不要 GPU 从 gpus 机械可得，不交给模型去申请；框架侧代改，owner: lujy）。
+            # 放在所有零副作用的校验之后、确认卡之前：人批的必须是一个起得来的作业（#893）。
+            # 拿到的是那张授权卡（pause），原样交回 loop；批了这个 run 当场分到卡，模型原样重提。
+            from core.capability_grants import GPU_CAPABILITY, require
+
+            grant_outcome = require(state, GPU_CAPABILITY, int(gpus),
+                                    reason=f"受管作业 {job_name}：{command[:160]}")
+            if grant_outcome is not None:
+                return grant_outcome
         category = _managed_job_confirmation_category(
             action="submit", scheduler=scheduler,
             highrisk_category=highrisk_category,
@@ -7388,6 +7848,7 @@ async def _submit_job(
                 "operation": "submit_external_job",
                 "command": command,
                 "scheduler": scheduler,
+                **({"slurm_target": slurm_target, "remote_user": slurm_probe["user"], "scheduler_cluster": slurm_probe["cluster"]} if remote else {}),
                 "job_name": job_name,
                 "mpi_ranks": mpi_ranks,
                 "cpus_per_rank": cpus_per_rank,
@@ -7432,7 +7893,7 @@ async def _submit_job(
                 # 在批准之后被改过，这次批准对它不成立。路径没变而内容变了，是这条
                 # 机制唯一能被悄悄绕过的形态。
                 try:
-                    recheck = _validate_stage_in(state, stage_in)
+                    recheck = _validate_stage_in(state, stage_in, remote=remote)
                 except ValueError as exc:
                     return {"status": "error", "error": str(exc)}
                 if recheck != validated_stage_in:
@@ -7471,6 +7932,7 @@ async def _submit_job(
                     category=category,
                     preview=(
                         f"scheduler={scheduler}\njob_name={job_name}\n"
+                        f"slurm_target={json.dumps(slurm_target, ensure_ascii=False) if remote else 'local CLI'}\n"
                         f"workdir={workdir or ''}\noutput_dir={output_dir or ''}\n"
                         "requested_resources="
                         + json.dumps(
@@ -7545,6 +8007,7 @@ async def _submit_job(
             hard_deadline_s=hard_deadline_s,
             payload_executables=payload_executables,
             input_observation=input_observation,
+            **({"slurm_target": slurm_target, "slurm_probe": slurm_probe} if remote else {}),
         )
         result["formal_input_gate"] = formal_input_gate
         try:
@@ -7746,7 +8209,7 @@ async def _submit_job(
                 str(result.get("scheduler") or scheduler),
                 str(result["job_id"]),
                 namespace=result.get("namespace"),
-                max_wait_s=foreground_wait_s,
+                max_wait_s=foreground_wait_s, **_nonce_kwargs(result.get("submission_nonce")),
                 _allow_short_wait=True,
             )
             result["foreground_wait"] = waited
@@ -7858,6 +8321,7 @@ def _local_job_ended_on_its_own(sandbox_state: dict[str, Any]) -> bool:
 
 def _remote_job_ended_on_its_own(
     scheduler: str, raw: dict[str, Any], job_id: str,
+    *, slurm_target: dict[str, Any] | None = None, expected_cluster: str | None = None, submission_nonce: str | None = None, scheduler_submit_time: str | None = None,
 ) -> dict[str, Any] | None:
     """远端调度器的正向终止证据；拿不到就返回 None（当作读不出，取消照旧可行）。
 
@@ -7904,7 +8368,8 @@ def _remote_job_ended_on_its_own(
     if kind == "slurm":
         # Queue absence is not terminal proof. Accounting allocation state owns
         # terminality; step rows contribute only OOM and resource facts.
-        accounting = _run(_slurm_accounting_argv(str(job_id)), timeout=10)
+        accounting = _slurm_accounting_result(str(job_id), slurm_target=slurm_target, expected_cluster=expected_cluster,
+                                             submission_nonce=submission_nonce, scheduler_submit_time=scheduler_submit_time)
         facts = _slurm_accounting_facts(str(job_id), accounting)
         if facts is None or facts.get("terminal") is not True:
             return None
@@ -7936,7 +8401,7 @@ async def _observed_job_end(
         result = await asyncio.to_thread(
             _job_status_sync, scheduler, str(record.get("job_id") or ""),
             record.get("namespace"), remote_host=record.get("launch_host"),
-            container_runtime_id=record.get("container_runtime_id"),
+            container_runtime_id=record.get("container_runtime_id"), **_slurm_kwargs(record),
         )
     except Exception:
         return None
@@ -7946,7 +8411,7 @@ async def _observed_job_end(
         # sacct 带 10 秒超时，同步调用会卡住整个事件循环（2026-09-13 审查实测 10.06 秒）。
         ended = await asyncio.to_thread(
             _remote_job_ended_on_its_own,
-            scheduler, (result.get("raw") or {}), str(record.get("job_id") or ""))
+            scheduler, (result.get("raw") or {}), str(record.get("job_id") or ""), **_slurm_kwargs(record))
         if ended is None:
             return None        # 调度器不再持有它 ≠ 它自己结束了：按读不出处理
         evidence = {
@@ -8370,6 +8835,8 @@ def _cancel_sync(
     container_runtime_id: str | None = None,
     refuse_if_ended: bool = False,
     absent_is_unknown: bool = False,
+    slurm_target: dict[str, Any] | None = None, expected_cluster: str | None = None,
+    submission_nonce: str | None = None, scheduler_submit_time: str | None = None,
 ) -> dict[str, Any]:
     scheduler = scheduler.lower()
     if scheduler == "local":
@@ -8429,7 +8896,30 @@ def _cancel_sync(
         except Exception as exc:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     if scheduler == "slurm":
-        result = _run(["scancel", str(job_id)], timeout=15)
+        if slurm_target is not None and refuse_if_ended:
+            ended = _remote_job_ended_on_its_own("slurm", {}, str(job_id), slurm_target=slurm_target, expected_cluster=expected_cluster, submission_nonce=submission_nonce, scheduler_submit_time=scheduler_submit_time)
+            if ended is not None:
+                return {"ok": False, "already_ended": True, "action": "scheduler_cancel_skipped",
+                        "observed_end": ended, "reason": "external_job_already_ended"}
+        if slurm_target is not None:
+            identity = _slurm_run(["squeue", "-h", "-j", str(job_id), "-o", "%i|%u|%k"],
+                                  timeout=10, slurm_target=slurm_target, expected_cluster=expected_cluster)
+            rows = [line.strip().split("|") for line in str(identity.get("stdout") or "").splitlines() if line.strip()]
+            expected = [str(job_id), str(slurm_target.get("user") or ""), f"ai4s:{submission_nonce}"]
+            if not submission_nonce or not identity.get("ok") or rows != [expected]:
+                return {"ok": False, "outcome_unknown": True, "action": "scheduler_cancel_not_sent",
+                        "reason": "slurm_cancellation_identity_unconfirmed",
+                        "error": "The queued job must match the persisted user and submission nonce before cancellation.",
+                        "identity_query": identity}
+        result = _slurm_run(["scancel", str(job_id)], timeout=15, slurm_target=slurm_target, expected_cluster=expected_cluster)
+        if slurm_target is not None:
+            ended = _remote_job_ended_on_its_own("slurm", {}, str(job_id), slurm_target=slurm_target, expected_cluster=expected_cluster, submission_nonce=submission_nonce, scheduler_submit_time=scheduler_submit_time)
+            cancelled = bool(ended and ended.get("allocation_states")
+                             and all(v == "CANCELLED" for v in ended["allocation_states"]))
+            return {"ok": cancelled, "action": "scheduler_cancel", "result": result,
+                    "outcome_unknown": not cancelled, "terminal_evidence": ended,
+                    "reason": None if cancelled else "scheduler_cancellation_not_confirmed",
+                    **({} if cancelled else {"error": "Cancellation requested; physical cancellation is not yet confirmed. Query this same job; do not submit it again."})}
     elif scheduler == "pbs":
         result = _run(["qdel", str(job_id)], timeout=15)
     elif scheduler == "kubernetes":
@@ -8453,10 +8943,21 @@ def _cancel_sync(
 
 def _job_status_sync(scheduler: str, job_id: str, namespace: str | None,
                      remote_host: str | None = None,
-                     container_runtime_id: str | None = None) -> dict[str, Any]:
+                     container_runtime_id: str | None = None,
+                     slurm_target: dict[str, Any] | None = None, expected_cluster: str | None = None, submission_nonce: str | None = None, scheduler_submit_time: str | None = None) -> dict[str, Any]:
     scheduler = scheduler.lower()
     if scheduler == "slurm":
-        r = _run(["squeue", "-j", job_id, "-h", "-o", "%i|%T|%M|%R"], timeout=10)
+        fmt = "%i|%T|%M|%R|%u|%k" if slurm_target is not None else "%i|%T|%M|%R"
+        r = _slurm_run(["squeue", "-j", job_id, "-h", "-o", fmt], timeout=10, slurm_target=slurm_target, expected_cluster=expected_cluster)
+        if slurm_target is not None and r.get("ok") and str(r.get("stdout") or "").strip():
+            rows = [line.strip().split("|") for line in str(r["stdout"]).splitlines() if line.strip()]
+            if (not submission_nonce or len(rows) != 1 or len(rows[0]) != 6
+                    or rows[0][0] != str(job_id) or rows[0][4] != slurm_target.get("user")
+                    or rows[0][5] != "ai4s:" + submission_nonce):
+                r = {**r, "ok": False, "stdout": "", "identity_unconfirmed": True,
+                     "stderr": "Queued job identity does not match the persisted user and submission nonce."}
+            else:
+                r = {**r, "stdout": "|".join(rows[0][:4]), "identity_verified": True}
     elif scheduler == "pbs":
         r = query_pbs_job(_run, job_id)
     elif scheduler == "kubernetes":
@@ -8481,25 +8982,36 @@ async def _job_status(
     scheduler: str,
     job_id: str,
     namespace: str | None = None,
+    submission_nonce: str | None = None,
+    collect_outputs: bool = False,
+    max_output_bytes: int = 256 * 1024**2,
     **_: Any,
 ) -> dict:
     """Query a submitted job."""
     # 判决拆除·第三波（rm:2305 → schema，2026-09-02）：scheduler enum / job_id 非空由 schema 核。
     try:
-        record = _external_job_record(state, scheduler, job_id, namespace)
+        record = _external_job_record(state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce))
         if record is None:
             return {"status": "error",
                     "error": ("未找到唯一受管 external job 记录；同 scheduler/job_id "
-                              "跨 scope 时必须提供 namespace")}
+                              "跨 scope 时请提供 submission_nonce（提交结果中的标识）或 namespace")}
         namespace = namespace or record.get("namespace")
         result = _job_status_sync(
             scheduler, job_id, namespace, remote_host=record.get("launch_host"),
-            container_runtime_id=record.get("container_runtime_id"),
+            container_runtime_id=record.get("container_runtime_id"), **_slurm_kwargs(record),
         )
         if _scheduler_phase(scheduler, result) == "terminal":
             settled = _settle_if_terminal(state, record, scheduler_result=result, evidence=None, observed_by="job_status")
             if settled is not None:
                 result["terminal_settlement"] = {k: v for k, v in settled.items() if k != "record"}
+        if collect_outputs and record.get("slurm_target") is not None:
+            terminal = _remote_job_ended_on_its_own("slurm", result.get("raw") or {}, str(job_id), **_slurm_kwargs(record))
+            if terminal is None:
+                result["output_collection"] = {"status": "not_collected", "reason": "terminal_state_unconfirmed"}
+            elif isinstance(max_output_bytes, int) and not isinstance(max_output_bytes, bool) and max_output_bytes > 0:
+                result["output_collection"] = await asyncio.to_thread(_slurm_files().collect_outputs, state, record, max_bytes=max_output_bytes)
+            else:
+                result["output_collection"] = {"status": "error", "reason": "invalid_max_output_bytes"}
         return result
     except Exception as e:
         return {"status": "error", "error": f"{type(e).__name__}: {e}"}
@@ -8579,9 +9091,10 @@ def _external_job_record(
 
 def _authoritative_record_for_read(
     state: Any, scheduler: str, job_id: str, namespace: str | None,
+    *, submission_nonce: str | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Resolve one scope-exact durable receipt for a read-only query."""
-    record = _external_job_record(state, scheduler, job_id, namespace)
+    record = _external_job_record(state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce))
     return record, None
 
 
@@ -8639,7 +9152,7 @@ def freeze_first_terminal_output_observation(
             continue
         row = dict(snapshot)
         if row.get("exists") and row.get("kind") == "file":
-            identity = _output_postconditions.output_identity(str(row.get("path")))
+            identity = _job_output_identity(record, str(row.get("path")))
             row["sha256"] = identity.get("sha256")
             row["sha256_skipped"] = identity.get("sha256_skipped")
         rows.append(row)
@@ -8851,6 +9364,43 @@ def _joint_job_resource_decision(
     return "continue", reasons
 
 
+def _confirmed_local_cancellation_evidence(
+    state: Any, record: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Recover positive native-stop evidence from its durable, exact identity receipt.
+
+    A scheduler cancellation ACK, a missing job record, or a legacy lifecycle
+    label alone cannot establish that the process stopped. Native stop confirms
+    termination before its receipt is written and removes the supervisor record;
+    subsequent status reads must therefore use that same confirmed receipt.
+    """
+    if (str(record.get("scheduler") or "").lower() != "local"
+            or not record.get("submission_nonce") or not record.get("container_runtime_id")):
+        return None
+    transaction = _latest_cancellation_transaction(state, record) or {}
+    intent = transaction.get("intent") or {}
+    outcome = transaction.get("outcome") or {}
+    identity = _cancellation_identity(record)
+    expected_key = _cancellation_identity_key(identity)
+    if (outcome.get("outcome") != "confirmed"
+            or not intent.get("intent_artifact_id") or not outcome.get("outcome_artifact_id")
+            or any(not isinstance(item.get("identity"), dict)
+                   or _cancellation_identity_key(item["identity"]) != expected_key
+                   for item in (intent, outcome))):
+        return None
+    physical = outcome.get("cancel_result") or {}
+    if (physical.get("ok") is not True or physical.get("action") != "sandbox_stop"
+            or physical.get("already_absent") is not False
+            or str(physical.get("container_id") or "") != str(record.get("job_id") or "")):
+        return None
+    return {
+        "source": "confirmed_local_cancellation", "sandbox_status": "cancelled",
+        "identity": identity, "cancel_result": physical,
+        "cancellation_intent_artifact_id": intent["intent_artifact_id"],
+        "cancellation_outcome_artifact_id": outcome["outcome_artifact_id"],
+    }
+
+
 def _settle_if_terminal(state: Any, record: dict[str, Any] | None, *, scheduler_result: dict[str, Any] | None,
                         evidence: dict[str, Any] | None, observed_by: str) -> dict[str, Any] | None:
     """status / health / wait / cancel 共用的终态结算入口（Codex 45 P0-D）；只在正向证据下写 B。"""
@@ -8874,20 +9424,20 @@ def _settle_if_terminal(state: Any, record: dict[str, Any] | None, *, scheduler_
                     evidence = {"source": "native_job_record", "sandbox_status": sandbox_state.get("status"),
                                 "exit_code": sandbox_state.get("exit_code")}
             elif _scheduler_phase(scheduler, scheduler_result) == "terminal":
-                evidence = _remote_job_ended_on_its_own(scheduler, raw, str(record.get("job_id") or ""))
+                evidence = _remote_job_ended_on_its_own(scheduler, raw, str(record.get("job_id") or ""), **_slurm_kwargs(record))
         if evidence is None:
-            return None
+            evidence = _confirmed_local_cancellation_evidence(state, record)
         return settle_terminal(state, record, evidence=evidence, scheduler_result=scheduler_result, observed_by=observed_by)
     except Exception as exc:  # 结算失败不能把读状态弄死，但要能看见
         return {"settled": False, "reason": f"settlement_error:{type(exc).__name__}: {exc}"}
 
 
 def probe_external_job_health(state: Any, scheduler: str, job_id: str,
-                              namespace: str | None = None) -> dict[str, Any]:
+                              namespace: str | None = None, *, submission_nonce: str | None = None) -> dict[str, Any]:
     """Read one managed job health snapshot; a trustworthy terminal observation is settled into the ledger once."""
-    result = _probe_external_job_health_impl(state, scheduler, job_id, namespace)
+    result = _probe_external_job_health_impl(state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce))
     if isinstance(result, dict) and result.get("scheduler_phase") == "terminal":
-        record, _err = _authoritative_record_for_read(state, scheduler, job_id, namespace)
+        record, _err = _authoritative_record_for_read(state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce))
         settled = _settle_if_terminal(state, record, scheduler_result=result.get("scheduler_result"),
                                       evidence=result.get("terminal_evidence"), observed_by="probe_external_job_health")
         if settled is not None:
@@ -8896,10 +9446,10 @@ def probe_external_job_health(state: Any, scheduler: str, job_id: str,
 
 
 def _probe_external_job_health_impl(state: Any, scheduler: str, job_id: str,
-                                    namespace: str | None = None) -> dict[str, Any]:
+                                    namespace: str | None = None, *, submission_nonce: str | None = None) -> dict[str, Any]:
     """Read one managed job health snapshot without executing model-supplied shell."""
     record, identity_error = _authoritative_record_for_read(
-        state, scheduler, job_id, namespace)
+        state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce))
     if identity_error is not None:
         return identity_error
     if record is None:
@@ -8911,7 +9461,7 @@ def _probe_external_job_health_impl(state: Any, scheduler: str, job_id: str,
     try:
         scheduler_result = _job_status_sync(
             scheduler, job_id, namespace, remote_host=record.get("launch_host"),
-            container_runtime_id=record.get("container_runtime_id"),
+            container_runtime_id=record.get("container_runtime_id"), **_slurm_kwargs(record),
         )
     except Exception as exc:
         scheduler_result = {"status": "error", "raw": {"ok": False, "stderr": f"{type(exc).__name__}: {exc}"}}
@@ -8919,7 +9469,7 @@ def _probe_external_job_health_impl(state: Any, scheduler: str, job_id: str,
     terminal_evidence = None
     if phase == "terminal" and str(scheduler or "").lower() == "slurm":
         terminal_evidence = _remote_job_ended_on_its_own(
-            "slurm", scheduler_result.get("raw") or {}, str(job_id),
+            "slurm", scheduler_result.get("raw") or {}, str(job_id), **_slurm_kwargs(record),
         )
     contract = record.get("health_contract") if isinstance(record.get("health_contract"), dict) else {}
     paths = list(contract.get("progress_paths") or [])
@@ -8932,13 +9482,13 @@ def _probe_external_job_health_impl(state: Any, scheduler: str, job_id: str,
     allowed = list(record.get("output_roots") or [])
     for key in ("scheduler_output_dir", "bootstrap_log_dir"):
         if record.get(key):
-            allowed.append(os.path.realpath(str(record[key])))
+            allowed.append(_job_path(record, str(record[key])))
     observed: list[dict[str, Any]] = []
     now = time.time()
     progress_newest = None
     activity_newest = None
     declared_progress_paths = {
-        os.path.realpath(path)
+        _job_path(record, path)
         for path in paths
         if isinstance(path, str) and path
     }
@@ -8946,13 +9496,13 @@ def _probe_external_job_health_impl(state: Any, scheduler: str, job_id: str,
         [p for p in paths + log_paths if isinstance(p, str) and p]
     ))
     for path in candidate_paths:
-        real = os.path.realpath(path)
+        real = _job_path(record, path)
         evidence_kind = (
             "declared_progress"
             if real in declared_progress_paths
             else "output_activity"
         )
-        if not _path_is_within(real, allowed):
+        if not _path_is_within(real, allowed, remote=record.get("slurm_target") is not None):
             observed.append({
                 "path": real,
                 "exists": False,
@@ -8960,7 +9510,7 @@ def _probe_external_job_health_impl(state: Any, scheduler: str, job_id: str,
                 "evidence_kind": evidence_kind,
             })
             continue
-        item = {**_health_file_snapshot(real), "evidence_kind": evidence_kind}
+        item = {**_job_snapshot(record, real), "evidence_kind": evidence_kind}
         observed.append(item)
         if item.get("exists") and isinstance(item.get("mtime_epoch_s"), (int, float)):
             mtime = float(item["mtime_epoch_s"])
@@ -8972,10 +9522,10 @@ def _probe_external_job_health_impl(state: Any, scheduler: str, job_id: str,
     # 会因此显示成"有过进度"，把 running_without_progress_evidence 翻成 healthy，
     # 于是真正的失败要等满 stall_after_s（默认 900 秒）才暴露。
     for path in bootstrap_paths:
-        real = os.path.realpath(path)
-        if not _path_is_within(real, allowed):
+        real = _job_path(record, path)
+        if not _path_is_within(real, allowed, remote=record.get("slurm_target") is not None):
             continue
-        observed.append({**_health_file_snapshot(real), "role": "bootstrap"})
+        observed.append({**_job_snapshot(record, real), "role": "bootstrap"})
     errors: list[dict[str, str]] = []
     remediation: dict[str, Any] | None = None
     # 049-3：配置规则（diagnose_patterns.yaml）的修法投影，纯信息——
@@ -8985,10 +9535,10 @@ def _probe_external_job_health_impl(state: Any, scheduler: str, job_id: str,
     for path in log_paths + bootstrap_paths:
         if not isinstance(path, str) or not path:
             continue
-        real = os.path.realpath(path)
-        if not _path_is_within(real, allowed):
+        real = _job_path(record, path)
+        if not _path_is_within(real, allowed, remote=record.get("slurm_target") is not None):
             continue
-        text = _tail_for_health(real)
+        text = _job_tail(record, real)
         for marker in _health_error_markers(contract):
             if marker and str(marker).casefold() in text.casefold():
                 errors.append({"path": real, "marker": str(marker)})
@@ -9069,9 +9619,9 @@ def _probe_external_job_health_impl(state: Any, scheduler: str, job_id: str,
         "resource_health_evidence": resource_health,
         "progress_paths": observed,
         "completion_paths": [
-            _health_file_snapshot(os.path.realpath(path))
-            if _path_is_within(os.path.realpath(path), allowed)
-            else {"path": os.path.realpath(path), "exists": False, "blocked": "outside_declared_outputs"}
+            _job_snapshot(record, _job_path(record, path))
+            if _path_is_within(_job_path(record, path), allowed, remote=record.get("slurm_target") is not None)
+            else {"path": _job_path(record, path), "exists": False, "blocked": "outside_declared_outputs"}
             for path in contract.get("completion_paths") or []
         ],
         "error_evidence": errors, "mpi_runtime_remediation": remediation,
@@ -9090,8 +9640,8 @@ def _probe_external_job_health_impl(state: Any, scheduler: str, job_id: str,
 
 
 async def _check_external_job_health(state: State, scheduler: str, job_id: str,
-                                     namespace: str | None = None, **_: Any) -> dict:
-    return probe_external_job_health(state, scheduler, job_id, namespace)
+                                     namespace: str | None = None, submission_nonce: str | None = None, **_: Any) -> dict:
+    return probe_external_job_health(state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce))
 
 
 # 收敛任务书 K13（缺陷 #13）：短作业常在几秒内结束，第二次探测却要等 min(interval, max_wait_s)
@@ -9103,7 +9653,7 @@ _EXTERNAL_WAIT_BACKOFF_S = (0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0)
 async def _wait_for_external_job(
     state: State, scheduler: str, job_id: str, namespace: str | None = None,
     max_wait_s: int = 300,
-    poll_interval_s: int | None = None, **_: Any,
+    poll_interval_s: int | None = None, submission_nonce: str | None = None, **_: Any,
 ) -> dict:
     """Wait inside a live experiment session without spending LLM turns per poll.
 
@@ -9114,7 +9664,7 @@ async def _wait_for_external_job(
     """
     _raise_if_external_wait_cancelled(state)
     initial = await _probe_external_job_health_cancellable(
-        state, scheduler, job_id, namespace)
+        state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce))
     if initial.get("status") != "success":
         return initial
     if initial.get("workflow_status") != "awaiting_external_job":
@@ -9135,7 +9685,7 @@ async def _wait_for_external_job(
         }
     ):
         return {"status": "success", "wait_outcome": "needs_diagnosis", "health": initial}
-    record = _external_job_record(state, scheduler, job_id, namespace) or {}
+    record = _external_job_record(state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce)) or {}
     configured = (record.get("health_contract") or {}).get("poll_interval_s", 180)
     interval = int(poll_interval_s if poll_interval_s is not None else configured)
     backoff = list(_EXTERNAL_WAIT_BACKOFF_S) if poll_interval_s is None else []
@@ -9157,7 +9707,7 @@ async def _wait_for_external_job(
         if time.monotonic() < next_probe and time.monotonic() < deadline:
             continue
         health = await _probe_external_job_health_cancellable(
-            state, scheduler, job_id, namespace)
+            state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce))
         try:
             state.append_transcript("external_job_wait_tick", scheduler=scheduler, job_id=job_id,
                                     health_state=health.get("health_state"),
@@ -9237,7 +9787,7 @@ def _external_workflow_rows(
             status = lifecycle_resolution.get("status")
             if status is not None and status not in _ACTIVE_JOB_STATES:
                 continue
-        health = probe_external_job_health(state, scheduler, job_id, row.get("namespace"))
+        health = probe_external_job_health(state, scheduler, job_id, row.get("namespace"), **_nonce_kwargs(row.get("submission_nonce")))
         rows.append({"scheduler": scheduler, "job_id": job_id,
                      "namespace": row.get("namespace"),
                      "launch_host": row.get("launch_host"),
@@ -11745,7 +12295,7 @@ def _finalize_after_cancellation_response(
 async def _finalize_external_job(
     state: State, scheduler: str, job_id: str, evidence_artifact_id: str = "",
     outcome: str = "", note: str = "", namespace: str | None = None,
-    disputed_execution_class: str = "", **_: Any,
+    disputed_execution_class: str = "", submission_nonce: str | None = None, **_: Any,
 ) -> dict:
     """Close a handoff by what this job did, not by what kind of run it sits in.
 
@@ -11774,11 +12324,11 @@ async def _finalize_external_job(
             "analyzed_* 结局必须提供 evidence_artifact_id：先铸造 frozen 非自动 "
             "experiment_log（metadata.external_job_refs 复制完整 job identity），"
             "再重新调用 finalize_external_job 并带上该 artifact id")}
-    record = _external_job_record(state, scheduler, job_id, namespace)
+    record = _external_job_record(state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce))
     if record is None:
         return {"status": "error",
                 "error": ("未找到唯一受管 external job 记录；同 scheduler/job_id "
-                          "跨 scope 时必须提供 namespace")}
+                          "跨 scope 时请提供 submission_nonce（提交结果中的标识）或 namespace")}
     lifecycle_resolution = lifecycle_for_submission(state, record)
     if lifecycle_resolution.get("resolution") == "legacy_lifecycle_scope_ambiguous":
         return {"status": "error",
@@ -11993,11 +12543,11 @@ async def _finalize_external_job(
             }
         else:
             health = freeze_first_terminal_output_observation(
-                state, record, probe_external_job_health(state, scheduler, job_id, namespace))
+                state, record, probe_external_job_health(state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce)))
     else:
         # scientific 收尾不能拿 operation 收据代替自身的实时证据核验。
         health = freeze_first_terminal_output_observation(
-            state, record, probe_external_job_health(state, scheduler, job_id, namespace))
+            state, record, probe_external_job_health(state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce)))
     if health.get("status") != "success":
         return health
     observed_sandbox = (
@@ -12775,6 +13325,8 @@ def _cancel_already_ended_response(
 
 
 def _last_read_observed_end(cancel_result: dict[str, Any] | None) -> dict[str, Any]:
+    if isinstance((cancel_result or {}).get("observed_end"), dict):
+        return cancel_result["observed_end"]
     sandbox_state = (cancel_result or {}).get("sandbox_state") or {}
     return {"source": "native_job_record_last_read",
             "sandbox_status": sandbox_state.get("status"),
@@ -12975,6 +13527,30 @@ def _close_confirmed_cancellation(
                 response["lifecycle"] = lifecycle
             return response
 
+    # The v3 ledger is the authority consumed by finish. Keep the legacy
+    # receipts for old readers, but do not return a confirmed local cancellation
+    # with only the old lifecycle closed. Replays publish the same nonce once.
+    try:
+        from .ledger import v3_active as _v3_active
+    except ImportError:  # pragma: no cover
+        from tools.ledger import v3_active as _v3_active
+    if _v3_active(state) and str(record.get("scheduler") or "").lower() == "local":
+        settled = _settle_if_terminal(
+            state, record, scheduler_result=None, evidence=None, observed_by="cancel_job")
+        if not (settled and settled.get("settled") is True
+                and settled.get("derived_state") == "CANCELLED"):
+            if transaction is not None:
+                return _cancellation_reconciliation_response(
+                    state, transaction, cancel_result=cancel_result,
+                    reason=f"confirmed cancellation v3 settlement incomplete: {settled}",
+                )
+            return {
+                "status": "cancellation_reconciliation_required",
+                "reason": "confirmed cancellation lacks identity-bound v3 terminal evidence",
+                "scheduler": record.get("scheduler"), "job_id": record.get("job_id"),
+                "do_not_repeat_cancel": True, "do_not_resubmit": True,
+            }
+
     # 计划内停止（D07）：提交时锚定任务原文声明了 planned_stop 的本地作业，取消已确认、
     # 不是替换。远端 scancel 返回 0 证明不了进程已停，暂不认。
     planned_stop = planned_stop_cancellation(
@@ -13155,14 +13731,14 @@ def _cancel_command_preview(command: Any) -> str:
 
 async def _cancel_job(
     state: State, scheduler: str, job_id: str, namespace: str | None = None,
-    reason: str = "", superseded_by: str | None = None, **_: Any,
+    reason: str = "", superseded_by: str | None = None, submission_nonce: str | None = None, **_: Any,
 ) -> dict:
     """Cancel one managed job as an append-only, recoverable transaction."""
-    record = _external_job_record(state, scheduler, job_id, namespace)
+    record = _external_job_record(state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce))
     if record is None:
         return {"status": "error",
                 "error": ("未找到唯一受管 external job 记录；同 scheduler/job_id "
-                          "跨 scope 时必须提供 namespace")}
+                          "跨 scope 时请提供 submission_nonce（提交结果中的标识）或 namespace")}
     lifecycle_resolution = lifecycle_for_submission(state, record)
     if lifecycle_resolution.get("resolution") == "legacy_lifecycle_scope_ambiguous":
         return {"status": "error",
@@ -13243,6 +13819,26 @@ async def _cancel_job(
                 superseded_by=intent.get("superseded_by"),
                 idempotent=True,
             )
+        if (record.get("slurm_target") is not None
+                and (not prior_outcome or prior_outcome.get("outcome") == "unknown")):
+            ended = await _observed_job_end(state, record)
+            if ended is not None:
+                _settle_if_terminal(state, record, scheduler_result=None, evidence=ended,
+                                    observed_by="cancel_job_reconcile")
+                states = ended.get("allocation_states") or []
+                if states and all(v == "CANCELLED" for v in states):
+                    result = {"ok": True, "action": "scheduler_cancel_reconciled", "terminal_evidence": ended}
+                    persisted = _persist_cancellation_outcome(state, intent, outcome="confirmed", cancel_result=result)
+                    if persisted is not None:
+                        return _close_confirmed_cancellation(
+                            state, record, transaction={"intent": intent, "outcome": persisted},
+                            cancel_result=result, evidence_artifact_id=str(intent["intent_artifact_id"]),
+                            target_lifecycle=str(intent.get("target_lifecycle") or "cancelled"),
+                            reason=str(intent.get("reason") or ""), superseded_by=intent.get("superseded_by"),
+                            idempotent=True)
+                else:
+                    return _cancel_already_ended_response(record, lifecycle_status=lifecycle_status,
+                                                         observed=ended, idempotent=True)
         if not prior_outcome or prior_outcome.get("outcome") == "unknown":
             return _cancellation_reconciliation_response(
                 state, transaction,
@@ -13359,7 +13955,7 @@ async def _cancel_job(
         record.get("namespace"),
         container_runtime_id=record.get("container_runtime_id"),
         refuse_if_ended=True,
-        absent_is_unknown=True,
+        absent_is_unknown=True, **_slurm_kwargs(record),
     )
     if result.get("already_ended"):
         # 发信号前的最后一读看到作业已自行结束：没有发出任何信号。如实记 not_sent——原先
@@ -13464,6 +14060,7 @@ register_tool(
         parameters_schema={
             "type": "object",
             "properties": {
+                "slurm_target": _SLURM_TARGET_SCHEMA,
                 "namespace": {"type": "string", "description": "Optional Kubernetes namespace."},
             },
         },
@@ -13566,6 +14163,7 @@ register_tool(
         parameters_schema={
             "type": "object",
             "properties": {
+                "slurm_target": _SLURM_TARGET_SCHEMA,
                 "command": {"type": "string", "minLength": 1, "description": "Command payload to run inside the job."},
                 "scheduler": {
                     "type": "string",
@@ -13780,8 +14378,11 @@ register_tool(
         parameters_schema={
             "type": "object",
             "properties": {
+                "collect_outputs": {"type": "boolean", "default": False, "description": "For a terminal SSH job, retry bounded hash-verified result collection without rerunning it."},
+                "max_output_bytes": {"type": "integer", "minimum": 1, "default": 268435456},
                 "scheduler": {"type": "string", "enum": list(SCHEDULERS)},
                 "job_id": {"type": "string", "minLength": 1},
+                "submission_nonce": {"type": "string", "description": "Optional exact identifier returned by submit_job; disambiguates identical job IDs on different targets."},
                 "namespace": {"type": "string"},
             },
             "required": ["scheduler", "job_id"],
@@ -13806,6 +14407,7 @@ register_tool(
             "properties": {
                 "scheduler": {"type": "string", "enum": list(SCHEDULERS)},
                 "job_id": {"type": "string", "minLength": 1},
+                "submission_nonce": {"type": "string", "description": "Optional exact identifier returned by submit_job; disambiguates identical job IDs on different targets."},
                 "namespace": {"type": "string"},
             },
             "required": ["scheduler", "job_id"],
@@ -13830,6 +14432,7 @@ register_tool(
             "properties": {
                 "scheduler": {"type": "string", "enum": list(SCHEDULERS)},
                 "job_id": {"type": "string", "minLength": 1},
+                "submission_nonce": {"type": "string", "description": "Optional exact identifier returned by submit_job; disambiguates identical job IDs on different targets."},
                 "namespace": {"type": "string"},
                 "max_wait_s": {"type": "integer", "minimum": 30, "maximum": 900, "default": 300},
                 "poll_interval_s": {"type": "integer", "minimum": 30, "maximum": 3600},
@@ -13866,6 +14469,7 @@ register_tool(
             "properties": {
                 "scheduler": {"type": "string", "enum": list(SCHEDULERS)},
                 "job_id": {"type": "string", "minLength": 1},
+                "submission_nonce": {"type": "string", "description": "Optional exact identifier returned by submit_job; disambiguates identical job IDs on different targets."},
                 "evidence_artifact_id": {"type": "string"},
                 "outcome": {"type": "string", "enum": ["analyzed_success", "analyzed_failure", "analyzed_inconclusive", "operation_completed", "operation_failed", "operation_blocked"]},
                 "note": {"type": "string"},
@@ -13901,6 +14505,7 @@ register_tool(
             "properties": {
                 "scheduler": {"type": "string", "enum": list(SCHEDULERS)},
                 "job_id": {"type": "string", "minLength": 1},
+                "submission_nonce": {"type": "string", "description": "Optional exact identifier returned by submit_job; disambiguates identical job IDs on different targets."},
                 "namespace": {"type": "string"},
                 "reason": {"type": "string"},
                 "superseded_by": {"type": "string"},

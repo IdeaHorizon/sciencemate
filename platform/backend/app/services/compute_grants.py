@@ -57,8 +57,8 @@ async def machines(user: User, replace_with: list[dict] | None = None) -> dict[s
 async def _ask(user: User, request: dict[str, Any], *, expect: str) -> dict[str, Any]:
     root = Path(settings.harness_root).expanduser().resolve()
     if not (root / "core" / "capabilities.py").is_file():
-        raise ComputeGrantsError("HARNESS_ROOT 不是一份当前的 harness checkout",
-                                 en="HARNESS_ROOT is not a current harness checkout")
+        raise ComputeGrantsError("HARNESS_ROOT 指向的目录无效",
+                                 en="HARNESS_ROOT does not point to a valid harness checkout")
     payload = {
         **request,
         "request_id": f"grants-{uuid4().hex}",

@@ -44,6 +44,7 @@ from app.models.feed import (
 from app.services.feed import domains as domain_service
 from app.services.feed import windows
 from app.services.feed.profile import Profile, author_matches, extract_terms, journal_key, journal_display_name
+from app.services.say import say
 
 #: 每天的选摘条数。三条是"读得完"和"有得挑"之间的位置。
 DAILY_PICK_COUNT = 3
@@ -261,41 +262,85 @@ class ScoredItem:
     matched_scholar: str = ""
     matched_query_terms: tuple[str, ...] = ()
 
-    def reason(self) -> str:
-        """一句能被当场验证的理由。
+    def why(self) -> dict:
+        """为什么推给你：哪一种依据，加上说出它要用到的名字。
 
-        每一句都要能指回**用户自己做过的某件事**（开的课题、选的学科、订阅的
+        每一条都要能指回**用户自己做过的某件事**（开的项目、选的学科、订阅的
         刊/人）。说不出依据时不编泛话，而是退回"这条是从哪儿来的"这种同样可
         核对的说法 —— 一条只有"本领域近期动态"的卡片对用户零信息，等于让他
         自己猜为什么被推。
+
+        存的是这份事实，不是一句话：今日选摘要存一整天，读它的那一屏用哪种语言
+        存的时候不知道（`say_why` 现说）。来源筛选也按 `kind` 归类，不读措辞。
         """
         if self.project_name and self.matched_terms:
-            shared = "、".join(self.matched_terms[:3])
-            return f"和你的课题「{self.project_name}」对得上：{shared}"
+            return {"kind": "project", "project": self.project_name,
+                    "terms": list(self.matched_terms[:3])}
         if self.matched_domains:
-            labels = "、".join(
-                domain_service.label(slug) for slug in self.matched_domains[:2]
-            )
-            return f"属于你关注的 {labels}"
+            return {"kind": "domains", "domains": list(self.matched_domains[:2])}
         if self.matched_journal:
-            return f"你订阅的期刊 {journal_display_name(self.matched_journal)} 有新文章"
+            return {"kind": "journal", "journal": journal_display_name(self.matched_journal)}
         if self.matched_scholar:
-            return f"你订阅的学者 {self.matched_scholar} 有新论文"
+            return {"kind": "scholar", "scholar": self.matched_scholar}
         if self.matched_query_terms:
-            return f"按你的课题检索词找到：{'、'.join(self.matched_query_terms[:3])}"
+            return {"kind": "project_terms", "terms": list(self.matched_query_terms[:3])}
         routes = acquisition_routes(self.item)
         if "web" in routes:
-            return "根据你的课题画像从公开网页发现"
+            return {"kind": "project_web"}
         if "project_profile" in routes:
-            return "根据你的课题画像检索到"
+            return {"kind": "project_search"}
         # 兜底也不说泛话：说出这条的来源（期刊名 / 站点），用户能自己判断要不要看。
         venue = (self.item.venue or "").strip()
         if "bignews" in routes:
-            return f"科学媒体报道：{venue}" if venue else "科学媒体报道"
+            return {"kind": "news", "venue": venue}
         if venue:
-            return f"来自 {venue}"
+            return {"kind": "venue", "venue": venue}
         source = str((self.item.extra or {}).get("source") or "").strip()
-        return f"来自 {source}" if source else "平台新收录"
+        return {"kind": "source", "source": source} if source else {"kind": "new"}
+
+    def reason(self, lang: str = "zh") -> str:
+        """一句能被当场验证的理由，用这一屏的语言说。"""
+        return say_why(self.why(), lang)
+
+
+#: 这几种理由说的是「你的项目」—— 资讯页的来源筛选把它们归到「项目」。
+PROJECT_REASONS = frozenset({"project", "project_terms", "project_web", "project_search"})
+
+_WHY_SAID: dict[str, dict[str, str]] = {
+    "project": {"zh": "与你的项目「{project}」相关：{terms}",
+                "en": "Related to your project “{project}”: {terms}"},
+    "domains": {"zh": "属于你订阅的学科：{labels}", "en": "In fields you follow: {labels}"},
+    "journal": {"zh": "你订阅的期刊 {journal} 有新文章", "en": "New in {journal}, a journal you follow"},
+    "scholar": {"zh": "你订阅的学者 {scholar} 有新论文", "en": "New paper by {scholar}, a scholar you follow"},
+    "project_terms": {"zh": "匹配你项目的检索词：{terms}", "en": "Matches your project's search terms: {terms}"},
+    "project_web": {"zh": "根据你的项目，从公开网页找到", "en": "Found on the web based on your projects"},
+    "project_search": {"zh": "根据你的项目检索到", "en": "Found based on your projects"},
+    "news": {"zh": "科学媒体报道：{venue}", "en": "Science news: {venue}"},
+    "news_unnamed": {"zh": "科学媒体报道", "en": "Science news"},
+    "venue": {"zh": "来自 {venue}", "en": "From {venue}"},
+    "source": {"zh": "来自 {source}", "en": "From {source}"},
+    "new": {"zh": "平台新收录", "en": "Newly added"},
+}
+
+
+def say_why(why: object, lang: str) -> str:
+    """`ScoredItem.why()` 的那份事实说成一句话。认不出的（坏数据）不说，不猜。"""
+    if not isinstance(why, dict) or why.get("kind") not in _WHY_SAID:
+        return ""
+    kind = str(why["kind"])
+    joiner = ", " if lang == "en" else "、"
+    if kind == "news" and not str(why.get("venue") or "").strip():
+        kind = "news_unnamed"
+    return say(
+        _WHY_SAID[kind], lang,
+        project=why.get("project") or "",
+        terms=joiner.join(str(term) for term in why.get("terms") or ()),
+        labels=joiner.join(domain_service.label(str(slug), lang=lang) for slug in why.get("domains") or ()),
+        journal=why.get("journal") or "",
+        scholar=why.get("scholar") or "",
+        venue=why.get("venue") or "",
+        source=why.get("source") or "",
+    )
 
 
 def _recency_score(published_at: datetime | None, *, now: datetime) -> float:
@@ -1259,7 +1304,7 @@ async def daily_picks(
     payload = [
         {
             "item_id": str(pick.item.id),
-            "reason": pick.reason(),
+            "why": pick.why(),
             "project_id": pick.project_id,
         }
         for pick in chosen

@@ -53,8 +53,8 @@ export function SessionAboutDrawer({
       </dl>
       <section>
         <h3>{t({ zh: "当前生效的指令", en: "Instructions in effect" })}</h3>
-        {effective.isLoading && <p>{t({ zh: "正在读…", en: "Reading…" })}</p>}
-        {effective.isError && <p>{t({ zh: "读不到这个会话的指令。", en: "The instructions for this session could not be read." })}</p>}
+        {effective.isLoading && <p>{t({ zh: "正在加载…", en: "Loading…" })}</p>}
+        {effective.isError && <p>{t({ zh: "无法加载这个会话的指令。", en: "The instructions for this session could not be read." })}</p>}
         {effective.data && LAYERS.map((kind) => {
           const layer = effective.data.layers[kind];
           if (!layer) return null;

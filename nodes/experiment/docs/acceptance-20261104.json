@@ -1,0 +1,83 @@
+{
+  "date": "2026-11-04",
+  "scope": "SSH Slurm CPU execution protocol; no scientific benchmark",
+  "cluster": {
+    "name": "codex-lab",
+    "slurm_version": "22.05.8",
+    "services": [
+      "slurmctld",
+      "slurmd",
+      "slurmdbd",
+      "MariaDB",
+      "OpenSSH"
+    ],
+    "isolated_docker": true,
+    "cpus": 2,
+    "container_memory_gib": 1,
+    "accounting_store_flags": "job_comment"
+  },
+  "code_sha256": {
+    "nodes/experiment/tools/slurm_ssh.py": "65825790ec4d729e52c9412632a4f565b4a286321fa1917126fed092a3f78172",
+    "nodes/experiment/tools/slurm_files.py": "e7b6f1788038bd9696b96f9d487147e446ec2c11a4a33ef1aa40ee6d85d4b409",
+    "nodes/experiment/tools/slurm_files_remote.py": "abd105f1457df5ee365d8f48a12989c9534c4477d2a7dd7166aa0e6efd6f849c",
+    "nodes/experiment/scripts/accept_slurm_ssh.py": "bc1bbd12a2957a280e04d669c43d98cc725d96aa3b758b55f6fd3037bc07b1f4"
+  },
+  "windows_packaged_runtime": {
+    "client": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.14 (main, Sep  1 2026, 14:17:39) [MSC v.1944 64 bit (AMD64)]",
+    "initial_submit_status": "success",
+    "submission_nonce": "0de0c1ad1c5f4bc084d3eb964e5f3575",
+    "recovered_job_id": "17",
+    "nonce_accounting_rows": [
+      "17|ai4s:0de0c1ad1c5f4bc084d3eb964e5f3575|codex-lab"
+    ],
+    "terminal": {
+      "state": "COMPLETED",
+      "exit_code": 0
+    },
+    "returned_binary_sha256": "da440b11bdc0a5447252fad5323437841482a49d8eed6b9f9015c310c1568996",
+    "returned_binary_bytes": 2056,
+    "collection_ok": true,
+    "repeat_collection_ok": true,
+    "repeat_files_reused": true,
+    "cancel_job_id": "18",
+    "cancel_accounting": "18|CANCELLED by 1001|0:0\n18.batch|CANCELLED|0:15"
+  },
+  "macos_lost_ack": {
+    "client": "macOS-26.3-arm64-arm-64bit-Mach-O",
+    "python": "3.14.7 (main, Aug 14 2026, 15:24:10) [Clang 22.1.3 ]",
+    "initial_submit_status": "submission_outcome_unknown",
+    "submission_nonce": "6925a481db864d76a9a029f48f77914f",
+    "recovered_job_id": "16",
+    "nonce_accounting_rows": [
+      "16|ai4s:6925a481db864d76a9a029f48f77914f|codex-lab"
+    ],
+    "terminal": {
+      "state": "COMPLETED",
+      "exit_code": 0
+    },
+    "returned_binary_sha256": "da440b11bdc0a5447252fad5323437841482a49d8eed6b9f9015c310c1568996",
+    "returned_binary_bytes": 2056,
+    "collection_ok": true,
+    "repeat_collection_ok": true,
+    "repeat_files_reused": true,
+    "cancel_job_id": "19",
+    "cancel_accounting": "19|CANCELLED by 1001|0:0\n19.batch|CANCELLED|0:15"
+  },
+  "lost_ack_injection": "A test-only SSH wrapper ran real OpenSSH/sbatch once and discarded its response; the production recovery path queried that nonce and did not call sbatch again.",
+  "windows_regression": {
+    "before": {
+      "sent_remote_command_bytes": 13288,
+      "received_remote_command_bytes": 8186,
+      "result": "shell parse failure"
+    },
+    "after": "The short bootstrap receives a length-prefixed script followed by exact binary input on stdin; the complete lifecycle passed."
+  },
+  "not_verified": [
+    "installer and full GUI",
+    "production HPC site",
+    "GPU or MPI",
+    "remote per-job filesystem isolation"
+  ],
+  "release_published": false
+}

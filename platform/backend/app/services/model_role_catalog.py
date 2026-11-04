@@ -86,10 +86,8 @@ def catalog_path() -> Path:
     root = (settings.harness_root or "").strip()
     if not root:
         raise ModelRoleCatalogError(
-            "HARNESS_ROOT 未配置 —— 读不到模型角色目录，"
-            "『设置 → 模型』的角色指派无法渲染。",
-            en="HARNESS_ROOT is not set — the model role catalog cannot be read, so the role "
-               "assignments under Settings → Models cannot be shown.",
+            "无法加载模型角色：未配置 HARNESS_ROOT。",
+            en="Could not load model roles: HARNESS_ROOT is not set.",
         )
     return Path(root).expanduser() / CATALOG_RELATIVE_PATH
 
@@ -100,19 +98,19 @@ def _load(path_str: str, mtime_ns: int) -> tuple[RoleSpec, ...]:
     try:
         raw = yaml.safe_load(Path(path_str).read_text(encoding="utf-8"))
     except OSError as exc:
-        raise ModelRoleCatalogError(f"模型角色目录读不到：{path_str} —— {exc}",
-                                    en=f"The model role catalog cannot be read: {path_str} — {exc}") from exc
+        raise ModelRoleCatalogError(f"无法加载模型角色：读取 {path_str} 失败（{exc}）",
+                                    en=f"Could not load model roles: cannot read {path_str} ({exc})") from exc
     except yaml.YAMLError as exc:
-        raise ModelRoleCatalogError(f"模型角色目录不是合法 YAML：{path_str} —— {exc}",
-                                    en=f"The model role catalog is not valid YAML: {path_str} — {exc}") from exc
+        raise ModelRoleCatalogError(f"无法加载模型角色：{path_str} 不是有效的 YAML（{exc}）",
+                                    en=f"Could not load model roles: {path_str} is not valid YAML ({exc})") from exc
     if not isinstance(raw, dict) or not isinstance(raw.get("roles"), list):
-        raise ModelRoleCatalogError(f"模型角色目录缺 roles 列表：{path_str}",
-                                    en=f"The model role catalog has no roles list: {path_str}")
+        raise ModelRoleCatalogError(f"无法加载模型角色：{path_str} 中缺少 roles 列表",
+                                    en=f"Could not load model roles: {path_str} has no roles list")
     specs: list[RoleSpec] = []
     for item in raw["roles"]:
         if not isinstance(item, dict) or not str(item.get("id") or "").strip():
-            raise ModelRoleCatalogError(f"模型角色目录里有一条缺 id：{item!r}",
-                                        en=f"An entry in the model role catalog has no id: {item!r}")
+            raise ModelRoleCatalogError(f"无法加载模型角色：有一条缺少 id（{item!r}）",
+                                        en=f"Could not load model roles: an entry has no id ({item!r})")
         specs.append(
             RoleSpec(
                 id=str(item["id"]).strip(),
@@ -136,9 +134,8 @@ def catalog() -> tuple[RoleSpec, ...]:
         mtime_ns = path.stat().st_mtime_ns
     except OSError as exc:
         raise ModelRoleCatalogError(
-            f"模型角色目录读不到：{path} —— {exc}（HARNESS_ROOT 指对了吗？）",
-            en=f"The model role catalog cannot be read: {path} — {exc} (is HARNESS_ROOT pointing at "
-               "the right place?)",
+            f"无法加载模型角色：读取 {path} 失败（{exc}），请检查 HARNESS_ROOT。",
+            en=f"Could not load model roles: cannot read {path} ({exc}). Check HARNESS_ROOT.",
         ) from exc
     return _load(str(path), mtime_ns)
 

@@ -1,0 +1,35 @@
+# 本表只登记待测系统和实际运行配置；不预先假定任何产品具备某项能力。
+systems:
+  - id: harness_academic_search
+    label: Harness 学术搜索
+    tracks: [common_retrieval, extension_workflow]
+    availability: local
+  - id: harness_literature_e2e
+    label: Harness E2E 文献调研
+    tracks: [common_retrieval, e2e_review, extension_workflow]
+    availability: local
+  - id: bohrium
+    label: 玻尔科研空间
+    tracks_to_verify: [common_retrieval, e2e_review, extension_workflow]
+  - id: intern_ai4s
+    label: 书生 AI4S 产品
+    tracks_to_verify: [common_retrieval, e2e_review, extension_workflow]
+  - id: panshi
+    label: 磐石 AI4S 产品
+    tracks_to_verify: [common_retrieval, e2e_review, extension_workflow]
+  - id: chatgpt
+    label: ChatGPT
+    tracks_to_verify: [common_retrieval, e2e_review]
+  - id: claude
+    label: Claude
+    tracks_to_verify: [common_retrieval, e2e_review]
+  - id: deepseek
+    label: DeepSeek
+    tracks_to_verify: [common_retrieval, e2e_review]
+  - id: dedicated_academic_search
+    label: 专用学术检索基线（待选）
+    tracks_to_verify: [common_retrieval]
+
+registration_rules:
+  - "每次正式运行前填写产品版本、账户层级、联网/深度研究开关和地区出口。"
+  - "未实际提供的能力一律填 not_offered；不以猜测替代实测。"

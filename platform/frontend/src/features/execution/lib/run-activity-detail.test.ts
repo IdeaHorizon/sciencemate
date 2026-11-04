@@ -94,7 +94,7 @@ test("tool errors, retries, redaction, and truncation stay explicit", () => {
   assert.equal(tool.error?.title, "Read source material did not complete");
   assert.equal(tool.error?.message, "The source could not be read.");
   assert.deepEqual(tool.notices, [
-    "Source payload truncated during ingest",
+    "Source content was truncated when saved",
     "Sensitive values redacted",
   ]);
 });
@@ -398,7 +398,8 @@ test("reported blockers surface as a readable activity line", () => {
     },
   ] as never);
   const text = JSON.stringify(detail);
-  assert.match(text, /postprocess is blocked/);
+  // 报阻塞的节点用显示名（postprocess → Visualization），不露节点 id。
+  assert.match(text, /Visualization is blocked/);
   assert.match(text, /visual_requests/);
 });
 
@@ -475,15 +476,15 @@ test("停靠中说清楚还要等多久、以及一句话能叫醒它", () => {
     event(2, "run.parked", { untilEpoch: until, delaySeconds: 10800, why: "unattended_recheck_backoff" }),
   ];
   const line = projectRunActivityRaw(parked, undefined, "zh").currentStatus ?? "";
-  assert.match(line, /停靠中/);
-  assert.match(line, /约 3 小时后复查/, "不给时间尺度的「稍等」比不说更糟");
-  assert.match(line, /发一句话可立即唤醒/, "D12 已经能叫醒它了，用户该知道有这个选项");
+  assert.match(line, /等待中/);
+  assert.match(line, /约 3 小时后再检查/, "不给时间尺度的「稍等」比不说更糟");
+  assert.match(line, /发送消息可立即继续/, "D12 已经能叫醒它了，用户该知道有这个选项");
   // 同一个局面在英文界面里也要说全这三件事 —— 只有一种语言写全的话，
   // 另一种语言的用户读到的是残缺的局面。
   const english = projectRunActivityRaw(parked, undefined, "en").currentStatus ?? "";
-  assert.match(english, /Parked/);
+  assert.match(english, /Waiting/);
   assert.match(english, /about 3h/);
-  assert.match(english, /wake it now/);
+  assert.match(english, /continue now/);
 });
 
 test("平台的回执留在事实流里，锚回它回应的那条消息", () => {
@@ -498,8 +499,8 @@ test("平台的回执留在事实流里，锚回它回应的那条消息", () =>
   ], undefined, "zh");
   const receipt = detail.said.find((s) => s.repliesToMessageId === "msg-7");
   assert.ok(receipt, "回执没锚回那条消息 —— 事后答不出它在回应谁");
-  assert.match(receipt!.text, /已收下/);
-  assert.match(receipt!.text, /上一轮还占着/, "占用状态要如实说，别只说「已收下」");
+  assert.equal(receipt!.text, "", "投递事件不能冒充助手发言");
+  assert.deepEqual(receipt!.receipt, { deferred: true, stage: "queued" });
 });
 
 test("「收下了」和「被读到了」是两件事，不许合并", () => {
@@ -513,7 +514,8 @@ test("「收下了」和「被读到了」是两件事，不许合并", () => {
   const both = detail.said.filter((s) => s.repliesToMessageId === "m");
   assert.equal(both.length, 2, "两件事被合成了一条");
   assert.ok(both.some((s) => s.receipt !== undefined), "worker 那条回执丢了");
-  assert.ok(both.some((s) => /已收下/.test(s.text)), "平台那条回执丢了");
+  assert.deepEqual(both.map((s) => s.receipt?.stage), ["queued", "read"]);
+  assert.ok(both.every((s) => s.text === ""), "内部回执不能变成对话正文");
 });
 
 test("没有专用锚字段的事件：提交号留在 submissionId，不冒充消息锚", () => {

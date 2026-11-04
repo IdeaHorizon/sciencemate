@@ -246,6 +246,7 @@ async def _execute_python(
         return {"status": "error", "error": "code 不能为空"}
 
     # v3.2（2026-07）：框架级高危命令拦截（跟 shared/tools/builtin.py:_run_bash 同款）。
+    from core import tool_errors as _errs
     from shared.lib import dangerous_commands as _dc
 
     # ── 第 0 道：越界写入 = 硬拒（deny，不问人、不受 /bypass 影响）─────────
@@ -281,12 +282,33 @@ async def _execute_python(
         return {"status": "error", "error": str(exc)}
     workspace.mkdir(parents=True, exist_ok=True)
 
+    # 这条命令用哪堵墙 —— 与 run_bash 同一个答案（core/sandbox.model_tool_wall）。
+    # 在 cwd 建好之后问：可写根只认已经存在的目录。调度器（只读探查）的写边界
+    # 为空（#1187）—— 下面装依赖那一步要先看它。
+    from core.sandbox import limits_for_profile, model_tool_wall
+
+    wall = model_tool_wall(state)
+
     # 声明了 requirements 就先装齐 —— 但**目的是"跑之前这些包能 import"**，
     # 不是"一定要跑一次装包器"。已经满足的直接跳过：否则解释器里缺个 pip
     # （uv 建的 venv 默认就不装 pip）会让每一次带 requirements 的调用都硬失败，
     # 哪怕那些包早就在。E2E v19 实测就栽在这上面：agent 声明 numpy（venv 里
     # 本来就有），拿到一句"pip install 失败"，只能绕道 safe_run_bash。
     dependency_root = Path(state.root) / ".harness" / "python-packages"
+    if requirements and wall.ephemeral:
+        # 装依赖 = 开网下载 + 往 run 目录写包，两样都是副作用；而装包器是框架拼的
+        # 命令、带着自己的可写根，不在这堵墙后面跑 —— 所以在它起之前就说不，
+        # 不能指望墙来拒（#1187）。
+        state.append_transcript(
+            "read_only_shell_refused", tool="execute_python",
+            code_preview=code[:200], os_refusal="requirements_install")
+        return {
+            "status": "error",
+            "error_code": _errs.REJECTED,
+            **_dc.read_only_shell_facts(),
+            "error": ("⛔ 只读探查里不装依赖（requirements 要开网下载、往 run 目录写包）。\n"
+                      + _dc.READ_ONLY_SHELL_MESSAGE),
+        }
     if requirements:
         # 上面那段注释承诺「已经满足的直接跳过」，但代码从来没做过这件事 ——
         # 每一次带 requirements 的调用都照样去跑装包器。2026-09-17 实测：
@@ -314,17 +336,18 @@ async def _execute_python(
 
     # 跑代码。等**进程退出**、输出落文件 —— 见 builtin.run_bash 同处注释：
     # 代码里 subprocess.Popen 起的后台进程会继承管道，接管道就永远等不到 EOF。
-    # 模型代码关进写沙箱（同 run_bash）：本节点目录 + run-local + scratch 可写。
-    from core.sandbox import limits_for_profile, model_tool_roots
-
+    # 模型代码关进写沙箱（同 run_bash）：本节点目录 + run-local + scratch 可写；
+    # 调度器只剩随命令删掉的私有 scratch。只读墙不接受调用方另给的可写根 ——
+    # 那两个内部参数在这里一个都不认（它们是模型实参里也能出现的名字）。
     _writable, _readonly = (
         (_sandbox_writable_roots, _sandbox_readonly_roots or [])
-        if _sandbox_writable_roots is not None
-        else model_tool_roots(state)
+        if _sandbox_writable_roots is not None and not wall.ephemeral
+        else (wall.writable_roots, wall.readonly_roots)
     )
     status, rc, out_b, err_b = await spawn_and_wait(
         the_interpreter_for_model_code(), "-c", code_to_run, state=state, timeout=timeout,
         cwd=str(workspace), writable_roots=_writable, readonly_roots=_readonly,
+        sandbox_ephemeral=wall.ephemeral,
         sandbox_environment={"PYTHONPATH": str(dependency_root)} if dependency_root.exists() else None,
         sandbox_limits=limits_for_profile(
             resource_profile, walltime_seconds=timeout
@@ -365,8 +388,6 @@ async def _execute_python(
     # 同 run_bash：envelope 里留一句给人看的失败原因，否则下游只剩
     # "Tool execution failed"（core/tool_errors.command_failure_note）。
     if rc != 0:
-        from core import tool_errors as _errs
-
         result["error_code"] = _errs.COMMAND_FAILED
         result["error"] = _errs.command_failure_note(rc, result["stderr_tail"])
     if rc in {125, 126, 137, 138} and "HARNESS_SANDBOX_LIMIT" in err:
@@ -386,6 +407,19 @@ async def _execute_python(
                 ),
             }
         )
+
+    # 调度器的只读探查撞了写墙：说清是哪堵墙、该派谁（#1187，同 run_bash）。
+    if wall.ephemeral:
+        _refusal = _dc.read_only_shell_refusal(
+            out, err, rc, shown=wall.readonly_roots)
+        if _refusal:
+            result.update(_refusal)
+            if rc != 0:
+                result["error_code"] = _errs.REJECTED
+                result["error"] = _refusal["read_only_shell_note"]
+            state.append_transcript(
+                "read_only_shell_refused", tool="execute_python",
+                code_preview=code[:200], os_refusal=_refusal["os_refusal"])
 
     # 图里有豆腐块 → 抬成醒目告警。matplotlib 渲染缺字形时**必然**往 stderr 打
     # "Glyph NNN missing from font(s)"，但它埋在一堆输出里、rc 还是 0 —— v27/v28
@@ -455,9 +489,9 @@ register_tool(
         # （那条红线由 harness rules + 冻结门管，且 exploratory 不许勾账），
         # 是演绎开工前的探路。
         # _orchestrator（2026-08-31，wangd 拍板）：轻量计算通道。"用户随口要核
-        # 个数"不该起完整节点。安全依据不在这份名单，在三道既有墙的组合：
-        # 强制沙箱把写根钉死在自己作用域 + run 目录（write_roots_for）、
-        # 代码文本过 _PROTECTED_SIG 边界、落地走 deliverable_writes 的门。
+        # 个数"不该起完整节点。#1187（wangd 10-21 裁决）起它是**只读探查**：
+        # 写边界为空（core/sandbox.model_tool_wall），算个数照常、结果只能打到
+        # stdout；要留下东西的计算就是科学执行，派 experiment / data。
         # experiment 仍然除外：它的算力走受治理的作业提交，不走裸 python
         # （见 test_experiment_cannot_reach_raw_shell）。
         allowed_node_types=["postprocess", "observation", "derivation",

@@ -208,6 +208,10 @@ class ProjectConfig(Base):
     autonomous_authorized_risk_classes: Mapped[list | None] = mapped_column(
         _JSON, nullable=True
     )
+    #: 模型命令在哪里跑（``core.execution_target``）：NULL / ``local`` = 本机；
+    #: ``wsl:<发行版>`` = 这台 Windows 上的一个 WSL 发行版。由人选，随每条请求送到 worker，
+    #: 冻进 RunAttempt 的 manifest（RFC_WINDOWS_EXECUTION_TARGETS D1/D2）。
+    execution_target: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
     # LLM preferences
     preferred_model: Mapped[str | None] = mapped_column(String(100), nullable=True)

@@ -195,7 +195,7 @@ async def _targeted_search_lane(
     from nodes.literature.tools.filter import compute_relevance_score
     from nodes.literature.tools.scihub_fetcher import paper_cache_dir
     from nodes.literature.tools.search_engines import Paper, SearchManager
-    from shared.tools.web import _web_search
+    from app.services.feed.web_search import search_feed_web as _web_search
 
     manager = SearchManager()
     from app.services.literature_harvester import _recent_publication
@@ -654,7 +654,7 @@ async def discover_for_subscriptions(
     from nodes.literature.tools.filter import compute_relevance_score
     from nodes.literature.tools.scihub_fetcher import paper_cache_dir
     from nodes.literature.tools.search_engines import CrossrefSearch, Paper, SearchManager
-    from shared.tools.web import _web_search
+    from app.services.feed.web_search import search_feed_web as _web_search
 
     journal_issns = {
         " ".join(str(entry.get("name") or "").split()): str(entry.get("issn") or entry.get("eissn") or "").strip()

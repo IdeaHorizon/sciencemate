@@ -16,24 +16,20 @@ import { say, type Language } from "../../../shared/i18n/language.ts";
  * spawn 时定死在环境变量里的，改不了当下这一轮。
  *
  * 一句话的口径要等于它回答的那个问题：人问的是"我现在换了，什么时候算数"。
+ *
+ * 空闲时根本不弹（chip 当场就变了，再弹一句是拿 toast 复述屏幕），所以这里只有
+ * 「执行进行中」这一种说法；调用方在 SessionWorkspace 里按 turnInFlightRef 判。
  */
-export function modelSwitchNotice({ turnInFlight, modelLabel }: {
-  /** 这一轮是否在飞（跑着，或停在等人/等授权处）。 */
-  turnInFlight: boolean;
+export function modelSwitchNotice({ modelLabel }: {
   /** 换成了哪个 —— 换完不说换成了什么，人只能回头再看一眼 chip。 */
   modelLabel: string | null;
 }, lang: Language) {
   const label = modelLabel?.trim();
   const target = label
-    ? say({ zh: "已换成 {label}", en: "Switched to {label}" }, lang, { label })
-    : say({ zh: "已换模型", en: "Model switched" }, lang);
-  return turnInFlight
-    ? say({
-      zh: "{target}；这一轮已经在跑，仍用原来的模型，下一轮开始生效",
-      en: "{target}. This turn is already running on the previous model; the change takes effect from the next turn.",
-    }, lang, { target })
-    : say({
-      zh: "{target}，下一条消息就用它",
-      en: "{target}. Your next message uses it.",
-    }, lang, { target });
+    ? say({ zh: "已切换到 {label}", en: "Switched to {label}" }, lang, { label })
+    : say({ zh: "已切换模型", en: "Model switched" }, lang);
+  return say({
+    zh: "{target}。当前执行仍使用原来的模型，下次执行时生效。",
+    en: "{target}. The current run keeps the previous model; the change applies from the next run.",
+  }, lang, { target });
 }

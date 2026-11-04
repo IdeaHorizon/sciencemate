@@ -29,10 +29,10 @@ import type { UpdateStatus } from "@/lib/api";
 
 /** `installed_from` 的人话。后端那四个值是**词表**，这里一个不漏地翻，漏了就会显示原文。 */
 const WHERE_IT_CAME_FROM: Record<UpdateStatus["installed_from"], Phrase> = {
-  payload: { zh: "自更新装上的载荷", en: "self-updated payload" },
-  bundled: { zh: "安装包里自带的", en: "shipped in the installer" },
-  repo: { zh: "源码目录直接跑的", en: "running from a source checkout" },
-  unknown: { zh: "说不上来", en: "unknown" },
+  payload: { zh: "自动更新安装", en: "installed by auto-update" },
+  bundled: { zh: "安装包安装", en: "installed from the installer" },
+  repo: { zh: "从源码运行", en: "running from source" },
+  unknown: { zh: "来源未知", en: "unknown source" },
 };
 
 export function AboutPanel() {
@@ -50,7 +50,6 @@ export function AboutPanel() {
     <div className="settings-page">
       <header className="settings-page-header">
         <h1>{t({ zh: "关于", en: "About" })}</h1>
-        <p>{t({ zh: "装的是哪一版，以及有没有新的。", en: "Which version this is, and whether a newer one exists." })}</p>
       </header>
 
       <section className="settings-compact-section">
@@ -62,9 +61,9 @@ export function AboutPanel() {
                 ? <>{status.installed_version
                       ? <>{t({ zh: "版本", en: "Version" })} <strong>{status.installed_version}</strong></>
                       // 源码目录直接跑的没有版本标记（开发者模式就是这样）：说清，别一直「正在读」。
-                      : t({ zh: "没有版本标记", en: "No version marker" })}
+                      : t({ zh: "未标记版本", en: "No version marker" })}
                     <small>　·　{t(WHERE_IT_CAME_FROM[status.installed_from] ?? WHERE_IT_CAME_FROM.unknown)}</small></>
-                : t({ zh: "正在读版本…", en: "Reading version…" })}
+                : t({ zh: "正在读取版本…", en: "Reading version…" })}
             </p>
           </div>
         </div>
@@ -80,16 +79,16 @@ export function AboutPanel() {
             <div className="about-update-actions">
               {updating ? null : staged && !available ? (
                 <button type="button" className="settings-primary-action" disabled={busy} onClick={() => void restart()}>
-                  {t({ zh: "现在重启", en: "Restart now" })}
+                  {t({ zh: "立即重启", en: "Restart now" })}
                 </button>
               ) : available && !needsReinstall ? (
                 <button type="button" className="settings-primary-action" disabled={busy}
-                        onClick={() => void install(t({ zh: "没有可装的版本", en: "No version available to install" }))}>
+                        onClick={() => void install(t({ zh: "没有可安装的版本", en: "No version available to install" }))}>
                   {t({ zh: `更新到 ${available}`, en: `Update to ${available}` })}
                 </button>
               ) : needsReinstall && status?.reinstall_url ? (
                 <a className="settings-secondary-action" href={status.reinstall_url} target="_blank" rel="noreferrer">
-                  {t({ zh: "去下载安装包", en: "Get the installer" })}
+                  {t({ zh: "下载安装包", en: "Download the installer" })}
                 </a>
               ) : null}
               <button type="button" className="settings-secondary-action" disabled={busy} onClick={() => void check()}>
@@ -111,13 +110,19 @@ export function AboutPanel() {
 
         {problem ? (
           <p className="settings-inline-error" role="alert">
-            {t({ zh: "查不到更新：", en: "Could not check for updates: " })}{problem}
+            {t({ zh: "检查更新失败：", en: "Could not check for updates: " })}{problem}
           </p>
         ) : null}
         {status?.apply_error ? (
           <p className="settings-inline-error" role="alert">
-            {t({ zh: "上一次更新没装上：", en: "The last update did not apply: " })}{status.apply_error}
+            {t({ zh: "上次更新安装失败：", en: "The last update did not install: " })}{status.apply_error}
           </p>
+        ) : null}
+        {status?.error_cause ? (
+          <details className="settings-technical">
+            <summary>{t({ zh: "技术细节", en: "Technical details" })}</summary>
+            <pre>{status.error_cause}</pre>
+          </details>
         ) : null}
       </section>
 

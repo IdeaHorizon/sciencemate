@@ -77,7 +77,10 @@ def org_orientation(state: Any, *, domain_terms: tuple[str, ...] = (),
     if not findings and not recipes and not dead_ends and not canon_body:
         return None
 
-    lines = [f"{ORG_ORIENTATION_PREFIX}（机械注入，来自组织知识库）", ""]
+    # 卡片正文是别的项目写的、甚至是外部文献转述的（#730）。它进 prompt 只许走数据框：
+    # 这段话随后会被包进 `<framework-notice>`，框里一句 `</framework-notice>` 就能把信封
+    # 提前关上、接着冒充框架说话。框里只放卡片；怎么用它们的话写在框外。
+    lines: list[str] = []
 
     if canon_body:
         lines += [f"**领域活综述 · {domain}**", "",
@@ -121,6 +124,14 @@ def org_orientation(state: Any, *, domain_terms: tuple[str, ...] = (),
                 lines.append(f"    上次代价：{_compact(cost)}")
         lines.append("")
 
+    from shared.lib.external_content import read_view, record_view, render_frame
+
+    witnesses = [(str(rec.get("id")), record_view(rec))
+                 for rec in (findings + recipes + dead_ends)]
+    if canon_body:
+        witnesses.insert(0, (f"领域活综述 · {domain}", read_view(canon_body)))
+    lines = [f"{ORG_ORIENTATION_PREFIX}（机械注入，来自组织知识库）", "",
+             render_frame("\n".join(lines).rstrip(), via="org-kb", witnesses=witnesses), ""]
     lines.append("以上是**组织资产**，每条可用 get_kb_record(方括号里的 id) 取全文与证据链。"
                  "与你的课题冲突时，冲突本身值得记下来 —— 那是开放问题，不是错误。"
                  "如果你**手里的证据**表明其中一条不成立或已有更好的说法，用 "

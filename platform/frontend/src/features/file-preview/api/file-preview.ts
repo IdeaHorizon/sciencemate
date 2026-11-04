@@ -79,7 +79,7 @@ export async function fetchFilePreview(
     }
     const message = typeof detail === "string"
       ? detail
-      : say({ zh: "打不开这个文件（{status}）", en: "This file could not be opened ({status})" }, lang, { status: response.status });
+      : say({ zh: "无法打开这个文件（{status}）", en: "This file could not be opened ({status})" }, lang, { status: response.status });
     throw new Error(message);
   }
 

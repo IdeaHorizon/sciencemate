@@ -16,7 +16,9 @@ from app.schemas.artifact import (
     ArtifactResponse,
     ArtifactVersionResponse,
 )
+from app.services import refusals
 from app.services.sessions import require_capability
+from app.services.user_interface import Language, language_on_screen, say
 
 # Per-project router (mounted at /projects/{project_id}/artifacts)
 router = APIRouter()
@@ -69,6 +71,7 @@ async def get_artifact(
     project_id: str,
     artifact_id: str,
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> Artifact:
     result = await db.execute(
         select(Artifact).where(
@@ -77,7 +80,7 @@ async def get_artifact(
     )
     artifact = result.scalar_one_or_none()
     if not artifact or _is_candidate_only(artifact):
-        raise HTTPException(status_code=404, detail="Artifact not found")
+        raise HTTPException(status_code=404, detail=say(refusals.ARTIFACT_NOT_FOUND, lang))
     return artifact
 
 
@@ -86,6 +89,7 @@ async def get_artifact_content(
     project_id: str,
     artifact_id: str,
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> dict:
     """产物正文 —— 从 **git** 读，不从库里那份拷贝。
 
@@ -100,7 +104,7 @@ async def get_artifact_content(
     )
     artifact = result.scalar_one_or_none()
     if not artifact or _is_candidate_only(artifact):
-        raise HTTPException(status_code=404, detail="Artifact not found")
+        raise HTTPException(status_code=404, detail=say(refusals.ARTIFACT_NOT_FOUND, lang))
 
     version = await db.scalar(
         select(ArtifactVersion)
@@ -130,6 +134,7 @@ async def delete_artifact(
     artifact_id: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> None:
     await require_capability(db, user, project_id, "publish_changes")
     result = await db.execute(
@@ -139,7 +144,7 @@ async def delete_artifact(
     )
     artifact = result.scalar_one_or_none()
     if not artifact:
-        raise HTTPException(status_code=404, detail="Artifact not found")
+        raise HTTPException(status_code=404, detail=say(refusals.ARTIFACT_NOT_FOUND, lang))
     await db.delete(artifact)
     await db.flush()
 
@@ -149,6 +154,7 @@ async def list_artifact_versions(
     project_id: str,
     artifact_id: str,
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> list[ArtifactVersion]:
     artifact = await db.scalar(
         select(Artifact).where(
@@ -157,7 +163,7 @@ async def list_artifact_versions(
         )
     )
     if not artifact or _is_candidate_only(artifact):
-        raise HTTPException(status_code=404, detail="Artifact not found")
+        raise HTTPException(status_code=404, detail=say(refusals.ARTIFACT_NOT_FOUND, lang))
     result = await db.execute(
         select(ArtifactVersion)
         .where(ArtifactVersion.artifact_id == artifact_id)

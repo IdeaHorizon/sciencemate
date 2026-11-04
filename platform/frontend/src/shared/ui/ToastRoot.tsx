@@ -38,7 +38,7 @@ export function ToastRoot() {
           <button
             className="ui-toast-dismiss"
             onClick={() => dismiss(n.id)}
-            aria-label={t({ zh: "关掉这条提示", en: "Dismiss notification" })}
+            aria-label={t({ zh: "关闭通知", en: "Dismiss notification" })}
           >
             <X size={14} />
           </button>

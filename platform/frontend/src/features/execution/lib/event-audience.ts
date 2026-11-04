@@ -92,6 +92,8 @@ const AUDIENCE: Record<ExecutionEventKind, EventAudience> = {
   // 用户交来的文件落进了工作区 / 新后端接回了在飞的那一轮：运行态记账。
   "material.added": "process",
   "run.rejoined": "process",
+  // 接续会话的起点与冻结件的去向：平台记账，右栏与执行历史里看。
+  "session.recovered": "process",
   "run.injected": "process",
   "run.recovering": "process",
   "run.blocked": "process",

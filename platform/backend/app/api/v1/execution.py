@@ -17,7 +17,7 @@ from sqlalchemy import String, and_, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.auth import get_current_user
-from app.services.user_interface import Language, language_for, language_on_screen, say
+from app.services.user_interface import Language, language_for, language_on_screen, said_of, say, spoken
 from app.config import settings
 from app.database import get_db
 from app.models.execution import (
@@ -258,7 +258,8 @@ def _attempt_response(attempt: RunAttempt) -> RunAttemptResponse:
     return RunAttemptResponse.model_validate(attempt)
 
 
-def _event_response(event: ExecutionEvent) -> ExecutionEventResponse:
+def _event_response(event: ExecutionEvent, lang: str) -> ExecutionEventResponse:
+    """一条事件送给这一屏。平台写进事件的话两种语言都存了（`in_either_language`），这里挑一边。"""
     return ExecutionEventResponse(
         schema_version=event.schema_version,
         id=event.id,
@@ -273,7 +274,7 @@ def _event_response(event: ExecutionEvent) -> ExecutionEventResponse:
         source=event.source,
         kind=event.kind,
         visibility=event.visibility,
-        payload=event.payload,
+        payload={key: spoken(value, lang) for key, value in (event.payload or {}).items()},
     )
 
 
@@ -474,6 +475,7 @@ async def list_session_events(
     user: User = Depends(get_current_user),
     tenant_id: str = Depends(get_runtime_tenant_id),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> EventPageResponse | JSONResponse:
     """一条 run 的事件；`includeChildren` 把它派出去的子节点也带上。
 
@@ -526,7 +528,7 @@ async def list_session_events(
     page = events[:limit]
     next_sequence = page[-1].sequence if page else after_sequence
     return EventPageResponse(
-        items=[_event_response(event) for event in page],
+        items=[_event_response(event, lang) for event in page],
         after_sequence=after_sequence,
         next_after_sequence=next_sequence,
         has_more=has_more,
@@ -621,19 +623,17 @@ async def get_session_observation(
             ledger = ledger_module()
             contracts = task_contract_module()
         except HarnessContractUnavailable as exc:
-            return _error(503, "harness_unavailable", say(
-                {"zh": "产物与任务绑定这两维需要 harness checkout（HARNESS_ROOT）：{why}",
-                 "en": "Deliverables and task bindings need a harness checkout (HARNESS_ROOT): {why}"},
-                lang, why=exc))
+            return _error(503, "harness_unavailable", said_of(exc, lang, otherwise={
+                "zh": "无法加载成果：执行环境不可用。",
+                "en": "Could not load outputs: the execution environment is unavailable."}))
         try:
             workspace = await run_in_repository_thread(
                 get_project_repository().session_status, str(project_id), session_id)
             root = workspace.path
         except ProjectRepositoryError as exc:
             # **显式报错，不降成空**：空列表会被读成"这次什么都没产出"。
-            return _error(503, "workspace_unavailable", say(
-                {"zh": "读不到这个会话的工作区：{why}", "en": "Could not read this session's workspace: {why}"},
-                lang, why=exc))
+            return _error(503, "workspace_unavailable", said_of(exc, lang, otherwise={
+                "zh": "无法读取这个会话的工作区。", "en": "Could not read this session's workspace."}))
         deliverables = await run_in_repository_thread(
             obs.deliverables_view, ledger, root)
         tasks_dir = root / "tasks"
@@ -680,6 +680,7 @@ async def stream_session_events(
     user: User = Depends(get_current_user),
     tenant_id: str = Depends(get_runtime_tenant_id),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> StreamingResponse | JSONResponse:
     """Replay and follow durable Run events without coupling Run life to SSE."""
     if not await _session_authorized(
@@ -774,7 +775,7 @@ async def stream_session_events(
                     )
                 for event in events:
                     cursor = event.sequence
-                    payload = _event_response(event).model_dump(
+                    payload = _event_response(event, lang).model_dump(
                         mode="json", by_alias=True, exclude_none=True
                     )
                     yield (

@@ -490,9 +490,9 @@ def _build_system_prompt(harness: NodeHarness, state: State | None = None) -> st
             volatile.append(situation)
             _mark("research_situation")
 
-    if harness.skills:
+    if harness.skills or (state is not None and getattr(state, "project_id", None)):
         # 传 node_type 让 render_skills 过滤掉**别的节点的 node-local skill**
-        rendered = render_skills(harness.skills, node_type=harness.node_type)
+        rendered = render_skills(harness.skills, node_type=harness.node_type, state=state)
         if rendered:
             from core.skill_registry import render_mode
 
@@ -635,6 +635,49 @@ def _owner_review_spec_section(
 _REVIEW_SPEC_MAX_CHARS = 24_000
 
 
+def _producer_side_effect_section(
+    harness: NodeHarness, node_inputs: dict, state: State | None = None
+) -> str | None:
+    """把被审 run 的「用户副作用约束 + 实际改动」组进 reviewer 的 context（#973）。
+
+    2026-09-12：用户说「不要修改文件」，实际新增 24 个 Project 文件；审稿核对了
+    产物和日志，却照 producer 的说法写了「全程只读」并给 0.92 通过 —— 改动清单
+    就在 transcript 里，没人把它和那句话放在一起。和 owner review_spec 同一条原则：
+    判据要用的运行时事实由框架主动送到，不指望审稿自己去 read_producer_transcript。
+    """
+    if harness.node_type not in ("_reviewer", "reviewer") or state is None:
+        return None
+    from core.side_effect_contract import producer_side_effect_check
+
+    check = producer_side_effect_check(state, node_inputs)
+    if check is None:
+        return None
+    promise = check.get("promise") or {}
+    if check.get("promised_read_only"):
+        quote = str(promise.get("quote") or "").strip()
+        contract = "**只读（不修改文件）**" + (f"——用户原话「{quote}」" if quote else "")
+    else:
+        contract = "没有（这次派发没带只读约束）"
+    lines = [
+        "## 🧾 被审 run 的文件改动（框架核对，不由 producer 申报）",
+        f"producer_run_id=`{check.get('producer_run_id')}`",
+        f"- 用户的副作用约束：{contract}",
+        f"- 实际改动（含它再派的节点）：{check.get('counts_text')}",
+    ]
+    if check.get("user_source"):
+        lines.append("- 用户源文件：" + "、".join(check["user_source"]))
+    lines.append(
+        "被审产物或 producer 的陈述若与这里不符（例如称「未修改文件」「全程只读」，而这里"
+        "节点证据或记账不为 0），按陈述失实记 concern。"
+        "critique 里的 `side_effect_check` 由框架照这份事实盖章。")
+    if check.get("contradiction"):
+        lines.append(
+            "⛔ **矛盾**：只读约束下改动了用户源文件。这份审查不能 approve / "
+            "approve_with_revisions（compose_review_critique 的 set_verdict 会拒收）；"
+            "把它记成 critical concern。")
+    return "\n".join(lines)
+
+
 def _build_user_prompt(harness: NodeHarness, state: State, node_inputs: dict) -> str:
     sections: list[str] = []
     _manifest: list[str] = []
@@ -646,6 +689,11 @@ def _build_user_prompt(harness: NodeHarness, state: State, node_inputs: dict) ->
     if spec_section:
         sections.append(spec_section)
         _mark("owner_review_spec")
+
+    side_effect_section = _producer_side_effect_section(harness, node_inputs, state)
+    if side_effect_section:
+        sections.append(side_effect_section)
+        _mark("producer_side_effects")
 
     if node_inputs:
         sections.append("## 节点输入")
@@ -709,13 +757,22 @@ def _build_user_prompt(harness: NodeHarness, state: State, node_inputs: dict) ->
                 "- 看到 superseded 标的 claim → 跳到 `superseded_by` 指的新版"
             )
             if any_hit:
+                # 条目正文可能来自外部（文献转述、晋升上来的 org 卡）—— 进 prompt 只许
+                # 走数据框，入库见证一并呈现（#730）。
+                from shared.lib.external_content import record_view, render_frame
+
                 sections.append(f"### 跟你任务相关的 KB 条目（query={effective_query!r}）：")
+                hit_lines: list[str] = []
                 for entity, records in kb_hits.items():
                     if not records:
                         continue
-                    sections.append(f"**{entity}**（命中 {len(records)} 条）：")
+                    hit_lines.append(f"**{entity}**（命中 {len(records)} 条）：")
                     for r in records:
-                        sections.append(_format_kb_entry_rich(entity, r))
+                        hit_lines.append(_format_kb_entry_rich(entity, r))
+                sections.append(render_frame(
+                    "\n\n".join(hit_lines), via="kb",
+                    witnesses=[(r.get("id"), record_view(r))
+                               for records in kb_hits.values() for r in records]))
             else:
                 sections.append(
                     f"（用 query={effective_query!r} 没命中，但 KB 里有上面提到的"

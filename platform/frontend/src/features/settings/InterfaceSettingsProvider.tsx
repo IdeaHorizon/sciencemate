@@ -200,7 +200,7 @@ export function InterfaceSettingsProvider({ children }: { children: React.ReactN
       return current;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : say(
-        { zh: "读不到界面设置", en: "Interface settings could not be loaded" },
+        { zh: "无法加载界面设置", en: "Interface settings could not be loaded" },
         // 这个 Provider 自己就是语言的出处，不能反过来去 useLanguage()。
         isLanguage(settings.language) ? settings.language : "zh",
       ));
@@ -231,7 +231,7 @@ export function InterfaceSettingsProvider({ children }: { children: React.ReactN
       setSettings(previous);
       cacheAndApply(previous);
       setError(caught instanceof Error ? caught.message : say(
-        { zh: "界面设置没能保存", en: "Interface settings could not be saved" },
+        { zh: "界面设置保存失败", en: "Interface settings could not be saved" },
         isLanguage(settings.language) ? settings.language : "zh",
       ));
       throw caught;

@@ -95,6 +95,42 @@ def _materialize_forwarded_file(
     return updated
 
 
+def _grant_declared_sources(state: State, parent_state: State | None) -> None:
+    """派发即授权（#1244，RFC_CAPABILITY_GRANTS_LAYERING D7）。
+
+    这一趟绑定的冻结预注册（task_contract 上的 exact 绑定）在「数据源 / 许可与前提」里显式写了的
+    主机，人批准那份计划时就看过；派发这个 run 时一并落成出网授权。无人值守的长课题因此不会在
+    第一次取数据时停下来，等一个没人答、按「没答就是没批」被拒掉的问题。
+
+    父 run 派发时拿到的这类授权，原样带给它派的子 run（Experiment 派 Data 去取同一批声明过的数据）。
+    人在卡片上批的不带下去：那张卡问的是「这个 run 能不能连」。运行中新冒出来的主机照旧问人。
+    记账层：解析或读取失败只记一笔，不拦派发 —— 没授权的主机自然还会走申请那条路。
+    """
+    from .capability_grants import dispatch_granted_hosts, grant_declared_hosts
+    from .prereg_sources import declared_hosts_for_run
+
+    try:
+        hosts, basis = declared_hosts_for_run(state)
+        granted = (grant_declared_hosts(
+            state, hosts, basis=f"prereg:{basis.get('artifact_id')}@v{basis.get('version')}")
+            if hosts else [])
+        inherited: list[str] = []
+        if parent_state is not None:
+            from_parent = list(dispatch_granted_hosts(parent_state))
+            if from_parent:
+                inherited = grant_declared_hosts(
+                    state, from_parent, basis=f"parent:{getattr(parent_state, 'run_id', '')}")
+        if granted or inherited or basis.get("unreadable"):
+            state.append_transcript(
+                "capability_granted_at_dispatch",
+                capability="egress_host", hosts=granted, inherited_hosts=inherited,
+                basis=basis,
+            )
+    except Exception as exc:  # 记账层永不拦派发
+        state.append_transcript(
+            "capability_dispatch_grant_failed", error=f"{type(exc).__name__}: {exc}"[:300])
+
+
 def _inherit_sandbox_capability(child: State, parent: State) -> None:
     """子 run 拿谁的沙箱能力 —— 判据是**事实**：父的冻结 manifest 盖不盖得住我的根。
 
@@ -154,6 +190,7 @@ async def execute_node(
     deliverable: dict | None = None,
     planned_stop_authorized: bool = False,
     planned_stop_note: str = "",
+    read_only: bool = False,
     task_instance_uuid: str | None = None,
     task_contract_revision: int | None = None,
     task_contract_digest: str | None = None,
@@ -280,9 +317,19 @@ async def execute_node(
         note=planned_stop_note,
         authorized_by_run_id=(parent_state.run_id if parent_state else None),
     )
+    # 「不要修改文件」同理（#973）：派发方声明，开工前冻住；父身上已有的承诺原样
+    # 传下来 —— 子 run 不能自己放宽，孙辈也一样。
+    from .side_effect_contract import declare_read_only, dispatch_promise
+
+    _promise = dispatch_promise(parent_state, read_only)
+    if _promise is not None:
+        declare_read_only(
+            state, quote=_promise.quote, said_by=_promise.said_by,
+            declared_by_run_id=_promise.declared_by_run_id)
     state.depth = depth
     if parent_state is not None:
         _inherit_sandbox_capability(state, parent_state)
+    _grant_declared_sources(state, parent_state)
     state.sub_run_id = sub_run_id
     state.parent_run_id = parent_state.run_id if parent_state else None
     state.append_transcript(
@@ -1363,6 +1410,70 @@ def compute_orchestration_closure(state: State, harness: NodeHarness) -> dict | 
     }
 
 
+FIGURE_DELIVERY_AUDIT_KEY = "figure_delivery_audit"
+
+
+def audit_delivered_figures(
+    state: State, harness: NodeHarness, workspace_result: dict | None,
+) -> dict | None:
+    """本 run 交出去的图是不是真图（#1200，wangd 2026-10-21 裁决）。
+
+    ``validate_figure_record`` 的伪造 / 指纹检查自 writing 09-18 重建后没有任何生产
+    调用方。裁决：挂在交付收集点，不在铸图时拦 —— cuikl 的约定是伪造记录照样落账、
+    **事后**被抓（nodes/postprocess/tests/test_render_figure.py 的防伪段）。收尾是
+    其中一个收集点：本 run 作用域里的脏路径就是它要交出去的东西（checkpoint 的口径，
+    ``workspace_snapshot``），里面的图记录正文与图文件逐个走一次完整校验
+    （``shared.lib.publication_figures.audit_figure_files``）。
+
+    没过的不是充分性问题，是记录完整性（B）：伪造的图不许当真图交付。每张记一条
+    结构化 blocker（哪张图、哪道检查、怎么修）→ 本 run ``blocked``，调用方在
+    run_node 的结果里看得见；交出去的文件照常入 checkpoint —— 证据留着，判决写明。
+
+    返回落进 summary 的账；``None`` = 不适用（没绑工作区 / 本 run 没交东西 / 系统节点，
+    与交付地板同一口径）。判据自己炸了不让 finalize 挂，记 ``error`` —— 「没核」
+    要看得见，不能读成「核过了」。
+    """
+    if workspace_result is None or str(harness.node_type or "").startswith("_"):
+        return None
+    try:
+        from shared.lib.publication_figures import audit_figure_files
+
+        audit = audit_figure_files(
+            getattr(state, "project_worktree", None), workspace_result.get("paths") or [])
+    except Exception as exc:  # noqa: BLE001
+        state.append_transcript(
+            "figure_delivery_audit_failed", error=f"{type(exc).__name__}: {exc}"[:500])
+        return {"checked": None, "findings": [], "error": f"{type(exc).__name__}: {exc}"[:500]}
+    if audit.findings:
+        from .blockers import record_blocker
+
+        node_type = str(harness.node_type or "")
+        # 一张图一条：记录正文和它的 PNG 是同一件事，拆成两条只会让调用方数错。
+        by_record: dict[str, list] = {}
+        for finding in audit.findings:
+            by_record.setdefault(finding.record_id, []).append(finding)
+        for record_id, findings in by_record.items():
+            record_blocker(
+                state,
+                summary=findings[0].message(),
+                # 图是上游（postprocess）的：writing 交了一张假图，是上游的记录出了事；
+                # postprocess 自己交的那张，就是它自己的事。
+                category="other" if node_type == "postprocess" else "upstream_quality",
+                evidence_paths=[finding.path for finding in findings],
+                requested_action=(
+                    f"由 postprocess 用 render_figure 重新出 {record_id}（同一 "
+                    "output_name 存成新版本），交付方再取新文件；不要手改图文件或图记录。"),
+                suggested_owner="postprocess",
+                retryable_after_change=True,
+                reported_by="framework:figure_record_integrity",
+            )
+        state.append_transcript(
+            "figure_delivery_refused",
+            findings=[{k: v for k, v in f.as_dict().items() if k != "message"}
+                      for f in audit.findings[:20]])
+    return audit.as_dict()
+
+
 async def finalize_run(
     state: State,
     harness: NodeHarness,
@@ -1449,6 +1560,9 @@ async def finalize_run(
                 "workspace_summary_failed",
                 error=f"{type(exc).__name__}: {exc}"[:500],
             )
+
+    # #1200：交出去的图必须是真图 —— 没过的记 blocker，所以要在读 blockers 之前。
+    figure_delivery = audit_delivered_figures(state, harness, project_workspace_result)
 
     blockers = list(state.hook_state.get("blockers") or [])
     final_status = "completed" if not missing else "incomplete"
@@ -1614,6 +1728,8 @@ async def finalize_run(
         "produced_artifact_types": sorted(produced_types),
         "unverified_artifacts": unverified,  # v3.2 provenance 审计（空=全部合法）
         "delivery_empty": delivery_empty,  # v2.1 交付地板（见上）
+        # #1200：交出去的图核过没有、哪些没过（None = 不适用；checked=[] = 核了、没有图）。
+        FIGURE_DELIVERY_AUDIT_KEY: figure_delivery,
         "turns": loop_result.turns,
         # #735：怎么结束的、算谁的（stop/cancelled/failure）。status 是老词表
         # （max_turns 在里面叫 completed），新消费者请读这两个字段。
@@ -1683,6 +1799,17 @@ async def finalize_run(
             "workspace_checkpoint_request_failed",
             error=f"{type(e).__name__}: {e}"[:500],
         )
+
+    # 这个 run 批到的 GPU（#893 阶段 1）在它真正结束时放掉。paused run 不到这里 ——
+    # 停在确认卡上等人时，卡仍归它。它起的后台作业还在跑的话，卡继续算作业的。
+    try:
+        from .capability_grants import release_gpu
+
+        freed = release_gpu(state)
+        if freed:
+            state.append_transcript("gpu_released", indices=freed)
+    except Exception as e:  # 放卡失败不能抹掉 run 的收尾；占卡进程没了，下一个分卡的人会回收
+        state.append_transcript("gpu_release_failed", error=f"{type(e).__name__}: {e}"[:300])
 
     # Active 注册表撤销 —— run 真正结束（completed/incomplete）。
     # paused run 在这里 NOT 到达；resume 后 pause_driver 调本函数才到达。

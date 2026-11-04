@@ -11,7 +11,8 @@ cgroup），Docker 一行不留。本模块只剩三样与后端无关的东西�
   哪些根可写、天花板多高、授权了哪些高危类"。平台冻一份进 DB，worker 校验 hash。
   只有 v4 一种形状（Docker 年代的 v1–v3 在 0.4.3 发布前就已不再写出）。
 * **可写根**（:func:`write_roots_for` 等）：自己的节点目录 + run-local（+ manifest 里
-  显式 rw 的项目资源）；整个 worktree 是拒写层。
+  显式 rw 的项目资源）；整个 worktree 是拒写层。调度器的只读探查 shell 一个可写根都
+  没有（:func:`model_tool_wall`，#1187）。
 
 文件末尾是给 experiment 节点留的**兼容垫片**：那些以 Docker 容器为前提的调用
 （``inspect_container`` / ``stop_container`` / ``image_name`` …）不再有真身，返回
@@ -488,6 +489,46 @@ def model_tool_roots(state: Any) -> tuple[list[Path], list[Path]]:
     return write_roots_for(state), readonly_overrides_for(state)
 
 
+def shell_is_read_only(state: Any) -> bool:
+    """这个 run 的模型 shell 是不是只读探查（harness ``shell_probe_only``；今天只有调度器）。
+
+    值由 ``core.agent_loop.run_loop`` 每轮开头按 harness 显式写进 ``hook_state``。
+    """
+    hook_state = getattr(state, "hook_state", None)
+    return bool(isinstance(hook_state, Mapping) and hook_state.get("_shell_probe_only"))
+
+
+@dataclass(frozen=True)
+class ModelToolWall:
+    """``run_bash`` / ``execute_python`` 这一条命令的写边界 —— 交给 spawn_and_wait 的那几样。"""
+
+    writable_roots: list[Path]
+    readonly_roots: list[Path]
+    ephemeral: bool = False
+    """只读探查（:func:`shell_is_read_only`）：没有可写根，写下的东西一样都留不下。"""
+
+
+def model_tool_wall(state: Any) -> ModelToolWall:
+    """模型自己的两个执行工具用哪堵墙 —— 两个工具一个答案。
+
+    普通节点：自己的作用域 + run-local 可写，worktree 其余只读（:func:`model_tool_roots`）。
+
+    **调度器（``shell_probe_only``）的写边界为空**（#1187，wangd 10-21 裁决）：项目、它的
+    作用域 ``notes/``、run 目录、harness 的持久缓存一律写不进；唯一可写的是后端给每条命令
+    的私有 scratch（``TMPDIR``），命令结束整块删（``CommandSpec.ephemeral``）。网络本来
+    就关着，后台进程随命令结束整组收掉 —— 于是它在 shell 里既落不了盘、也起不了作业。
+    「这一步是科学执行」的机械判据就是「有副作用」，而有副作用的命令在这堵墙后面做不成。
+
+    此前这里只有一句 prompt（#997）加一个按命令文本记账的见证
+    （``probe_only_shell_violation``）：写根照旧是本节点作用域 + run 目录，调度器用
+    heredoc / ``python -c`` 替 experiment 写代码、跑计算、落结果，都能真的落地。
+    """
+    if shell_is_read_only(state):
+        return ModelToolWall([], readonly_overrides_for(state), ephemeral=True)
+    writable, readonly = model_tool_roots(state)
+    return ModelToolWall(writable, readonly)
+
+
 # ── 本地铸 manifest（CLI 路径）与继承判据 ─────────────────────────────────────
 
 
@@ -644,6 +685,7 @@ def _native_launch(
     limits: SandboxLimits | None,
     network_access: bool,
     environment: Mapping[str, str] | None,
+    capabilities: frozenset[str] = frozenset(),
 ):
     from core import isolation
 
@@ -671,6 +713,7 @@ def _native_launch(
         limits=applied,
         environment=environment,
         network_access=bool(network_access),
+        capabilities=frozenset(capabilities),
     )
     launch = backend.prepare(spec, state=state)
     if launch.cwd_in_argv:
@@ -724,7 +767,12 @@ _NATIVE_JOB = Path(__file__).resolve().parent / "isolation" / "_native_job.py"
 def _jobs_root() -> Path:
     import tempfile
 
-    root = Path(os.environ.get("HARNESS_JOBS_ROOT") or (Path(tempfile.gettempdir()) / "hf-jobs"))
+    # 没声明时按用户分开（POSIX）：多用户 Linux 上 /tmp 是共用的，谁先建了 /tmp/hf-jobs
+    # 别人就再也建不了自己的作业目录（11-04 node20：另一个账号建的那个目录，本账号的作业
+    # 与 GPU 账本全部 PermissionError）。macOS / Windows 的临时目录本来就按用户分。
+    default = Path(tempfile.gettempdir()) / (
+        f"hf-jobs-{os.getuid()}" if hasattr(os, "getuid") else "hf-jobs")
+    root = Path(os.environ.get("HARNESS_JOBS_ROOT") or default)
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -828,38 +876,108 @@ def gpu_capability() -> GpuCapability:
     函数（#893 阶段 0，带 `_visible_gpus` 与 `GPU_ISOLATION_NONE`），被这里的定义
     遮住、一个调用方都没有 —— 两份答案并存，读源码的人分不清哪份在生效。
 
-    今天所有原生后端（darwin / linux / win32）都还没有 GPU 分配与隔离的实现：
-    Docker 年代那条路随执行器分档一起拆掉了，原生这边没接上（#793 的尾巴）。
-    所以 ``schedulable`` 恒为 False —— 但 ``visible`` 说真话，
-    机器上有几张就是几张。
+    ``schedulable``（#893 阶段 1）= 看得见卡 + 当前后端能给 CUDA 开口（linux / win32 /
+    wsl 目标；darwin 没有）+ 还有本平台没分出去的卡。分配与记账在 ``core.gpu``，授权走
+    ``core.capability_grants`` 的 GPU 那一节。``isolated`` 恒为 False：没有 MIG/vGPU，
+    同机不经本平台的程序照样看得见这些卡 —— 分配不是隔离。
 
     **不要把这两个字段合成一个 ``available``**。合起来就只能二选一地撒谎：
     说 True 则提交时才撞墙（#893 的现场），说 False 则人看着 4 张空卡
     被告知"没有 GPU"。
     """
-    import shutil
-    import subprocess
+    from core import gpu as _gpu
 
-    visible: int | None = None
-    if shutil.which("nvidia-smi"):
-        try:
-            out = subprocess.run(
-                ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
-                capture_output=True, text=True, timeout=15)
-            if out.returncode == 0:
-                visible = len([l for l in out.stdout.splitlines() if l.strip()])
-        except (OSError, subprocess.SubprocessError):
-            visible = None
-    return GpuCapability(
-        visible=visible,
-        schedulable=False,
-        isolated=False,
-        reason=(
-            "原生后端（darwin / linux / win32）还没有 GPU 分配与隔离的实现 —— "
-            "Docker 年代那条路随执行器分档拆掉了，原生这边尚未接上（#893 / #793）。"
-            "这个答案在提交之前就能确定，不必等到审批之后。"
-        ),
-    )
+    indices = _gpu.visible_indices()
+    visible = None if indices is None else len(indices)
+    if not indices:
+        return GpuCapability(visible=visible, schedulable=False, isolated=False, reason=(
+            "这台机器上没有看得见的 NVIDIA GPU（或 nvidia-smi 跑不通）。"
+            "这个答案在提交之前就能确定，不必等到审批之后。"))
+    backend, why = _gpu_backend()
+    if backend is None:
+        return GpuCapability(visible=visible, schedulable=False, isolated=False, reason=(
+            f"受管执行后端用不了 GPU：{why}。这个答案在提交之前就能确定，不必等到审批之后。"))
+    try:
+        free = _gpu.free_indices(indices)
+    except OSError as exc:
+        # 账本读写不了也是一个答案，不是一次崩溃：分不了卡就照实说为什么。
+        return GpuCapability(visible=visible, schedulable=False, isolated=False, reason=(
+            f"GPU 分配账本读写不了（{exc.__class__.__name__}: {exc}）；修好之前不分卡。"))
+    if not free:
+        holders = ", ".join(sorted({str(row.get("run_id")) for row in _gpu.ledger(indices)}))
+        return GpuCapability(visible=visible, schedulable=False, isolated=False, reason=(
+            f"{visible} 张卡都被本平台别的 run 占着（{holders}）；它们结束后自动空出来。"))
+    return GpuCapability(visible=visible, schedulable=True, isolated=False, reason=(
+        f"空闲 {len(free)} 张（{backend}）。submit_job(scheduler=local, gpus=N) 时框架替你"
+        "问人：批了这个 run 才看得见卡、独占它们到 run 结束。"
+        "不是隔离 —— 没有 MIG/vGPU，同机不经本平台的程序仍看得见这些卡。"))
+
+
+def _gpu_backend() -> tuple[str | None, str]:
+    """能给 GPU 命令开口的后端：linux（Landlock / bwrap 放开 /proc）、win32（Low IL 下 CUDA
+    照常，11-03 9800x3d 实测）、wsl 目标（发行版里 bwrap）。darwin 没有 NVIDIA。"""
+    from core import isolation
+
+    snapshot = isolation.enforcement_snapshot()
+    name = snapshot.get("backend")
+    if not name:
+        return None, str(snapshot.get("unavailable_reason") or "isolation backend unavailable")
+    if name == "darwin":
+        return None, "macOS 上没有受管的 NVIDIA GPU 路线"
+    return str(snapshot.get("target") if snapshot.get("target") not in (None, "local")
+               else name), ""
+
+
+# ── 作业内通信：本机多进程 MPI 的回环 TCP（#1166）────────────────────────────
+
+
+@dataclass(frozen=True)
+class JobTcpCapability:
+    """受管作业里能不能做本机多进程通信（MPI_Init 的回环 TCP bind/connect）。
+
+    * ``runs``      —— 作业里回环 TCP 能用（多进程 MPI 跑得起来）。
+    * ``contained`` —— 同时外网与宿主上监听的服务够不着（10-21 裁决要的那个范围）。
+    * ``loopback``  —— 后端报的处境（``isolation.enforcement_snapshot()["job_loopback"]``）。
+
+    **不发授权卡**（与 10-21 裁决原文「同一个 pause 授权通道」不同，理由写在这里）：bwrap 下
+    私有网络命名空间本身就是那个范围，没有可开的口，批不批都一样，卡只是走过场；纯 Landlock /
+    seatbelt 下那个范围守不住（回环与宿主共享），开口就是同时放开宿主服务与外网，所以不开、
+    在提交之前把缺口说清。
+    """
+
+    runs: bool
+    contained: bool
+    loopback: str | None
+    reason: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"runs": self.runs, "contained": self.contained,
+                "loopback": self.loopback, "reason": self.reason}
+
+    def sentence(self) -> str:
+        head = "本机多进程通信（MPI 回环 TCP）："
+        return head + ("可以。" if self.runs else "不行 —— ") + self.reason
+
+
+def job_tcp_capability() -> JobTcpCapability:
+    """受管作业里本机回环 TCP 的现状，读的是记账快照（与开局说明、提交前的拒绝同一个答案）。"""
+    from core import isolation
+
+    snapshot = isolation.enforcement_snapshot()
+    if not snapshot.get("backend"):
+        return JobTcpCapability(runs=False, contained=False, loopback=None, reason=(
+            f"受管执行后端起不来：{snapshot.get('unavailable_reason') or '原因未知'}。"))
+    loopback = str(snapshot.get("job_loopback") or "")
+    if loopback == "private_netns":
+        return JobTcpCapability(runs=True, contained=True, loopback=loopback, reason=(
+            "每个受管作业有自己的网络命名空间，回环可用，外网与宿主上的服务都够不着。"))
+    if loopback == "host_shared":
+        return JobTcpCapability(runs=True, contained=False, loopback=loopback, reason=(
+            "这台机器的墙不断网：回环可用，但与宿主共享 —— 宿主上监听的服务与外网同样够得着。"))
+    return JobTcpCapability(runs=False, contained=False, loopback=loopback or None, reason=(
+        "这台机器的墙把回环 TCP 也断了，而它守不住「只放作业内回环」：回环与宿主共享，开口就同时"
+        "放开宿主服务与外网，所以不开。要在本机跑多进程 MPI，需要 bubblewrap 可用（允许非特权 "
+        "user namespace），或者走 Slurm。这个答案在提交之前就能确定。"))
 
 
 def prepare_launch(
@@ -875,12 +993,18 @@ def prepare_launch(
     stdout_path: Path | str | None = None,
     stderr_path: Path | str | None = None,
     gpus: int = 0,
+    gpu_lease: Any = None,
 ):
-    """兼容入口：前台取物命令走原生后端；detached 作业走原生作业进程组。"""
+    """兼容入口：前台取物命令走原生后端；detached 作业走原生作业进程组。
+
+    ``gpus > 0`` 必须带着本 run 批到的 ``gpu_lease``（``core.capability_grants.gpu_lease``），
+    卡数不少于 ``gpus``：作业只看得见这几张卡，墙为 CUDA 开口，作业也登记成这几张卡的持有者。
+    """
     import secrets
     import sys
 
-    if gpus:
+    lease_indices = tuple(getattr(gpu_lease, "indices", ()) or ())
+    if gpus and len(lease_indices) < int(gpus):
         # 拒绝要带上事实，而且是**和资源画像同一份事实**（#893）。
         # 旧文案只说"原生后端不提供"，于是读到"可见 4×A100"的模型无从对账，
         # 只能一路规划到提交才撞墙 —— 而那时人已经批过一次不可逆的审批。
@@ -888,29 +1012,38 @@ def prepare_launch(
         # 因为它无法从一句文案判断"是缺卡、缺驱动、还是缺契约"。四条事实都摆出来。
         cap = gpu_capability()
         raise SandboxContractError(
-            "local GPU execution is not provided by the native backends. "
+            "local GPU execution needs this run's approved GPU grant (gpu_runtime). "
             + cap.sentence()
             + f"（visible={cap.visible}, schedulable={cap.schedulable}, "
             + f"isolated={cap.isolated}）"
             + " 这个答案在提交之前、在问人之前就能确定：core.sandbox.gpu_capability()。"
+            + f" 本 run 批到的卡：{list(lease_indices) or '无'}；要用先经人批准"
+            + "（core.capability_grants.require(state, 'gpu_runtime', N)）。"
         )
+    from core import gpu as _gpu
+
+    gpu_env = dict(gpu_lease.env()) if (gpus and gpu_lease is not None) else dict(_gpu.HIDDEN)
+    opened = frozenset({"gpu_runtime"}) if gpus else frozenset()
+    environment = {**(environment or {}), **gpu_env}
     if not detached:
         return _native_launch(
             payload_argv, state=None, cwd=cwd, writable_roots=writable_roots,
             readonly_roots=readonly_roots, limits=limits, network_access=network_access,
-            environment=environment,
+            environment=environment, capabilities=opened,
         )
     if stdout_path is None or stderr_path is None:
         raise SandboxContractError("detached jobs need stdout_path and stderr_path")
     inner = _native_launch(
         payload_argv, state=None, cwd=cwd, writable_roots=writable_roots,
         readonly_roots=readonly_roots, limits=limits, network_access=network_access,
-        environment=environment,
+        environment=environment, capabilities=opened,
     )
     name = f"hf-job-{secrets.token_hex(8)}"
     runtime_id = secrets.token_hex(32)
     control_dir = _jobs_root() / name
-    control_dir.mkdir(mode=0o700)
+    from shared.lib.private_files import mkdir_private
+
+    mkdir_private(control_dir, exist_ok=False)   # Windows 上 mkdir(0o700) 只认 owner（见 mkdir_private）
     (control_dir / "launch.json").write_text(json.dumps({
         "argv": list(inner.argv),
         "cwd": str(getattr(inner, "cwd", None) or cwd),
@@ -929,6 +1062,9 @@ def prepare_launch(
         "status": "created",
         "created_at": __import__("time").time(),
     })
+    if gpus and gpu_lease is not None:
+        # 作业也算这几张卡的持有者：run 先结束，卡等作业结束才空出来（core.gpu）。
+        _gpu.attach_job(gpu_lease, control_dir)
     return NativeJobLaunch(
         argv=[sys.executable, "-I", "-B", str(_NATIVE_JOB), "start", str(control_dir)],
         container_name=name,
@@ -1099,6 +1235,7 @@ __all__ = [
     "effective_egress_policy",
     "GpuCapability",
     "gpu_capability",
+    "job_tcp_capability",
     "SandboxCeiling",
     "SandboxContractError",
     "SandboxLimits",
@@ -1107,12 +1244,15 @@ __all__ = [
     "availability",
     "limits_for_profile",
     "manifest_for",
+    "ModelToolWall",
     "model_tool_roots",
+    "model_tool_wall",
     "parse_manifest",
     "prepare_attempt_command",
     "prepare_launch",
     "readonly_overrides_for",
     "require_available",
+    "shell_is_read_only",
     "uncovered_write_roots",
     "write_roots_for",
 ]

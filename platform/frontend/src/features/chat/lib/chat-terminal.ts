@@ -138,7 +138,8 @@ export function normalizeChatPause(value: unknown, fallbackQuestion?: unknown): 
   return {
     header: stringValue(pauseRecord?.header, metadata?.header),
     question,
-    context: stringValue(pauseRecord?.context, pauseRecord?.situation),
+    // 旧版 decision Offer 的 context 为空，但外层 pause 带着完整报告。
+    context: stringValue(pauseRecord?.context, outer?.context, pauseRecord?.situation),
     askingNodeType: stringValue(
       pauseRecord?.asking_node_type,
       pauseRecord?.askingNodeType,

@@ -55,6 +55,21 @@ from ._native import (
 _LANDLOCK_EXEC = Path(__file__).with_name("_landlock_exec.py")
 
 
+def _own_runtime_dirs() -> tuple[Path, ...]:
+    """墙的最内层是我们自己（``_exec.py`` 垫片，由本解释器起）：这几处目录墙里必须看得见。"""
+    out: list[Path] = []
+    for raw in (Path(__file__).parent, Path(sys.executable).parent, Path(sys.prefix),
+                Path(sys.base_prefix)):
+        path = canonical(raw)
+        if path is not None and path not in out:
+            out.append(path)
+    return tuple(out)
+
+
+def _inside_any(path: Path, roots: list[str]) -> bool:
+    return any(path == Path(root) or Path(root) in path.parents for root in roots)
+
+
 def _probe_bwrap() -> tuple[str | None, str]:
     exe = shutil.which("bwrap")
     if not exe:
@@ -282,7 +297,11 @@ def _probe_systemd() -> tuple[str | None, str]:
 class LinuxBackend:
     name = "linux"
 
-    def __init__(self) -> None:
+    def __init__(self, *, always_hidden: tuple[str, ...] = ()) -> None:
+        #: 不论命令是否联网都换成空 tmpfs 的目录（只在 bwrap 下兑现）。WSL 目标用它藏
+        #: ``/run/WSL``：那里的 interop socket 能让墙里的进程以用户身份在 Windows 侧起进程，
+        #: 写边界与断网一起失效（``core.isolation.wsl``，11-03 真机实测）。
+        self._always_hidden = tuple(always_hidden)
         self._probed = False
         self._bwrap: str | None = None
         self._landlock = False
@@ -294,6 +313,27 @@ class LinuxBackend:
         self._reasons: dict[str, str] = {}
         #: 结构判据按可写根缓存：一条 run 的根是固定的，别每条命令都起一次 git。
         self._git_check_cache: dict[tuple[str, ...], tuple[tuple[Path, Path], ...]] = {}
+
+    #: :meth:`facts` / :meth:`from_facts` 交换的字段。探针结果只对探它的那台机器、那次
+    #: 开机成立 —— 缓存它的一方（``_wsl_entry``）负责按开机 id 失效。
+    _FACT_FIELDS = ("_bwrap", "_landlock", "_landlock_abi", "_landlock_net",
+                    "_landlock_net_scope", "_systemd", "_reasons")
+
+    def facts(self) -> dict[str, Any]:
+        """探针探出来的事实（JSON 可序列化）。"""
+        self._probe()
+        return {name.lstrip("_"): getattr(self, name) for name in self._FACT_FIELDS}
+
+    @classmethod
+    def from_facts(cls, facts: dict[str, Any], **kwargs: Any) -> LinuxBackend:
+        """用同一台机器先前探出来的事实建后端，不再重探。字段缺了就当没缓存、照常探。"""
+        backend = cls(**kwargs)
+        keys = [name.lstrip("_") for name in cls._FACT_FIELDS]
+        if all(key in facts for key in keys):
+            for name, key in zip(cls._FACT_FIELDS, keys):
+                setattr(backend, name, facts[key])
+            backend._probed = True
+        return backend
 
     def _probe(self) -> None:
         if self._probed:
@@ -362,6 +402,24 @@ class LinuxBackend:
         if self._landlock_net:
             return self._landlock_net_scope
         return "none"
+
+    @property
+    def job_loopback(self) -> str:
+        """一条受管命令 / 作业里，本机回环 TCP 是什么处境（#1166，进记账）。
+
+        ``private_netns`` = bwrap 的 ``--unshare-net``：自己的网络命名空间里 bwrap 拉起了 ``lo``，
+        回环 bind/connect 照常（多进程 MPI 跑得通），外网不可达、宿主上监听的服务也看不见 ——
+        「作业内通信、断外网与无关宿主服务」不用开任何口，本来就是这道墙。
+        ``denied`` = 纯 Landlock：网络规则按端口不按地址、回环与宿主共享，seccomp 又禁建 AF_INET
+        socket；要让 MPI 跑通就得同时放开宿主服务与外网，守不住，所以不开。
+        ``host_shared`` = 没断网：回环通，但与宿主共享。2026-11-04 node20 实测：bwrap 下
+        ``mpirun -np 2`` 一次 Allreduce 成功、``1.1.1.1`` 不可达、宿主 22 端口拒绝；纯 Landlock 下
+        PMIx 监听线程起不来（lujy 09-28 的 ``bind(): Permission denied``）。
+        """
+        self._probe()
+        if self._bwrap:
+            return "private_netns"
+        return "denied" if self._landlock_net else "host_shared"
 
     @property
     def write_boundary_scope(self) -> str:
@@ -446,21 +504,34 @@ class LinuxBackend:
                 continue
         return out
 
-    def _bwrap_argv(self, layers: WriteLayers, *, network: bool) -> list[str]:
+    def _bwrap_argv(self, layers: WriteLayers, *, network: bool, gpu: bool = False) -> list[str]:
         assert self._bwrap
         argv = [self._bwrap, "--die-with-parent", "--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev"]
+        if gpu:
+            # CUDA 运行时给新线程写 /proc/self/task/<tid>/comm（#1174）；--ro-bind / 把 /proc
+            # 也一起变成只读了。批到 GPU 的 run 把 /proc 可写地挂回来。
+            argv += ["--bind", "/proc", "/proc"]
         if not network:
             # 先铺 tmpfs，再发声明的根 —— 后挂的罩住前面的，所以**声明过**的路径
             # （例如 HARNESS_JOBS_ROOT 下自己那个作业目录）会被下面的 bind 从宿主
             # 还原回来，没声明的整片消失。
-            for mountpoint in self._private_socket_dirs():
+            hidden = self._private_socket_dirs()
+            for mountpoint in hidden:
                 argv += ["--tmpfs", mountpoint]
+            # 我们自己（_exec.py 垫片与起它的解释器）住在被换掉的目录里时只读挂回来 ——
+            # 否则墙的最内层自己就起不来：checkout 在 /tmp 下时 `python3: can't open file
+            # …/_exec.py`（11-03 WSL 真机实测；普通 Linux 上同理，只是 checkout 很少在 /tmp）。
+            for keep in _own_runtime_dirs():
+                if _inside_any(keep, hidden):
+                    argv += ["--ro-bind", str(keep), str(keep)]
         # 深度升序发射，后挂的罩住前面的 → 最具体的声明赢。旧次序（broad → readonly →
         # priority）会让住在只读根里的可写根把它内部的只读洞盖回可写（#899-A）。
         for path, mode in layers.ordered:
             argv += ["--bind" if mode == "rw" else "--ro-bind", str(path), str(path)]
         for path in layers.git:
             argv += ["--ro-bind", str(path), str(path)]
+        for mountpoint in self._always_hidden:
+            argv += ["--tmpfs", mountpoint]
         if not network:
             argv.append("--unshare-net")
         return argv
@@ -471,7 +542,8 @@ class LinuxBackend:
         # 私有 scratch 现在是**所有**分支的事，不再只有 Landlock：共享 /tmp 一挂就等于
         # 把别的 run 的状态目录和 /tmp/hf-jobs/*/record.json 交出去（#872）。
         scratch_dir = private_scratch()
-        layers = write_layers(spec.writable_roots, spec.readonly_roots, scratch_dir=scratch_dir)
+        layers = write_layers(spec.writable_roots, spec.readonly_roots, scratch_dir=scratch_dir,
+                              persistent_cache=not spec.ephemeral)
         inner: list[str] = list(spec.argv)
         unmet: list[tuple[str, str]] = []
         if not self._bwrap and self._landlock:
@@ -514,6 +586,17 @@ class LinuxBackend:
             dev = canonical("/dev")
             if dev is not None:
                 roots.append(str(dev))
+            if "gpu_runtime" in spec.capabilities:
+                # #1174（lujy 实证）：CUDA 驱动初始化时给它新建的辅助线程写
+                # /proc/self/task/<tid>/comm，Landlock 拒了就 cuInit=304。那些线程起在 Landlock
+                # 规则之后、可能在任意子进程里，所以只能放行整个 /proc 的写 —— 能写到的是同一
+                # 用户自己进程的 comm / oom_score_adj 一类。粒度按内核做得到的如实记账。
+                roots.append("/proc")
+                unmet.append((
+                    "gpu_runtime",
+                    "本 run 批到了 GPU：/proc 在墙里可写（CUDA 运行时要写线程名），同一用户"
+                    "自己进程的 comm / oom_score_adj 等因此也改得动",
+                ))
             inner = [*_landlock_argv(roots, network=spec.network_access), *inner]
         else:
             # bwrap 自己 execvp 载荷失败 → `bwrap: execvp X: …` + rc 1，从咽喉看和"命令跑完
@@ -521,7 +604,14 @@ class LinuxBackend:
             # 说；这一支的最内层换成 _exec.py 垫片来说，咽喉据此报 spawn_failed。
             inner = [*exec_shim_argv(), *inner]
         if self._bwrap:
-            inner = [*self._bwrap_argv(layers, network=spec.network_access), "--", *inner]
+            inner = [*self._bwrap_argv(layers, network=spec.network_access,
+                                         gpu="gpu_runtime" in spec.capabilities),
+                     "--", *inner]
+            if "gpu_runtime" in spec.capabilities:
+                unmet.append((
+                    "gpu_runtime",
+                    "本 run 批到了 GPU：/proc 在墙里可写地挂回（CUDA 运行时要写线程名）",
+                ))
         unit = None
         stop: list[str] = []
         witness = None
@@ -539,7 +629,8 @@ class LinuxBackend:
         return NativeLaunch(
             argv=inner,
             cwd=spec.cwd,
-            env=payload_environment(spec.environment, scratch_dir=scratch_dir, home=spec.home),
+            env=payload_environment(spec.environment, scratch_dir=scratch_dir, home=spec.home,
+                                    persistent_cache=not spec.ephemeral),
             unit=unit,
             stop_argv=stop,
             limit_witness=witness,

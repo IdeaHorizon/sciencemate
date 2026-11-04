@@ -20,8 +20,8 @@ export default function ProjectFilesPage() {
           <h1 className="page-title">{t({ zh: "项目文件", en: "Project files" })}</h1>
           <p className="page-subtitle">
             {t({
-              zh: "Project 就是一个 Git 仓库：每个节点拥有自己的目录，产出直接落成文件。这里看的是「一共有什么」；「这一轮改了什么」在会话里看。你自己的文件从「项目材料」传进来，agent 在新会话里直接可读。",
-              en: "A Project is a Git repository: every node owns a directory and writes its outputs straight to files. This page answers \"what is here in total\"; \"what changed this turn\" lives in the session. Your own files come in through Project materials and the agent can read them in a new session.",
+              zh: "这个项目中的所有文件。每次执行改动了哪些文件，可以在对应会话里查看；要添加自己的文件，在会话中点「添加文件」。",
+              en: "All the files in this project. To see what a run changed, open its session; to add your own files, use Add a file in a session.",
             })}
           </p>
         </div>

@@ -36,6 +36,7 @@ from app.models.execution import (
     TERMINAL_RUN_STATUSES,
 )
 from app.services.redaction import DEFAULT_REDACTION_POLICY, RedactionPolicy
+from app.services.say import in_either_language, say
 from app.services.run_status import project_run_status
 
 #: 一条记录的 `file_identity` 有三种来源，两种由平台自己命名。名字在这里
@@ -373,6 +374,28 @@ _ERROR_TEXT_IN_TRUNCATED = re.compile(r'"error":\s*"((?:[^"\\]|\\.)*)"')
 _ERROR_CODE_IN_TRUNCATED = re.compile(r'"error_code":\s*"([a-z_]+)"')
 
 
+#: 自主循环为什么停（harness `core.session_driver.next_action` 的停机码）→ 人话。
+#: `loop_aborted` 只说了「熔断了」，具体是哪一种在 harness 的 detail 里，所以它后面
+#: 还跟着那段原文；其余几个码自己就说清了。
+_LOOP_STOPPED_BECAUSE: dict[str, dict[str, str]] = {
+    "continuous_not_running": {"zh": "自主模式已关闭", "en": "autonomous mode is off"},
+    "stopped_while_waiting": {"zh": "等待期间自主模式被关闭",
+                              "en": "autonomous mode was turned off while waiting"},
+    "no_research_yet": {"zh": "项目里还没有可以继续的研究，请先告诉助手要研究什么",
+                        "en": "there is no research in this project to continue yet; "
+                              "tell the assistant what to research first"},
+    "live_pause_pending": {"zh": "有一个决策在等你处理", "en": "a decision is waiting for you"},
+    "waiting_for_a_person": {"zh": "有一个问题需要你回答", "en": "a question is waiting for your answer"},
+    "loop_aborted": {"zh": "多次尝试都没有进展", "en": "several attempts made no progress"},
+}
+
+
+def _step_did_not_finish(status: str) -> dict[str, str]:
+    """一步没走完、harness 又没说为什么时的那句话（状态码原样放在括号里）。"""
+    return in_either_language({"zh": "这一步没有完成（{status}）", "en": "This step did not finish ({status})"},
+                              status=status)
+
+
 def _tool_failure_fields(raw: dict[str, Any], result: Any) -> dict[str, Any]:
     """失败事件的 errorCode / errorMessage —— **一处**决定，别在别处再抄一份。
 
@@ -387,9 +410,12 @@ def _tool_failure_fields(raw: dict[str, Any], result: Any) -> dict[str, Any]:
         code = result.get("error_code") or code
         message = result.get("error") or message
         if not message and result.get("returncode") not in (None, 0):
-            # 子进程类工具的失败写在 returncode/stderr_tail 里。
-            message = f"命令退出码 {result['returncode']}：" + str(
-                result.get("stderr_tail") or "")[-300:]
+            # 子进程类工具的失败写在 returncode/stderr_tail 里。平台自己说的这半句两种语言
+            # 都存（读的那一屏挑一边），stderr 原样跟在后面。
+            message = in_either_language(
+                {"zh": "命令执行失败（退出码 {code}）：{stderr}",
+                 "en": "Command failed (exit code {code}): {stderr}"},
+                code=result["returncode"], stderr=str(result.get("stderr_tail") or "")[-300:])
     elif isinstance(result, str):
         found_code = _ERROR_CODE_IN_TRUNCATED.search(result)
         if found_code:
@@ -406,7 +432,8 @@ def _tool_failure_fields(raw: dict[str, Any], result: Any) -> dict[str, Any]:
             message = result
     fields = {
         "errorCode": str(code or "tool_error"),
-        "errorMessage": str(message or "Tool execution failed"),
+        "errorMessage": (message if isinstance(message, dict) else str(message)) if message
+        else in_either_language({"zh": "工具执行失败", "en": "Tool execution failed"}),
     }
     # 工具自己写的"下一步该干什么"。显示层一直在读 `error.recovery`，但在这一跳
     # 之前**没有任何写者** —— 于是每一类失败都退回按工具类型猜的兜底句，而兜底
@@ -606,18 +633,32 @@ class TranscriptAdapter:
             #
             # 渲染成一条 session 消息，而不是又发明一种只有我们自己看得懂的
             # 事件类型：用户界面已经会显示 session 消息，接上去就到得了人。
+            #
+            # 写的时候不知道谁来读、用哪种语言，所以两种都存（`in_either_language`）。
+            # 停机原因按 harness 给的码说成人话；harness 的 detail 是它写给开发者的原文，
+            # 只在码本身说不清为什么时（熔断、认不出的码）跟在后面，并原样留在 `detail`。
             detail = str(raw.get("detail") or "").strip()
-            done = str(raw.get("reason") or "") == "research_complete"
-            content = ("✅ 自主研究已完成，循环停止。" if done
-                       else "🛑 自主研究循环已停止。")
-            if detail:
-                content += f"\n\n原因：{detail}"
-            elif not done:
-                content += f"\n\n原因：{raw.get('reason') or 'unknown'}"
+            code = str(raw.get("reason") or "")
+            if code == "research_complete":
+                content = in_either_language({"zh": "✅ 自主研究已完成。",
+                                              "en": "✅ Autonomous research is complete."})
+            elif code in _LOOP_STOPPED_BECAUSE:
+                content = {lang: say({"zh": "🛑 自主研究已停止：{because}。",
+                                      "en": "🛑 Autonomous research has stopped: {because}."},
+                                     lang, because=say(_LOOP_STOPPED_BECAUSE[code], lang))
+                           for lang in ("zh", "en")}
+            else:
+                content = in_either_language(
+                    {"zh": "🛑 自主研究已停止（{code}）。", "en": "🛑 Autonomous research has stopped ({code})."},
+                    code=code or "unknown")
+            if detail and code not in _LOOP_STOPPED_BECAUSE.keys() - {"loop_aborted"}:
+                content = {lang: text + say({"zh": "\n\n详细信息：{detail}", "en": "\n\nDetails: {detail}"},
+                                            lang, detail=detail)
+                           for lang, text in content.items()}
             return EventDraft(
                 "session.message",
                 EventVisibility.SUMMARY,
-                {"role": "system", "content": content},
+                {"role": "system", "content": content, **({"detail": detail} if detail else {})},
                 at,
             )
         if raw_event == "session_message":
@@ -724,7 +765,7 @@ class TranscriptAdapter:
                 {
                     "stepId": step_id,
                     "errorCode": status,
-                    "errorMessage": str(raw.get("error") or f"Root step ended with {status}"),
+                    "errorMessage": str(raw.get("error") or "") or _step_did_not_finish(status),
                 },
                 at,
             )
@@ -999,6 +1040,7 @@ class TranscriptAdapter:
                 {
                     "decisionId": decision_id,
                     "selectedChoiceId": selected,
+                    "decidedBy": raw.get("decided_by") or "human",
                     "terminal": terminal,
                     "acceptedResponseCount": int(raw.get("accepted_response_count") or 1),
                     "requiredApprovalCount": int(raw.get("required_approval_count") or 1),
@@ -1045,8 +1087,9 @@ class TranscriptAdapter:
                 encoded = patch.encode("utf-8")
                 truncated = bool(raw.get("patch_truncated"))
                 if len(encoded) > _MAX_WORKSPACE_PATCH_BYTES:
+                    # 截断的说明不写进 diff 正文（那样只能是一种语言）：`patchTruncated`
+                    # 交给显示层，它按这一屏的语言说。
                     patch = encoded[:_MAX_WORKSPACE_PATCH_BYTES].decode("utf-8", "ignore")
-                    patch += "\n … diff 过长，平台在摄取时截断（完整内容在 Project Git 里）"
                     truncated = True
                 payload["patch"] = patch
                 payload["patchTruncated"] = truncated
@@ -2361,8 +2404,8 @@ class ExecutionIngestService:
             payload["status"] = status
         else:
             payload["errorCode"] = status
-            payload["errorMessage"] = str(
-                raw.get("error") or raw.get("message") or f"run ended with {status}")
+            payload["errorMessage"] = (str(raw.get("error") or raw.get("message") or "")
+                                       or _step_did_not_finish(status))
         return await self._insert_event(
             db,
             session=session,

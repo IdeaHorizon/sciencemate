@@ -62,6 +62,7 @@ from typing import Any
 
 import yaml
 
+from .cost_ledger import is_vendor_host, provider_label
 from .runtime_secrets import get as _runtime_secret
 from .runtime_secrets import install as _install_secret
 
@@ -287,7 +288,19 @@ def _synthesize_reasoning_from_env() -> tuple[dict[str, RoleBinding], dict[str, 
     if base_url.endswith("/v1"):
         base_url = base_url[:-3]
     model = os.getenv("LLM_MODEL", "").strip()
-    if not (api_key and base_url and model):
+    # 和交付通道那条路同一条规则：缺模型名或地址才是"没配"，没有 key 不算 —— 自建端点
+    # （vLLM / SGLang / Ollama）默认不鉴权，平台只在端点确实不要 key 时才这样发。这里以前
+    # 还要 key，于是平台那几次单次调用（会话命名、资讯翻译）对不鉴权的自建模型一律报
+    # 「当前没有可用后端」，而平台那一侧早就放行了（11-04 真跑撞到）。
+    if not (base_url and model):
+        return {}, {}
+    # 但官方托管端点没有 key 只有一个结局：被拒。那不是"不鉴权的自建端点"，是 key 忘了填 ——
+    # 平台那边同样不会这样发（官方地址不带 key 探不通，连接停在 missing_credentials）。
+    # 这里认得出，就在这里说"没配"，不让人发一次请求去换一个 401。官方主机名单只有一份，
+    # 和记账"谁在收钱"是同一个问题（`cost_ledger.is_vendor_host`）。
+    if not api_key and is_vendor_host(provider_label(base_url)):
+        log.warning("LLM_BASE_URL 指向官方托管端点 %s，但没有 LLM_API_KEY —— 视为未配置",
+                    provider_label(base_url))
         return {}, {}
     window = os.getenv("LLM_CONTEXT_WINDOW", "").strip()
     binding = RoleBinding(

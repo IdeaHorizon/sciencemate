@@ -10,7 +10,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.services.user_interface import Language, language_on_screen, said_of, say
+from app.services import refusals
+from app.services.user_interface import Language, language_for, language_on_screen, said_of, say
 from app.auth import get_current_user
 from app.config import settings
 from app.database import get_db
@@ -116,6 +117,7 @@ async def create_project(
         operation_mode=data.operation_mode,
         reporting_level=data.reporting_level,
         preferred_model=data.preferred_model,
+        lang=lang,
     )
     return await _project_response(db, user, result["project"])
 
@@ -164,9 +166,9 @@ async def get_project(
     result = await db.execute(query)
     project = result.scalar_one_or_none()
     if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail=say(refusals.PROJECT_NOT_FOUND, language_for(user)))
     if not await can_access_project(db, user, project):
-        raise HTTPException(status_code=403, detail="Not authorized to view this project")
+        raise HTTPException(status_code=403, detail=say(refusals.NOT_AUTHORIZED_FOR_PROJECT, language_for(user)))
 
     return {
         **await _project_response(db, user, project),
@@ -183,9 +185,9 @@ async def get_project_repository_status(
 ) -> dict:
     project = await db.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail=say(refusals.PROJECT_NOT_FOUND, language_for(user)))
     if not await can_access_project(db, user, project):
-        raise HTTPException(status_code=403, detail="Not authorized to view this project")
+        raise HTTPException(status_code=403, detail=say(refusals.NOT_AUTHORIZED_FOR_PROJECT, language_for(user)))
     from app.services.project_repository import (
         ProjectRepositoryError,
         get_project_repository,
@@ -199,7 +201,7 @@ async def get_project_repository_status(
         raise HTTPException(
             status_code=409,
             detail={"code": "project_repository_unavailable", "message": said_of(exc, lang, otherwise={
-                "zh": "项目仓库读不了：{why}", "en": "The project repository cannot be read: {why}"})},
+                "zh": "无法读取项目文件，请稍后重试。", "en": "Could not read the project files. Try again later."})},
         ) from exc
     return {
         "projectId": project_id,
@@ -226,9 +228,9 @@ async def _authorize_repository_read(
     """
     project = await db.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail=say(refusals.PROJECT_NOT_FOUND, language_for(user)))
     if not await can_access_project(db, user, project):
-        raise HTTPException(status_code=403, detail="Not authorized to view this project")
+        raise HTTPException(status_code=403, detail=say(refusals.NOT_AUTHORIZED_FOR_PROJECT, language_for(user)))
     if session_id:
         session = await db.scalar(
             select(SessionProjection).where(
@@ -237,7 +239,7 @@ async def _authorize_repository_read(
             )
         )
         if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
+            raise HTTPException(status_code=404, detail=say(refusals.SESSION_NOT_FOUND, language_for(user)))
 
 
 @router.get("/{project_id}/catalog", response_model=dict)
@@ -286,7 +288,7 @@ async def get_project_catalog(
             root = (await run_in_repository_thread(repository.status, project_id)).path
     except ProjectRepositoryError as exc:
         raise HTTPException(status_code=409, detail=said_of(exc, lang, otherwise={
-            "zh": "读不到这个工作区：{why}", "en": "This workspace cannot be read: {why}"})) from exc
+            "zh": "无法读取这个工作区。", "en": "Could not read this workspace."})) from exc
 
     try:
         from app.services.harness_contract import catalog_module
@@ -297,8 +299,9 @@ async def get_project_catalog(
         # 空目录看起来和"这个项目还没产出东西"一模一样。
         raise HTTPException(
             status_code=503,
-            detail=say({"zh": "研究产出这一层需要 harness checkout（HARNESS_ROOT）：{why}",
-                        "en": "Research outputs need a harness checkout (HARNESS_ROOT): {why}"}, lang, why=exc),
+            detail=said_of(exc, lang, otherwise={
+                "zh": "无法加载成果：执行环境不可用。",
+                "en": "Could not load outputs: the execution environment is unavailable."}),
         ) from exc
 
     entries = await run_in_repository_thread(catalog.build, root)
@@ -348,7 +351,7 @@ async def get_project_records(
             root = (await run_in_repository_thread(repository.status, project_id)).path
     except ProjectRepositoryError as exc:
         raise HTTPException(status_code=409, detail=said_of(exc, lang, otherwise={
-            "zh": "读不到这个工作区：{why}", "en": "This workspace cannot be read: {why}"})) from exc
+            "zh": "无法读取这个工作区。", "en": "Could not read this workspace."})) from exc
 
     try:
         from app.services.harness_contract import ledger_module
@@ -357,8 +360,9 @@ async def get_project_records(
     except HarnessContractUnavailable as exc:
         raise HTTPException(
             status_code=503,
-            detail=say({"zh": "研究记录这一层需要 harness checkout（HARNESS_ROOT）：{why}",
-                        "en": "Research records need a harness checkout (HARNESS_ROOT): {why}"}, lang, why=exc),
+            detail=said_of(exc, lang, otherwise={
+                "zh": "无法加载研究记录：执行环境不可用。",
+                "en": "Could not load research records: the execution environment is unavailable."}),
         ) from exc
 
     def _read() -> dict:
@@ -419,7 +423,7 @@ async def get_project_repository_tree(
         )
     except ProjectRepositoryError as exc:
         raise HTTPException(status_code=409, detail=said_of(exc, lang, otherwise={
-            "zh": "列不出这个目录：{why}", "en": "This folder cannot be listed: {why}"})) from exc
+            "zh": "无法打开这个文件夹。", "en": "Could not open this folder."})) from exc
     return {"schemaVersion": 3, "sessionId": session_id, **listing}
 
 
@@ -445,7 +449,7 @@ async def get_project_repository_file(
         )
     except ProjectRepositoryError as exc:
         raise HTTPException(status_code=404, detail=said_of(exc, lang, otherwise={
-            "zh": "打不开这个文件：{why}", "en": "This file cannot be opened: {why}"})) from exc
+            "zh": "无法打开这个文件。", "en": "Could not open this file."})) from exc
 
 
 @router.get(
@@ -510,7 +514,7 @@ async def get_project_repository_raw(
         ) from exc
     except ProjectRepositoryError as exc:
         raise HTTPException(status_code=404, detail=said_of(exc, lang, otherwise={
-            "zh": "打不开这个文件：{why}", "en": "This file cannot be opened: {why}"})) from exc
+            "zh": "无法打开这个文件。", "en": "Could not open this file."})) from exc
 
     filename = PurePosixPath(safe).name
     return Response(
@@ -539,11 +543,11 @@ async def update_project(
     result = await db.execute(select(Project).where(Project.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail=say(refusals.PROJECT_NOT_FOUND, language_for(user)))
     if not await has_project_capability(db, user, project, "manage_settings"):
         raise HTTPException(
             status_code=403,
-            detail="Missing project capability: manage_settings",
+            detail=say(refusals.missing_capability("manage_settings"), language_for(user)),
         )
 
     update_data = data.model_dump(exclude_unset=True)
@@ -598,19 +602,31 @@ async def update_project_config(
     proj_result = await db.execute(select(Project).where(Project.id == project_id))
     project = proj_result.scalar_one_or_none()
     if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail=say(refusals.PROJECT_NOT_FOUND, language_for(user)))
     if not await has_project_capability(db, user, project, "manage_settings"):
         raise HTTPException(
             status_code=403,
-            detail="Missing project capability: manage_settings",
+            detail=say(refusals.missing_capability("manage_settings"), language_for(user)),
         )
 
     result = await db.execute(select(ProjectConfig).where(ProjectConfig.project_id == project_id))
     config = result.scalar_one_or_none()
     if not config:
-        raise HTTPException(status_code=404, detail="Project config not found")
+        raise HTTPException(status_code=404, detail=say({"zh": "找不到项目设置", "en": "Project config not found"}, language_for(user)))
 
     update_data = data.model_dump(exclude_unset=True)
+    if "execution_target" in update_data:
+        # 写法与「这台机器上有没有」在这里核；存进去一个起不来的目标，症状要到下一条命令
+        # 才出现，而且是在 worker 里（RFC_WINDOWS_EXECUTION_TARGETS D2）。
+        import asyncio
+
+        from app.services.execution_targets import TargetRejectedError, normalise
+
+        try:
+            update_data["execution_target"] = await asyncio.to_thread(
+                normalise, update_data["execution_target"])
+        except TargetRejectedError as exc:
+            raise HTTPException(status_code=422, detail=exc.said_in(language_for(user))) from exc
     for field, value in update_data.items():
         setattr(config, field, value)
     await db.flush()
@@ -662,11 +678,11 @@ async def delete_project(
     result = await db.execute(select(Project).where(Project.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail=say(refusals.PROJECT_NOT_FOUND, language_for(user)))
     if not await has_project_capability(db, user, project, "manage_settings"):
         raise HTTPException(
             status_code=403,
-            detail="Missing project capability: manage_settings",
+            detail=say(refusals.missing_capability("manage_settings"), language_for(user)),
         )
 
     await db.execute(sql_delete(Project).where(Project.id == project_id))
@@ -708,9 +724,9 @@ async def list_project_blockers(
 
     project = await db.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail=say(refusals.PROJECT_NOT_FOUND, language_for(user)))
     if not await can_access_project(db, user, project):
-        raise HTTPException(status_code=403, detail="Not authorized to view this project")
+        raise HTTPException(status_code=403, detail=say(refusals.NOT_AUTHORIZED_FOR_PROJECT, language_for(user)))
 
     rows = (
         await db.execute(
@@ -782,7 +798,7 @@ async def get_project_jobs(
 
     project = await db.get(Project, project_id)
     if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail=say(refusals.PROJECT_NOT_FOUND, language_for(user)))
     # 登记表在**项目的家**（`core.jobs._jobs_path` = state.project_root，
     # 即 `<projects_home>/<项目>/jobs.jsonl`）。
     # 这里从前读的是项目仓库 / 会话工作区的根 —— 那里没有任何人写这个文件，于是这条路由对每个项目
@@ -797,8 +813,9 @@ async def get_project_jobs(
     except HarnessContractUnavailable as exc:
         raise HTTPException(
             status_code=503,
-            detail=say({"zh": "作业观测面需要 harness checkout（HARNESS_ROOT）：{why}",
-                        "en": "The jobs view needs a harness checkout (HARNESS_ROOT): {why}"}, lang, why=exc),
+            detail=said_of(exc, lang, otherwise={
+                "zh": "无法加载作业：执行环境不可用。",
+                "en": "Could not load jobs: the execution environment is unavailable."}),
         ) from exc
 
     def read_them() -> list:
@@ -810,8 +827,8 @@ async def get_project_jobs(
         # 读不动就说读不动。降级成空清单等于告诉调用方"没跑过作业"。
         raise HTTPException(
             status_code=503,
-            detail=say({"zh": "作业登记表读不出来（不是「没有作业」）：{why}",
-                        "en": "The job ledger cannot be read (this is not \"no jobs\"): {why}"}, lang, why=exc),
+            detail=said_of(exc, lang, otherwise={
+                "zh": "无法读取作业记录。", "en": "Could not read the job records."}),
         ) from exc
 
     return {

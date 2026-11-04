@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from app.services.execution_ingest import TranscriptAdapter
+from app.services.say import spoken
 
 from .test_execution_foundation import AT, _context
 
@@ -21,6 +22,11 @@ def _draft(raw: dict):
         {"at": AT, **raw}, context=_context(), adapter_state={}, event_id="e1")
 
 
+def _said(draft, lang: str) -> str:
+    """消息两种语言都存着（写的时候不知道谁来读）；这一屏读到的是哪一句。"""
+    return spoken(draft.payload["content"], lang)
+
+
 def test_an_aborted_loop_becomes_a_message_carrying_its_reason():
     draft = _draft({
         "event": "unattended_loop_stopped", "turn": 41, "reason": "loop_aborted",
@@ -28,10 +34,11 @@ def test_an_aborted_loop_becomes_a_message_carrying_its_reason():
     })
     assert draft is not None, "平台不认这条事件 —— 循环停了而界面上什么都没有"
     assert draft.kind == "session.message"
-    assert "停止" in draft.payload["content"]
-    assert "一字不差" in draft.payload["content"], (
+    assert "停止" in _said(draft, "zh")
+    assert "一字不差" in _said(draft, "zh"), (
         "没带理由的「已停止」只会换来一句「为什么」"
     )
+    assert _said(draft, "en").startswith("🛑 Autonomous research has stopped: several attempts")
 
 
 def test_a_completed_loop_does_not_read_like_a_failure():
@@ -40,12 +47,20 @@ def test_a_completed_loop_does_not_read_like_a_failure():
         "detail": "",
     })
     assert draft is not None and draft.kind == "session.message"
-    assert "完成" in draft.payload["content"]
-    assert "🛑" not in draft.payload["content"], "做完了不该显示成停机"
+    assert "完成" in _said(draft, "zh")
+    assert "🛑" not in _said(draft, "zh"), "做完了不该显示成停机"
+    assert _said(draft, "en") == "✅ Autonomous research is complete."
 
 
 def test_a_reasonless_stop_still_says_something():
-    """detail 缺失（老 worker / 未知路径）也不能退化成一条空消息。"""
+    """detail 缺失（老 worker / 未知路径）也不能退化成一条空消息 —— 停机码说成人话。"""
     draft = _draft({"event": "unattended_loop_stopped", "reason": "live_pause_pending"})
     assert draft is not None
-    assert "live_pause_pending" in draft.payload["content"]
+    assert _said(draft, "zh") == "🛑 自主研究已停止：有一个决策在等你处理。"
+    assert _said(draft, "en") == "🛑 Autonomous research has stopped: a decision is waiting for you."
+
+
+def test_a_stop_code_nobody_knows_is_still_named():
+    """认不出的码原样说出来，不编一句理由。"""
+    draft = _draft({"event": "unattended_loop_stopped", "reason": "something_new"})
+    assert "something_new" in _said(draft, "zh") and "something_new" in _said(draft, "en")

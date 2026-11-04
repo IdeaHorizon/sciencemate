@@ -483,15 +483,30 @@ def resolve_tool_path(state: Any, value: str, *, write: bool = False) -> Path:
             own = _own_node_package(state)
             if own is not None and (resolved == own or resolved.is_relative_to(own)):
                 return resolved
+            # archive_papers returns paths in this user's shared paper library.
+            # It is research input, not framework state. Resolve symlinks before
+            # checking it, and never extend this grant to writes or credentials.
+            from core.paths import literature_papers_dir
+
+            papers = literature_papers_dir().resolve(strict=False)
+            if resolved == papers or resolved.is_relative_to(papers):
+                return resolved
         raise ProjectWorkspaceError(
             f"Path escaped the Project boundary: {value!r}\n"
             f"可读范围：本 Project 目录 {str(project_root)!r}"
             + (f"、本节点自己的 spec 目录 {str(_own_node_package(state))!r}"
                if _own_node_package(state) is not None else "")
             + "。\n平台代码、别的节点的 spec、框架状态目录都不在可读范围内；"
-            "要找论文缓存用 literature 的检索工具，不要直接读盘。"
+            "论文库中的 PDF、抽取文本和索引可用 read_file / search_files / list_files 只读访问。"
         )
     if write:
+        # 只读约束（#973）：派发方声明了「用户不让改文件」，用户源文件这一类
+        # 在这里机械禁写 —— 所有文件写工具都经过这一行。节点证据与 .research
+        # 照写（那是诚实收尾必须留下的东西），由收尾核对如实照数。
+        from core.side_effect_contract import promised_read_only, refuse_user_source_write
+
+        refuse_user_source_write(
+            promised_read_only(state), resolved.relative_to(project_root).as_posix())
         owned_target = (project_root / str(state.workspace_relative_path)).resolve()
         owned_is_file = owned_target.suffix != "" and owned_target.name == "MEMORY.md"
         permitted = (
@@ -1234,6 +1249,51 @@ _INTERNAL_WORKSPACE_PREFIXES = (".research/",)
 
 def _is_internal_bookkeeping(path: str) -> bool:
     return path.startswith(_INTERNAL_WORKSPACE_PREFIXES)
+
+
+# ── 一个 Project 路径属于哪一类（#973，wangd 2026-10-21 裁决）──────────────
+#
+# 用户说「不要修改文件」那次（2026-09-12），实际新增了 24 个 Project 文件，而最终
+# 回复和 Reviewer 都说「未修改文件」。那 24 个全是 experiment / reviewer 自己目录
+# 里的证据 —— 用户的源码一个字没动。「没改源码」被简写成了「没改文件」，而当时
+# 唯一的判据只认 `.research/`，节点证据反而全被算成「用户文件」。
+#
+# 裁决：三类，判据只按前缀，只在这里算一次 —— 收尾核对、子节点汇总、Reviewer 的
+# 副作用检查、终稿陈述、只读禁写都调这一个函数。
+#   用户源文件  不属于任何节点作用域、也不是 .research 的路径（项目根的普通文件、
+#               用户带进来的源码）。只读约束下禁写。
+#   节点证据    某个节点 `workspace_prefix` 下的路径（_NODE_WORKSPACES 表，
+#               含扩展节点的 runs/extensions/）。只读约束下照写，但照数。
+#   .research   平台记账（_INTERNAL_WORKSPACE_PREFIXES）。照写，照数。
+# run 目录里的东西（scratch、transcript、运行日志）不在 Project 里，根本不进这三类。
+USER_SOURCE = "user_source"
+NODE_EVIDENCE = "node_evidence"
+BOOKKEEPING = "bookkeeping"
+
+
+def node_prefix_of(path: str) -> str | None:
+    """这条 Project 相对路径落在哪个节点的作用域里；不在任何作用域里返回 None。"""
+    rel = Path(str(path or "").strip()).as_posix().lstrip("/")
+    if rel.startswith("./"):
+        rel = rel[2:]
+    if not rel or rel == ".":
+        return None
+    for owned in dict.fromkeys(_NODE_WORKSPACES.values()):
+        if rel == owned or rel.startswith(owned.rstrip("/") + "/"):
+            return owned
+    if rel.startswith("runs/extensions/"):
+        return "runs/extensions"
+    return None
+
+
+def classify_project_path(path: str) -> str:
+    """一条 Project 相对路径属于哪一类：USER_SOURCE / NODE_EVIDENCE / BOOKKEEPING。"""
+    rel = Path(str(path or "").strip()).as_posix().lstrip("/")
+    if _is_internal_bookkeeping(rel):
+        return BOOKKEEPING
+    if node_prefix_of(rel) is not None:
+        return NODE_EVIDENCE
+    return USER_SOURCE
 
 
 def observe_after_tool(state: Any, tool_name: str) -> dict[str, Any] | None:

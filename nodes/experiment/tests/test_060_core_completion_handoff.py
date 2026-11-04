@@ -139,8 +139,13 @@ def test_frozen_trio_without_finish_commit_must_not_complete(
         return real_append_once(kind, key, **payload)
 
     monkeypatch.setattr(led, "append_once", interrupt_finish)
-    with pytest.raises(OSError, match="post-freeze pre-finish"):
+    with pytest.raises(tx.DeliveryTransactionError, match="post-freeze pre-finish") as caught:
         tx.settle_delivery(state, led, _manifest(state, outcome="failed"))
+    assert caught.value.code == "closure_ledger_persist_failed"
+    assert caught.value.facts["checkpoint"] == "ledger_commit"
+    assert caught.value.facts["commit_visibility"] == "unknown"
+    assert caught.value.facts["frozen_artifacts_preserved"] is True
+    assert isinstance(caught.value.__cause__, OSError)
 
     audit = contract_audit.audit_experiment_delivery(state)
     assert audit["passed"] is False, audit

@@ -20,7 +20,7 @@ test("上下文窗口占位文案里的默认值 = core/harness.py 的 DEFAULT_M
     new URL("../components/ModelConnections.tsx", import.meta.url),
     "utf8",
   );
-  const shown = page.match(/留空 = 用平台默认（(\d+)）/);
+  const shown = page.match(/留空则使用默认值 (\d+)/);
   assert.ok(shown, "models 设置页没找到那句占位文案");
   assert.equal(shown[1], match[1]);
 });

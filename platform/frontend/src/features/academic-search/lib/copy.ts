@@ -5,7 +5,7 @@
  * ## 用法
  *
  * 组件里 `const t = useT();` 然后 `t(AC.searchButton)`；
- * 批量列表（标签页）直接遍历 `CATEGORIES`，`t(item)` 就是当前语言的标签。
+ * 标签页遍历 `CATEGORIES`，通过 `CATEGORY_BY_VALUE` 取当前语言的显示标签。
  */
 import type { Phrase } from "@/shared/i18n";
 
@@ -17,17 +17,17 @@ export const AC = {
   },
   searchInputAria: { zh: "学术搜索内容", en: "Academic search query" },
   searchButton: { zh: "搜索论文", en: "Search papers" },
-  searchFailed: { zh: "检索失败：", en: "Search failed: " },
+  searchFailed: { zh: "搜索失败：", en: "Search failed: " },
   retryLater: { zh: "请稍后重试", en: "Please try again later" },
 
-  // ── 本地文献资产 ────────────────────────────────────────────────────────
+  // ── 全文（本地 PDF、学校馆藏）────────────────────────────────────────────
   assetOpenFailed: {
-    zh: "本地文献资产打开失败，请重新登录后再试。",
-    en: "Could not open the local asset. Please sign in again and retry.",
+    zh: "无法打开全文，请稍后重试。",
+    en: "Could not open the full text. Please try again later.",
   },
-  localAssetsAria: { zh: "本地文献资产", en: "Local paper assets" },
+  localAssetsAria: { zh: "全文", en: "Full text" },
   openLocalPdf: { zh: "打开本地 PDF", en: "Open local PDF" },
-  openSchoolFulltext: { zh: "查看学校馆藏全文（模拟）", en: "Open school full text (demo)" },
+  openSchoolFulltext: { zh: "查看学校馆藏全文", en: "Open school full text" },
 
   // ── 论文条目 ────────────────────────────────────────────────────────────
   untitledPaper: { zh: "未命名论文", en: "Untitled paper" },
@@ -44,7 +44,7 @@ export const AC = {
 
   // ── 评分雷达 ────────────────────────────────────────────────────────────
   radarAria: { zh: "推荐度多维雷达图", en: "Recommendation radar across dimensions" },
-  radarCasMissing: { zh: "分区未收录，该项按最低分计", en: "Quartile not indexed; scored at the minimum" },
+  radarCasMissing: { zh: "未收录中科院分区，此项计 0 分", en: "No CAS quartile; this dimension scores 0" },
   dimensionRelevance: { zh: "相关度", en: "Relevance" },
   dimensionCas: { zh: "分区", en: "Quartile" },
   dimensionCitation: { zh: "引用", en: "Citations" },
@@ -70,30 +70,27 @@ export const AC = {
   impactFactorMax: { zh: "影响因子上限", en: "Maximum impact factor" },
   sortMode: { zh: "排序方式", en: "Sort by" },
   sortModeAria: { zh: "结果排序方式", en: "Result sorting" },
+  defaultSort: { zh: "默认排序", en: "Default order" },
 
   // ── 翻译状态 ────────────────────────────────────────────────────────────
-  translating: {
-    zh: "正在后台翻译当前页摘要，检索结果可正常浏览。",
-    en: "Translating this page's abstracts in the background; results stay browsable.",
-  },
+  translating: { zh: "正在翻译本页内容…", en: "Translating this page…" },
   translationFailed: {
-    zh: "当前页翻译暂不可用，已保留原文显示。",
-    en: "Translation is unavailable for this page; showing the original text.",
+    zh: "本页翻译失败，显示原文。",
+    en: "Translation failed for this page; showing the original text.",
   },
 
   // ── 条目操作与分页 ──────────────────────────────────────────────────────
-  like: { zh: "点赞", en: "Like" },
   save: { zh: "收藏", en: "Save" },
+  saved: { zh: "已收藏", en: "Saved" },
   share: { zh: "分享", en: "Share" },
   shared: { zh: "已分享", en: "Shared" },
-  noResults: { zh: "该分类暂无结果。", en: "No results in this category." },
+  linkCopied: { zh: "已复制链接", en: "Link copied" },
+  noResults: { zh: "没有符合筛选条件的论文。", en: "No papers match the current filters." },
   paginationAria: { zh: "学术搜索结果分页", en: "Academic search result pages" },
   previousPage: { zh: "上一页", en: "Previous" },
   nextPage: { zh: "下一页", en: "Next" },
-  pageStatus: {
-    zh: "第 {page}/{total} 页 · 每页最多 {size} 篇",
-    en: "Page {page} of {total} · up to {size} per page",
-  },
+  pageStatus: { zh: "第 {page} / {total} 页", en: "Page {page} of {total}" },
+  doi: { zh: "DOI：{doi}", en: "DOI: {doi}" },
 } as const satisfies Record<string, Phrase>;
 
 /** 排序方式：下拉的当前值与选项列表用的是同一批词条，改文案只改一处。 */

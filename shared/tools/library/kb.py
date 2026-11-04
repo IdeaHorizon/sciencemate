@@ -31,6 +31,7 @@ from typing import Any
 
 from core.state import State
 from core.tool_registry import ToolDefinition, register_tool
+from shared.lib.external_content import carry_witness, frame_payload
 from shared.lib.kb_schema import (
     ENTITIES, CLAIM_TYPES, CONCEPT_TYPES, SCOPES, CREATED_BY_ROLES,
     SchemaValidationError, smart_default_scope,
@@ -858,7 +859,7 @@ async def _search_kb(
     # entity_type 不传 = 全景仪表盘（原 kb_overview）。「看大势」和「按条件找」
     # 是同一个动作的两档，不是两个工具 —— 后者只是前者加了 where 子句。
     if not (entity_type or "").strip():
-        return await _kb_overview(state, recent_n=recent_n)
+        return frame_payload(await _kb_overview(state, recent_n=recent_n), via="kb")
     # entity_type / projection 的枚举由 parameters_schema 声明，派发口核一次。
     records = state.list_kb(entity_type, scope_filter=scope)
     q = query.strip().lower() if query else ""
@@ -924,7 +925,8 @@ async def _search_kb(
     result = budget_kb_search(out, entity_type, projection=projection)
     # 兼容旧 caller：保留 count 字段（= returned）。
     result["count"] = result["returned"]
-    return result
+    # KB 里存的是外部来源与历史记录（#730）：读进对话只许走数据框，入库见证一并呈现。
+    return frame_payload(result, via="kb")
 
 
 register_tool(
@@ -1213,6 +1215,7 @@ async def _kb_mode3_candidates(
                     "score": len(overlap),
                     "text": (r.get("claim_text") or r.get("experiment_text")
                              or r.get("text", ""))[:120],
+                    **carry_witness(r),
                 })
 
     candidates.sort(key=lambda c: -c["score"])
@@ -1263,6 +1266,7 @@ async def _find_stale_dead_end_or_refuted(
                 "dont_repeat_reason": (cl.get("dont_repeat_reason") or "")[:200],
                 "last_reviewed_at": last,
                 "review_history_length": len(cl.get("review_history") or []),
+                **carry_witness(cl),
             })
     out.sort(key=lambda r: r["last_reviewed_at"])
     return {
@@ -1302,7 +1306,9 @@ async def _get_kb_record(
     if rec is None:
         return {"status": "error",
                 "error": f"找不到 {entity}/{kb_id}（已被 supersede 或不存在）"}
-    return {"status": "success", "entity": entity, "record": rec}
+    # 同 search_kb：数据框 + 读时见证（#730）。
+    return frame_payload({"status": "success", "entity": entity, "record": rec},
+                         via="kb", source=str(rec.get("source") or "") or None)
 
 
 register_tool(
@@ -1395,7 +1401,11 @@ async def _kb_overview(
 async def _kb_provenance(state: Any, kb_id: str, **_: Any) -> dict:
     from core.kb_provenance import kb_provenance
 
-    return kb_provenance(state, str(kb_id or ""))
+    out = kb_provenance(state, str(kb_id or ""))
+    if out.get("status") == "error":
+        return out
+    # 每一跳的摘要取自 KB 正文 —— 同 search_kb，数据框 + 读时见证（#730）。
+    return frame_payload(out, via="kb")
 
 
 register_tool(
@@ -1584,7 +1594,8 @@ async def _find_org_promotion_candidates(
         rec = state.get_kb_record(kind, c["source_id"]) or {}
         return {**{k: c[k] for k in ("source_id", "kind", "lane", "evidence_closure",
                                       "has_draft")},
-                "text": (rec.get("claim_text") or rec.get("text") or "")[:200]}
+                "text": (rec.get("claim_text") or rec.get("text") or "")[:200],
+                **carry_witness(rec)}
 
     # 这一次新交出去的；已进组织的、已在待审里的另列（见下），不重复算候选。
     handled = {a["source_id"] for a in out["already"]}
@@ -1687,6 +1698,7 @@ async def _find_synthesis_candidates(
     claims = state.list_kb("claims")
     concepts = state.list_kb("concepts")
     concept_by_id = {c["id"]: c for c in concepts}
+    claim_by_id = {c["id"]: c for c in claims}
 
     # concept_id → [(claim_id, claim_text)]，只算非 synthesis 的 anchor claim
     by_concept: dict[str, list[tuple[str, str]]] = {}
@@ -1740,6 +1752,8 @@ async def _find_synthesis_candidates(
             "n_anchor_claims": len(anchors),
             "candidate_source_claim_ids": [a[0] for a in anchors[:20]],
             "sample_claim_texts": [a[1] for a in anchors[:5]],
+            # 摘出来的那几句正文与词条名的入库见证（#730）
+            **carry_witness(concept, *(claim_by_id.get(a[0]) for a in anchors[:5])),
         })
 
     candidates.sort(key=lambda r: r["n_anchor_claims"], reverse=True)
@@ -1805,7 +1819,18 @@ _SCAN_TYPES = (
 )
 
 
-async def _curator_scan(
+async def _curator_scan(state: State, scan_type: str, **kwargs: Any) -> dict:
+    """curator_scan 的出口：扫描结果里的 KB 正文进对话只许走数据框（#730）。
+
+    四种扫描各自截一段 claim / chunk / concept 正文给模型看，和 search_kb 是同一类
+    读取点 —— 投影行带着入库见证，这里换成读时视图。"""
+    out = await _curator_scan_inner(state, scan_type, **kwargs)
+    if out.get("status") == "error":
+        return out
+    return frame_payload(out, via="kb")
+
+
+async def _curator_scan_inner(
     state: State,
     scan_type: str,
     limit: int = 20,
@@ -2268,10 +2293,10 @@ def _resolve_one(state: State, kb_id: str, _seen: set[str] | None = None) -> dic
         if _is_external_uri(src):
             return {"id": kb_id, "kind": "chunk", "external": [src],
                     "text_preview": (rec.get("text") or "")[:160],
-                    "scope": rec.get("scope")}
+                    "scope": rec.get("scope"), **carry_witness(rec)}
         return {"id": kb_id, "kind": "chunk", "external": [],
                 "note": f"source 是内部来源（{src[:60]}）—— 不可外部引用",
-                "text_preview": (rec.get("text") or "")[:160]}
+                "text_preview": (rec.get("text") or "")[:160], **carry_witness(rec)}
 
     if kb_id.startswith("claim_"):
         rec = state.get_kb_record("claims", kb_id)
@@ -2289,7 +2314,7 @@ def _resolve_one(state: State, kb_id: str, _seen: set[str] | None = None) -> dic
                     internal.append(s)
         out = {"id": kb_id, "kind": "claim", "external": sorted(set(ext)),
                "claim_text_preview": (rec.get("claim_text") or "")[:160],
-               "scope": rec.get("scope")}
+               "scope": rec.get("scope"), **carry_witness(rec)}
         if internal:
             out["unresolved_sources"] = internal
         return out
@@ -2298,7 +2323,7 @@ def _resolve_one(state: State, kb_id: str, _seen: set[str] | None = None) -> dic
     if rec is not None:
         ext = [s for s in (rec.get("sources") or []) if _is_external_uri(s)]
         return {"id": kb_id, "kind": "concept", "external": sorted(set(ext)),
-                "canonical_name": rec.get("canonical_name")}
+                "canonical_name": rec.get("canonical_name"), **carry_witness(rec)}
     return {"id": kb_id, "external": [], "note": "未知 id 前缀 / 记录不存在"}
 
 
@@ -2316,7 +2341,8 @@ async def _resolve_citations(state: State, ids: list[str] | None = None,
             resolved.append(row)
         else:
             unresolved.append(row)
-    return {
+    # 反查行里带着正文预览 —— 同 search_kb，数据框 + 读时见证（#730）。
+    return frame_payload({
         "status": "success",
         "resolved": resolved,
         "unresolved": unresolved,
@@ -2327,7 +2353,7 @@ async def _resolve_citations(state: State, ids: list[str] | None = None,
             "`eprint = {arXiv preprint}` 这种占位条目 —— 那和编造的引用"
             "在读者眼里没有区别。"
         ),
-    }
+    }, via="kb")
 
 
 register_tool(

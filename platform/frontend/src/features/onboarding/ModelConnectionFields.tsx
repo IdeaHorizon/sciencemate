@@ -2,7 +2,7 @@
 
 /** 一条模型连接要填的四样东西。主推理模型和那几个可选角色共用它。 */
 
-import { PROVIDERS, type ProviderPreset } from "./lib/providers";
+import { PROVIDERS, keyIsOptional, type ProviderPreset } from "./lib/providers";
 import { useT } from "@/shared/i18n";
 
 export type ConnectionDraft = {
@@ -17,7 +17,7 @@ export function emptyDraft(): ConnectionDraft {
 }
 
 export function draftIsComplete(draft: ConnectionDraft): boolean {
-  return Boolean(draft.baseUrl.trim() && draft.model.trim() && draft.apiKey.trim());
+  return Boolean(draft.baseUrl.trim() && draft.model.trim() && (draft.apiKey.trim() || keyIsOptional(draft)));
 }
 
 export function ModelConnectionFields({
@@ -53,7 +53,14 @@ export function ModelConnectionFields({
       </label>
       <label htmlFor={`${idPrefix}-key`}>{t({ zh: "API 密钥", en: "API key" })}
         <input id={`${idPrefix}-key`} type="password" autoComplete="off" value={draft.apiKey}
+          placeholder={keyIsOptional(draft) ? t({ zh: "自建服务不需要密钥时可留空", en: "Leave blank if your service needs no key" }) : undefined}
           onChange={(event) => onChange({ ...draft, apiKey: event.target.value })} />
+        {keyIsOptional(draft) && (
+          <small>{t({
+            zh: "自建服务（vLLM、SGLang、Ollama 等）通常不需要密钥，可以留空。保存时会测试一次连接，需要密钥的话会提示你。",
+            en: "Self-hosted services (vLLM, SGLang, Ollama and so on) usually need no key, so you can leave this blank. Saving tests the connection once and tells you if a key is needed.",
+          })}</small>
+        )}
       </label>
     </div>
   );

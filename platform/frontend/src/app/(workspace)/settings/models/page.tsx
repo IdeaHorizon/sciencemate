@@ -31,7 +31,7 @@ export default function ModelSettingsPage() {
   const { user } = useAuth();
   return (
     <div className="settings-page">
-      <header className="settings-page-header"><h1>{t({ zh: "模型与密钥", en: "Models & credentials" })}</h1><p>{t({ zh: "选新会话建立时冻结进去的那个模型，并查看你这个角色能看到的网关连接。", en: "Choose the model captured by new Sessions and inspect the gateway connections your role can access." })}</p></header>
+      <header className="settings-page-header"><h1>{t({ zh: "模型与密钥", en: "Models & credentials" })}</h1><p>{t({ zh: "添加模型，并选择每项工作默认用哪个模型。", en: "Add models and choose which one each kind of work uses by default." })}</p></header>
       <ModelConnections
         client={THIS_MACHINE}
         keys={{ backends: qk.modelBackends(), roles: qk.modelRoles() }}

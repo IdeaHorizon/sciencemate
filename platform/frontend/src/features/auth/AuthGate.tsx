@@ -43,11 +43,11 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   if (needsAuthentication === null || !ready || !authenticated) {
     return (
-      <main className="auth-loading" aria-label={t({ zh: "正在恢复你的会话", en: "Restoring your session" })}>
+      <main className="auth-loading" aria-label={t({ zh: "正在加载", en: "Loading" })}>
         <FlaskConical size={19} />
         <span>{ready
-          ? t({ zh: "正在打开登录…", en: "Opening sign in…" })
-          : t({ zh: "正在恢复工作区…", en: "Restoring workspace…" })}</span>
+          ? t({ zh: "正在前往登录页…", en: "Opening the sign-in page…" })
+          : t({ zh: "正在加载工作区…", en: "Loading workspace…" })}</span>
       </main>
     );
   }

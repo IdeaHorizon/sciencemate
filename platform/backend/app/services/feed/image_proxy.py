@@ -31,9 +31,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
+import sys
 from collections import OrderedDict
 
 import httpx
+from app.config import settings
+
+# App Server has its own venv; use the configured checkout as discovery does.
+_harness_root = settings.harness_root or str(Path(__file__).resolve().parents[5])
+if _harness_root not in sys.path:
+    sys.path.insert(0, _harness_root)
+from shared.contrib.paper_image_policy import image_bytes_rejection_reason, image_url_rejection_reason
 
 from app.services.feed.collectors import FETCH_TIMEOUT_SECONDS, USER_AGENT
 
@@ -62,9 +71,14 @@ _lock = asyncio.Lock()
 
 async def fetch(url: str) -> tuple[bytes, str]:
     """取一张图，返回 (字节, content-type)。带进程内 LRU。"""
+    if reason := image_url_rejection_reason(url):
+        raise ImageUnavailable(reason)
     async with _lock:
         hit = _cache.get(url)
         if hit is not None:
+            if reason := image_bytes_rejection_reason(hit[0]):
+                del _cache[url]
+                raise ImageUnavailable(reason)
             _cache.move_to_end(url)
             return hit
 
@@ -89,6 +103,8 @@ async def fetch(url: str) -> tuple[bytes, str]:
         raise ImageUnavailable(f"unexpected content-type {content_type!r}")
 
     body = response.content
+    if reason := image_url_rejection_reason(str(response.url)) or image_bytes_rejection_reason(body):
+        raise ImageUnavailable(reason)
     if len(body) > MAX_IMAGE_BYTES:
         raise ImageUnavailable(f"image is {len(body)} bytes, over the cap")
 

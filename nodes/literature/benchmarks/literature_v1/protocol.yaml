@@ -1,0 +1,51 @@
+benchmark:
+  id: literaturebench_v1
+  version: 0.3.0
+  language: zh-CN
+  purpose: "跨平台学术文献检索的可核验比较；不是通用问答或 E2E 工作流比较。"
+  current_round: common_retrieval
+  primary_taskset: "tasks/esi22_topics_v1.yaml"
+  e2e_pilot_taskset: "tasks/esi22_e2e_pilot_v1.yaml"
+
+arms:
+  common_retrieval:
+    description: "所有被测系统均可参加；只要求返回论文候选和来源标识。"
+    output_limit: 50
+    time_budget_seconds: 300
+    interaction_budget: 1
+    allow_followup: false
+  e2e_review:
+    enabled: false
+    description: "历史内部诊断，本轮不运行、不评分，不要求对手提供。"
+    time_budget_seconds: 1800
+    interaction_budget: 1
+    required_submission_fields: [query_trace_or_explicit_unavailable, included_papers, classification, evidence_bound_summary, limitations]
+  extension_workflow:
+    enabled: false
+    description: "全文、图片、持久索引、状态记录等能力本轮不运行、不评分。"
+
+fairness:
+  freeze_before_run: [task_version, run_date_utc, product_name_and_version, subscription_tier, model_name_if_exposed, region_and_network_egress, logged_in_state, time_budget_seconds, output_limit]
+  input_rules:
+    - "所有系统使用同一个 task.prompt_zh 课题文本；搜索框直接输入原文，对话产品只套用固定输出格式模板（见对手测试操作手册）。"
+    - "模板只说明最多 50 篇和所需书目字段，不添加关键词、论文标题或 DOI；不得为某个平台手工改写主题。"
+    - "使用各产品公开可得的最佳常规模式，并如实记录模式、版本和账户层级。"
+    - "自动追问时，仅回答 task.clarification_reply；没有该字段则回答‘请按原问题自行判断范围’。"
+    - "同一任务不得粘贴其他系统得到的 DOI、标题或综述。"
+  failure_rules:
+    - "超时、限流、登录失败必须记录为运行事实。"
+    - "允许最多两次尝试；报告所有尝试与首个成功尝试。"
+    - "平台未提供某能力写 not_offered，不能推断为质量低。"
+  max_attempts: 2
+
+measurement:
+  common_retrieval: [ndcg_at_10, precision_at_10, recall_at_50, identifier_presence, metadata_completeness, duplicate_rate, latency_seconds, failure_transparency]
+  evidence_validation: [doi_resolves_to_matching_title, url_accessible, citation_claim_supported]
+  e2e_review: [evidence_coverage, citation_entailment_human_review, query_auditability, abstract_provenance, multilabel_classification_quality, artifact_reusability, limitation_honesty]
+  extension_workflow: [index_persistence, fulltext_status_traceability, figure_status_traceability, rerun_reproducibility]
+
+reporting:
+  aggregate: "按题类型和领域分层平均；不得只报总体均值。"
+  uncertainty: "报告逐题结果、失败数、95% bootstrap 区间或至少分位数。"
+  review_blinding: "E2E 人工审阅时隐藏系统名称和 UI 截图。"
+  primary_comparison: "同一任务、同一分母、同一输出上限的 paired comparison。"

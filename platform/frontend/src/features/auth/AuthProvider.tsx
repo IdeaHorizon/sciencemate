@@ -14,6 +14,8 @@ import { queryClient } from "@/lib/query/client";
 import { canonicalRunEventRegistry } from "@/features/execution/lib/run-event-registry";
 import { bootstrapSession } from "./session-bootstrap";
 
+import {clearAcademicSearchSession, setAcademicSearchOwner} from "@/features/academic-search/lib/active-search";
+
 const TOKEN_KEY = "atrium.access_token";
 
 type AuthState = {
@@ -52,12 +54,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [ready, setReady] = useState(false);
 
+  useEffect(() => {setAcademicSearchOwner(user?.id ?? null);}, [user?.id]);
+
   const clearSession = useCallback(() => {
     localStorage.removeItem(TOKEN_KEY);
     api.clearToken();
     canonicalRunEventRegistry.stopAll("Authentication session ended");
     setUser(null);
     queryClient.clear();
+    clearAcademicSearchSession();
   }, []);
 
   useEffect(() => {

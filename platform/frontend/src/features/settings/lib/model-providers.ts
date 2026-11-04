@@ -25,7 +25,7 @@ const PROVIDER_LABELS: Record<string, Phrase> = {
   deepseek: { zh: "DeepSeek", en: "DeepSeek" },
   kimi: { zh: "Kimi / 月之暗面", en: "Kimi / Moonshot" },
   openai: { zh: "OpenAI", en: "OpenAI" },
-  openai_compatible: { zh: "兼容 OpenAI 的端点", en: "OpenAI-compatible endpoint" },
+  openai_compatible: { zh: "兼容 OpenAI 的服务", en: "OpenAI-compatible endpoint" },
   local: { zh: "本机 / 自建网关", en: "Local / self-hosted gateway" },
 };
 
@@ -74,7 +74,7 @@ export function providerOptions(current: string | undefined, lang: Language) {
   if (trimmed && !options.some((option) => option.value === trimmed)) {
     options.push({
       value: trimmed,
-      label: say({ zh: "{name}（本机执行不支持）", en: "{name} (not supported by local execution)" }, lang,
+      label: say({ zh: "{name}（不支持）", en: "{name} (not supported)" }, lang,
         { name: providerLabel(trimmed, lang) }),
       supported: false,
     });

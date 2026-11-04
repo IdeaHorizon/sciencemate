@@ -246,3 +246,35 @@ async def test_a_reconcile_failure_never_breaks_the_read(db_session, monkeypatch
 
 async def _boom(*args, **kwargs):
     raise RuntimeError("registry exploded")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_reconcile_does_not_poison_the_read(db_session, registry, monkeypatch) -> None:
+    """对账失败不能把读会话的那个事务拖下水（#1254）。
+
+    0.5.6 Windows 现场：界面每 1–2 秒轮询、每次 GET 都在这里写库，几个请求抢 SQLite 写锁，
+    对账改了 run 行之后的 autoflush 报 `database is locked`。异常被吞了，可 SQLAlchemy 已经
+    把整个请求的事务标成回滚 —— 下一条查询 `PendingRollbackError`，重开会话连着五次 500。
+    这里用一个必然失败的 flush（违反 NOT NULL）复现同一条机制：失败要关在保存点里。
+    """
+    from sqlalchemy import select
+
+    from app.models.execution import Run
+    from app.services import harness_sessions as hs
+    from app.services import sessions as svc
+
+    run = await _insert_run(db_session, run_id="run-locked", status=RunStatus.RUNNING)
+
+    async def flush_fails(db, *, run_ids=None, reap_workers=False):
+        row = await db.get(Run, "run-locked")
+        row.project_id = None                         # 下一次 autoflush 必然失败
+        await db.execute(select(Run.id))              # 触发 autoflush → IntegrityError
+        return 1
+
+    monkeypatch.setattr(hs, "mark_orphaned_harness_runs", flush_fails)
+    await svc._reap_orphaned_runs_of(db_session, project_id=run.project_id, session_id=run.session_id)
+
+    rows = (await db_session.execute(select(Run.id))).scalars().all()   # 以前这里 PendingRollbackError
+    assert "run-locked" in rows
+    await db_session.refresh(run)
+    assert run.project_id, "失败的那次对账改到一半的东西要随保存点一起回滚"

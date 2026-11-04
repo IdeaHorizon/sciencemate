@@ -87,10 +87,14 @@ def test_append_once_reconfirms_visible_row_after_repeated_file_fsync_failure(
         outcome="failed", closure_id="c",
     )
     assert replay["idempotency_key"] == "finish:durability"
-    assert calls == ["file", "file", "file", "directory"]
+    expected = ["file", "file", "file"]
+    if os.name != "nt":
+        expected.append("directory")
+    assert calls == expected
     assert len(led.records()) == 1
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows validates directories without POSIX fsync")
 def test_append_once_retries_a_failed_first_creation_directory_fsync(
     tmp_path, monkeypatch,
 ):

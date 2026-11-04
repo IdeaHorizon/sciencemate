@@ -68,7 +68,7 @@ test("真实会话形状：analysis 在跑，literature 是它的卫星 —— �
     childStart("hypothesis", "literature", 2),
   ]);
   assert.deepEqual(model.stations, [{
-    nodeType: "hypothesis", label: "analysis", caption: "hypothesis", visits: 1, running: true,
+    nodeType: "hypothesis", visits: 1, running: true,
   }]);
   assert.deepEqual(model.edges, []);
   assert.deepEqual(model.satellites, [
@@ -87,8 +87,8 @@ test("迭代回路：去程回程分开计数，正在跑的那条转移是 acti
     childEnd("_orchestrator", "hypothesis", 3),
     childStart("hypothesis", "experiment", 4),
   ]);
-  assert.deepEqual(model.stations.map((s) => [s.label, s.visits, s.running]), [
-    ["analysis", 2, false],
+  assert.deepEqual(model.stations.map((s) => [s.nodeType, s.visits, s.running]), [
+    ["hypothesis", 2, false],
     ["experiment", 2, true],
   ]);
   assert.deepEqual(model.edges, [
@@ -107,7 +107,7 @@ test("writing 到访后才出现；postprocess 挂在 writing 旁", () => {
     childEnd("writing", "postprocess", 3),
     childEnd("_orchestrator", "writing", 2),
   ]);
-  assert.deepEqual(model.stations.map((s) => s.label), ["analysis", "writing"]);
+  assert.deepEqual(model.stations.map((s) => s.nodeType), ["hypothesis", "writing"]);
   assert.deepEqual(model.satellites, [
     { nodeType: "postprocess", station: "writing", count: 1, running: false },
   ]);
@@ -141,7 +141,7 @@ test("同型接续（重试）计入 visits 不算转移；同型多次服务聚
     childStart("hypothesis", "literature", 4),
   ]);
   assert.deepEqual(model.stations, [{
-    nodeType: "hypothesis", label: "analysis", caption: "hypothesis", visits: 2, running: true,
+    nodeType: "hypothesis", visits: 2, running: true,
   }]);
   assert.deepEqual(model.edges, []);
   assert.deepEqual(model.satellites, [
@@ -175,7 +175,7 @@ test("身份解析不出来时退回 payload 的 nodeType，事件乱序也不�
     payload: { owningRun: false },
   });
   const model = projectResearchMap([end, start]);
-  assert.deepEqual(model.stations.map((s) => [s.label, s.running]), [["experiment", false]]);
+  assert.deepEqual(model.stations.map((s) => [s.nodeType, s.running]), [["experiment", false]]);
 });
 
 test("流程图的车站 = 治理型产出节点，observation 不再是小卫星", () => {
@@ -214,8 +214,8 @@ test("同一个 run id 被派第二次 = 第二次到访：车站重新亮起来
   ]);
 
   assert.deepEqual(model.stations, [
-    { nodeType: "hypothesis", label: "analysis", caption: "hypothesis", visits: 2, running: true },
-    { nodeType: "observation", label: "observation", caption: undefined, visits: 1, running: false },
+    { nodeType: "hypothesis", visits: 2, running: true },
+    { nodeType: "observation", visits: 1, running: false },
   ]);
   // 回程那一条是"正在跑的这一次"，要画成流动的。
   assert.deepEqual(model.edges, [
@@ -234,7 +234,7 @@ test("复派之后真结束了就熄灭 —— 一次到访的终态关不掉更
     childEnd("_orchestrator", "hypothesis", 1, "run.failed"),
   ]);
   assert.deepEqual(model.stations, [{
-    nodeType: "hypothesis", label: "analysis", caption: "hypothesis", visits: 2, running: false,
+    nodeType: "hypothesis", visits: 2, running: false,
   }]);
 });
 

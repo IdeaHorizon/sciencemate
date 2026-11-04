@@ -17,6 +17,9 @@ import pytest
 from core.bootstrap import bootstrap
 from core.state import State
 
+# 讲的是续轮行为，前提是研究已经开始（见 conftest.research_under_way）。
+pytestmark = pytest.mark.usefixtures("research_under_way")
+
 
 def _blocked_state() -> State:
     bootstrap()

@@ -27,7 +27,7 @@ from app.models.project import (
 
 
 async def _initialize_repository_and_owner_membership(
-    db: AsyncSession, project: Project, owner_id: str
+    db: AsyncSession, project: Project, owner_id: str, *, lang: str
 ) -> ProjectMembership:
     """建仓 + 建 owner 成员关系。
 
@@ -44,6 +44,7 @@ async def _initialize_repository_and_owner_membership(
         description=project.description,
         research_domain=project.research_domain,
         owner_id=owner_id,
+        lang=lang,
     )
     membership = ProjectMembership(
         project_id=project.id,
@@ -66,8 +67,11 @@ async def create_project(
     operation_mode: OperationMode = OperationMode.ASSISTED,
     reporting_level: ReportingLevel = ReportingLevel.MEDIUM,
     preferred_model: str | None = None,
+    lang: str = "zh",
 ) -> dict:
     """Create a project: Git 仓 + 初始 revision + config + branch + 预算。
+
+    `lang` 是建项目那一屏的语言，新项目的 PROJECT.md / MEMORY.md 骨架按它写。
 
     v2.1 起项目的真实结构在 Git 里（六个节点目录），不在 nodes/edges 表里。
     返回值里的 nodes/edges 保留为空列表，只为不破坏调用方的形状。
@@ -83,7 +87,7 @@ async def create_project(
     )
     db.add(project)
     await db.flush()  # get project.id
-    await _initialize_repository_and_owner_membership(db, project, owner_id)
+    await _initialize_repository_and_owner_membership(db, project, owner_id, lang=lang)
 
     # 2. Create config
     config = ProjectConfig(

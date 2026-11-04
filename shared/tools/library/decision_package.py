@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 from datetime import UTC, datetime
+from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
@@ -492,6 +493,7 @@ def _render_decision_package(
     review_unusable: bool = False,
     closure_lines: list[str] | None = None,
     child_obligation_effect: dict | None = None,
+    needs_a_person: str | None = None,
 ) -> str:
     """构建 ASCII decision package 文本。
 
@@ -629,6 +631,10 @@ def _render_decision_package(
         lines.append("")
         lines.append(f"  {framework_override_note}")
 
+    if needs_a_person:
+        lines.append("")
+        lines.append(f"  ⏸ 这张卡要你本人选：{needs_a_person}")
+
     # ── 选项区 ──
     # 这里**不再构造选项集**：正文、pause、账本同读一个 offer。此前这行自己调
     # `_build_option_labels`，而调用点从没传 `curator_pending` —— 屏幕上于是
@@ -648,8 +654,16 @@ def _render_decision_package(
                          "\"整合未完成\"这道下游门禁。）")
     lines.append(offer.to_ascii_options())
     lines.append("")
-    lines.append(f"Enter 1-{len(offer.choices)} to choose (or free text for context to add).")
-    lines.append("If auto-approve is ON, recommended option will execute after 5s countdown.")
+    lines.append(
+        f"Enter 1-{len(offer.choices)} for a shortcut, "
+        "or discuss and describe your decision in your own words."
+    )
+    if needs_a_person:
+        lines.append("Auto-approve does not answer this one: it waits for you.")
+    else:
+        lines.append(
+            "The scheduler decides within existing authorization; a recommendation is not a decision."
+        )
     lines.append(sep)
 
     return "\n".join(lines)
@@ -671,6 +685,61 @@ def _recommended_index_from_action(action: str) -> int:
 # 同一个 producer run 允许的 reviewer 重试次数上限。见 record_decision_answer
 # 里的 E2E-4 活锁说明。
 _RETRY_REVIEWER_MAX = int(os.getenv("HARNESS_RETRY_REVIEWER_MAX", "2") or 2)
+
+
+# 同一份产物连续 REVISE 多少轮之后，无人值守不再替人选「再改一轮」。
+#
+# 2026-10-30 node20（0.5.9 个人版，连续档）：hypothesis 的 prereg 从 v1 改到 v11、
+# plan 从 v5 改到 v14，十轮、三个小时，一次实验没跑。每一轮 reviewer 都给
+# major_concerns、都推荐 REVISE，连续档每一轮 1 秒后照推荐自动选 [2] —— 每轮修掉
+# 一个 critical，又引出一个新的。连续档的空转熔断看的是「产物有没有变」，而
+# REVISE 每轮都产出新版，所以永远算「有进展」：空转的那条路恰好产出熔断器数的
+# 东西。和 reviewer 重试上限是同一个道理 —— 上限钉在呈递这一刻，按磁盘上的链现算。
+_UNATTENDED_REVISE_MAX = int(os.getenv("HARNESS_UNATTENDED_REVISE_MAX", "3") or 3)
+
+
+def _revise_chain(state: Any, producing_run_id: str) -> list[str]:
+    """这个 producer run 之前，同一条 REVISE 链上还有哪几版（旧→新）。
+
+    链接是磁盘上的事实：REVISE 重跑完成时 run_node 在 orchestrator 的 transcript
+    里写 `decision_action_completed {producing_run_id: 上一版, authorized_action:
+    revise, replacement_run_id: 这一版}`，顺着 replacement → producing 往回走即可。
+    只认 revise：REDIRECT 换了节点去做别的事；PROCEED / ABORT 不产生替身 —— 链在
+    那里自然断开。
+
+    读法同 `_durable_retry_attempts`：transcript 按会话存、跨 run 追加，进程重启后
+    也数得回来；只解析含标记串的行。读不动就当没有链（宁可少数，不把人拦错）。
+    """
+    if not producing_run_id:
+        return []
+    path = getattr(state, "transcript_path", None)
+    if not path:
+        return []
+    predecessor: dict[str, str] = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if "decision_action_completed" not in line:
+                    continue
+                try:
+                    record = _json.loads(line)
+                except ValueError:
+                    continue
+                if (record.get("event") != "decision_action_completed"
+                        or record.get("authorized_action") != "revise"):
+                    continue
+                new = str(record.get("replacement_run_id") or "")
+                old = str(record.get("producing_run_id") or "")
+                if new and old:
+                    predecessor[new] = old
+    except (OSError, TypeError):
+        return []
+    chain: list[str] = []
+    current = str(producing_run_id)
+    while current in predecessor and predecessor[current] not in chain:
+        current = predecessor[current]
+        chain.append(current)
+    return list(reversed(chain))
 
 
 def _durable_retry_attempts(state: Any, producing_run_id: str) -> int:
@@ -877,9 +946,12 @@ async def _present_decision_package(
     review_critique_artifact_id: str | None = None,
     review_failed_reason: str | None = None,
     child_obligation_effect: dict | None = None,
+    action: str | None = None,
+    reasoning: str = "",
+    human_decision_reason: str = "",
     **_: Any,
 ) -> dict:
-    """生成 decision package pause 事件。
+    """准备并记录研究决定；确需用户判断时返回原有 pause 事件。
 
     优先读 review_critique artifact 拿结构化字段；失败则用 review_failed_reason
     走 fallback 渲染。
@@ -906,6 +978,16 @@ async def _present_decision_package(
     # 传参却没给/给了个 "null"）没人管，于是合格的 review 被当成不可用。
     # 账本是权威 —— 两个方向都该以它为准。
     _entry0 = _flow_entry_for(state, producing_run_id)
+    if _entry0 is not None:
+        human_decision_reason = human_decision_reason or str(
+            _entry0.get("human_decision_reason") or ""
+        )
+        # 已知的交付事实直接取账本，不让调度器为呈递重复抄参数。
+        artifact_ids_produced = artifact_ids_produced or list(_entry0.get("artifact_ids") or [])
+        producing_summary = producing_summary or str(_entry0.get("producing_summary") or "")
+        if child_obligation_effect is None:
+            child_obligation_effect = _entry0.get("child_obligation_effect")
+        review_failed_reason = review_failed_reason or _normalize_absent(_entry0.get("review_failed_reason"))
     if (review_critique_artifact_id is None and _entry0 is not None
             and _entry0.get("review_state") in ("done", "skipped")):
         _cid = _normalize_absent(_entry0.get("review_critique_artifact_id"))
@@ -1289,8 +1371,34 @@ async def _present_decision_package(
             downgraded_to="revise",
         )
 
+    # ── 连续 REVISE 到上限：这张卡要人本人选 ────────────────────────────────
+    # 不改推荐、不改菜单 —— 人照样可以再选 REVISE。只是无人值守不再替人选它
+    # （见 `_UNATTENDED_REVISE_MAX`）。理由随这一次呈递走，自动作答的各条路
+    # 只读它（`core.pause_driver.needs_a_person`）。
+    needs_a_person: str | None = human_decision_reason.strip() or (
+        "需要你手工修改产物，改完后再继续。" if action == "edit" else None
+    )
+    if recommended_action_str == "revise" and _UNATTENDED_REVISE_MAX > 0:
+        _chain = _revise_chain(state, producing_run_id)
+        if len(_chain) >= _UNATTENDED_REVISE_MAX:
+            needs_a_person = (
+                f"{source_node_type} 已经连续 REVISE {len(_chain)} 轮"
+                f"（这是第 {len(_chain) + 1} 版），reviewer 仍推荐再改一轮。"
+                "再自动改下去不见得收敛，下一步怎么走要你判断。"
+            )
+            state.append_transcript(
+                "unattended_revise_capped",
+                source_node_type=source_node_type,
+                producing_run_id=producing_run_id,
+                revisions=len(_chain),
+                cap=_UNATTENDED_REVISE_MAX,
+                earlier_runs=_chain,
+            )
+
     flow = state.hook_state.get("pending_post_node_flow") or []
     _capped_now = bool((_entry_now or {}).get("review_retry_capped"))
+    if review_unusable and _capped_now and action == "proceed" and not needs_a_person:
+        needs_a_person = "独立审查仍不可用且已达到重试上限，需要你决定如何处理这份未审查产物。"
     presented_actions = (
         _REVIEW_FAILED_ACTIONS if (review_unusable and not _capped_now)
         else _NORMAL_ACTIONS)
@@ -1322,6 +1430,9 @@ async def _present_decision_package(
             "reviewRetryCapped": bool(presented_capped),
             "reviewCritiqueArtifactId": review_critique_artifact_id or "",
             "artifactIdsProduced": list(artifact_ids_produced or []),
+            # 「回到上游」那一项回到哪个节点。选项文案（英文、给模型看的那份）里写着它，
+            # 界面按 choice id 说人话时从这里拿，不去解析文案。
+            "redirectTargetNode": recommended_target_node or "",
         },
     )
 
@@ -1340,7 +1451,11 @@ async def _present_decision_package(
         recommended_target_node=recommended_target_node,
         framework_override_note=framework_override_note,
         child_obligation_effect=child_obligation_effect,
+        needs_a_person=needs_a_person,
     )
+    # UI 以嵌套 offer 为权威：空 context 会覆盖外层的完整报告。
+    # 全文必须属于 Offer 本身，让落盘、重连和历史记录拿到同一份依据。
+    offer = replace(offer, context=package_text)
 
     # ── flow entry 记账（#155 状态机）────────────────────────────────────────
     # 关键修正（qinp #155 现象 3）：decision_state 以前在**呈递时**就写 done ——
@@ -1348,8 +1463,8 @@ async def _present_decision_package(
     #   review 挂了 → 呈递 → decision_state=done → 下游 producing gate 不再拦
     # 的静默路径（"没有有效审查也能进下一阶段"）。我在 #151 甚至把"不卡新
     # producing"当安全特性写进注释和测试 —— 那是错的，这里一并纠正。
-    # 现在：呈递只把 decision_state 置 "awaiting_human"，真正的 done 由
-    # pause_driver 在**拿到人工答复后**机械写入（record_decision_answer）。
+    # 现在：准备只写 pending；需要人时才写 awaiting_human。明确选择后由
+    # record_decision_answer 记账，在动作实际完成前保留对应义务。
     # ── 重呈递不得踩在途状态（2026-08-17 空转 11 圈的引擎）──────────────────
     # 下面这个循环无条件把 entry 写成 awaiting_human。若该 entry 的授权动作
     # **已经起了**（action_in_progress），这一笔就把"已经起了"抹成"还没起"：
@@ -1389,7 +1504,9 @@ async def _present_decision_package(
     for entry in flow:
         if entry.get("producing_run_id") != producing_run_id:
             continue
-        entry["decision_state"] = "awaiting_human"
+        entry["decision_state"] = "awaiting_human" if needs_a_person else "pending"
+        if needs_a_person:
+            entry["human_decision_reason"] = needs_a_person
         # #202 × #208 交汇：reviewer 重试已封顶时，review-failed 选项集（无
         # PROCEED）+ 重试上限 = 人工无路可走。#208 的封顶文案本身就明写"改选
         # PROCEED"，所以封顶后必须把 PROCEED 放回菜单 —— 此时它是**人工显式
@@ -1406,7 +1523,7 @@ async def _present_decision_package(
             # **必须**继续拦下游（新 gate 认这个状态）。
             entry["review_state"] = "failed_awaiting_human"
             entry["review_retryable"] = True
-    # 注意：这里不再 drop 任何 entry —— 走完与否由人工答复决定（见 pause_driver）。
+    # 这里不 drop entry；后续由明确选择和实际执行结果推进。
     state.hook_state["pending_post_node_flow"] = flow
 
     # log to transcript（reviewer 跑挂时也能追责）
@@ -1424,7 +1541,7 @@ async def _present_decision_package(
     #     → 这是**计划层失败**，且 redirect 目标未必是 Analysis（可能是 data）。
     #       顺延会把目标信息弄丢，也该让人知道计划出问题了。
     _framework_overrode = bool(framework_override_note)
-    if (not review_unusable and not _framework_overrode
+    if (action is None and not needs_a_person and not review_unusable and not _framework_overrode
             and _defers_to_analysis(source_node_type)):
         deferred_entry = None
         for entry in flow:
@@ -1474,7 +1591,7 @@ async def _present_decision_package(
     state.hook_state["pending_post_node_flow"] = flow
 
     state.append_transcript(
-        "decision_package_presented",
+        "decision_package_presented" if needs_a_person else "decision_package_prepared",
         source_node_type=source_node_type,
         producing_run_id=producing_run_id,
         decision_id=decision_id,
@@ -1511,10 +1628,13 @@ async def _present_decision_package(
         # 按 review_failed 走静态 fallback。不写就是逼下游猜 —— 猜错=判死 run。
         decision_options=list(offer.choice_ids()),
         review_retry_capped=presented_capped,
+        **({"needs_a_person": needs_a_person} if needs_a_person else {}),
     )
 
+    from core.pause_driver import NEEDS_A_PERSON_KEY
+
     _pause_payload = offer.to_pause_payload()
-    return {
+    package = {
         "status": "pause",
         "pause_event": {
             # 这一次呈递**整份摊开**，不在这里挑字段。
@@ -1551,8 +1671,43 @@ async def _present_decision_package(
                 "review_failed": bool(review_failed_reason),
                 "artifact_ids_produced": list(artifact_ids_produced or []),
                 "review_critique_artifact_id": review_critique_artifact_id,
+                **({NEEDS_A_PERSON_KEY: needs_a_person} if needs_a_person else {}),
             },
         },
+    }
+
+
+    if needs_a_person or action == "edit":
+        return package
+    if action is None:
+        return {
+            "status": "success", "decision_required": True,
+            "offer": _pause_payload, "context": package_text,
+            "note": "在已有研究目标与授权内自行判断，带 action 再调用本工具记录决定。"
+                    "只有确实需要用户判断时才填写 human_decision_reason；推荐项不是决定。",
+        }
+    entry = record_decision_answer(
+        state, package["pause_event"],
+        {"offer_id": offer.offer_id, "choice_id": action, "note": ""},
+        decided_by="orchestrator",
+    )
+    if entry is None or entry.get("decision_rejection") or entry.get("decision_validation_error"):
+        return {"status": "error", "error": (entry or {}).get("decision_rejection")
+                or (entry or {}).get("decision_validation_error") or "没有找到待处理的研究决定。"}
+    entry["orchestrator_reasoning"] = reasoning
+    state.append_transcript(
+        "orchestrator_decision", producing_run_id=producing_run_id,
+        chosen_action=action, reasoning=reasoning, decided_by="orchestrator",
+    )
+    from core.pause_driver import execute_authorized_action
+
+    execution = await execute_authorized_action(state, entry)
+    if execution is not None and execution.get("status") in {"pause", "error"}:
+        return execution
+    return {
+        "status": "success", "decided_by": "orchestrator", "action": action,
+        "decision_state": entry.get("decision_state"), "execution": execution,
+        "note": "这是调度器在已有研究目标和授权内的判断，不是用户本次作出的选择。",
     }
 
 
@@ -1588,19 +1743,18 @@ def _offer_for_answer(pause_payload: dict, entry: dict) -> "Offer":
     )
 
 
-def record_decision_answer(state: State, pause_payload: dict, answer: Any) -> dict | None:
-    """把**人工对 decision package 的真实选择**机械记进 flow entry（#155）。
+def record_decision_answer(
+    state: State, pause_payload: dict, answer: Any, *, decided_by: str = "human",
+) -> dict | None:
+    """把明确选择及其决策者机械记进 flow entry（#155）。
 
     `pause_payload` 是呈递时那份 pause_event **全份**（含 `option_details` /
     `offer_id` / `metadata`）。收全份是因为判答复需要的是**那一次呈递本身** ——
     顺序、label、合法集，缺一样就得靠猜。只收 `metadata` 的旧签名仍受理
     （老 checkpoint 恢复出来的 pause 没有结构化选项），走降级路径。
 
-    由 core.pause_driver 在拿到答复后立刻调 —— 这是框架唯一能确知"用户选了啥"
-    的地方：present_decision_package 只负责 unwind 出 pause，答复是回给
-    orchestrator LLM 的文本，框架本来看不到。没有这一步，
-    `reviewer_retry_authorized` 之类的事件只代表"框架认为有资格重试"，
-    不代表"用户批准了本次重试"（qinp #155 现象 2）。
+    暂停驱动器记录用户答复；present_decision_package 记录调度器在已有授权内的
+    选择，并显式标记 decided_by，避免把调度器决定记成人工批准。
 
     entry 命运由选择决定：
       - retry_reviewer → review_state=retry_authorized（保留，reviewer guard 认它放行一次）
@@ -1667,6 +1821,7 @@ def record_decision_answer(state: State, pause_payload: dict, answer: Any) -> di
         return entry
 
     entry.pop("decision_rejection", None)
+    entry.pop("decision_validation_error", None)
     chosen = outcome.choice_id
     history.append({
         "answer_raw": _answer_preview(answer),
@@ -1677,6 +1832,10 @@ def record_decision_answer(state: State, pause_payload: dict, answer: Any) -> di
         "review_attempt_count": entry.get("review_attempt_count", 0),
     })
     entry["accepted_action"] = chosen
+    entry["decided_by"] = decided_by
+    history[-1]["decided_by"] = decided_by
+    if decided_by == "human":
+        entry.pop("human_decision_reason", None)
     # 人在选项之外写的那段话（Offer 契约里的 `note`）。此前它只进
     # `decision_history[-1]["note"]` —— 那是**账本**，没有任何执行路径读它。
     # 于是 REVISE 重跑时只带 reviewer 的 `recommended_feedback` 过去，
@@ -1754,7 +1913,7 @@ def record_decision_answer(state: State, pause_payload: dict, answer: Any) -> di
         #       这是人的权力；框架的职责是别让它被伪装成"审查已通过"。
         _review_state = entry.get("review_state")
         if _review_state not in ("done", "skipped"):
-            if not entry.get("review_retry_capped"):
+            if not entry.get("review_retry_capped") or decided_by != "human":
                 entry["decision_state"] = "awaiting_human"
                 entry["accepted_action"] = None
                 entry["decision_validation_error"] = (
@@ -1768,7 +1927,7 @@ def record_decision_answer(state: State, pause_payload: dict, answer: Any) -> di
                 state.append_transcript(
                     "decision_action_rejected",
                     producing_run_id=producing_run_id,
-                    chosen_action=chosen,
+                    chosen_action=chosen, decided_by=decided_by,
                     reason="review_state_not_done",
                     review_state=_review_state,
                     flow_closed=False,
@@ -1806,7 +1965,7 @@ def record_decision_answer(state: State, pause_payload: dict, answer: Any) -> di
             state.append_transcript(
                 "decision_action_rejected",
                 producing_run_id=producing_run_id,
-                chosen_action=chosen,
+                chosen_action=chosen, decided_by=decided_by,
                 requested_target_node=str(target or ""),
                 reason=_unexecutable,
                 flow_closed=False,
@@ -1828,7 +1987,7 @@ def record_decision_answer(state: State, pause_payload: dict, answer: Any) -> di
             "decision_action_authorized",
             producing_run_id=producing_run_id,
             decision_id=decision_id,
-            chosen_action=chosen,
+            chosen_action=chosen, decided_by=decided_by,
             authorized_target_node=target,
             flow_closed=False,
         )
@@ -1860,7 +2019,7 @@ def record_decision_answer(state: State, pause_payload: dict, answer: Any) -> di
         e for e in flow if e.get("producing_run_id") != producing_run_id]
     state.append_transcript(
         "decision_answer_recorded", producing_run_id=producing_run_id,
-        decision_id=decision_id, chosen_action=chosen, flow_closed=True)
+        decision_id=decision_id, chosen_action=chosen, decided_by=decided_by, flow_closed=True)
     return entry
 
 
@@ -1967,13 +2126,14 @@ register_tool(
         name="present_decision_package",
         description=(
             "Post-producing decision point —— **只在 _orchestrator 用**。\n\n"
-            "每个 producing 节点完后流程：\n"
-            "  1. run_node('_reviewer', ...)       → review_critique artifact\n"
-            "  2. run_node('_curator', ...)         → KB 整合\n"
-            "  3. **present_decision_package(...)** ← 本工具\n"
-            "         → unwind 给 user 看 ASCII 报告 + 5 选项\n"
-            "         → user 输入 1-5，或 auto-approve 倒计时 5 秒后自动选 recommended\n\n"
-            "**5 个固定选项**（v0.5 起，新增 [3] REDIRECT）：\n"
+            "run_node 完成科研产出后会自动做独立审查，并把 post_node_review 返回给你。"
+            "先理解产出与审查意见，在对话正文里向用户解释你的判断，再调用本工具呈递选择。"
+            "解释的内容和详略按当前情况组织，不套固定模板；卡片只承载选择，报告供查阅。\n\n"
+            "已有目标和授权内的日常决定，由你判断后传 action 直接执行；"
+            "不传 action 时先返回可用动作，供你判断，不会自动替你选推荐项。"
+            "只有确实缺少用户判断、信息或新授权时，填写 human_decision_reason，"
+            "才会暂停提问。决定与理由要先在正常对话里说明，不用固定格式。\n\n"
+            "可用的流程动作（用户仍可正常讨论、补充或改变安排）：\n"
             "  [1] PROCEED to next stage\n"
             "  [2] REVISE (re-run source_node with reviewer feedback)\n"
             "  [3] REDIRECT to upstream（re-run upstream node X，then re-run source_node）\n"
@@ -2005,9 +2165,22 @@ register_tool(
                     "type": "string",
                     "description": "producing 子 run 的 id",
                 },
+                "action": {
+                    "type": "string",
+                    "enum": sorted(set(_NORMAL_ACTIONS + _REVIEW_FAILED_ACTIONS)),
+                    "description": "在已有研究目标与授权内由调度器选定的流程动作。",
+                },
+                "reasoning": {
+                    "type": "string",
+                    "description": "本次判断的理由，供审计记录；给用户的解释写在正常对话里。",
+                },
+                "human_decision_reason": {
+                    "type": "string",
+                    "description": "确实需要用户判断、缺少信息或新授权时说明原因；日常决定不填。",
+                },
                 "producing_summary": {
                     "type": "string",
-                    "description": "producing 节点 final text 摘要（可选）",
+                    "description": "产出摘要，供报告详情留存（可选）；给用户的解释写在调用前的对话正文中。",
                 },
                 "artifact_ids_produced": {
                     "type": "array",

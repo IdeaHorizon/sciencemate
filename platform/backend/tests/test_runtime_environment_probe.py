@@ -125,7 +125,7 @@ def test_broken_runtime_reaches_the_user_with_its_real_identity():
         )
     )
     assert described.code == "runtime_environment_broken"
-    assert described.title == "平台的执行环境坏了"
+    assert described.title == "执行环境异常"
     # 环境修好之前重发一定还是这个结果 —— 三态里的 False，不给假希望。
     assert described.retryable is False
 

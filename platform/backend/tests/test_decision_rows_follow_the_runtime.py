@@ -138,3 +138,17 @@ def test_the_presentation_identity_travels_into_the_decision_row() -> None:
     )
     assert draft is not None and draft.kind == "decision.required"
     assert draft.payload["context"]["offerId"] == "1788917217-bfe3f6:p6e729f0e:o41e10000"
+
+
+def test_preparing_a_scheduler_decision_does_not_put_the_run_in_waiting_human() -> None:
+    from app.services.execution_ingest import IngestContext, TranscriptAdapter
+
+    draft = TranscriptAdapter().adapt(
+        {"event": "decision_package_prepared", "at": datetime.now(UTC).isoformat(),
+         "decision_id": "producer:p1", "offer_id": "offer", "prompt": "Revise the design"},
+        context=IngestContext(
+            tenant_id="t", workspace_id="w", project_id="p", session_id="s", run_id="run_x",
+        ),
+        adapter_state={}, event_id="evt-prepared",
+    )
+    assert draft is None or draft.kind not in {"decision.required", "run.paused"}

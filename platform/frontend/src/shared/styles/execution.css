@@ -548,11 +548,8 @@
   gap: 14px;
 }
 
-.execution-result-actions button {
-  padding: 0;
+.execution-result-actions a {
   color: var(--color-accent);
-  border: 0;
-  background: transparent;
   font-size: var(--font-size-control);
 }
 

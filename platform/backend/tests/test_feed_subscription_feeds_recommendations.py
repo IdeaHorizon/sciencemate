@@ -376,6 +376,9 @@ def test_journal_reasons_decode_new_and_cached_names():
     scored = ScoredItem(item=item, score=1.0, matched_journal=item.venue)
     expected = '你订阅的期刊 ACS ES&T Water 有新文章'
     assert scored.reason() == expected
-    cached = FeedCard(item=_to_out(item), reason='你订阅的期刊 ACS ES&amp;T Water 有新文章')
+    assert scored.reason("en") == 'New in ACS ES&T Water, a journal you follow'
+    cached = FeedCard(item=_to_out(item), reason='你订阅的期刊 ACS ES&amp;T Water 有新文章',
+                      recommendation_sources=['journal'])
     assert cached.reason == expected
-    assert FeedCard(item=_to_out(item), reason='你订阅的期刊 ACS ES&amp;amp;T Water 有新文章').reason == expected
+    assert FeedCard(item=_to_out(item), reason='你订阅的期刊 ACS ES&amp;amp;T Water 有新文章',
+                    recommendation_sources=['journal']).reason == expected

@@ -184,22 +184,20 @@ def catalog(*, lang: str = FEED_LABEL_LANG) -> tuple[dict, ...]:
             raise HarnessContractUnavailable(
                 "The packaged discipline catalog is unavailable"
             ) from exc
-    if str(lang).lower().startswith("en"):
-        # CAS 原始目录只有中文标签；英文界面不能把中文混进来。没有官方
-        # 英文对照表时用稳定的 CAS 编码作为可核验回退，而不是伪造翻译。
-        cas = tuple(
-            {
-                **group,
-                "label": f"CAS {str(group.get('archive', '')).removeprefix('cas:')}",
-                "categories": tuple(
-                    {**category, "label": f"CAS {category.get('domain', '')}"}
-                    for category in group.get("categories", ())
-                ),
-            }
-            for group in _cas_catalog
-        )
-    else:
-        cas = _cas_catalog
+    # 目录里每一格都带中文名（`label`，原目录）和英文名（`label_en`，通行译名，见
+    # discipline_catalog.source.json）。按这一屏的语言给一个 `label`，英文界面不混中文。
+    english = str(lang).lower().startswith("en")
+
+    def named(entry: dict) -> dict:
+        shown = {key: value for key, value in entry.items() if key != "label_en"}
+        if english:
+            shown["label"] = entry["label_en"]
+        return shown
+
+    cas = tuple(
+        {**named(group), "categories": tuple(named(category) for category in group.get("categories", ()))}
+        for group in _cas_catalog
+    )
     legacy = (
         {
             "archive": FEED_ARXIV_DOMAIN,

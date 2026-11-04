@@ -39,13 +39,12 @@ export function ProjectChatRedirect({ projectId, mode = "api" }: { projectId: st
   if (sessions.isError) {
     return (
       <div className="session-workspace-error" role="alert">
-        <span>{t({ zh: "读不到研究会话", en: "Research unavailable" })}</span>
-        <h1>{t({ zh: "这个项目的会话列表没读出来。", en: "The project sessions could not be loaded." })}</h1>
-        <p>{sessions.error instanceof Error ? sessions.error.message : t({ zh: "会话列表没有返回一个有效的结果。", en: "The Session index did not return a valid response." })}</p>
-        <button type="button" onClick={() => void sessions.refetch()}>{t({ zh: "重试", en: "Retries" })}</button>
+        <h1>{t({ zh: "无法加载会话列表", en: "Could not load sessions" })}</h1>
+        <p>{sessions.error instanceof Error ? sessions.error.message : t({ zh: "请稍后重试。", en: "Please try again later." })}</p>
+        <button type="button" onClick={() => void sessions.refetch()}>{t({ zh: "重试", en: "Retry" })}</button>
       </div>
     );
   }
 
-  return <div className="session-redirect-loading"><Skeleton height={54} rounded="sm" /><span>{t({ zh: "正在打开项目研究…", en: "Opening project research…" })}</span></div>;
+  return <div className="session-redirect-loading"><Skeleton height={54} rounded="sm" /><span>{t({ zh: "正在打开会话…", en: "Opening session…" })}</span></div>;
 }

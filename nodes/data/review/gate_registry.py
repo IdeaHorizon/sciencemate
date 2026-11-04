@@ -27,6 +27,39 @@ def required_gate_names(_review_profile: str) -> set[str]:
     return set(REQUIRED_GATES)
 
 
+def quality_gates_complete(value: object, review_profile: str) -> bool:
+    """Use the same recorded evidence at publication and terminal reuse."""
+    if not isinstance(value, list) or not value:
+        return False
+    gates = [gate for gate in value if isinstance(gate, dict)]
+    if len(gates) != len(value):
+        return False
+    if any(
+        str(gate.get("status") or "").lower() not in {"pass", "passed", "success", "ok"}
+        for gate in gates
+    ):
+        return False
+    by_name = {str(gate.get("name") or ""): gate for gate in gates}
+    required = required_gate_names(review_profile)
+    if not required.issubset(by_name):
+        return False
+    for name in required:
+        evidence = by_name[name].get("evidence")
+        if not isinstance(evidence, dict):
+            return False
+        try:
+            expected = int(evidence.get("expected_checks"))
+            observed = int(evidence.get("observed_checks"))
+        except (TypeError, ValueError):
+            return False
+        checks = evidence.get("checks")
+        if expected < 0 or observed < expected or not isinstance(checks, dict):
+            return False
+        if not checks or len(checks) < expected or not all(_passed(check) for check in checks.values()):
+            return False
+    return True
+
+
 def _passed(value: Any) -> bool:
     if value is True:
         return True

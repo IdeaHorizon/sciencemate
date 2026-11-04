@@ -31,6 +31,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from shared.lib.external_content import carry_witness
+
 #: 每跳摘要的截断
 HOP_SNIPPET_CHARS = 120
 #: 链的最大深度（防环、防超长闭包把输出撑爆）
@@ -46,10 +48,14 @@ class Hop:
     summary: str = ""
     ok: bool = True
     detail: dict = field(default_factory=dict)
+    #: 这一跳摘要取自的那条 KB 记录的入库见证（#730）。摘要截掉的半句里可能正是
+    #: 注入；读工具（kb_provenance）的数据框把它换成读时视图。
+    witness: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {"kind": self.kind, "ref": self.ref, "summary": self.summary,
-                "ok": self.ok, **({"detail": self.detail} if self.detail else {})}
+                "ok": self.ok, **({"detail": self.detail} if self.detail else {}),
+                **self.witness}
 
 
 def kb_provenance(state: Any, kb_id: str) -> dict:
@@ -105,6 +111,7 @@ def _walk(state: Any, entity: str, rid: str, hops: list[Hop],
             ("confidence_basis", _snip(rec.get("confidence_basis"))),
             ("status", rec.get("status")),
         ) if v},
+        witness=carry_witness(rec),
     ))
 
     # org → 源 project 条目（晋升回链）
@@ -149,7 +156,8 @@ def _chunk_hops(state: Any, rec: dict, hops: list[Hop], seen: set[str],
     hops.append(Hop("chunk", rid, _snip(rec.get("text")),
                     detail={"source": rec.get("source"),
                             **({"group_readings": len(rec.get("group_readings") or [])}
-                               if rec.get("group_readings") else {})}))
+                               if rec.get("group_readings") else {})},
+                    witness=carry_witness(rec)))
     anchor = str(rec.get("source") or "")
     if anchor:
         hops.append(Hop("external_anchor", anchor, "外部锚 —— 可核原文"))

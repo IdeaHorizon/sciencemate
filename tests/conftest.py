@@ -119,3 +119,21 @@ def mem_worktree(tmp_path):
     subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
     subprocess.run(["git", "commit", "-qm", "init"], cwd=wt, check=True)
     return wt
+
+
+@pytest.fixture
+def research_under_way(monkeypatch):
+    """声明「这个用例讲的是一段已经开始的研究」。
+
+    连续档只续已经开始的研究（`chat._nothing_to_continue`，判据见
+    `core.research_situation.research_under_way`）。讲停靠、熔断、退避、孤儿
+    pause 这些续轮行为的用例，夹具多半是一个空项目 —— 判据会如实说「还没有
+    研究可续」，于是它们测的那段逻辑根本走不到。
+
+    用法：文件里 `pytestmark = pytest.mark.usefixtures("research_under_way")`。
+    「还没有研究可续」本身由 test_continuous_does_not_choose_the_research.py
+    专测，那边不用这个夹具。
+    """
+    import chat as chat_mod
+
+    monkeypatch.setattr(chat_mod, "_nothing_to_continue", lambda state: None)

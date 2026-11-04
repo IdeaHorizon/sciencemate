@@ -704,20 +704,23 @@ def test_scope_guard_error_without_state_stays_silent():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 依赖安装路径：项目 run 必须将环境安装留在 workspace 内，
-# 不得再把 ~/.local 作为跨项目共享前缀。
+# 依赖安装路径：未获授权仍拒绝；默认项目内环境只是建议，
+# 不把用户已获 Core 授权的个人安装目录一律禁止。
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_user_home_block_points_at_project_local_environment():
-    """拦用户目录时明确要求在项目的 run_root/build_root 内安装。"""
+def test_user_home_block_preserves_authority_and_suggests_an_isolated_environment():
+    """权限缺口继续拒绝，但指导不强制更换用户指定的安装位置。"""
     target = str(Path.home() / ".local/share/OpenCL/vendors/nvidia.icd")
-    err = sb._scope_guard_error(
+    result = sb._scope_guard_error(
         f"echo libcuda.so > {target}", "unknown_absolute",
-        "absolute path is not declared writable", target)["error"]
+        "absolute path is not declared writable", target)
+    assert result["status"] == "error"
+    err = result["error"]
 
-    assert "run_root" in err and "build_root" in err
-    assert "不要安装到 `~/.local`" in err
-    assert "平台管理员" in err
+    assert "建议" in err and "独立环境" in err
+    assert "Core 已授予写权限" in err
+    assert "路径角色声明不能代替 Core 授权" in err
+    assert "不要安装到 `~/.local`" not in err
 
 
 def test_non_home_block_has_no_dependency_hint():

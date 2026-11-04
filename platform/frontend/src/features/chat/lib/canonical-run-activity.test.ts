@@ -67,7 +67,7 @@ test("被打断的一轮是「接着跑」，不是「失败」", () => {
   stale.run.view = { ...stale.run.view, waitingOn: { kind: "permission" } };
   const staleAttention = canonicalRunAttention(stale, undefined, "zh");
   assert.equal(staleAttention?.tone, "continue");
-  assert.match(staleAttention?.recovery ?? "", /接着跑/);
+  assert.match(staleAttention?.recovery ?? "", /继续/);
   assert.doesNotMatch(staleAttention?.title ?? "", /失败|stopped/i);
   assert.equal(JSON.stringify(staleAttention).includes("stale_unknown"), false);
 
@@ -225,7 +225,7 @@ test("a stale run with no recorded reason still says something", () => {
   setStatus(unknown, "stale_unknown");
   unknown.run.summary = {};
   const attention = canonicalRunAttention(unknown, undefined, "zh");
-  assert.match(attention?.title ?? "", /这一轮没跑完/);
+  assert.match(attention?.title ?? "", /这次执行未完成/);
   assert.equal(attention?.tone, "continue");
 });
 

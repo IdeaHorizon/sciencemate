@@ -12,14 +12,14 @@ import { fc } from "../lib/feed-copy";
 import { handoffDraft, handoffHref, handoffSessionTitle } from "../lib/handoff";
 
 /**
- * 「接入课题」：挑一个课题 → 在它下面新建一个会话 → 带着这条资讯落进输入框。
+ * 「在项目中讨论」：挑一个项目 → 在它下面新建一个会话 → 带着这条资讯落进输入框。
  *
  * ## 为什么不是一个链接
  *
  * 第一版是 `<a href="/projects?feed_item=…">`。它**看起来**在工作：点了会跳走。
- * 但 Projects 页根本不读那个参数 —— 用户拿到的是一个普通的课题列表，那篇论文
+ * 但 Projects 页根本不读那个参数 —— 用户拿到的是一个普通的项目列表，那篇论文
  * 什么都没跟过来。按钮许诺了一个界面给不出的能力，而且没有任何一层会报错：
- * 我甚至写了一条测试断言"接入课题"这几个字存在，它一直是绿的。
+ * 我甚至写了一条测试断言按钮那几个字存在，它一直是绿的。
  *
  * 真跑一次、点一下，才看得出这条路是空的。
  */
@@ -76,7 +76,7 @@ export function HandoffAction({
   }
 
   if (options.length === 0) {
-    // 一个课题都没有时说实话，而不是给一个点了没反应的菜单。
+    // 一个项目都没有时说实话，而不是给一个点了没反应的菜单。
     return (
       <span className="feed-handoff-empty">{fc("handoff.no_projects", lang)}</span>
     );

@@ -147,7 +147,7 @@ test("active tool.failed direct fields produce a forced-open error view", () => 
   assert.deepEqual(tool.error, {
     impact: "The research tool timed out",
     message: "The metadata service timed out.",
-    recovery: "Adjust the scope or source access, then ask the agent to continue.",
+    recovery: "Adjust the scope or source access, then ask the assistant to continue.",
   });
   assert.equal(resources.observedRetries, 1);
 });

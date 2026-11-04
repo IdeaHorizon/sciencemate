@@ -194,6 +194,19 @@ def test_a_viewer_who_cannot_drive_gets_neither_button_nor_composer() -> None:
     assert built["answer"]["reason"]
 
 
+def test_the_lock_reason_speaks_the_language_of_the_screen() -> None:
+    """锁住输入框的原因显示在界面上：中文那一屏说中文，英文那一屏说英文。"""
+    reason = {"zh": "已归档的会话只能查看。", "en": "Archived Sessions are read-only."}
+    for lang, said in (("zh", reason["zh"]), ("en", reason["en"])):
+        built = view.build_session_view(
+            _run(RunStatus.COMPLETED.value), observed_status=RunStatus.COMPLETED.value,
+            pause=None, may_drive=False, readonly_reason=reason, lang=lang,
+        )
+        assert built["answer"]["reason"] == said
+    fallback = view.build_session_view(None, observed_status=None, pause=None, may_drive=False, lang="zh")
+    assert fallback["answer"]["reason"] == "你只能查看这个会话。"
+
+
 # ── 结构判据：停止按钮与 /stop 端点必须是同一个谓词 ─────────────────────────
 
 

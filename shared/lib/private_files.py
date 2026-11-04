@@ -20,9 +20,35 @@ def make_private(path: Path) -> None:
     _set_windows_private_dacl(path)
 
 
+def mkdir_private(path: Path, *, exist_ok: bool = True) -> None:
+    """建一个只有本人进得去的目录（父目录一并建）。**不要**在 Windows 上写 ``mkdir(mode=0o700)``。
+
+    CPython 3.12.4 起（CVE-2024-4030），Windows 上 ``os.mkdir(path, 0o700)`` 不再忽略 mode，而是给目录
+    一个**受保护**的 DACL：``D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)`` —— 里面没有用户本人
+    的 SID，只有 OWNER RIGHTS。``tempfile.mkdtemp`` 同样如此。于是「谁能进」取决于**建它那一刻谁是
+    owner**：提权运行（以管理员身份启动、或从管理员终端拉起）时 owner 是 ``BUILTIN\\Administrators``，
+    之后同一个用户正常（未提权）运行，这个目录和里面的一切都打不开，连 owner 都读不出来。
+
+    11-04 实测（9800x3d，Python 3.12.14，同一个未提权令牌做 AccessCheck）：这份 DACL owner=本人 → 可读，
+    owner=Administrators → 拒绝；按继承建的目录两种 owner 都可读（继承来的 ACE 写明了用户 SID）。
+    lujy 10-29 的诊断包正是这个形状：``payload``、一个工作区被 Administrators 拥有，``harness-state\\users\\
+    <uid>``（家，``home_marker_unreadable``）、会话运行目录、一个项目仓库读不了。
+
+    所以 Windows 上按继承建：数据根在 ``%LOCALAPPDATA%`` 下，继承来的 ACL 本来就只有本人、SYSTEM、
+    Administrators，而且点名本人的 SID，提不提权建都一样进得去。POSIX 上照旧 0o700。放秘密的目录再调
+    :func:`make_private`（Windows 上是点名本人 SID + SYSTEM 的受保护 DACL，同样不依赖 owner）。
+    """
+    path = io_path(path)
+    if os.name == "nt":
+        path.mkdir(parents=True, exist_ok=exist_ok)
+        return
+    path.mkdir(mode=0o700, parents=True, exist_ok=exist_ok)
+    path.chmod(0o700)
+
+
 def write_private_bytes(path: Path, data: bytes, *, overwrite: bool = True) -> None:
     parent = io_path(path.parent)
-    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    mkdir_private(parent)
     make_private(parent)
     flags = os.O_WRONLY | os.O_CREAT | (0 if overwrite else os.O_EXCL)
     # Do not truncate existing secret data before its access policy is established.

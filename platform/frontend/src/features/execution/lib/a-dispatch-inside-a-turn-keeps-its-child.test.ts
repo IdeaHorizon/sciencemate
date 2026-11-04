@@ -87,7 +87,8 @@ test("插话的「已收下」与送达回执都用消息 id 锚定，不靠提�
   const queued = activity.said?.find((said) => said.sequence === 1692);
   assert.ok(queued, "seq 1692 是 interject.queued 的「已收下」");
   assert.equal(queued.repliesToMessageId, INTERJECT_MESSAGE);
-  assert.ok(queued.text.length > 0);
+  assert.equal(queued.text, "", "投递回执只更新消息状态，不进入对话正文");
+  assert.equal(queued.receipt?.stage, "queued");
   // seq 1693 interrupt.acknowledged：带真 repliesToMessageId 的送达回执
   const receipt = activity.said?.find((said) => said.sequence === 1693);
   assert.ok(receipt?.receipt, "seq 1693 是送达回执（receipt）");

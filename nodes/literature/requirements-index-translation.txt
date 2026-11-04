@@ -1,0 +1,2 @@
+# Optional GPLv3 website translation provider. Install in the harness interpreter.
+translators==6.0.4

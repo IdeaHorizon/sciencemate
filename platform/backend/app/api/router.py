@@ -6,9 +6,11 @@ from app.api.v1 import (
     artifacts,
     auth,
     capabilities,
+    cnki,
     project_instructions,
     chat,
     execution,
+    execution_targets,
     feed,
     kb,
     knowledge,
@@ -20,6 +22,7 @@ from app.api.v1 import (
     session_environment,
     sessions,
     settings,
+    skills,
     update,
 )
 from app.auth import get_current_user
@@ -34,10 +37,13 @@ api_router.include_router(
     project_instructions.router, tags=["instructions"], dependencies=[Depends(get_current_user)]
 )
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
+api_router.include_router(cnki.router, prefix="/cnki", tags=["cnki"])
 authenticated = [Depends(get_current_user)]
 
 api_router.include_router(execution.router, tags=["execution"], dependencies=authenticated)
+api_router.include_router(skills.router, tags=["skills"], dependencies=authenticated)
 api_router.include_router(update.router, tags=["update"], dependencies=authenticated)
+api_router.include_router(execution_targets.router, tags=["execution"], dependencies=authenticated)
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"], dependencies=authenticated)
 api_router.include_router(
     projects.router, prefix="/projects", tags=["projects"], dependencies=authenticated

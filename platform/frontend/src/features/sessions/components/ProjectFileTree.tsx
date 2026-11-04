@@ -5,7 +5,15 @@ import { FileText, Folder } from "lucide-react";
 
 import { useSessionProjectTree } from "../hooks/useSessions";
 import type { ProjectFileEntry, ProjectFileTree as ProjectFileTreeData } from "../types";
-import { useT } from "@/shared/i18n";
+import { nodeDisplayName } from "@/features/execution/lib/display-names";
+import { useLanguage, useT, type Phrase } from "@/shared/i18n";
+
+const FILE_STATUS_LABELS: Record<ProjectFileEntry["status"], Phrase> = {
+  committed: { zh: "已提交", en: "committed" },
+  modified: { zh: "已修改", en: "modified" },
+  // 「未跟踪」是 Git 的说法；对读者来说它就是还没提交过的新文件。
+  untracked: { zh: "新文件", en: "untracked" },
+};
 
 /**
  * Project 仓库里有哪些文件 —— **展开一层，取一层**。
@@ -77,14 +85,14 @@ export function ProjectFileTree({
   const root = useSessionProjectTree(projectId, sessionId, "", !!projectId);
 
   if (root.isLoading && !root.data) {
-    return <p className="muted">{t({ zh: "正在加载 Git 工作区…", en: "Loading Git worktree…" })}</p>;
+    return <p className="muted">{t({ zh: "正在加载文件…", en: "Loading files…" })}</p>;
   }
   if (root.data && root.data.entries.length === 0) {
-    return <p className="muted">{t({ zh: "这个工作区还没有文件 —— agent 产出东西之后会出现在这里。", en: "This workspace has no files yet — they appear once the agent produces something." })}</p>;
+    return <p className="muted">{t({ zh: "还没有文件。助手生成的文件会显示在这里。", en: "No files yet. Files the assistant creates will appear here." })}</p>;
   }
 
   return (
-    <section className="project-files-panel" aria-label={t({ zh: "项目 Git 文件", en: "Project Git files" })}>
+    <section className="project-files-panel" aria-label={t({ zh: "项目文件", en: "Project files" })}>
       <p className="project-files-count">
         {t({ zh: "项目里共 {count} 个文件", en: "{count} Project files" }, { count: root.data?.totalFiles ?? 0 })}
       </p>
@@ -137,7 +145,7 @@ function Level({
   }, [listing]);
 
   if (loading && !listing) {
-    return <p className="muted">Loading…</p>;
+    return <p className="muted">{t({ zh: "正在加载…", en: "Loading…" })}</p>;
   }
 
   // 顺序由后端给（跟着节点表走）—— 前端再排一次就是第二份会分叉的名单，
@@ -153,8 +161,8 @@ function Level({
       {bookkeeping.length > 0 && (
         <details className="project-files-bookkeeping">
           <summary>
-            <span>{t({ zh: "平台记账", en: "Platform bookkeeping" })}</span>
-            <small>{t({ zh: "{count} 个（`.history/` 等，不是研究产出）", en: "{count} (`.history/` and the like; not research outputs)" }, { count: bookkeeping.length })}</small>
+            <span>{t({ zh: "平台记录", en: "Platform records" })}</span>
+            <small>{t({ zh: "{count} 个（如 .history/，不属于研究成果）", en: "{count} (such as .history/; not research outputs)" }, { count: bookkeeping.length })}</small>
           </summary>
           <EntryList
             entries={bookkeeping}
@@ -180,7 +188,7 @@ function LevelNotice({ listing }: { listing: ProjectFileTreeData }) {
   if (!listing.truncated) return null;
   return (
     <p className="project-files-truncated">
-      {t({ zh: "这一层共 {total} 项，只列出了前 {shown} 项。", en: "This level has {total} entries; only the first {shown} are listed." }, { total: listing.totalEntries, shown: listing.entries.length })}
+      {t({ zh: "此文件夹共 {total} 项，仅显示前 {shown} 项。", en: "This folder has {total} items; only the first {shown} are shown." }, { total: listing.totalEntries, shown: listing.entries.length })}
     </p>
   );
 }
@@ -197,6 +205,7 @@ function EntryList({
   onOpenFile?: (path: string) => void;
 }) {
   const t = useT();
+  const lang = useLanguage();
   return (
     <ul>
       {entries.map((entry) =>
@@ -208,7 +217,7 @@ function EntryList({
                 <code>{entry.name}</code>
                 <small>
                   {t({ zh: "{count} 个文件", en: "{count} files" }, { count: entry.fileCount ?? 0 })} · {formatBytes(entry.sizeBytes)}
-                  {entry.changedCount ? ` · ${entry.changedCount} live` : ""}
+                  {entry.changedCount ? ` · ${t({ zh: "{count} 个未提交", en: "{count} uncommitted" }, { count: entry.changedCount })}` : ""}
                 </small>
               </summary>
               {/* 挂载即取数：没展开的目录一个请求都不发。 */}
@@ -238,8 +247,8 @@ function EntryList({
               <code>{entry.name}</code>
             )}
             <small>
-              {entry.owner} · {entry.status}
-              {entry.missing ? t({ zh: " · 字节不在这个工作区", en: " · bytes are not in this workspace" }) : ""}
+              {nodeDisplayName(entry.owner, lang)} · {t(FILE_STATUS_LABELS[entry.status])}
+              {entry.missing ? t({ zh: " · 文件内容不在此工作区", en: " · file content is not in this workspace" }) : ""}
             </small>
           </li>
         ),

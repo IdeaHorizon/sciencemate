@@ -1,49 +1,47 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { humanizeFactKey, summarizePauseFacts } from "./pause-facts.ts";
+import { summarizePauseFacts } from "./pause-facts.ts";
 
-test("真实形状：review 失败要显示，没被封顶不占地方", () => {
-  // 取自 node20 实测 decision.required 的字段集。
-  assert.deepEqual(
-    summarizePauseFacts({
-      producingRunId: "1787155777-702875",
-      sourceNodeType: "hypothesis",
-      reviewFailed: true,
-      reviewFailedReason: "reviewer 未产出 review_critique",
-      reviewRetryCapped: false,
-      reviewCritiqueArtifactId: "",
-      artifactIdsProduced: ["a", "b"],
-    }),
-    [
-      { key: "producingRunId", label: "producing run id", value: "1787155777-702875", tone: "value" },
-      { key: "sourceNodeType", label: "source node type", value: "hypothesis", tone: "value" },
-      { key: "reviewFailed", label: "review failed", tone: "flag" },
-      { key: "reviewFailedReason", label: "review failed reason", value: "reviewer 未产出 review_critique", tone: "value" },
-    ],
-  );
+// 取自 node20 实测 decision.required 的字段集。
+const REAL = {
+  producingRunId: "1787155777-702875",
+  sourceNodeType: "hypothesis",
+  reviewFailed: true,
+  reviewFailedReason: "reviewer 未产出 review_critique",
+  reviewRetryCapped: false,
+  reviewCritiqueArtifactId: "",
+  artifactIdsProduced: ["a", "b"],
+  redirectTargetNode: "literature",
+};
+
+test("真实形状：认得的用人话说，为假的不占地方，卡片别处说过的不重复", () => {
+  assert.deepEqual(summarizePauseFacts(REAL, "zh").forPeople, [
+    { key: "reviewFailed", label: "审查未通过", tone: "flag" },
+    { key: "reviewFailedReason", label: "未通过的原因", value: "reviewer 未产出 review_critique", tone: "value" },
+  ]);
+  assert.deepEqual(summarizePauseFacts(REAL, "en").forPeople.map((fact) => fact.label),
+    ["Review did not pass", "Why it did not pass"]);
 });
 
-test("不枚举字段名 —— 上游加什么就显示什么", () => {
-  const facts = summarizePauseFacts({ somethingNobodyPlannedFor: "42", anotherFlag: true });
-  assert.deepEqual(facts.map((f) => f.label), ["something nobody planned for", "another flag"]);
+test("中文界面的正文里不出现英文字段名", () => {
+  for (const fact of summarizePauseFacts(REAL, "zh").forPeople) {
+    assert.doesNotMatch(fact.label, /[A-Za-z]/, `字段名漏到了正文里：${fact.label}`);
+  }
 });
 
-test("为假的布尔不占地方；空串、数组、对象不显示", () => {
-  assert.deepEqual(summarizePauseFacts({ a: false, b: "", c: [1], d: { x: 1 }, e: null }), []);
+test("没起名字的不丢 —— 上游加什么，技术信息里都看得到", () => {
+  assert.deepEqual(summarizePauseFacts(REAL, "zh").technical,
+    ["producingRunId: 1787155777-702875", "artifactIdsProduced: a, b"]);
+  const facts = summarizePauseFacts({ somethingNobodyPlannedFor: "42", anotherFlag: true }, "zh");
+  assert.deepEqual(facts.forPeople, []);
+  assert.deepEqual(facts.technical, ["somethingNobodyPlannedFor: 42", "anotherFlag"]);
 });
 
-test("数字显示（重试余额、需要几个人批这类）", () => {
-  assert.deepEqual(
-    summarizePauseFacts({ requiredApprovalCount: 2 }),
-    [{ key: "requiredApprovalCount", label: "required approval count", value: "2", tone: "value" }],
-  );
+test("为假的布尔、空串、对象、null 都不显示", () => {
+  assert.deepEqual(summarizePauseFacts({ a: false, b: "", d: { x: 1 }, e: null }, "zh"),
+    { forPeople: [], technical: [] });
 });
 
 test("没有 facts 就是空", () => {
-  assert.deepEqual(summarizePauseFacts(undefined), []);
-});
-
-test("键名分词", () => {
-  assert.equal(humanizeFactKey("reviewRetryCapped"), "review retry capped");
-  assert.equal(humanizeFactKey("producing_run_id"), "producing run id");
+  assert.deepEqual(summarizePauseFacts(undefined, "en"), { forPeople: [], technical: [] });
 });

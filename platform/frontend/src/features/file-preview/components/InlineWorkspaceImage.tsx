@@ -49,7 +49,7 @@ export function InlineWorkspaceImage({
   const label = alt || path.split("/").pop() || path;
 
   if (query.isLoading) {
-    return <span className="inline-workspace-image is-loading">{t({ zh: "正在读取 {label}…", en: "Reading {label}…" }, { label })}</span>;
+    return <span className="inline-workspace-image is-loading">{t({ zh: "正在加载 {label}…", en: "Loading {label}…" }, { label })}</span>;
   }
   // 取不到、或者服务端说它不是图（扩展名骗人）→ 退回成可点的文件名。
   if (query.error || !url) {
@@ -58,7 +58,7 @@ export function InlineWorkspaceImage({
         type="button"
         className="chat-run-file-open"
         onClick={() => onOpen(path)}
-        title={query.error ? t({ zh: `打不开 ${path}`, en: `Cannot open ${path}` }) : t({ zh: `在右栏打开 ${path}`, en: `Open ${path} in the side panel` })}
+        title={query.error ? t({ zh: "无法打开 {path}", en: "Cannot open {path}" }, { path }) : t({ zh: `在右栏打开 ${path}`, en: `Open ${path} in the side panel` })}
       >
         <code>{label}</code>
       </button>
@@ -70,7 +70,7 @@ export function InlineWorkspaceImage({
       type="button"
       className="inline-workspace-image"
       onClick={() => onOpen(path)}
-      title={t({ zh: `${path}（点开在右栏看大图）`, en: `${path} (open it in the side panel for the full size)` })}
+      title={t({ zh: "{path}（点击在右栏查看大图）", en: "{path} (open it in the side panel for the full size)" }, { path })}
     >
       {/* eslint-disable-next-line @next/next/no-img-element --
           next/image 优化不了 blob: URL（它要的是构建期已知的远端/本地资源，

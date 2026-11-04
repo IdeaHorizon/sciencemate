@@ -51,6 +51,8 @@ class ProjectConfigUpdate(BaseModel):
     #: 只在 operation_mode == AUTONOMOUS 时生效；[] / None = 每个高危点都停下
     #: 问人。默认必须是"都停"——授权范围只能由人显式给出。
     autonomous_authorized_risk_classes: list[str] | None = None
+    #: 模型命令在哪里跑：``local`` / ``wsl:<发行版>``。写法与可用性在接口里核。
+    execution_target: str | None = Field(None, max_length=80)
     reporting_level: ReportingLevel | None = None
     preferred_model: str | None = None
     tool_whitelist: list[str] | None = None
@@ -117,6 +119,8 @@ class ProjectConfigResponse(BaseModel):
     #: 无人值守时预授权的高危类别（`match_high_risk` 的标签）。
     #: None / [] = 每个高危点都停下问人。
     autonomous_authorized_risk_classes: list[str] | None = None
+    #: 模型命令在哪里跑；None = 本机。
+    execution_target: str | None = None
     reflection_mode: ReflectionMode | None = None
     harness_overrides: dict | None = None
     research_intent: dict | None = None

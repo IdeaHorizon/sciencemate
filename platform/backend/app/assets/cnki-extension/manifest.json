@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "ScienceMate 知网本机采集",
+  "version": "0.1.0",
+  "description": "在本机 Chrome 中采集知网题录，供自己的 ScienceMate 搜索和推荐使用。",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "alarms", "scripting"],
+  "host_permissions": ["https://kns.cnki.net/*"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "background": {"service_worker": "background.js", "type": "module"},
+  "action": {"default_popup": "popup.html"}
+}

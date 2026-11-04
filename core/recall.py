@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
+from shared.lib.external_content import record_view, render_frame
+
 log = logging.getLogger("recall")
 
 if TYPE_CHECKING:
@@ -257,6 +259,7 @@ def _fill_claim_buckets(
                     "scope": scope,
                     "similarity": round(sim, 3),
                     "created_at": claim.get("created_at"),
+                    "witness": record_view(claim),
                 })
         # 原来还收 "theoretical" —— 类型已随 10→5 收敛并归一成 empirical；
         # validated_methods 收的是"怎么做"的结论，本来就该只有 methodological。
@@ -274,6 +277,7 @@ def _fill_claim_buckets(
                     "scope": scope,
                     "similarity": round(sim, 3),
                     "created_at": claim.get("created_at"),
+                    "witness": record_view(claim),
                 })
 
 
@@ -324,6 +328,7 @@ def _fill_prior_runs(state, qvec, result, *, k_per_category: int,
             "scope": scope,
             "similarity": round(sim, 3),
             "text_preview": text_preview,
+            "witness": record_view(chunk),
         })
         if len(result.prior_runs) >= k_per_category:
             break
@@ -423,6 +428,7 @@ def _fill_load_bearing_capital(state, result, *, cap: int | None = None) -> None
             "confidence": c.get("confidence"),
             "scope_dimensions": draft.get("applicability")
                                 or c.get("scope_dimensions") or {},
+            "witness": record_view(c),
         })
 
 
@@ -459,6 +465,13 @@ def _fill_prior_failed_checks(state, result, *, max_scan: int = 400) -> None:
         return   # 只要最近一次
 
 
+def _framed(body: list[str], entries: list[dict], id_key: str) -> str:
+    """一段召回出来的记录装进数据框（#730）：正文取自 KB，可能是外部文献转述或
+    别的项目晋升上来的卡 —— 框里只放记录，怎么用它们的话留在框外。"""
+    return render_frame("\n".join(body), via="kb",
+                        witnesses=[(e.get(id_key), e.get("witness")) for e in entries])
+
+
 def render_briefing(result: RecallResult, *, query: str = "") -> str:
     """RecallResult → 给 LLM 看的结构化 markdown briefing。
 
@@ -482,19 +495,21 @@ def render_briefing(result: RecallResult, *, query: str = "") -> str:
             f"—— 本项目花真实算力换来的决策依据，设计方案前先读。"
             f"它们在终态会成为晋升候选**"
         )
+        body: list[str] = []
         for c in result.load_bearing_capital:
             age = _age_label(c.get("drafted_at"))
-            lines.append(
+            body.append(
                 f"  ▸ [{c['claim_id']}｜{c.get('claim_type')}｜conf={c.get('confidence')}"
                 + (f"｜{age}" if age else "")
                 + f"] {c['claim_text']}"
             )
             if c.get("why"):
-                lines.append(f"     → 机制：{c['why']}")
+                body.append(f"     → 机制：{c['why']}")
             if c.get("decision_relevance"):
-                lines.append(f"     → 据此该怎么做：{c['decision_relevance']}")
+                body.append(f"     → 据此该怎么做：{c['decision_relevance']}")
             if c.get("scope_dimensions"):
-                lines.append(f"     → 适用范围：{c['scope_dimensions']}")
+                body.append(f"     → 适用范围：{c['scope_dimensions']}")
+        lines.append(_framed(body, result.load_bearing_capital, "claim_id"))
         if result.card_drafts_not_injected:
             lines.append(f"  （另有 {result.card_drafts_not_injected} 张草稿未注入，"
                          f"search_kb(entity_type='claims') 可查）")
@@ -523,11 +538,11 @@ def render_briefing(result: RecallResult, *, query: str = "") -> str:
         lines.append(
             f"🎯 **类似 prior runs**（embedding similarity；找到 {len(result.prior_runs)} 条）"
         )
-        for r in result.prior_runs:
-            lines.append(
-                f"  • [run={r['origin_run_id'][:24]}…, node={r.get('created_by_node_type','?')}, "
-                f"sim={r['similarity']}] {r['text_preview'][:200]}"
-            )
+        lines.append(_framed(
+            [f"  • [run={r['origin_run_id'][:24]}…, node={r.get('created_by_node_type','?')}, "
+             f"sim={r['similarity']}] {r['text_preview'][:200]}"
+             for r in result.prior_runs],
+            result.prior_runs, "chunk_id"))
         lines.append("")
 
     # 2. dead_ends
@@ -535,15 +550,17 @@ def render_briefing(result: RecallResult, *, query: str = "") -> str:
         f"⚠️ **此领域 active dead_ends**（org-scope，{len(result.active_dead_ends)} 条）"
     )
     if result.active_dead_ends:
+        body = []
         for d in result.active_dead_ends:
             age = _age_label(d.get("created_at"))
-            lines.append(
+            body.append(
                 f"  • [{d['claim_id']}, sim={d['similarity']}"
                 + (f", {age}" if age else "")
                 + f"] {d['claim_text']}"
             )
             if d["dont_repeat_reason"]:
-                lines.append(f"    └ avoid: {d['dont_repeat_reason']}")
+                body.append(f"    └ avoid: {d['dont_repeat_reason']}")
+        lines.append(_framed(body, result.active_dead_ends, "claim_id"))
     else:
         lines.append("  _（无强相关 dead_end，可能是此方向首次踩或 KB 尚未沉淀）_")
     lines.append("")
@@ -554,14 +571,16 @@ def render_briefing(result: RecallResult, *, query: str = "") -> str:
         f"（replication ≥ 1，{len(result.validated_methods)} 条）"
     )
     if result.validated_methods:
+        body = []
         for v in result.validated_methods:
             age = _age_label(v.get("created_at"))
-            lines.append(
+            body.append(
                 f"  • [{v['claim_id']}, sim={v['similarity']}, "
                 f"conf={v['confidence']}, rep={v['replication_count']}"
                 + (f", {age}" if age else "")
                 + f"] {v['claim_text']}"
             )
+        lines.append(_framed(body, result.validated_methods, "claim_id"))
     else:
         lines.append("  _（无）_")
     lines.append("")

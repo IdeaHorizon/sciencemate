@@ -6,6 +6,7 @@ import { cn } from "@/shared/ui";
 import { useInterfaceSettings } from "@/features/settings/InterfaceSettingsProvider";
 import { RichText } from "./RichText";
 import type { ChatMessage, ArtifactLinkContext } from "../types";
+import { useT } from "@/shared/i18n";
 
 export function ChatMessages({
   messages,
@@ -33,6 +34,7 @@ export function ChatMessages({
   bodyOwnedByAccessory?: (message: ChatMessage) => boolean;
   children?: React.ReactNode;
 } & ArtifactLinkContext) {
+  const t = useT();
   const { settings: interfaceSettings } = useInterfaceSettings();
   const endRef = useRef<HTMLDivElement>(null);
   const prevCountRef = useRef(messages.length);
@@ -76,7 +78,7 @@ export function ChatMessages({
               </div>
             ) : m.role !== "system" ? (
               <>
-                <span>{m.role === "assistant" ? "Agent" : "You"}</span>
+                <span>{m.role === "assistant" ? t({ zh: "助手", en: "Assistant" }) : t({ zh: "你", en: "You" })}</span>
                 <div className="message-body">
                   {/* 空 assistant 消息**不再**画三个跳动的点。
                       状态行（chat-transcript-status：Thinking / Analyzing tool

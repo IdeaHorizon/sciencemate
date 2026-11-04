@@ -175,6 +175,12 @@ def test_the_price_of_the_hole_is_on_the_record(nest):
 
     if NATIVE != "linux":
         pytest.skip("这条代价属于纯放行清单后端（Landlock）；seatbelt 有 deny 原语")
+    if _uses_bwrap():
+        # #1248：node20 上这条一直红，issue 当时以为那台机器「没有 bwrap」。其实 bwrap 在
+        # （09-18 装的）、探针也过，后端走的是 bwrap 分支 —— 它用后挂的 `--ro-bind` 把洞盖在
+        # 可写根上，有真正的 deny 原语，本来就没有这项代价。强制关掉 bwrap 只留 Landlock 时，
+        # 这条在 issue 的基线 1483dbe5 和现在的 main 上都是绿的。bwrap 下该钉的是下一条。
+        pytest.skip("bwrap 有「盖住」原语，没有这项代价 —— 见 test_bwrap_holds_the_hole_without_the_price")
 
     _state, (status, _rc, _out, _err) = _run(
         f"echo NEW > '{nest['runtime'] / 'brand_new.txt'}'", nest)
@@ -186,6 +192,30 @@ def test_the_price_of_the_hole_is_on_the_record(nest):
     # 登记为「不能新建」的根，新建确实失败；没登记的根不受影响。
     assert nest["worktree"] not in chains, (
         "只读根被误登记成「挖了洞的可写根」—— 那会把一条不存在的代价报给节点")
+
+
+def _uses_bwrap() -> bool:
+    return bool(select_backend(NATIVE).facts().get("bwrap")) if NATIVE == "linux" else False
+
+
+@live
+def test_bwrap_holds_the_hole_without_the_price(nest):
+    """bwrap 分支：洞照样守住，可写根里照样能新建，账上**不**记一条不存在的代价（#1248）。
+
+    纯放行清单才需要拿「不能在根里新建」换洞；bwrap 把洞用 `--ro-bind` 盖在可写根上，两样都有。
+    把纯 Landlock 的代价套到 bwrap 上，节点会被告知一个它其实没付的代价 —— 和不记账一样误导。
+    """
+    if NATIVE != "linux" or not _uses_bwrap():
+        pytest.skip("只在 bwrap 可用的 Linux 上")
+    target = nest["deps"] / "lib.txt"
+    state, (status, _rc, _out, _err) = _run(
+        f"echo NEW > '{nest['runtime'] / 'brand_new.txt'}'; echo TAMPERED > '{target}'", nest)
+    assert status == "done"
+    assert (nest["runtime"] / "brand_new.txt").exists(), "bwrap 下可写根里新建被拒了"
+    assert target.read_text(encoding="utf-8").strip() == "ORIGINAL", "bwrap 下洞被写穿了"
+    gaps = [e for e in state.events if e.get("event") == "isolation_gap"
+            and e.get("invariant") == "writable_root_new_entries"]
+    assert not gaps, f"bwrap 没付的代价被记到了账上：{gaps}"
 
 
 @live

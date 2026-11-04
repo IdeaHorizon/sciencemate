@@ -25,17 +25,17 @@ export function useProjectMembers(projectId: string, project?: Project) {
   const add = useMutation({
     mutationFn: ({ email, role }: { email: string; role: ProjectMemberRole }) => addProjectMember(projectId, email, role),
     onSuccess: () => void invalidate(),
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "没能把这个人加进项目", en: "This person could not be added to the Project" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "添加成员失败", en: "This person could not be added to the Project" })),
   });
   const changeRole = useMutation({
     mutationFn: ({ userId, role }: { userId: string; role: ProjectMemberRole }) => changeProjectMemberRole(projectId, userId, role),
     onSuccess: () => void invalidate(),
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "角色没能改", en: "The role could not be changed" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "修改角色失败", en: "The role could not be changed" })),
   });
   const remove = useMutation({
     mutationFn: (userId: string) => removeProjectMember(projectId, userId),
     onSuccess: () => void invalidate(),
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "没能把这个人移出项目", en: "This person could not be removed from the Project" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "移出成员失败", en: "This person could not be removed from the Project" })),
   });
   return { query, add, changeRole, remove };
 }

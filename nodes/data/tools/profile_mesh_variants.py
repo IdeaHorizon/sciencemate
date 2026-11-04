@@ -52,10 +52,10 @@ def _declared_stage_values(
                 continue
             parameter = str(dimension.get("parameter") or "").strip().casefold()
             if parameter in {"geometry_variant", "naca_code", *COORDINATE_PROFILE_KEYS}:
-                values = dimension.get("values")
-                if parameter == "naca_code" and isinstance(values, list):
-                    values = [f"NACA {value}" if re.fullmatch(r"\d{4}", str(value or "")) else value for value in values]
-                add(values)
+                choices = dimension.get("values")
+                if parameter == "naca_code" and isinstance(choices, list):
+                    choices = [f"NACA {value}" if re.fullmatch(r"\d{4}", str(value or "")) else value for value in choices]
+                add(choices)
     return values
 
 

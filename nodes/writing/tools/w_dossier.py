@@ -153,10 +153,21 @@ def build_dossier(state: Any, *, force: bool = False) -> dict[str, Any]:
     for d in scan_dirs:
         if d.is_dir():
             candidates.extend(p for p in d.rglob("*") if p.is_file() and not p.name.endswith(".ref"))
+    # 图记录完整性（#1200，框架侧代改，owner: qinp）：读图与图题这一步跑一次完整的
+    # validate_figure_record —— 伪造的记录、指纹对不上、铸完又被换过的图文件不当真图用：
+    # 图题不收、文件不进清单，原因（哪张、哪道检查、怎么修）进 withheld_figures 摆给模型。
+    from shared.lib.publication_figures import audit_figure_files
+    try:
+        refused = audit_figure_files(root, [p.relative_to(root).as_posix() for p in candidates]).refused
+        withheld = [f.as_dict() for f in refused.values()]
+    except Exception as exc:  # noqa: BLE001 —— 核不成不许让卷宗读不出来；收尾时框架再核一次
+        refused, withheld = {}, [{"check": "audit_failed", "message": f"图记录完整性没核成（{exc}）：清单里的图未经伪造/指纹校验"}]
     figure_captions: dict[str, str] = {}
     # 第一遍：先把图表服务记录里的图题收齐（按路径排序时 fig1_*.png 排在 figure__*.md 前面，一遍扫会挂空）
     for p in sorted(candidates):
         rel = p.relative_to(root).as_posix()
+        if rel in refused:
+            continue
         if rel.startswith("figures/") and p.suffix.lower() in _TEXT_EXT and p.name.startswith("figure__"):
             rec = p.read_text(encoding="utf-8", errors="replace")
             m = re.search(r"^Caption:\s*(.+)$", rec, re.M)
@@ -170,7 +181,7 @@ def build_dossier(state: Any, *, force: bool = False) -> dict[str, Any]:
     for p in sorted(candidates):
         rel = p.relative_to(root).as_posix()
         # figures/ 下的 .md 是图表服务的记录与说明，不是证据文档
-        if rel.startswith("figures/") and p.suffix.lower() in _TEXT_EXT:
+        if rel in refused or (rel.startswith("figures/") and p.suffix.lower() in _TEXT_EXT):
             continue
         if p.suffix.lower() in _TEXT_EXT and p.stat().st_size < 4_000_000:
             sha = _sha(p)
@@ -207,7 +218,8 @@ def build_dossier(state: Any, *, force: bool = False) -> dict[str, Any]:
             figures.append({"id": img_id, "path": rel, "name": p.name,
                             "format": p.suffix.lower().lstrip("."), "bytes": p.stat().st_size,
                             "caption": _caption_for(p.stem, figure_captions)})
-    dossier = {"docs": docs, "doc_ids": doc_ids, "figure_ids": figure_ids, "entries": entries, "refs": refs, "figures": figures}
+    dossier = {"docs": docs, "doc_ids": doc_ids, "figure_ids": figure_ids, "entries": entries, "refs": refs, "figures": figures,
+               "withheld_figures": withheld}
     write_json(out_path, dossier)
     return dossier
 
@@ -229,6 +241,8 @@ def _index_text(dossier: dict, max_chars: int) -> str:
     with_doi = sum(1 for r in dossier.get("refs", []) if r.get("doi") or r.get("arxiv"))
     lines.append(f"\n## 参考文献：{n_refs} 条，其中 {with_doi} 条带 DOI/arXiv（用 part='refs' 取全文）")
     lines.append(f"## 图文件：{len(dossier.get('figures', []))} 个（用 part='figures' 取清单）")
+    if dossier.get("withheld_figures"):
+        lines.append(f"## 不能当真图用的图：{len(dossier['withheld_figures'])} 个（part='figures' 末尾有原因与修法）")
     return clip("\n".join(lines), max_chars)
 
 
@@ -248,7 +262,11 @@ async def _read_dossier(state: Any, part: str = "index", ids: list[str] | None =
     if part == "figures":
         text = "\n".join(f"- {f['id']} {f['path']} ({f['format']}, {f['bytes']} B)" + (f" · 图题：{f['caption']}" if f.get("caption") else "")
                          for f in dossier.get("figures", []))
-        return {"status": "success", "figures": clip(text, max_chars), "count": len(dossier.get("figures", []))}
+        withheld = dossier.get("withheld_figures") or []
+        if withheld:   # #1200（框架侧代改，owner: qinp）：没过完整性校验的图，说清哪张、为什么、怎么修
+            text += "\n\n## 不能当真图用（不在上面的清单里，提纲不能引用）\n" + "\n".join(f"- {w['message']}" for w in withheld)
+        return {"status": "success", "figures": clip(text, max_chars), "count": len(dossier.get("figures", [])),
+                "withheld": len(withheld)}
     if part == "search":
         q = (query or "").strip()
         if not q:

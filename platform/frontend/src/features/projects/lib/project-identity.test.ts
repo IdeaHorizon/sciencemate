@@ -22,10 +22,10 @@ test("project identity uses authoritative project metadata instead of the URL id
 });
 
 test("project identity has honest loading and error states", () => {
-  assert.equal(projectIdentity(undefined, { loading: true, error: false }, "zh").name, "载入中…");
+  assert.equal(projectIdentity(undefined, { loading: true, error: false }, "zh").name, "正在加载…");
   assert.deepEqual(projectIdentity(undefined, { loading: false, error: true }, "zh"), {
-    name: "读不到这个项目",
-    meta: "项目信息没读出来",
+    name: "无法加载项目",
+    meta: "请稍后重试。",
     state: "error",
   });
 });

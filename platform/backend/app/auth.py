@@ -7,7 +7,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 
 import bcrypt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 import jwt
 from jwt import InvalidTokenError
@@ -168,13 +168,24 @@ async def implicit_local_user(db: AsyncSession = Depends(get_db)) -> User:
 
 
 async def get_current_user(
+    request: Request,
     token: str | None = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """FastAPI dependency: extract and validate current user from JWT."""
     if not token and settings.debug:
         return await _get_or_create_local_user(db)
+    try:
+        return await _the_user_this_token_belongs_to(token, db)
+    except HTTPException as refused:
+        if refused.status_code == status.HTTP_401_UNAUTHORIZED:
+            # 拒绝的那句按发问那一屏的语言说（判据在 `_refuse` 里已经记进日志）。
+            from app.services.user_interface import language_on_screen, say
+            refused.detail = say(_SIGNED_OUT, language_on_screen(request))
+        raise
 
+
+async def _the_user_this_token_belongs_to(token: str | None, db: AsyncSession) -> User:
     if not token:
         raise _refuse("no bearer token on the request")
 
@@ -252,11 +263,17 @@ def _refuse(reason: str, **facts: object) -> HTTPException:
         )
     else:
         logger.warning("authentication refused: %s", reason)
+    from app.services.say import say
     return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid authentication credentials",
+        # 说给人的只有这一句：为什么拒（哪一条判据）在上面的日志里，不往界面上送。
+        # 账号 token 那条路（`get_current_user`）会换成发问那一屏的语言。
+        detail=say(_SIGNED_OUT, "zh"),
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+_SIGNED_OUT = {"zh": "登录已失效，请重新登录。", "en": "Your sign-in has expired. Sign in again."}
 
 
 async def _get_or_create_local_user(db: AsyncSession) -> User:

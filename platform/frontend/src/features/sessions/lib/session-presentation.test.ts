@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   sessionDriverLabel,
-  sessionFrozenModelLabel,
   sessionHasActiveDriver,
   sessionHasAdvancedBase,
   sessionIsDrivenBy,
@@ -24,7 +23,7 @@ test("the version line names a commit you can actually go look at", () => {
   );
   assert.equal(
     sessionRevisionLabel(session("canonical", null) as never, "zh"),
-    "读不到版本信息",
+    "无法获取版本信息",
   );
 });
 
@@ -33,10 +32,12 @@ test("base divergence is how far main moved since this session branched", () => 
   assert.equal(sessionHasAdvancedBase(session("canonical", "a".repeat(40), 0) as never), false);
 });
 
-test("driver labels distinguish archived records from active unclaimed sessions", () => {
-  assert.equal(sessionDriverLabel({ lifecycleStatus: "archived", primaryDriverUserId: null, driverLabel: "Unassigned" } as never, "zh"), null);
-  assert.equal(sessionDriverLabel({ lifecycleStatus: "active", primaryDriverUserId: null, driverLabel: "Unassigned" } as never, "zh"), "没人在开车");
-  assert.equal(sessionDriverLabel({ lifecycleStatus: "active", primaryDriverUserId: "user-a", driverLabel: "Mia Zhang" } as never, "zh"), "Mia Zhang · 驾驶者");
+// 「没人在开车」「· 驾驶者」两种说法删了：没有人发过言时不占一格，有人时只给
+// 名字（条目名「最近使用者」由会话信息那一行给）。
+test("the last-used-by label is just a name, and absent when nobody has spoken", () => {
+  assert.equal(sessionDriverLabel({ lifecycleStatus: "archived", primaryDriverUserId: null, driverLabel: "Unassigned" } as never), null);
+  assert.equal(sessionDriverLabel({ lifecycleStatus: "active", primaryDriverUserId: null, driverLabel: "Unassigned" } as never), null);
+  assert.equal(sessionDriverLabel({ lifecycleStatus: "active", primaryDriverUserId: "user-a", driverLabel: "Mia Zhang" } as never), "Mia Zhang");
 });
 
 test("who is driving comes from the server, and it never expires", () => {
@@ -56,7 +57,7 @@ test("who is driving comes from the server, and it never expires", () => {
   assert.equal(sessionIsDrivenBy(driven as never, "mia"), true);
   assert.equal(sessionIsDrivenBy(driven as never, "chen"), false);
   assert.equal(sessionIsDrivenBy(unclaimed as never, "mia"), false);
-  assert.equal(sessionDriverLabel({ ...unclaimed, driverLabel: "Unassigned" } as never, "zh"), "没人在开车");
+  assert.equal(sessionDriverLabel({ ...unclaimed, driverLabel: "Unassigned" } as never), null);
 });
 
 /**
@@ -72,9 +73,3 @@ test("who is driving comes from the server, and it never expires", () => {
  * —— 接管之后，被接管走的那个人拿到 `answer.via === "none"` + 原因 + 到期时刻。
  */
 
-test("the frozen Session model label removes credential provenance before linking", () => {
-  assert.equal(sessionFrozenModelLabel("DeepSeek (environment)", "en"), "DeepSeek · fixed for this Session");
-  assert.equal(sessionFrozenModelLabel("DeepSeek (environment)", "zh"), "DeepSeek · 这个会话固定用它");
-  assert.equal(sessionFrozenModelLabel("GPT-5", "en"), "GPT-5 · fixed for this Session");
-  assert.equal(sessionFrozenModelLabel(null, "en"), "Project model · fixed for this Session");
-});

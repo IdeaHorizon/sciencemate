@@ -691,6 +691,8 @@ async def test_crossref_doi_enrichment_fills_year_from_the_same_date_source(monk
 @pytest.mark.asyncio
 async def test_crossref_issn_window_reads_all_pages() -> None:
     class Response:
+        status_code = 200
+
         def __init__(self, message):
             self.message = message
 

@@ -21,7 +21,7 @@ def test_metacharacters_in_source_path_do_not_execute(tmp_path, monkeypatch):
     marker = tmp_path / "PWNED"
     seen: list[str] = []
 
-    def _capture(cmd: str, timeout: int = 10) -> str:
+    def _capture(cmd: str, timeout: int = 10, *, env_path=None, state=None) -> str:
         # 用真实 shell 跑，才能证明"引号确实挡住了"而不是"我们没跑"。
         seen.append(cmd)
         import subprocess
@@ -42,7 +42,7 @@ def test_ordinary_path_still_produces_a_working_probe(tmp_path, monkeypatch):
     """加引号不得把正常路径也弄坏 —— 指纹拿不到就等于每次都重扫。"""
     seen: list[str] = []
     monkeypatch.setattr("nodes.experiment.tools.repro_snapshot._run",
-                        lambda cmd, timeout=10: seen.append(cmd) or "abc123")
+                        lambda cmd, timeout=10, **probe: seen.append(cmd) or "abc123")
 
     safe_bash._recon_fingerprint(str(tmp_path))
 

@@ -28,15 +28,15 @@ export function ArchivedBanner({ projectId }: { projectId: string }) {
       void queryClient.invalidateQueries({ queryKey: qk.project(projectId) });
       void queryClient.invalidateQueries({ queryKey: qk.projects() });
     },
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "没恢复成", en: "Could not restore it" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "恢复失败", en: "Restore failed" })),
   });
   if (project.data?.status !== "archived") return null;
   return (
     <div className="project-archived-banner" role="status">
       <span>
         <strong>{t({ zh: "这个项目已归档", en: "This project is archived" })}</strong>
-        <small>{t({ zh: "只能看：不能开新会话、改设置，后台也不再替它干活。知识、会话和产出都在。",
-                    en: "Read-only: no new sessions or settings changes, and nothing runs for it in the background. Its knowledge, sessions and outputs are all kept." })}</small>
+        <small>{t({ zh: "项目为只读状态，不能新建会话或修改设置。已有的知识、会话和成果都会保留。",
+                    en: "Read-only: you cannot start sessions or change settings. Its knowledge, sessions and outputs are all kept." })}</small>
       </span>
       {project.data.can_archive && (
         <Button size="sm" iconLeft={<RotateCcw size={13} />} disabled={restore.isPending} onClick={() => restore.mutate()}>

@@ -46,10 +46,10 @@ test("「这个项目交付了什么」只剩一个数据源", () => {
   );
 });
 
-test("交付物条和「研究产出」页读的是同一个目录", () => {
+test("交付物条和「研究成果」页读的是同一个目录", () => {
   const bar = source("../../sessions/components/SessionDeliverables.tsx");
   const view = source("../components/ProjectOutputsView.tsx");
-  for (const [name, code] of [["交付物条", bar], ["研究产出页", view]] as const) {
+  for (const [name, code] of [["交付物条", bar], ["研究成果页", view]] as const) {
     assert.match(code, /useProjectCatalog\(/, `${name} 应该读目录`);
   }
   // 交付物判据只有一处：后端算好的 isDeliverable，前端不自己重算。

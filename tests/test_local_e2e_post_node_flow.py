@@ -20,6 +20,7 @@ summary）。其余全是真代码：flow entry 怎么登记、运行时怎么�
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -74,8 +75,12 @@ def wired(tmp_path, monkeypatch):
             store = RecordStore(base / "artifacts", base / "records.jsonl")
             for a in arts:
                 store.save(
-                    artifact_id=a["id"], artifact_type=a["type"], name=a["id"],
-                    content="{}", metadata={}, directory=base / "artifacts",
+                    artifact_id=a["id"], artifact_type=a["type"], name=a["id"].split("__", 1)[-1],
+                    content=(json.dumps({
+                        "verdict": "approve", "summary": "定义明确，设计可以执行。",
+                        "recommended_action": {"action": "proceed"},
+                    }, ensure_ascii=False) if node_type == "_reviewer" else "{}"),
+                    metadata={}, directory=base / "artifacts",
                     created_at="2026-09-12T00:00:00+00:00",
                     provenance=produced(node_type, rid),
                     produced_by_node_type=node_type, produced_by_run_id=rid,
@@ -140,11 +145,10 @@ async def test_answering_proceed_closes_the_flow_instead_of_re_presenting(tmp_pa
     assert not still_open, "PROCEED 之后 flow 仍开着 —— 下一轮会重新呈递"
 
 
-# ── 2. Move 1d：运行时自己走完两步 ────────────────────────────────────────
+# ── 2. 自动审查后把结果交回调度器 ────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_one_dispatch_runs_review_and_returns_a_decision_pause(tmp_path, wired):
-    """调度器只发起一次 run_node(hypothesis) —— 它下一次醒来该看到决策 pause。"""
+async def test_one_dispatch_returns_review_before_presenting_a_decision(tmp_path, wired):
     from shared.tools.run_node import _run_node_tool
 
     state = _state(tmp_path)
@@ -152,26 +156,83 @@ async def test_one_dispatch_runs_review_and_returns_a_decision_pause(tmp_path, w
         user_note="先立研究设计：把问题和闭合条件定下来。")
 
     assert "_reviewer" in wired, "运行时没有自己派 reviewer —— 手续又回到调度器手上"
-    assert out.get("status") == "pause", (
-        f"run_node 该返回决策 pause，实际 {out.get('status')!r}"
-    )
-    assert "decision" in str(out.get("pause_event", {})).lower() or out["pause_event"]
+    assert out["status"] == "success"
+    assert "pause_event" not in out
+    assert out["post_node_review"]["review_critique_artifact_id"] == "review_critique__auto"
+    assert "定义明确" in out["post_node_review"]["critique"]["content"]
+    assert out["final_text_preview"] == "hypothesis 交付完成"
 
 
-# ── 3. Move 1e：flow 开着时调度器拿不到控制权 ─────────────────────────────
+# ── 3. 弹框仍由调度器显式调用 ────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_the_orchestrator_gets_no_turn_while_the_flow_is_open(tmp_path, wired):
-    """一次派发里，调度器唯一的返回点就是决策 pause —— 中间没有它的回合。"""
+async def test_the_orchestrator_can_explain_then_explicitly_present(tmp_path, wired):
     from shared.tools.run_node import _run_node_tool
+    from shared.tools.library.decision_package import _present_decision_package
 
     state = _state(tmp_path)
     out = await _run_node_tool(state, "hypothesis", node_inputs={"mode": "fresh"},
         user_note="先立研究设计：把问题和闭合条件定下来。")
 
-    # 派发序列由运行时决定：先 producing，再 reviewer，然后就 pause 了。
     assert wired == ["hypothesis", "_reviewer"], f"派发序列不对：{wired}"
-    assert out["status"] == "pause"
+    assert out["status"] == "success"
+    entry = state.hook_state["pending_post_node_flow"][0]
+    assert entry["decision_state"] == "pending"
+    presented = await _present_decision_package(
+        state, source_node_type="hypothesis", producing_run_id=out["child_run_id"],
+        human_decision_reason="测试中的研究取舍由用户确认。",
+    )
+    assert presented["status"] == "pause"
+    assert entry["decision_state"] == "awaiting_human"
+    assert "hypothesis 交付完成" in presented["pause_event"]["context"]
+    assert "pre_registration__t1" in presented["pause_event"]["context"]
+
+
+@pytest.mark.asyncio
+async def test_review_reaches_the_llm_and_its_explanation_precedes_the_pause(tmp_path, wired):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from core.agent_loop import run_loop
+    from core.harness import NodeHarness
+    from core.llm import LLMMessage, LLMResponse
+    from core.pause import clear_all
+
+    def reply(content, name, arguments, call_id):
+        return LLMResponse(
+            content=content, finish_reason="tool_calls", usage={"total_tokens": 10},
+            tool_calls=[{"id": call_id, "type": "function", "function": {
+                "name": name, "arguments": json.dumps(arguments),
+            }}],
+        )
+
+    explanation = "研究计划已经完成。独立审查认为定义明确、设计可执行，我建议接受并继续，下面请你选择。"
+    llm = MagicMock()
+    llm.chat = AsyncMock(side_effect=[
+        reply("开始研究设计。", "run_node", {"node_type": "hypothesis", "user_note": "先形成研究计划。"}, "produce"),
+        reply(explanation, "present_decision_package", {
+            "source_node_type": "hypothesis", "producing_run_id": "r_hyp",
+            "human_decision_reason": "需要用户选择下一阶段的研究方向。",
+        }, "decide"),
+    ])
+    harness = NodeHarness(
+        node_type="_orchestrator", system_prompt="test", kb_query="_disable",
+        tools=["run_node", "present_decision_package"], max_turns=3,
+    )
+    state = _state(tmp_path)
+    clear_all()
+    try:
+        result = await run_loop(harness, state, [LLMMessage(role="user", content="形成研究计划。")], llm)
+        assert result.status == "paused"
+        assert llm.chat.call_count == 2
+        review_inputs = llm.chat.call_args_list[1].args[0]
+        assert any(message.role == "tool" and "定义明确" in (message.content or "") for message in review_inputs)
+        events = [json.loads(line) for line in state.transcript_path.read_text().splitlines()]
+        said_at = next(i for i, event in enumerate(events) if event.get("content") == explanation)
+        card_at = next(i for i, event in enumerate(events) if event.get("event") == "decision_package_presented")
+        assert said_at < card_at
+        assert any(message.role == "assistant" and message.content == explanation for message in result.messages)
+    finally:
+        clear_all()
 
 
 # ── 4. 写入门：不合规的产物写不出来 ───────────────────────────────────────

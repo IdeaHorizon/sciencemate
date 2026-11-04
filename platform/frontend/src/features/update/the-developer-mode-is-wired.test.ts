@@ -61,19 +61,19 @@ test("the 'now' row really says where it runs", () => {
 });
 
 test("every situation has its own sentence", () => {
-  assert.equal(sayWhereItRuns(null, zh), "正在读…");
-  assert.equal(sayWhereItRuns(told(), zh), "没有开启。跑的是安装包或自更新装上的那份。");
+  assert.equal(sayWhereItRuns(null, zh), "正在加载…");
+  assert.equal(sayWhereItRuns(told(), zh), "未开启，当前运行的是安装的版本。");
   assert.equal(sayWhereItRuns(told({ declared: "/src/hf", restart_needed: true }), zh),
-    "已指向 /src/hf，重启后生效 —— 现在跑的还是安装的版本。");
+    "已指向 /src/hf，重启后生效。当前运行的仍是安装的版本。");
   assert.equal(sayWhereItRuns(told({ declared: "/src/hf", active: true, git: { branch: "main", commit: "abc1234" } }), zh),
-    "正在从源码目录 /src/hf (main @ abc1234) 跑。");
-  assert.equal(sayWhereItRuns(told({ declared: "/src/hf", active: true }), zh), "正在从源码目录 /src/hf 跑。");
+    "正在从源码目录 /src/hf (main @ abc1234) 运行。");
+  assert.equal(sayWhereItRuns(told({ declared: "/src/hf", active: true }), zh), "正在从源码目录 /src/hf 运行。");
   assert.equal(sayWhereItRuns(told({ declared: "/gone", problem: "目录不存在：/gone", restart_needed: false }), zh),
-    "指向 /gone，但这个目录用不了：目录不存在：/gone 跑的是安装的版本。");
+    "已指向 /gone，但该目录无法使用：目录不存在：/gone 当前运行的是安装的版本。");
   assert.equal(sayWhereItRuns(told({ restart_needed: true, running_from: "/src/hf" }), zh),
-    "已停用，重启后回到安装的版本 —— 这个进程还在从 /src/hf 跑。");
+    "已停用，重启后恢复为安装的版本。当前仍从 /src/hf 运行。");
   assert.equal(sayWhereItRuns(told({ declared: "/src/hf", restart_needed: true }), en),
-    "Set to /src/hf; it takes effect after a restart — the installed version is still running.");
+    "Set to /src/hf; it takes effect after a restart. The installed version is still running.");
 });
 
 test("'set but not restarted' is never shown as 'running from source'", () => {

@@ -28,6 +28,32 @@
 #       probe_toolchain / resource_fetch / run_contract / hooks   共 +7
 #
 entries:
+  # ── 待答问题仍可对话，答复交回既有驱动器（2026-11-04）────────────────────
+  - file: core/pause_dialogue.py
+    class: C
+    why: 没有正在讨论的 pause 时，无法把 answer 交给驱动器；不创建或猜测新问题。
+  - file: core/pause_dialogue.py
+    class: B
+    why: asking_run_id 或 offer_id 已变更时，不把旧问题的答复记到当前问题上。
+  - file: core/pause_dialogue.py
+    class: A
+    why: 权限讨论中的模型选择不能代替用户授权；只认用户原话中的明确批准或拒绝。
+  - file: core/pause_dialogue.py
+    class: B
+    why: 选项身份必须属于当前 pause，避免把不存在的选项记成已接受的决定。
+  - file: core/pause_dialogue.py
+    class: B
+    why: 研究决定须映射到当前 choice_id 才能记账；未映射时继续讨论，不关闭原决定。
+  - file: core/pause_dialogue.py
+    class: B
+    why: 自由文本答复须保留用户原话，不能将模型改写记为用户提交的信息或授权。
+  - file: core/pause_driver.py
+    class: collector
+    why: 把既有 run_node 的实际派发失败转交调用者并记录，不增加执行前置条件。
+  - file: shared/tools/library/decision_package.py
+    class: B
+    why: 既有决定账本未受理动作时原样报告原因，不宣称调度器的决定已经执行。
+
   # ── 任务身份与合同（#1080 / #1097，2026-09-21）────────────────────────────
   #
   # 这批拒绝点答的都是同一个问题：**这一趟被安排去做哪件事**。它们不是充分性判决
@@ -1372,6 +1398,176 @@ entries:
       _render_figure：渲染出来的对象模型与它自己声明的合同矛盾（断言失败 / 设计合同
       失败）。读的是渲染后的 matplotlib 对象模型，不是作者对它的描述——声明的事实与
       产物不一致，记录就是假的。报错逐条列出"声明 vs 实际"并指回 render_guidance。
+  # ── PR#1251（cuikl，postprocess 双轨制图：SVG 插画轨 + 美化）的登记，2026-10-22 ──
+  #
+  # 框架侧代填（wangd 授权「帮 cuikl 把剩下四处修了合掉」，owner: cuikl）。和表头
+  # PR#771 那次"抬基线"不同：这 39 条逐条读过源码再分类，没有一条是充分性判决 ——
+  # 全是合同声明的形状/引用完整性（C）、渲染器与字体的物理事实（C）、产物与自己
+  # 声明的合同矛盾（B，沿用 figure.py _render_figure 的先例）、以及两处资源闸（A）。
+  # 行号是合并时的现值，只作定位用。
+  #
+  # contracts.py：新增 1 处（11/7，已登 3）
+  - file: nodes/postprocess/contracts.py
+    class: C
+    why: >-
+      L300：preferred_form must be one of PREFERRED_FORMS; got …（调用方声明的首选形态不在枚举里，报错列出合法值）
+  # figure_contract.py：illustration 家族 + 分块图 group/edge 引用完整性，新增 10 处（84/0，已登 75）
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L977：an illustration contract has no bands/blocks —— svg 轨上版面归作者，合同只是拿去对 SVG DOM 的声明，不是渲染源；带了 bands/blocks 就是把 schematic 的形状塞进了另一条轨
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L990：an illustration contract must declare nodes —— 合同是拿去对 DOM 的东西，空节点表什么都证明不了
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1253：duplicate node ids（分块图 _validate_block：同一 id 两个节点，引用无法唯一）
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1259：duplicate group ids（同上，组 id 重复）
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1267：group declares parent …, which is not a declared group（父组引用不存在，报错列出已声明的组）
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1275：group nesting forms a cycle through …（组嵌套成环，没有可画的层次）
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1281：groups[i] ends up with no members —— 一个围着空的框只占地方不说事
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1288：group lists unknown node …; declared nodes: …（组成员引用不存在的节点）
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1299：edges[i].<端点> references unknown group（边端点写成 group:<id> 但组没声明）
+  - file: nodes/postprocess/figure_contract.py
+    class: C
+    why: >-
+      L1304：edges[i].<端点> references unknown node（边端点引用不存在的节点，报错列出已声明节点）
+  # svg_audit.py：模型写的 SVG 进门时的机械审计，6 处（6/0）
+  - file: nodes/postprocess/svg_audit.py
+    class: C
+    why: >-
+      L73：SVG is not well-formed XML（defusedxml 解析失败；不是 XML 就没有 DOM 可审）
+  - file: nodes/postprocess/svg_audit.py
+    class: C
+    why: >-
+      L75：root element must be <svg>; got <…>（根元素不是 svg，不是一张 SVG 图）
+  - file: nodes/postprocess/svg_audit.py
+    class: C
+    why: >-
+      L100：SVG has no usable viewBox or width/height —— 用户单位映射不到物理毫米，字号政策和印刷尺寸判据没有立足点
+  - file: nodes/postprocess/svg_audit.py
+    class: B
+    why: >-
+      L368：text_policy_failures 逐条拼出的失败（语言/禁用词）—— 与 declare 时同一判据，SVG 文字违背了调用方在合同里声明的文字政策，产物与自己的声明矛盾；沿用 figure.py _render_figure 的 B
+  - file: nodes/postprocess/svg_audit.py
+    class: C
+    why: >-
+      L374：these characters have no glyph in the available font stack —— 字没了不会报错而是静默变豆腐/消失，正是要拦的物理事实
+  - file: nodes/postprocess/svg_audit.py
+    class: C
+    why: >-
+      L399：smallest text prints at …pt < floor …pt at medium=…（enforce_print 时按版心缩放系数换算的印刷字号低于下限；物理尺寸）
+  # svg_render.py：栅格化信封 + 试渲染，3 处（3/0）
+  - file: nodes/postprocess/svg_render.py
+    class: C
+    why: >-
+      L152：cairosvg render did not exit cleanly（沙箱里渲染器非零退出，环境性失败；illustration.py 对它不扣铸造预算）
+  - file: nodes/postprocess/svg_render.py
+    class: C
+    why: >-
+      L159：cairosvg exited cleanly but <png> was not produced（渲染器退出 0 但没有文件，环境性失败）
+  - file: nodes/postprocess/svg_render.py
+    class: C
+    why: >-
+      L207：trial_render 把 audit_svg 的 VisualContractError 转成 {status: error, error_code: audit_rejected} —— 审计判决的转述信封，不是新判断
+  # enhancer.py：AI 美化生成器，3 处（3/0）
+  - file: nodes/postprocess/enhancer.py
+    class: C
+    why: >-
+      L921：unknown_mode（mode 不在 MODES 枚举里，报错列出合法取值）
+  - file: nodes/postprocess/enhancer.py
+    class: C
+    why: >-
+      L933：input_png_missing（要美化的 PNG 不在盘上）
+  - file: nodes/postprocess/enhancer.py
+    class: C
+    why: >-
+      L982：generation['error'] 原样回传（外部图像生成失败，环境性；attempts 账随信封一起回）
+  # tools/illustration.py：mint_svg_figure / enhance_figure，16 处（16/0）
+  - file: nodes/postprocess/tools/illustration.py
+    class: C
+    why: >-
+      L118：svg_text must be a complete <svg> document
+  - file: nodes/postprocess/tools/illustration.py
+    class: C
+    why: >-
+      L123：contract_id was never declared in this run —— 先 declare_figure_contract 再铸造，报错列出已声明的合同
+  - file: nodes/postprocess/tools/illustration.py
+    class: C
+    why: >-
+      L130：contract was declared for request X, not Y —— 一份合同只属于一个调用方请求
+  - file: nodes/postprocess/tools/illustration.py
+    class: C
+    why: >-
+      L137：contract is locked to track …, not 'svg' —— 轨道在 declare 时按请求输入形态锁定，手写 SVG 只能走 svg 轨
+  - file: nodes/postprocess/tools/illustration.py
+    class: C
+    why: >-
+      L145：contract is family …, not illustration —— SVG 铸造只收 illustration 家族
+  - file: nodes/postprocess/tools/illustration.py
+    class: B
+    why: >-
+      L216：the SVG contradicts its own contract —— 断言按 SVG DOM 标记求值，逐条列出 expects/actual；产物与自己声明的合同矛盾，记录就是假的（沿用 figure.py _render_figure 的 B）
+  - file: nodes/postprocess/tools/illustration.py
+    class: C
+    why: >-
+      L246：these characters render as tofu boxes with the fonts the renderer actually resolves —— 渲染器真实解析出的字体没有这些字形（cairo 只取 font-family 第一项），物理事实
+  - file: nodes/postprocess/tools/illustration.py
+    class: A
+    why: >-
+      L265：rasterization failed N times in a row with an environment-level error … STOP —— 确定性的环境失败重试是浪费，连败到 _ENV_FAIL_STREAK_LIMIT 就停；不扣铸造预算，是资源闸
+  - file: nodes/postprocess/tools/illustration.py
+    class: C
+    why: >-
+      L488：figure … does not exist（enhance_figure 引用不存在的图）
+  - file: nodes/postprocess/tools/illustration.py
+    class: C
+    why: >-
+      L491：… is not a minted figure record —— 只美化铸造过的 svg 轨图记录
+  - file: nodes/postprocess/tools/illustration.py
+    class: B
+    why: >-
+      L496：enhance_figure only accepts svg-track figures —— 数据图/带证据的图按构造够不着 AI 美化，守的是证据记录不被改写
+  - file: nodes/postprocess/tools/illustration.py
+    class: A
+    why: >-
+      L508：enhance_budget_exhausted —— 每请求 ENHANCE_ATTEMPTS_PER_REQUEST 次美化用完；铸造图本身就是交付物，美化是可选的
+  - file: nodes/postprocess/tools/illustration.py
+    class: C
+    why: >-
+      L533：mode must be one of none / code / code2prompt
+  - file: nodes/postprocess/tools/illustration.py
+    class: C
+    why: >-
+      L545：figure … has no PNG on disk to enhance
+  - file: nodes/postprocess/tools/illustration.py
+    class: C
+    why: >-
+      L604：enhancement failed（生成器一轮失败的转述信封，带 attempts/variants 账和「铸造图仍是交付物」的说明）
+  - file: nodes/postprocess/tools/illustration.py
+    class: C
+    why: >-
+      L669：enhance_figure 兜底 except（VisualContractError/PermissionError/ValueError/OSError/RuntimeError）→ {status: error, error: str(exc)}：把上面各处的判决和环境错误装进信封，不是新判断
   # ── C 批（组织页·知识）：晋升真的交给组织，2026-09-24 ─────────────────────
   - file: core/kb_promotion.py
     class: B
@@ -1802,3 +1998,199 @@ entries:
       clean_results 2.2692871655836173，跨过预注册的 2σ 门）。拒绝铸这份记录，报错把两个
       数、出处 id 与字段路径一起说出来。声明了却够不到出处 / 路径不存在 / 不是数字同样
       不放行（观测不到不许当成一致）。没声明 annotated_values 的不拦，缺席落进记录。
+
+  # [#1200] validate_figure_record(resolve_file=…) → raise PublicationFigureError(check="file_bytes")
+  # 旧 writing 的 stage 图工具逐文件重验字节；09-18 重建把它删了，之后没人重验。裁决（wangd
+  # 10-21）：挂在交付收集点 —— writing 读图（w_dossier.build_dossier）与 run 收尾
+  # （core/executor.finalize_run → audit_delivered_figures）各调一次完整校验。这一处 raise
+  # 不进模型的工具结果：两个收集点都把它收成结构化 finding（withheld_figures / blocker）。
+  - file: shared/lib/publication_figures.py
+    class: B
+    why: >-
+      图记录认领的输出文件（metadata.files 的 content_hash）与盘上的字节不一致 —— 铸完记录后
+      图被换过（重画了却没重铸、手改了 PNG）。绑定指纹算的是记录里写的 hash，文件换了它照样
+      自洽，只有逐文件重算看得见。这张图不能当记录担保的那张交付：收集点报出记录 id、文件、
+      两个 hash，修法是让 postprocess 用 render_figure 重新铸。盘上找不到的文件不算伪造，缺席
+      进 _adequacy_findings。
+
+  # ── nodes/experiment/tools/contract_audit.py（+1，PR#1213 恢复 Data 请求重派）──────
+  # [new · PR#1213] dispatch_data_request → 重派前缺精确 (spec_id, child_run_id) 的旧派发事件（约 L2999）
+  # 语义由 owner lujy 在 PR#1213 评论里复核为 B；框架侧按其原文登记（wangd 2026-10-21 授权）。
+  - file: nodes/experiment/tools/contract_audit.py
+    class: B
+    why: >-
+      同一 spec 的旧 Data child 已终态且已记录可恢复结果，但其精确 child 派发事件
+      尚未持久化；在新 child 覆盖当前 delivery receipt 前拒绝重派，避免旧尝试从
+      action census 漏账。调用 reconcile_data_dispatch(spec_id) 补记后可安全重试，
+      不重跑旧 child。
+
+  # PR #1268: explicit workdir argument contract.
+  - file: nodes/experiment/tools/safe_bash.py
+    class: C
+    why: >-
+      workdir is explicitly supplied as an empty or non-string directory argument.
+      Reject before materializing a directory, recording an execution action, or
+      starting a payload. Supply one non-empty cwd or workdir path. This checks
+      the execution argument contract, not scientific sufficiency, and does not
+      grant path capability or weaken existing directory validation.
+  - file: nodes/experiment/tools/safe_bash.py
+    class: C
+    why: >-
+      cwd and workdir identify conflicting paths, so there is no unambiguous
+      declared working directory. Reject before execution and request one
+      argument or matching paths. This prevents silently choosing a different
+      output location; existing path and capability checks still apply after
+      the caller corrects the arguments.
+  # ── 本机 GPU 按 run 授权（#893 阶段 1 / #1174，wangd 10-21 裁决）──────────────────
+  # [new] capability_grants.require → capability_not_enforceable
+  # RFC_CAPABILITY_GRANTS_LAYERING §3.3：对一个后端开不了口的能力调 require，回的是带事实的
+  # error，没有卡片。今天唯一的调用方（experiment submit_job）在它之前已按同一份
+  # gpu_capability 拒过（基线里的 local_gpu_execution_unsupported），这一处是给后来的调用方的。
+  - file: core/capability_grants.py
+    class: C
+    why: >-
+      物理事实：这台机器看不见 NVIDIA GPU、当前隔离后端给不了 CUDA 开口（macOS），或本平台
+      的卡都被别的 run 占着。原因与 gpu_capability().sentence() 同一份；不弹一张批了也用不上
+      的卡（#893 的原始病症就是人批准之后才说不能用）。
+
+  # ── 本机多进程通信（#1166，wangd 10-21 裁决；框架侧代改，owner: lujy）─────────────
+  # [new] resource_manager._submit_job → local_mpi_unsupported
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: >-
+      物理事实：这台机器的墙把作业里的回环 TCP 也断了（纯 Landlock / seatbelt），而「只放作业内
+      回环、断外网与宿主服务」在回环与宿主共享时守不住 —— MPI_Init 的 bind/connect 一定失败。
+      在确认卡之前、零副作用地拒，事实与开局说明同一个 core.sandbox.job_tcp_capability()；
+      bwrap 下每个作业有自己的网络命名空间，回环可用，不走这里。
+
+  # ── 「不要修改文件」由派发方声明、框架机械执行（#973，wangd 10-21 裁决）─────────────
+  # [new] side_effect_contract.refuse_user_source_write → ProjectWorkspaceError
+  # 写入咽喉（resolve_tool_path(write=True)）、save_artifact 的交付投影、run_node 派发时的
+  # deliverable 路径三处共用这一个 raise。
+  - file: core/side_effect_contract.py
+    class: A
+    why: >-
+      安全：派发方（调度器）按用户原话声明了 read_only，这一次写入落在用户源文件上
+      （不属于任何节点作用域、也不是 .research 记账）。不是充分性判决 —— 不评判写得
+      对不对，只兑现用户划的边界。节点证据与 .research 照写照数（诚实收尾必须留下的
+      运行记录不拦），报错说清哪一类能写、交付内容该放哪。
+  # [new] compose_review_critique(set_verdict) 拒 approve / approve_with_revisions
+  - file: nodes/_reviewer/tools/critique_builder.py
+    class: B
+    why: >-
+      记录完整性：框架算出的事实是「用户要求只读、被审 run 改动了用户源文件」，一份
+      approve 的审查会把这条矛盾写成通过（2026-09-12：审稿称「全程只读」并以 0.92
+      approve）。只拒这两个 verdict，major_concerns / block 照收；报错带着改动清单。
+  # ── 调度器的只读探查 shell（#1187，wangd 10-21 裁决）─────────────────────────────
+  # [new] execute_python → 只读墙下带 requirements（约 L297）
+  # 墙本身在 spawn 层（core/sandbox.model_tool_wall：调度器的写边界为空），不是拒绝点；
+  # 这一处是墙**够不着**的那一步：装包器是框架拼的命令、带着自己的可写根和网络，
+  # 不在只读墙后面跑，所以在它起之前说不。
+  - file: shared/tools/library/python_exec.py
+    class: A
+    why: >-
+      写边界：调度器的 execute_python 写边界为空，而 requirements 要开网下载、往 run 目录
+      写包 —— 两样都是副作用，且装包器绕开那堵墙。不评判算得对不对，只是这条通道不留东西；
+      报错带 read_only_shell / recommended_nodes，指路 run_node 派 experiment / data。
+
+  # ── Experiment #1258：SSH Slurm 身份、传输与恢复边界（维护者整合）──
+  - file: nodes/experiment/tools/resource_manager.py
+    class: A
+    why: _ssh_submission_path_guard：远端输出不得进入 OS、凭据、Git 或框架状态目录；由既有提交授权绑定应用目录，未提交作业。
+  - file: nodes/experiment/tools/resource_manager.py
+    class: A
+    why: 远端 command 的路径语法解析不可用或失败时，不以未检查的写目标启动作业；报告 parser 缺口，保持 job_submitted=false。
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: _submit_sync_impl：SSH slurm_target 不能交给其他 scheduler 执行；在副作用前明确要求 slurm。
+  - file: nodes/experiment/tools/resource_manager.py
+    class: B
+    why: 同步提交分支必须消费已核对的远端探测身份，不能在缺少用户/集群事实时创建错误归属的 intent。
+  - file: nodes/experiment/tools/resource_manager.py
+    class: B
+    why: stage_in 准备失败时收束原 intent，保存 do_not_resubmit 与新 attempt 恢复条件；不将不完整输入声明为已提交。
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: _submit_job：显式 slurm_target 与非 Slurm scheduler 不匹配时返回可修正参数错误，未启动任务。
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: SSH 登录或远端 Slurm CLI 探测失败，保留 probe 事实与下一动作，不能静默改到提交机执行。
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: 远端 work/output 路径尚不可用时返回实际 path_check，让调用者修正路径或共享盘，不创建虚假执行事实。
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: slurm_target 或 Linux 路径字段无效时零副作用拒绝，说明合法 host/alias 与远端绝对路径形状。
+  - file: nodes/experiment/tools/safe_bash.py
+    class: C
+    why: 所选构建环境初始化失败时报告 selected_build_environment_unavailable、未启动载荷和修复后可重试，禁止悄悄改用其他环境。
+  - file: nodes/experiment/tools/slurm_ssh.py
+    class: C
+    why: _execute：SSH 客户端不可用或传输异常时报告 ssh_unavailable/ssh_error，不把未知远端副作用判成没有发生。
+  - file: nodes/experiment/tools/slurm_ssh.py
+    class: C
+    why: 超时或停止传输时返回 unknown effects，要求先对账原 nonce；不自动重投可能已发生的外部操作。
+  - file: nodes/experiment/tools/slurm_ssh.py
+    class: A
+    why: SSH stderr 超过 2 MiB 有界输出预算时停止传输并报告，不无界积累登录输出。
+  - file: nodes/experiment/tools/slurm_ssh.py
+    class: C
+    why: 未观测到本次随机身份的完成 footer 时不把登录 shell 的退出 0 当作载荷完成。
+  - file: nodes/experiment/tools/slurm_ssh.py
+    class: B
+    why: SSH 退出状态与同一请求的远端完成见证不一致时不铸造成功回执，保留两项观测用于恢复。
+  - file: nodes/experiment/tools/slurm_ssh.py
+    class: C
+    why: 在有界登录输出内未发现随机输出起点时，不把 banner 或上一条输出当作本次二进制/命令结果。
+  - file: nodes/experiment/tools/slurm_ssh.py
+    class: A
+    why: SSH stdout 超过本次明确的 max_output_bytes 时中止接收并保留未知远端副作用事实。
+  # ── Data #1274：修复协议、绑定资产与下载完整性（维护者整合）──
+  - file: nodes/data/tools/execute_preprocessing_plan.py
+    class: collector
+    why: _repair_step_from_feedback：已明确不可局部修复时返回现有缺陷与 exhausted 事实，不重复执行、不改写科研要求。
+  - file: nodes/data/tools/execute_preprocessing_plan.py
+    class: C
+    why: 当前 producer 没有对应修复协议时，返回 repair_unsupported 与已有 revision_contract，指回同一 DAG 的可修订生产者。
+  - file: nodes/data/tools/execute_preprocessing_plan.py
+    class: B
+    why: 绑定脚本必须由原 DAG 中可写 producer 修复，不能用内联代码替换已绑定输入而伪造其来源。
+  - file: nodes/data/tools/execute_preprocessing_plan.py
+    class: C
+    why: producer 未声明 report rebuild 能力时不能执行不存在的重建接口；保留资产，报告实现缺口。
+  - file: nodes/data/tools/execute_preprocessing_plan.py
+    class: C
+    why: 修复提议超出当前 producer 公开 controls 时交回 plan 修订，不能把未应用参数记成已修复。
+  - file: nodes/data/tools/execute_preprocessing_plan.py
+    class: C
+    why: 审核要求超出工具可支持的参数控制时返回原缺陷与资产修订契约，不假称已经执行生产者变更。
+  - file: nodes/data/tools/execute_preprocessing_plan.py
+    class: B
+    why: report rebuild 若改变了应保留的输入或无关产物，停止发布并回传 changed_inputs；不能沿用旧证据声称只改报告。
+  - file: nodes/data/tools/mesh_generator.py
+    class: B
+    why: generate_geometry_file_gmsh_mesh：实际网格违反已绑定构造几何时保存测量和诊断，交回同一资产修复，不发布与请求几何矛盾的网格。
+  - file: nodes/data/tools/preprocessing_capabilities.py
+    class: B
+    why: generate_preprocessing_artifact：edit_source 必须指向已经绑定的输入资产；找不到原始基线时不新造替代文件冒充编辑。
+  - file: nodes/data/tools/preprocessing_capabilities.py
+    class: C
+    why: 模型返回截断或无效编辑，已有有界恢复仍失败时如实报告未应用任何编辑；保留原资产与诊断供修订。
+  - file: nodes/data/tools/scientific_mesh.py
+    class: C
+    why: _resolve_unfinished_geometry_state：必需几何既未落盘又没有可执行生产者时返回具体缺失 producer 的计划修订要求，不以外部相似几何替代。
+  - file: nodes/data/tools/scientific_preprocessor.py
+    class: B
+    why: 包组装时输入或资产绑定与当前请求不一致，返回原契约问题，不能把另一个输入的证据用于当前交付。
+  - file: nodes/data/tools/scientific_preprocessor.py
+    class: C
+    why: 包组装读取必需输入失败时保存 input_asset_unavailable 和文件位置，指回生产者；不把没有读取到的输入记成已消费。
+  - file: nodes/data/tools/web_search.py
+    class: B
+    why: data_web_download：断点响应的对象身份或字节范围改变时不把不同版本片段拼成同一文件，保留可核对的传输失败事实。
+  - file: nodes/data/tools/web_search.py
+    class: B
+    why: 服务端未经请求返回局部字节响应时不把它发布为完整文件，必须按实际范围重新选择和获取。
+  - file: nodes/data/tools/web_search.py
+    class: A
+    why: 流式接收超出已声明字节范围或 max_bytes 预算时停止下载，不发布不完整内容；明确返回预算和可选择的有界子集。

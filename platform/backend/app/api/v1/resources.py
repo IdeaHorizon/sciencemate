@@ -21,6 +21,8 @@ from app.schemas.resource import (
     ProjectResourceOut,
     ProjectResourceUpdate,
     ResourceType,
+    SSHConnectRequest,
+    SSHOperationRequest,
 )
 from app.services.compute_inventory import local_compute_inventory
 from app.services.sessions import require_capability
@@ -30,6 +32,9 @@ compute_router = APIRouter()
 
 
 def _resource_response(resource: ProjectResource) -> dict:
+    observed = (resource.config or {}).get('observation') or {}
+    observed_at = observed.get('observed_at', 0)
+    fresh = isinstance(observed_at, (int, float)) and 0 <= datetime.now(UTC).timestamp() - observed_at < 60
     return {
         "id": resource.id,
         "project_id": resource.project_id,
@@ -41,7 +46,7 @@ def _resource_response(resource: ProjectResource) -> dict:
         "workspace_binding": resource.workspace_binding,
         "config": resource.config or {},
         "is_enabled": resource.is_enabled,
-        "health_status": "unknown",
+        "health_status": "online" if resource.provider == "ssh" and fresh else "unknown",
         "has_secret_reference": bool(resource.secret_ref),
         "created_by_user_id": resource.created_by_user_id,
         "updated_by_user_id": resource.updated_by_user_id,
@@ -52,7 +57,8 @@ def _resource_response(resource: ProjectResource) -> dict:
 
 
 async def _get_resource(
-    db: AsyncSession, *, project_id: str, resource_id: str, for_update: bool = False
+    db: AsyncSession, *, project_id: str, resource_id: str, for_update: bool = False,
+    lang: Language = "zh",
 ) -> ProjectResource:
     query = select(ProjectResource).where(
         ProjectResource.tenant_id == settings.runtime_tenant_id,
@@ -63,7 +69,8 @@ async def _get_resource(
         query = query.with_for_update()
     resource = await db.scalar(query)
     if not resource:
-        raise HTTPException(status_code=404, detail="Project resource not found")
+        raise HTTPException(status_code=404, detail=say(
+            {"zh": "找不到这个项目资源", "en": "Project resource not found"}, lang))
     return resource
 
 
@@ -74,6 +81,7 @@ async def _ensure_unique_name(
     resource_type: str,
     name: str,
     exclude_id: str | None = None,
+    lang: Language = "zh",
 ) -> None:
     query = select(ProjectResource.id).where(
         ProjectResource.tenant_id == settings.runtime_tenant_id,
@@ -86,7 +94,8 @@ async def _ensure_unique_name(
     if await db.scalar(query):
         raise HTTPException(
             status_code=409,
-            detail="A Project resource with this type and name already exists",
+            detail=say({"zh": "项目中已有同类型、同名的资源",
+                        "en": "A Project resource with this type and name already exists"}, lang),
         )
 
 
@@ -113,6 +122,25 @@ async def list_project_resources(
     return [_resource_response(item) for item in resources]
 
 
+@router.post("/{project_id}/resources/ssh/connect")
+async def connect_ssh_resource(
+    project_id: str, data: SSHConnectRequest,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
+) -> dict:
+    from app.services.ssh_resources import connect
+    return await connect(db, user, project_id, lang=lang, **data.model_dump())
+
+
+@router.post("/{project_id}/resources/{resource_id}/ssh")
+async def operate_ssh_resource(
+    project_id: str, resource_id: str, data: SSHOperationRequest,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+) -> dict:
+    from app.services.ssh_resources import operate
+    return await operate(db, user, project_id, resource_id, **data.model_dump(exclude_none=True))
+
+
 @router.post(
     "/{project_id}/resources",
     response_model=ProjectResourceOut,
@@ -123,6 +151,7 @@ async def create_project_resource(
     data: ProjectResourceCreate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> dict:
     project = await require_capability(db, user, project_id, "manage_resources")
     await _ensure_unique_name(
@@ -130,6 +159,7 @@ async def create_project_resource(
         project_id=project_id,
         resource_type=data.resource_type,
         name=data.name,
+        lang=lang,
     )
     resource = ProjectResource(
         tenant_id=settings.runtime_tenant_id,
@@ -165,10 +195,11 @@ async def get_project_resource(
     resource_id: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> dict:
     await require_capability(db, user, project_id, "view_session")
     return _resource_response(
-        await _get_resource(db, project_id=project_id, resource_id=resource_id)
+        await _get_resource(db, project_id=project_id, resource_id=resource_id, lang=lang)
     )
 
 
@@ -182,10 +213,11 @@ async def update_project_resource(
     data: ProjectResourceUpdate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> dict:
     project = await require_capability(db, user, project_id, "manage_resources")
     resource = await _get_resource(
-        db, project_id=project_id, resource_id=resource_id, for_update=True
+        db, project_id=project_id, resource_id=resource_id, for_update=True, lang=lang
     )
     updates = data.model_dump(exclude_unset=True)
     next_type = updates.get("resource_type", resource.resource_type)
@@ -197,6 +229,7 @@ async def update_project_resource(
             resource_type=next_type,
             name=next_name,
             exclude_id=resource.id,
+            lang=lang,
         )
     for field, value in updates.items():
         setattr(resource, field, value)
@@ -219,10 +252,11 @@ async def disable_project_resource(
     resource_id: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> Response:
     project = await require_capability(db, user, project_id, "manage_resources")
     resource = await _get_resource(
-        db, project_id=project_id, resource_id=resource_id, for_update=True
+        db, project_id=project_id, resource_id=resource_id, for_update=True, lang=lang
     )
     resource.is_enabled = False
     resource.disabled_at = resource.disabled_at or datetime.now(UTC)
@@ -281,7 +315,7 @@ async def write_compute_grants(
     """
     if user.role != UserRole.INSTITUTION_ADMIN.value:
         raise HTTPException(status_code=403, detail=say(
-            {"zh": "只有机构管理员能改算力授权", "en": "Only an institution administrator can change compute grants"},
+            {"zh": "只有管理员可以修改算力授权", "en": "Only an administrator can change compute grants"},
             lang))
     # `probe_cmd` 是一条**服务器上用 shell 执行**的命令（`core.capabilities._probe`），每次
     # 有人看这一页、每个 agent 开一轮都会跑。网页上加一条，等于让浏览器里的人在服务器上跑
@@ -299,10 +333,9 @@ async def write_compute_grants(
         if wanted - there:
             raise HTTPException(
                 status_code=422,
-                detail=say({"zh": "probe_cmd 是一条会在服务器上执行的命令，网页上加不了、改不了 —— "
-                                  "要写就登到服务器上手改 grants.yaml",
-                            "en": "probe_cmd is a command the server executes, so it cannot be added or changed "
-                                  "from the web — sign in to the server and edit grants.yaml by hand"}, lang))
+                detail=say({"zh": "探测命令（probe_cmd）只能在服务器上修改：请登录服务器编辑 grants.yaml。",
+                            "en": "probe_cmd can only be changed on the server: sign in to it and edit "
+                                  "grants.yaml."}, lang))
     try:
         return await compute_grants.write(user, body.grants)
     except compute_grants.ComputeGrantsError as exc:

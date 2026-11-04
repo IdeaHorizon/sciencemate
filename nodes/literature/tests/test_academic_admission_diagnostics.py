@@ -3,6 +3,14 @@ import pytest
 from platform_runtime import _academic_exclusion_reason, _select_academic_search_results
 
 
+@pytest.fixture(autouse=True)
+def isolated_local_catalog(monkeypatch, tmp_path):
+    from nodes.literature.tools import local_index
+    index = local_index.LocalPaperIndex(db_path=tmp_path / "index.sqlite3")
+    monkeypatch.setattr(local_index, "get_index", lambda: index)
+    monkeypatch.setenv("HARNESS_LITERATURE_HOME", str(tmp_path))
+
+
 @pytest.mark.parametrize('paper,kwargs,reason', [
     ({'title': 'Editorial Board', 'exact_title_match': True}, {}, 'nonresearch'),
     ({'title': 'Original study', 'exact_title_match': True}, {}, None),
@@ -45,11 +53,14 @@ def test_property_forms_keep_relevant_evidence_without_dropping_topic_gate():
 @pytest.mark.asyncio
 async def test_source_overlap_respects_language_policy_and_preserves_diagnostics(monkeypatch):
     import asyncio
+    import threading
     import platform_runtime as runtime
     from nodes.literature.tools import search_engines, strategy_generator
 
     source_started, journal_started = asyncio.Event(), asyncio.Event()
     journal_queries = []
+    exact_started = threading.Event()
+    strategy_overlaps_title = []
 
     class Results(list):
         def audit_dict(self):
@@ -77,6 +88,7 @@ async def test_source_overlap_respects_language_policy_and_preserves_diagnostics
             pass
 
         async def search_title(self, *args, **kwargs):
+            exact_started.set()
             return []
 
         async def search(self, query, **kwargs):
@@ -90,16 +102,67 @@ async def test_source_overlap_respects_language_policy_and_preserves_diagnostics
 
     monkeypatch.setattr(search_engines, 'SearchManager', Manager)
     monkeypatch.setattr(search_engines, 'CrossrefSearch', Crossref)
-    monkeypatch.setattr(strategy_generator, 'generate_strategy_detailed', lambda q: (
-        {'english_query': 'coral bleaching'}, {}))
+    def generate_strategy(query, **_kwargs):
+        strategy_overlaps_title.append(exact_started.wait(2))
+        return {'english_query': 'coral bleaching'}, {}
+
+    monkeypatch.setattr(strategy_generator, 'generate_strategy_detailed', generate_strategy)
     monkeypatch.setattr(runtime, '_academic_strategy_queries', lambda *a: ['coral bleaching', '珊瑚白化'])
     monkeypatch.setattr(runtime, '_add_chinese_titles', translate)
     monkeypatch.setattr(runtime, '_local_literature_assets', lambda papers: {})
     result = await runtime.run_literature_search({'query': 'coral bleaching', 'limit': 100})
     assert journal_queries == ['coral bleaching']
+    assert strategy_overlaps_title == [True]
     assert result['strategy_diagnostics']['admission']['candidate_count'] == 0
     assert result['strategy_diagnostics']['admission']['excluded_by_reason'] == {}
-    assert set(result['timings']) >= {'source_search', 'candidate_enrichment', 'title_translation', 'total'}
+    assert set(result['timings']) >= {
+        'source_search', 'candidate_enrichment', 'strategy_generation', 'exact_title', 'total',
+    }
+
+
+@pytest.mark.asyncio
+async def test_supplemental_source_failure_is_visible_in_result(monkeypatch, tmp_path):
+    import httpx
+    import platform_runtime as runtime
+    from nodes.literature.tools import search_engines, strategy_generator
+
+    class Results(list):
+        def audit_dict(self):
+            return {"warnings": [], "source_diagnostics": {}}
+
+    class Manager:
+        local_index = None
+
+        def __init__(self, **kwargs):
+            pass
+
+        async def search_all(self, *args, **kwargs):
+            return Results()
+
+        def _merge_results(self, left, right):
+            return left + right
+
+    class Crossref:
+        def __init__(self, client):
+            pass
+
+        async def search_title(self, *args, **kwargs):
+            return []
+
+        async def search(self, *args, **kwargs):
+            response = httpx.Response(429, request=httpx.Request("GET", "https://example.invalid"))
+            response.raise_for_status()
+
+    monkeypatch.setenv("HARNESS_LITERATURE_HOME", str(tmp_path))
+    monkeypatch.setitem(strategy_generator.LLM_CONFIG, "api_base", "")
+    monkeypatch.setattr(search_engines, "SearchManager", Manager)
+    monkeypatch.setattr(search_engines, "CrossrefSearch", Crossref)
+    monkeypatch.setattr(strategy_generator, "generate_strategy_detailed",
+                        lambda *a, **kw: ({"english_query": "coral bleaching"}, {}))
+    result = await runtime.run_literature_search({"query": "coral bleaching"})
+    assert any(w["code"] == "journal_recall_unavailable" and "429" in w["detail"]
+               for w in result["warnings"])
+    assert result["strategy_diagnostics"]["source_audits"][0]["journal_recall"]["http_status"] == 429
 
 
 @pytest.mark.asyncio

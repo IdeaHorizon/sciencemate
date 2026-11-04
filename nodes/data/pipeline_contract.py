@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from copy import deepcopy
 from typing import Any
 
@@ -17,12 +18,20 @@ PIPELINE_OUTCOMES = {
     "fatal",
 }
 
+RESUMABLE_WRITER_FAILURES = {
+    "model_service_timeout", "model_service_unavailable", "model_output_exhausted", "reference_unavailable",
+}
+
 
 def merge_parameter_updates(parameters: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
-    """Apply a local amendment without deleting omitted sibling controls."""
+    """Keep omitted controls; an explicitly empty object clears that subtree.
+
+    Retain the empty object so later default/binding merges cannot resurrect
+    the rejected controls. An empty top-level update remains a no-op.
+    """
     return {**deepcopy(parameters), **{
         key: merge_parameter_updates(parameters[key], value)
-        if isinstance(parameters.get(key), dict) and isinstance(value, dict) else deepcopy(value)
+        if isinstance(parameters.get(key), dict) and isinstance(value, dict) and value else deepcopy(value)
         for key, value in updates.items()
     }}
 
@@ -43,8 +52,36 @@ def revision_issue_identity(issue: dict[str, Any]) -> tuple[str, ...]:
     return values if any(values) else (" ".join(str(issue.get("message") or "").split()).casefold(),)
 
 
+def revision_progress(
+    issues: list[dict[str, Any]], *, passed_checks=(), materials=None, error: str = "",
+) -> dict[str, Any]:
+    """Separate finding identity from current diagnostics and material evidence."""
+    diagnostics = [{key: item[key] for key in (
+        "code", "rule_id", "severity", "message", "observed", "expected", "metrics",
+    ) if key in item} for item in issues]
+    diagnostic_text = json.dumps({
+        "error": str(error).lower(),
+        "issues": sorted(diagnostics, key=lambda item: json.dumps(item, sort_keys=True, default=str)),
+    }, sort_keys=True, default=str)
+    # Run-local paths are bookkeeping; numeric diagnostics and entity IDs are not.
+    diagnostic_text = re.sub(r"/output/[^/\s'\"]+", "/output/<run>", diagnostic_text)
+    diagnostic_text = re.sub(r"/(?:private/)?tmp/[^/\s'\"]+", "/tmp/<run>", diagnostic_text)
+    checks = sorted(set(passed_checks))
+    basis = {
+        "issue_ids": sorted(revision_issue_identity(item) for item in issues),
+        "passed_checks": checks,
+        "diagnostic_signature": _hash(diagnostic_text),
+        "material_signature": _hash(materials) if materials else "",
+    }
+    return {**basis, "signature": _hash(basis), "issue_count": len(issues),
+            "passed_check_count": len(checks)}
+
+
 def review_progress_improved(current: dict[str, Any], previous: dict[str, Any] | None) -> bool:
-    """Count resolved findings even when they expose another validation layer."""
+    """Continue for resolved checks or new diagnostics on changed assets, not mere rewording.
+
+    New evidence permits another correction; only a passed review proves quality.
+    """
     if not previous:
         return True
     current_issues = {tuple(item) for item in current.get("issue_ids") or []}
@@ -53,6 +90,9 @@ def review_progress_improved(current: dict[str, Any], previous: dict[str, Any] |
         bool(previous_issues - current_issues)
         or int(current.get("passed_check_count") or 0) > int(previous.get("passed_check_count") or 0)
         or int(current.get("issue_count") or 0) < int(previous.get("issue_count") or 0)
+        or bool(current.get("material_signature") and previous.get("material_signature")
+                and current["material_signature"] != previous["material_signature"]
+                and current.get("diagnostic_signature") != previous.get("diagnostic_signature"))
     )
 
 
@@ -87,7 +127,9 @@ def revision_contract(
         if str(item.get(key) or "").strip()
     ]
     selected_ids = list(dict.fromkeys([*(affected_ids or []), *inferred_ids]))
-    if scope not in {"asset", "step", "plan"}:
+    if any(item.get("repair_kind") == "plan_structure" for item in normalized):
+        scope = "plan"
+    elif scope not in {"asset", "step", "plan"}:
         scope = (
             "step" if any(item.get("step_id") for item in normalized)
             else "asset" if selected_ids
@@ -118,20 +160,43 @@ def pipeline_outcome(result: dict[str, Any] | None) -> dict[str, Any]:
     """Normalize tool and planner statuses once at the controller boundary."""
     value = result if isinstance(result, dict) else {}
     declared = str(value.get("outcome") or "").strip()
-    if declared in PIPELINE_OUTCOMES:
-        return {
-            "kind": declared,
-            "reason": str(value.get("reason") or value.get("error") or "").strip(),
-            "revision_contract": value.get("revision_contract"),
-        }
-
     status = str(value.get("status") or "").strip().lower()
     category = str(value.get("failure_category") or "").strip().lower()
     contract = value.get("revision_contract")
     contract = contract if isinstance(contract, dict) else None
+    transition = value.get("transition") if isinstance(value.get("transition"), dict) else {}
+    if not contract and transition.get("status") in {"needs_reference_search", "needs_geometry_processing"}:
+        # Discovery is a route decision, not an asset-content repair. Keep the
+        # failed owner and diagnosis when the controller re-enters planning.
+        contract = revision_contract([{
+            "code": transition["status"],
+            "step_id": transition.get("step_id") or value.get("failed_step"),
+            "tool_name": transition.get("tool_name"),
+            "message": transition.get("reason") or value.get("error") or transition["status"],
+            "required_change": "Reconcile this step's dependency and acquisition route with the original request and available evidence; preserve unaffected steps.",
+        }], scope="plan")
+    if category == "framework_report_error" and status not in {"success", "completed"}:
+        declared = "fatal"
+    elif (category in {"repair_unsupported", "repair_exhausted"} or value.get("local_repair_exhausted")) and contract:
+        # A failed implementation is not a failed scientific request. Once
+        # local repair is spent, revise only its producer/dependencies; the
+        # locked delivery contract still gates the replacement and publication.
+        contract = revision_contract(contract["issues"], scope="plan",
+                                     affected_ids=contract.get("affected_ids"))
+        declared = "revise_plan"
+    if declared in {"revise_asset", "revise_plan"} and contract:
+        # A cached outer label cannot widen an explicit local repair scope.
+        declared = "revise_asset" if contract.get("scope") in {"asset", "step"} else "revise_plan"
+    if declared in PIPELINE_OUTCOMES:
+        return {
+            "kind": declared,
+            "reason": str((value.get("question") if declared == "needs_input" else "")
+                          or value.get("reason") or value.get("error") or value.get("question") or value.get("message") or "").strip(),
+            "revision_contract": contract,
+        }
     if status in {"success", "completed", "needs_final_generation_plan"}:
         kind = "completed"
-    elif status == "needs_input":
+    elif status in {"needs_input", "pause"}:
         kind = "needs_input"
     elif status in {"needs_reference_search", "needs_geometry_processing"}:
         kind = "revise_plan"
@@ -151,7 +216,9 @@ def pipeline_outcome(result: dict[str, Any] | None) -> dict[str, Any]:
     return {
         "kind": kind,
         "reason": str(
-            value.get("error") or value.get("reason") or value.get("stop_reason") or status
+            (value.get("question") if kind == "needs_input" else "")
+            or value.get("error") or value.get("reason") or value.get("question")
+            or value.get("message") or value.get("stop_reason") or status
         ).strip(),
         "revision_contract": contract,
     }

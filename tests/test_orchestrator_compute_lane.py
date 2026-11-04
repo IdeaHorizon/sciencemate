@@ -1,14 +1,15 @@
 """协调者的轻量计算通道（execute_python，2026-08-31，wangd 拍板）。
 
 设计不是新闸，是三道**既有**墙的组合——本文件测的就是组合没有散架：
-  1. 强制进程沙箱：write_roots_for 把写根钉死在自己作用域 + run 目录，
-     沙箱不可用时 fail-closed（launch rejected），不会裸跑；
+  1. 强制进程沙箱：#1187 起调度器的写边界为空（core/sandbox.model_tool_wall），
+     算个数照常、结果只能打到 stdout；沙箱不可用时 fail-closed，不会裸跑；
   2. 代码文本边界：match_boundary_violation(mode="python") 筛框架状态；
   3. 落地走 #721 的门：结果交用户 = write_file(project/...)，
      正式证据仍走 run_node。
 
-所以这里不 spawn 真沙箱（本机 Landlock 探针本来就起不来，那是沙箱套件的
-活），只测**接线**：工具在场、写根推导正确、旧闸没有被顺手放松。
+所以这里不 spawn 真沙箱（真起进程的判据在
+tests/test_the_orchestrator_shell_is_read_only.py），只测**接线**：工具在场、
+墙的推导正确、旧闸没有被顺手放松。
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ import subprocess
 from pathlib import Path
 
 from core.loader import load_harness
-from core.sandbox import model_tool_roots, write_roots_for
+from core.sandbox import model_tool_roots, model_tool_wall
 from core.state import State
 from shared.lib import dangerous_commands as dc
 
@@ -50,19 +51,15 @@ def test_harness_grants_the_lane_without_loosening_the_old_gates() -> None:
     assert harness.deliverable_writes is True        # 落地仍走 #721 的门
 
 
-def test_sandbox_write_roots_exclude_everyone_elses_land(tmp_path: Path) -> None:
-    """墙在 spawn：写根只有自己作用域 + run 目录。producing 节点的目录、
-    Project 根都不在写根里——计算通道碰不到别人的地盘，靠的是这个推导。"""
+def test_the_lane_has_no_write_root_at_all(tmp_path: Path) -> None:
+    """墙在 spawn：调度器的计算通道一个可写根都没有（#1187）—— 连自己的作用域
+    notes/ 和 run 目录都不在里面；唯一可写的是后端给每条命令的私有 scratch。"""
     project = _worktree(tmp_path)
     state = State.new("_orchestrator", tmp_path / "runtime",
                       project_id="p1", project_worktree=project)
-    from core.project_workspace import _NODE_WORKSPACES
-
-    roots = {str(r) for r in write_roots_for(state)}
-    own = (project / _NODE_WORKSPACES["_orchestrator"]).resolve()
-    assert any(Path(r) == own or own.is_relative_to(Path(r)) for r in roots)
-    for foreign in (project, project / "literature", project / "experiments"):
-        assert not any(Path(r) == foreign.resolve() for r in roots), roots
+    state.hook_state["_shell_probe_only"] = load_harness("_orchestrator").shell_probe_only
+    wall = model_tool_wall(state)
+    assert wall.writable_roots == [] and wall.ephemeral is True
 
 
 def test_worktree_stays_readable(tmp_path: Path) -> None:

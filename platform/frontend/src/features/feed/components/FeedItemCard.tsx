@@ -138,11 +138,11 @@ export function FeedItemCard({
            对自家端点再抓一遍、再缓存一份。next/image 的价值在于优化**外部
            未受控**的图，而这条路上的图早就受控了。 */
         <img
-          className="feed-card-image"
+          className={`feed-card-image${imageAsset?.kind === "journal_cover" ? " feed-journal-cover" : ""}`}
           /* blob 地址，内容由后端代取 —— 不是出版商的外链。直连外链等于
              每次打开首页就向对方广播一次"这个用户在读这条"。 */
           src={imageSrc ?? ""}
-          alt=""
+          alt={imageAsset?.kind === "journal_cover" ? say({ zh: "期刊封面", en: "Journal cover" }, lang) : ""}
           /* ⚠️ **不要加 `loading="lazy"`**。
              它在这条路上不但没用，还会让图根本不显示：图是 useFeedImage 用
              fetch 取回来的，`<img>` 拿到 blob 时网络请求**已经发生过**了，

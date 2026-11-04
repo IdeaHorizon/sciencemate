@@ -244,6 +244,61 @@ def render_situation_facts(situation: ResearchSituation) -> list[str]:
     return lines
 
 
+def research_under_way(state: Any) -> bool:
+    """这个项目里有没有一段**已经开始的研究** —— 连续档只续这个。
+
+    ## 为什么要问
+
+    连续档的意思是「目标我给过了，别停下来问，一直跑完」。它续的是用户给过的
+    目标；项目里还什么都没有的时候，没有东西可续。
+
+    2026-10-30 node20（0.5.9 个人版）：新项目、`--continuous`、开场一句「你好」。
+    调度器自己判断出该先问用户想研究什么，于是用 `request_human_input` 问了 ——
+    框架按它自己给的推荐项代答成「硬碳/多孔碳负极储钠机理」，它就替用户开了题。
+    之后 hypothesis 被 REVISE 了十轮、三个小时，一次实验没跑；reviewer 第一轮就
+    指出「权威用户原始输入只有『你好』两个字」。代答说清了「不是用户选的」，
+    可**研究什么**这一问本来就不该有人替用户答。
+
+    ## 判据：只看盘上的事实，不读用户那句话的意思
+
+    任一成立即「已开始」：
+
+      · 有 research_state（开题落过盘，`import_artifact` 进来的也算）；
+      · 有收尾 flow 挂着；
+      · 本项目跑过（或正在跑）任何**非系统**节点 —— 服务节点也算：用户只要
+        一次调研，那也是用户给的活。
+
+    系统节点（`_curator` 的 dreaming、`_reviewer`）不算：新项目一启动就会在后台
+    dream，那不是谁给的目标。身份读不出来的在飞 run 也不算 —— 刚起的 dreaming
+    在写下首行之前就是这个样子。
+
+    「用户那句话算不算目标」是语义判断，框架不做：用户说了目标，调度器在那一轮
+    里就会起节点，之后这里自然为真；没说，就等用户说。
+
+    判不出来（读盘异常）按「已开始」算：这道判据只该拦住「确实什么都没有」的
+    项目，不该因为一次读盘失败把正在跑的研究停下来。
+    """
+    try:
+        if (getattr(state, "hook_state", None) or {}).get("pending_post_node_flow"):
+            return True
+        root = getattr(state, "root", None)
+        if root is not None:
+            from core import run_history
+
+            runs = run_history.load_runs(
+                root.parent, project_id=getattr(state, "project_id", None),
+                exclude_run_id=getattr(state, "run_id", None),
+                include_in_flight=True)
+            if any(r.node_type and not r.is_system_node for r in runs):
+                return True
+        from core.loop_hooks_builtin import _latest_research_state
+
+        research_state_path, _verdict = _latest_research_state(state)
+        return research_state_path is not None
+    except Exception:
+        return True
+
+
 def known_evidence_record_types() -> tuple[str, ...]:
     """转发注册表 —— 让调度器侧的报错文案能列出合法类型，不必自己维护名单。"""
     return evidence_record_types()

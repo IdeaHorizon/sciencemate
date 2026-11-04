@@ -1466,7 +1466,7 @@ def _provisioned_build_tracker_on_turn_end(ctx: HookContext) -> list | None:
         elif cur_sha != st["env_sha256"]:
             try:
                 from tools.repro_snapshot import collect_platform_profile
-                prof = collect_platform_profile(env_path=str(env_path))
+                prof = collect_platform_profile(env_path=str(env_path), state=ctx.state)
             except Exception:
                 prof = {}
             new_fp = env_fingerprint(env_path, prof)
@@ -1885,9 +1885,14 @@ def _dead_end_block(state, messages) -> str:
         if not dead_ends:
             return ""
         lines = ["⛔ **KB 相关死路（禁止重走）**："]
+        body = []
         for r in dead_ends[-5:]:
             reason = r.get("dont_repeat_reason") or r.get("content", "")[:120]
-            lines.append(f"  - {reason.strip()}")
+            body.append(f"  - {reason.strip()}")
+        # （框架侧代改，owner: lujy）#730：KB 正文进 prompt 只许走数据框，入库见证一并呈现。
+        from shared.lib.external_content import record_view, render_frame
+        lines.append(render_frame("\n".join(body), via="kb",
+                                  witnesses=[(r.get("id"), record_view(r)) for r in dead_ends[-5:]]))
         return "\n\n" + "\n".join(lines)
     except Exception:
         return ""
@@ -2206,41 +2211,14 @@ register_loop_hook(prereg_binding_briefing)
 
 _DATA_SOURCE_PREFLIGHT_KEY = "_data_source_reachability_checked"
 
-# 显式排除的"长得像域名"的文件扩展名与数据格式后缀。注意 .nc/.sh/.in/.md 同时
-# 是真实 ccTLD，不排除就会把 sst.mnmean.nc 误判成主机 —— 宁可漏报不可误报。
-_NON_HOST_SUFFIXES = frozenset("""
-nc nc4 cdf cdl netcdf grb grb2 grib grib2 hdf hdf5 h5 zarr npy npz mat sav
-csv tsv txt dat bin log out err json yaml yml toml ini cfg conf nml namelist
-md rst html htm css js xml pdf png jpg jpeg tif tiff svg gif mp4 avi
-py sh bash csh zsh pl rb jl f f90 f77 c cc cpp cxx h hpp o so a exe whl
-zip tar gz tgz xz bz2 zst rar iso img deb rpm lock bak tmp swp orig rej
-db sql sqlite parquet feather pt pth ckpt pkl safetensors ipynb docx xlsx pptx
-""".split())
-
-# 裸 token 扫描：至少两段、字符集 [a-z0-9.-]；左侧 lookbehind 含 "/" —— URL 路径
-# 段（.../ncep.reanalysis/...）不算主机，主机由 _URL_HOST_RE 单独负责。
-_HOST_TOKEN_RE = re.compile(
-    r"(?<![0-9a-z._/-])([a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
-    r"(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+)"
+# 主机解析的规则搬到了 core.prereg_sources（#1244：派发时按冻结预注册授予出网授权也读它，
+# 两处各写一份就是两个会分叉的答案）。名字保留成别名，本文件与测试的用法不变。
+# （框架侧代改，owner: lujy）
+from core.prereg_sources import (  # noqa: E402
+    data_source_section as _data_source_section,
+    declared_hosts as _extract_declared_hosts,
+    looks_like_host as _looks_like_host,
 )
-_URL_HOST_RE = re.compile(r"https?://([^\s/?#\"'<>）)\]，、；]+)", re.I)
-
-
-def _looks_like_host(host: str) -> bool:
-    """Conservative hostname test: prefer missing a host over inventing one."""
-    if not host or len(host) < 4 or ".." in host:
-        return False
-    labels = host.split(".")
-    if len(labels) < 2 or any(not label for label in labels):
-        return False
-    tld = labels[-1]
-    if not tld.isalpha() or not 2 <= len(tld) <= 24:
-        return False          # 版本号 v1.2.3 / 分辨率 0.25 的尾段不是字母
-    if tld in _NON_HOST_SUFFIXES:
-        return False          # sst.mnmean.nc、requirements.txt 之类
-    if all(label.isdigit() for label in labels[:-1]):
-        return False
-    return True
 
 
 def _frozen_prereg_content(state: Any) -> str:
@@ -2267,50 +2245,6 @@ def _frozen_prereg_content(state: Any) -> str:
         if isinstance(latest, dict):
             return str(latest.get("content") or "")
     return ""
-
-
-def _data_source_section(text: str) -> str:
-    """定位「数据源/资源 + 许可/前提」小节正文（标题大小写与全半角宽容）。"""
-    lines = text.splitlines()
-    start = -1
-    level = 0
-    for index, line in enumerate(lines):
-        matched = re.match(r"^(#{1,6})\s*(.+?)\s*$", line)
-        if not matched:
-            continue
-        title = (matched.group(2)
-                 .replace("（", "(").replace("）", ")")
-                 .replace("　", "").replace(" ", "").lower())
-        subject = any(word in title for word in ("数据源", "数据来源", "资源", "datasource", "datasources"))
-        premise = any(word in title for word in ("许可", "前提", "licen"))
-        if subject and premise:
-            start = index + 1
-            level = len(matched.group(1))
-            break
-    if start < 0:
-        return ""
-    body: list[str] = []
-    for line in lines[start:]:
-        heading = re.match(r"^(#{1,6})\s", line)
-        if heading and len(heading.group(1)) <= level:
-            break
-        body.append(line)
-    return "\n".join(body)
-
-
-def _extract_declared_hosts(section: str) -> list[str]:
-    candidates: list[str] = []
-    for matched in _URL_HOST_RE.finditer(section):
-        raw = matched.group(1).lower().split("@")[-1].split(":")[0]
-        candidates.append(raw)
-    for matched in _HOST_TOKEN_RE.finditer(section.lower()):
-        candidates.append(matched.group(1))
-    hosts: list[str] = []
-    for candidate in candidates:
-        host = candidate.strip().strip(".").lower()
-        if _looks_like_host(host) and host not in hosts:
-            hosts.append(host)
-    return hosts
 
 
 # ── 域名风险标注（只读常量表；**仅供 owner 目视判断，绝不用于自动放行**）──────
@@ -2681,11 +2615,10 @@ register_loop_hook(platform_limit_ask_nudge)
 # ─────────────────────────────────────────────
 # 设计动机（2026-07-10 meiyu laptop pilot 审计）：实验物理 workdir 此前靠任务描述
 # 显式传路径，未传时 agent 随手落在 ~/experiments/<name>。约定：
-# experiment_root 只是逻辑容器，不作为可写白名单；实际写入必须落到
-# source_worktree_root / source_patch_root / build_root / run_root。run_root 和
-# build_root 都有 run-local 的隐式分配；managed_source_root 与 build_root 是
-# 惰性角色，不创建空壳目录，但应在模型规划前公开，避免上游或模型先猜任务类型。
-# 显式声明仍优先，外部共享盘不得靠默认值推断。
+# experiment_root 只是逻辑容器；公开框架已有的实际角色、读写属性与默认分配，
+# 不把默认目录布局升级成用户任务的限制。用户指定且 Core 已授权的位置可用。
+# managed_source_root 与 build_root 是惰性分配，不创建空壳目录；路径提示本身
+# 不授予权限，也不要求输入搬家、固定安装前缀或额外路线手续。
 
 _PATH_ROLE_CONV_INJECTED_KEY = "_path_role_convention_injected"
 
@@ -2753,21 +2686,14 @@ def _path_role_convention_on_turn_start(ctx: HookContext) -> list | None:
         if role.role == "managed_source_root"
     })
     install_prefixes = sorted({
-        str(Path(path) / "install") for path in build_roots
+        str(Path(role.path) / "install") for role in runtime_roles
+        if role.role == "build_root" and role.writable and not role.container_only
     })
 
-    def _render_lazy_role(
-        role_name: str,
-        paths: list[str],
-        purpose: str,
-    ) -> str:
-        if len(paths) == 1:
-            return f"- `{role_name}`: `{paths[0]}/`（{purpose}；按需创建）\n"
-        candidates = "\n".join(f"  - `{path}/`" for path in paths)
-        return (
-            f"- `{role_name}`：存在 {len(paths)} 个已授权候选（{purpose}）；"
-            "执行时必须显式消歧：\n" + candidates + "\n"
-        )
+    def _render_role(role) -> str:
+        access = "仅逻辑容器" if role.container_only else "可写" if role.writable else "只读"
+        origin = "框架分配" if role.source.startswith("framework:") else "显式声明"
+        return f"- `{role.role}`: `{role.path}`（{origin}；{access}）\n"
 
     if ctx.state.hook_state.get(_PATH_ROLE_CONV_INJECTED_KEY):
         return None
@@ -2790,7 +2716,7 @@ def _path_role_convention_on_turn_start(ctx: HookContext) -> list | None:
     except Exception:
         pass
 
-    scope_note = "run-local 节点输出（本 run 独立；跨 run 资产必须显式声明角色）"
+    scope_note = "run-local 节点输出（框架默认分配）"
     declaration_note = "显式声明或由显式 run_root 推导" \
         if explicit_experiment or explicit_run else scope_note
     root_line = (
@@ -2798,54 +2724,38 @@ def _path_role_convention_on_turn_start(ctx: HookContext) -> list | None:
         "但不是 run_root，不能作为 scheduler workdir 或清理根）\n"
         if is_owned_workspace else
         f"- `experiment_root`: `{experiment_root}/`（{declaration_note}；仅逻辑容器，不得直接写入）\n")
+    role_lines = "".join(
+        _render_role(role) for role in runtime_roles
+        if not (role.role == "experiment_root" and role.path == str(experiment_root))
+        and not (is_owned_workspace and role.role == "workspace_root")
+    )
+    install_suggestion = (
+        "未指定安装目标时，建议使用独立安装目录（例如 "
+        + "、".join(f"`{path}`" for path in install_prefixes)
+        + "）；这是默认建议，不限定用户已授权的位置。\n"
+        if install_prefixes else
+        "未指定安装目标时，建议选用已授权的独立安装目录。\n"
+    )
     return [_sys(
         "📁 **路径角色契约（path_role_convention hook）**\n\n" +
-        root_line +
-        f"- `run_root`: `{run_root}/`（可写；运行输入、日志、输出和 checkpoint）\n"
-        + _render_lazy_role(
-            "managed_source_root", managed_source_roots,
-            "仅本 run 下载、解压源码",
-        )
-        + _render_lazy_role(
-            "build_root", build_roots,
-            "存放编译缓存与产物",
-        )
-        + _render_lazy_role(
-            "install_prefix", install_prefixes,
-            "对应 build_root/install；所有安装器均须显式定向到这里",
-        )
-        + "默认源码与构建目录分离：不得在 managed_source_root 或 source_baseline_root "
-        "内编译；只有软件官方入口明确要求 in-tree build、冻结路线步骤声明 "
-        "source_worktree_root 且该目录为独立可写 worktree 时，才允许在其中构建并"
-        "保留 patch/diff 与产物证据。不得探索、复用或清理 project workspace，"
-        "除非它已在 `path_roles` 中被显式声明。\n"
-        + "`managed_source_root`、`source_baseline_root`、`source_worktree_root`、"
-        "`source_patch_root`、`dependency_root` 均按实际活动声明，不要求空建；"
-        "managed_source_root 与 build_root 是框架已有的惰性 run-local 分配；"
-        "路线步骤使用对应 workdir_role 且省略 cwd 时，resolver 会选择上面给出的精确目录。"
-        "项目 run 的源码、构建、安装和运行输出必须留在 project workspace 内。"
-        "**构建输入还必须在你自己的角色目录内**：源码若来自工作区物料目录或别的节点"
-        "留下的副本（例如编排层解压出来的那份），先取进 managed_source_root 再构建 ——"
-        "那些位置不归你管，构建期间可能被改写，直接拿它当输入会让这次结果无法复现；"
-        "取入时把来源路径与文件哈希记进 scratchpad 和 experiment_log。"
-        "编译只使用上述 build_root；CMake 配置须传 -DCMAKE_INSTALL_PREFIX=<install_prefix>，"
-        "其他构建/安装器也须尽可能用 PREFIX、DESTDIR、--prefix 等机制定向到 install_prefix；"
-        "若修改源码必须先声明独立的"
-        " source_worktree_root，并保存 patch/diff 记录。把最终角色路径写入"
-        " scratchpad 和 experiment_log。\n\n"
-        "⚠️ **路径角色是权限，只能来自框架 run-local 分配、fixture / 编排输入或人工批准。**"
-        "artifact（含你自己保存的 `declared_route`、`pre_registration`）"
-        "**不会**产生任何角色——在里面写 `source_path` / `build_dir` 既不会获得"
-        "写权限，也不会把某棵树锁成只读。需要在未声明的目录下工作时，直接执行，"
-        "工具会就该目录请求一次人工批准；批准后该目录在本 run 内可写、可清空内容，"
-        "不必再逐条询问。"
+        root_line + role_lines + "\n"
+        "用户指定且 Core 已授权的目录可用于构建、安装和输出，无须迁回默认目录。"
+        "同类路径有多处时，按本次任务明确选用的目录；未指定时建议源码、构建和安装相互独立。\n"
+        + install_suggestion
+        + "获准读取的源码可直接作为输入，已获准修改的源码可原地修改；"
+        "只读输入需要修改时，使用已授权的可写副本，并记录来源、实际路径与修改。\n"
+        "不得覆盖框架状态、他人数据或只读基线；清理遵守相应路径的清理权限，"
+        "不能把整个项目或工作区当作可删的运行目录。\n"
+        "路径列表反映当前框架角色分配，写入仍受 Core 当前授权约束。"
+        "用户指定或自写 artifact 不会自行增加权限；真实权限缺口按 Core 的现有授权流程处理，"
+        "执行环境能力以工具实际探测为准。"
     )]
 
 
 
 path_role_convention = LoopHook(
     name="path_role_convention",
-    description="turn-1 注入最小规范路径角色；外部 experiment_root 是容器，绑定 workspace 使用专用角色",
+    description="turn-1 展示当前路径分配、读写属性与安全边界；默认构建安装布局仅作建议",
     on_turn_start=_path_role_convention_on_turn_start,
     emits=("path_role_convention_injected"),
 )
@@ -5051,13 +4961,14 @@ def _classify_external_job_status(submission: dict[str, Any]) -> str:
     """Return running, finished_or_unavailable, or unknown after one query."""
     try:
         try:
-            from tools.resource_manager import _job_status_sync
+            from tools.resource_manager import _job_status_sync, _slurm_kwargs
         except ImportError:
-            from .tools.resource_manager import _job_status_sync
+            from .tools.resource_manager import _job_status_sync, _slurm_kwargs
         result = _job_status_sync(
             str(submission["scheduler"]), str(submission["job_id"]),
             submission.get("namespace"), remote_host=submission.get("launch_host"),
             container_runtime_id=submission.get("container_runtime_id"),
+            **_slurm_kwargs(submission),
         )
     except Exception:
         return "unknown"
@@ -5706,6 +5617,7 @@ def external_job_reconciliation_on_turn_start(ctx: HookContext) -> list[LLMMessa
         health = probe_external_job_health(
             ctx.state, job["scheduler"], job["job_id"],
             job.get("namespace"),
+            **({"submission_nonce": str(job["submission_nonce"])} if job.get("submission_nonce") else {}),
         )
         reports.append({**job, "health": health,
                         "workflow_status": health.get("workflow_status", "awaiting_external_job")})

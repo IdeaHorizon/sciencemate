@@ -23,7 +23,7 @@ export function ProjectDreamingPanel({
   const t = useT();
   const skip = useMutation({
     mutationFn: () => skipProjectDreaming(projectId),
-    onSuccess: () => undefined,
+    onSuccess: () => pushSuccess(t({ zh: "已跳过本次整理", en: "Skipped the next tidy-up" })),
     onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "跳过失败", en: "The skip failed" })),
   });
 
@@ -32,7 +32,7 @@ export function ProjectDreamingPanel({
       <div className="settings-compact-heading">
         <div>
           <h2>{t({ zh: "知识库整理", en: "Knowledge base tidy-up" })}</h2>
-          <p>{t({ zh: "研究间隙自动跑的沉淀过程 —— 把这个项目的产出整理进知识库。", en: "A between-runs pass that files this project's outputs into the knowledge base." })}</p>
+          <p>{t({ zh: "在两次执行之间，自动把这个项目的成果整理进知识库。", en: "Between runs, the project's outputs are filed into the knowledge base automatically." })}</p>
         </div>
       </div>
       <div className="settings-row-group">
@@ -41,7 +41,7 @@ export function ProjectDreamingPanel({
             <strong>{t({ zh: "跳过本次整理", en: "Skip this tidy-up" })}</strong>
             <small>
               {canManage
-                ? t({ zh: "只跳过排在最前面的这一次；下次触发条件满足时会重新排上。已经沉淀的内容不受影响。", en: "Skips only the one at the front of the queue; it is scheduled again when the trigger next fires. Nothing already filed is affected." })
+                ? t({ zh: "只跳过即将进行的这一次，之后仍会照常整理。", en: "Skips only the next tidy-up; later ones run as usual." })
                 : t({ zh: "只有项目负责人或管理员可以跳过整理。", en: "Only a project lead or administrator can skip the tidy-up." })}
             </small>
           </span>

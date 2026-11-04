@@ -131,7 +131,8 @@ async def test_four_translation_batches_start_concurrently(db_session, monkeypat
     monkeypatch.setattr(translation, "select_effective_backend", AsyncMock(return_value=object()))
     monkeypatch.setattr(translation, "resolved_api_key", lambda backend: "test-credential")
     monkeypatch.setattr(translation.settings, "feed_translation_concurrency", 4)
-    cards = [FeedCard(item=FeedItemOut(id=str(i), kind="paper", title=f"Study {i}")) for i in range(12)]
+    cards = [FeedCard(item=FeedItemOut(id=str(i), kind="paper", title=f"Study {i}"),
+                      recommendation_sources=["domain"]) for i in range(12)]
     monkeypatch.setattr(feed, "preparing_translation_pool", AsyncMock(return_value=FeedTodayOut()))
     monkeypatch.setattr(feed, "feed_today", AsyncMock(return_value=FeedTodayOut(feed=cards)))
     entered, active, maximum = [], 0, 0
@@ -179,7 +180,8 @@ async def test_scrolling_exposure_keeps_pool_and_new_articles_allow_fast_snapsho
     db_session.add_all([user, item])
     await db_session.commit()
     from app.schemas.feed import FeedCard, FeedItemOut
-    build = AsyncMock(return_value=FeedTodayOut(feed=[FeedCard(item=FeedItemOut(id="cached", kind="paper", title="已准备文章"))]))
+    build = AsyncMock(return_value=FeedTodayOut(feed=[FeedCard(item=FeedItemOut(id="cached", kind="paper", title="已准备文章"),
+                                                                 recommendation_sources=["domain"])]))
     await pool_cache.get_pool(db_session, user, build)
     db_session.add(FeedEngagement(user_id=user.id, item_id=item.id, action="impression"))
     await db_session.commit()

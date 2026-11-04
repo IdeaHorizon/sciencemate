@@ -13,6 +13,8 @@ import json
 import re
 from typing import Any
 
+from nodes.data.delivery_contract import is_structured_request
+
 
 PREPROCESSING_REQUEST_SCHEMA_VERSION = "1.0"
 PREPROCESSING_WORK_ORDER_SCHEMA_VERSION = "1.0"
@@ -62,21 +64,21 @@ def caller_request_text(
     if isinstance(value, dict):
         candidates.extend(
             value.get(key)
-            for key in ("user_request", "spec", "task", "objective", "request", "content")
+            for key in ("user_request", "spec", "task", "objective", "request", "content", "preprocessing_request")
             if value.get(key) not in (None, "", [], {})
         )
         node_inputs = value.get("node_inputs")
         if isinstance(node_inputs, dict):
             candidates.extend(
                 node_inputs.get(key)
-                for key in ("user_request", "spec", "task", "objective")
+                for key in ("user_request", "spec", "task", "objective", "preprocessing_request")
                 if node_inputs.get(key) not in (None, "", [], {})
             )
         for item in value.get("inputs") or []:
             if isinstance(item, dict):
                 candidates.extend(
                     item.get(key)
-                    for key in ("user_request", "spec", "task", "objective", "request", "content")
+                    for key in ("user_request", "spec", "task", "objective", "request", "content", "preprocessing_request")
                     if item.get(key) not in (None, "", [], {})
                 )
         if value.get("purpose") not in (None, "", [], {}):
@@ -85,6 +87,11 @@ def caller_request_text(
         candidates.append(value)
 
     for candidate in [*candidates, *fallbacks]:
+        if isinstance(candidate, dict):
+            nested = caller_request_text(candidate)
+            if nested:
+                return nested
+            continue
         text = _text(candidate)
         if text.startswith(("{", "[")):
             try:
@@ -93,8 +100,9 @@ def caller_request_text(
                 parsed = None
             if isinstance(parsed, dict):
                 nested = caller_request_text(parsed)
-                if nested:
-                    text = nested
+                if not nested:
+                    continue
+                text = nested
         text = re.sub(r"^\s*##\s*节点输入\s*", "", text, flags=re.I)
         text = re.sub(r"^\s*-\s*\*\*spec\*\*\s*[:：]\s*", "", text, flags=re.I)
         boundary = _SERVICE_CONTEXT_BOUNDARY_RE.search(text)
@@ -108,6 +116,49 @@ def caller_request_text(
 def _slug(value: Any, fallback: str) -> str:
     result = re.sub(r"[^A-Za-z0-9._-]+", "_", _text(value)).strip("._-")
     return result or fallback
+
+
+def requirement_authority_context(
+    task_context: str | dict[str, Any],
+    preprocessing_request: dict[str, Any],
+) -> str | dict[str, Any]:
+    """Project legacy dispatch context for analysis without changing its receipt.
+
+    The driver can bind independent user words while retaining the caller's
+    expanded service spec as non-authoritative execution context. Preserve
+    supplied asset locations and defect reports without promoting suggested
+    outputs/defaults into acceptance conditions. Structured callers own their
+    full contract and do not use this projection.
+    """
+    if not isinstance(task_context, dict):
+        return task_context
+    inputs = task_context.get("node_inputs")
+    snapshot = preprocessing_request.get("authority_snapshot")
+    if (
+        task_context.get("request_source") not in {"caller_or_experiment_node", "bound_data_request"}
+        or not isinstance(inputs, dict)
+        or preprocessing_request.get("review_profile") != "request_bound"
+        or (preprocessing_request.get("authority") or {}).get("kind") != "user_request"
+        or not isinstance(snapshot, dict) or set(snapshot) != {"request"}
+        or not str(snapshot.get("request") or "").strip()
+        or preprocessing_request.get("dispatch_identity")
+        or is_structured_request(inputs)
+    ):
+        return task_context
+    request = deepcopy(preprocessing_request)
+    # Only the legacy dispatcher object is projected out. Independently
+    # supplied structured inputs retain their complete content and identity.
+    request["inputs"] = [item for item in request.get("inputs") or [] if item != inputs]
+    return {
+        "user_request": caller_request_text(task_context, preprocessing_request=request),
+        "preprocessing_request": request,
+        # Path discovery has already inspected the original dispatch. Do not
+        # feed its prose specification back as a second set of requirements.
+        "execution_context": {key: deepcopy(value) for key, value in inputs.items()
+                              if key != "dispatch_proposal_unverified"
+                              and (key not in {"spec", "upstream_plan", "user_note"} or not isinstance(value, str))},
+        "request_source": task_context["request_source"],
+    }
 
 
 def _first_mapping(context: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
@@ -165,6 +216,7 @@ def _requested_assets(context: dict[str, Any], explicit: dict[str, Any]) -> list
 def normalize_preprocessing_request(
     task_context: str | dict[str, Any],
     *,
+    state: Any = None,
     source_artifact_ids: list[str] | None = None,
     source_stable_id: str = "",
     authority_kind_hint: str = "",
@@ -173,18 +225,21 @@ def normalize_preprocessing_request(
     context = deepcopy(task_context) if isinstance(task_context, dict) else {
         "user_request": _text(task_context)
     }
+    if "data_request_envelope" in context:
+        raise ValueError("Use preprocessing_request instead of the unsupported Data dispatch envelope.")
     node_inputs = context.get("node_inputs")
-    if isinstance(node_inputs, dict):
+    structured_caller = context.get("request_source") == "structured_data_request" or is_structured_request(node_inputs)
+    if isinstance(node_inputs, dict) and (structured_caller or context.get("request_source") != "caller_or_experiment_node"):
         # Orchestrated service calls arrive under hook_state.node_inputs.  Make
         # that structured payload the native request surface instead of
         # requiring Experiment to render a Markdown pseudo-plan.  A persisted
         # free-text input from an earlier call cannot replace the latest caller
         # message; an explicit structured preprocessing_request still owns its
-        # purpose and authority below.
-        current_user_request = context.get("user_request")
-        context = {**context, **deepcopy(node_inputs), "node_inputs": deepcopy(node_inputs)}
-        if current_user_request not in (None, ""):
-            context["user_request"] = current_user_request
+        # purpose and authority below. Legacy service inputs are execution
+        # hints: the driver has already selected their caller-authored text.
+        bound_context = {key: context[key] for key in ("user_request", "preprocessing_request")
+                         if context.get(key) not in (None, "", {})}
+        context = {**context, **deepcopy(node_inputs), "node_inputs": deepcopy(node_inputs), **bound_context}
     explicit = (
         deepcopy(context.get("preprocessing_request"))
         if isinstance(context.get("preprocessing_request"), dict)
@@ -213,9 +268,34 @@ def normalize_preprocessing_request(
         if authority_kind in {"research_plan", "pre_registration"}
         else "request_bound"
     )
-    caller_text = caller_request_text(context) or caller_request_text(task_context)
+    caller_text = caller_request_text(context, preprocessing_request=explicit) or caller_request_text(task_context)
     explicit_snapshot = explicit.get("authority_snapshot")
     raw_authority = deepcopy(explicit_snapshot) if isinstance(explicit_snapshot, dict) else {}
+    source_id = _text(authority.get("artifact_id") or (
+        context.get("source_prereg_artifact_id") if authority_kind == "pre_registration" else ""
+    ))
+    # Resolve only an explicitly bound authority, once at ingress. Metadata or
+    # the current HEAD cannot stand in for the exact frozen scientific content.
+    if not raw_authority and state is not None and source_id and review_profile == "plan_bound":
+        version = authority.get("version", context.get("source_prereg_version"))
+        expected_hash = _text(authority.get("content_hash") or context.get("source_prereg_content_hash")).lower()
+        record = (next((item for item in state.artifact_versions(source_id)
+                        if item.get("version") == version), None)
+                  if version is not None else state.read_artifact(source_id))
+        content = (record or {}).get("content")
+        if not record or record.get("type") != authority_kind or not isinstance(content, str) or not content.strip():
+            raise ValueError(f"Referenced authority content is unavailable: {source_id}, version={version}")
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if expected_hash and content_hash != expected_hash:
+            raise ValueError(f"Referenced authority content hash mismatch: {source_id}, version={version}")
+        if context.get("scientific_parameters") == "frozen_prereg_only" and not (record.get("metadata") or {}).get("frozen"):
+            raise ValueError(f"Referenced pre_registration is not frozen: {source_id}, version={version}")
+        try:
+            decoded = json.loads(content)
+        except ValueError:
+            decoded = None
+        raw_authority = decoded if isinstance(decoded, dict) and decoded else {"content": content}
+        authority.update(artifact_id=source_id, version=record.get("version"), content_hash=content_hash)
     if not raw_authority:
         raw_authority = (
             _first_mapping(context, ("pre_registration", "preregistration"))
@@ -238,13 +318,15 @@ def normalize_preprocessing_request(
     if review_profile == "request_bound" and caller_text:
         # Service-added artifact/KB context is provenance, not part of the
         # caller's locked request and must not influence review or identity.
-        raw_authority = {"request": caller_text}
+        # A structured caller owns its whole contract, while a previously
+        # bound snapshot must survive normalization without losing fields.
+        raw_authority = (
+            deepcopy(explicit_snapshot) if isinstance(explicit_snapshot, dict) and explicit_snapshot
+            else deepcopy(node_inputs) if structured_caller and isinstance(node_inputs, dict)
+            else {"request": caller_text}
+        )
     assets = _requested_assets(context, explicit)
-    raw_acceptance = (
-        explicit.get("acceptance_criteria")
-        or context.get("acceptance_criteria")
-        or context.get("acceptance")
-    )
+    raw_acceptance = explicit.get("acceptance_criteria", context.get("acceptance_criteria") or context.get("acceptance"))
     acceptance = deepcopy(
         [key for key, enabled in raw_acceptance.items() if enabled]
         if isinstance(raw_acceptance, dict)
@@ -254,10 +336,11 @@ def normalize_preprocessing_request(
         "kind": authority_kind,
         "locked": True,
         "source_hash": source_stable_id or _canonical_hash(raw_authority),
+        **{key: authority[key] for key in ("version", "content_hash") if authority.get(key) is not None},
     }
     if authority.get("artifact_id"):
         authority_payload["artifact_id"] = _text(authority["artifact_id"])
-    elif context.get("source_prereg_artifact_id"):
+    elif authority_kind == "pre_registration" and context.get("source_prereg_artifact_id"):
         authority_payload["artifact_id"] = _text(context["source_prereg_artifact_id"])
     base = {
         "schema_version": _text(explicit.get("schema_version")) or PREPROCESSING_REQUEST_SCHEMA_VERSION,
@@ -268,7 +351,7 @@ def normalize_preprocessing_request(
         # It is evidence, not an invitation for planning to expand its scope.
         "authority_snapshot": deepcopy(raw_authority),
         "purpose": _text(
-            (caller_text if review_profile == "request_bound" else "")
+            caller_text
             or explicit.get("purpose")
             or context.get("purpose")
             or context.get("objective")
@@ -287,23 +370,22 @@ def normalize_preprocessing_request(
                 **({"stage": context.get("requesting_stage")} if context.get("requesting_stage") else {}),
             }
         ),
-        "inputs": deepcopy(_list(
-            explicit.get("inputs")
-            or context.get("inputs")
+        "inputs": deepcopy(_list(explicit.get("inputs",
+            context.get("inputs")
             or context.get("scientific_parameters")
             or context.get("node_inputs")
-        )),
+        ))),
         "requested_assets": assets,
         "acceptance_criteria": acceptance,
-        "non_goals": deepcopy(_list(explicit.get("non_goals") or context.get("non_goals"))),
+        "non_goals": deepcopy(_list(explicit.get("non_goals", context.get("non_goals")))),
         "scientific_authority": bool(
             review_profile == "plan_bound"
             and explicit.get("scientific_authority", True)
         ),
         "source_artifact_ids": list(dict.fromkeys(
-            _text(item) for item in (
-                explicit.get("source_artifact_ids")
-                or _list(context.get("source_prereg_artifact_id"))
+            _text(item) for item in explicit.get("source_artifact_ids",
+                _list(context.get("source_prereg_artifact_id"))
+                or _list(context.get("source_artifact_ids"))
                 or source_artifact_ids
                 or []
             ) if _text(item)
@@ -312,6 +394,13 @@ def normalize_preprocessing_request(
     target_software = explicit.get("target_software", context.get("target_software"))
     if target_software not in (None, "", {}):
         base["target_software"] = deepcopy(target_software)
+    # Only an explicit operation contract adds edit/export requirements.
+    # A dispatcher's expanded spec is execution context, not user authority.
+    operation = explicit.get("operation_request")
+    if operation is None and isinstance(node_inputs, dict):
+        operation = node_inputs.get("operation_request")
+    if isinstance(operation, str) and operation.strip() and operation.strip() != caller_text:
+        base["operation_request"] = operation.strip()
     identity_basis = {
         **base,
         "source_stable_id": source_stable_id,
@@ -352,12 +441,58 @@ def preprocessing_request_fingerprint(value: Any) -> str:
     semantic = deepcopy(value)
     for key in ("request_id", "request_spec_hash", "provided_request_spec_hash"):
         semantic.pop(key, None)
+    # run_node appends this execution note on redispatch. It is not a changed
+    # scientific input; retain every other input and the locked authority.
+    snapshot = semantic.get("authority_snapshot") or {}
+    legacy_user_request = (
+        semantic.get("review_profile") == "request_bound"
+        and (semantic.get("authority") or {}).get("kind") == "user_request"
+        and isinstance(snapshot, dict) and set(snapshot) == {"request"}
+        and bool(snapshot.get("request"))
+    )
+    for item in semantic.get("inputs") or []:
+        if isinstance(item, dict):
+            item.pop("修订基线（重新调起时必读）", None)
+            item.pop("recovery_feedback", None)
+            item.pop("review_feedback", None)
+            if legacy_user_request:
+                item.pop("dispatch_proposal_unverified", None)
+            if legacy_user_request and item.get("request_kind") == "asset_preprocessing":
+                item.pop("request_kind")
+            nested = item.get("preprocessing_request")
+            if (legacy_user_request and isinstance(nested, dict) and not nested.get("inputs")
+                    and nested.get("authority_snapshot") == snapshot
+                    and (nested.get("authority") or {}).get("kind") == "user_request"):
+                item.pop("preprocessing_request")  # Duplicate dispatch wrapper, not a scientific input.
+            if (legacy_user_request and set(item) <= {"spec", "upstream_plan", "user_note"}
+                    and all(value is None or isinstance(value, str) for value in item.values())):
+                # These are dispatcher paraphrases, already excluded from
+                # scientific authority by requirement_authority_context.
+                # User-specified sources remain in the authority snapshot;
+                # explicit input bindings and structured plans remain intact.
+                item.clear()
+    semantic["inputs"] = [item for item in semantic.get("inputs") or [] if item != {}]
     authority = semantic.get("authority")
     if isinstance(authority, dict):
         authority = deepcopy(authority)
         authority.pop("source_hash", None)
         semantic["authority"] = authority
     return _canonical_hash(semantic)
+
+
+def preprocessing_recovery_fingerprint(value: Any) -> str:
+    """Route diagnostics to the original run without relaxing delivery identity.
+
+    A user-text authority owns its acceptance conditions; a dispatcher's added
+    checks are hypotheses for review. Structured experiment/plan contracts keep
+    their full identity, including explicitly supplied acceptance conditions.
+    """
+    request = deepcopy(value) if isinstance(value, dict) else {}
+    if ((request.get("authority") or {}).get("kind") == "user_request"
+            and set(request.get("authority_snapshot") or {}) == {"request"}):
+        request.pop("acceptance_criteria", None)
+        request.pop("non_goals", None)
+    return preprocessing_request_fingerprint(request)
 
 
 def validate_preprocessing_request(value: Any) -> list[str]:
@@ -386,42 +521,6 @@ def validate_preprocessing_request(value: Any) -> list[str]:
     if not isinstance(value.get("requested_assets"), list):
         errors.append("preprocessing_request.requested_assets must be an array")
     return errors
-
-
-def decisive_input_gaps(request: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return only omissions that make a requested asset scientifically indeterminate."""
-    gaps: list[dict[str, Any]] = []
-    request_inputs = request.get("inputs") or []
-    for asset in request.get("requested_assets") or []:
-        if not isinstance(asset, dict):
-            continue
-        text = " ".join(str(asset.get(key) or "") for key in (
-            "filename", "format", "purpose", "scientific_role", "representation"
-        )).casefold()
-        evidence = [
-            *request_inputs,
-            *(asset.get("content_constraints") or []),
-            asset.get("generation_recipe"),
-            asset.get("parameter_bindings"),
-        ]
-        missing = ""
-        bindings = asset.get("parameter_bindings") if isinstance(asset.get("parameter_bindings"), dict) else {}
-        if "kpoints" in text and not all(
-            bindings.get(key) not in (None, "", [], {})
-            for key in ("grid", "scheme", "shift")
-        ):
-            missing = "explicit KPOINTS grid, scheme, and shift"
-        elif "poscar" in text and not request_inputs and not any(evidence[1:]):
-            missing = "atomic structure, lattice, and species coordinates"
-        elif re.search(r"(?:^|\W)(?:mesh|grid|网格)(?:$|\W)", text) and not request_inputs and not any(evidence[1:]):
-            missing = "geometry/domain and mesh-resolution contract"
-        if missing:
-            gaps.append({
-                "asset_id": asset.get("asset_id"),
-                "field": missing,
-                "reason": "The value changes the scientific content of the requested file and cannot be guessed.",
-            })
-    return gaps
 
 
 def build_preprocessing_work_order(
@@ -467,7 +566,7 @@ def build_preprocessing_work_order(
         declared_stage = _text(asset.get("stage_id"))
         unit = {
             "work_unit_id": f"wu_{asset_id}",
-            "kind": "plan_stage_asset" if profile == "plan_bound" else "requested_asset",
+            "kind": "plan_stage_asset" if profile == "plan_bound" and declared_stage in stages else "requested_asset",
             "requested_asset_ids": [asset_id],
             "dependencies": deepcopy(_list(asset.get("dependencies"))),
             "acceptance_criteria": deepcopy(_list(asset.get("content_constraints"))),

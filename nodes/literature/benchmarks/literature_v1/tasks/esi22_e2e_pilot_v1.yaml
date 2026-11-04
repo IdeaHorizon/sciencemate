@@ -1,0 +1,20 @@
+suite: literaturebench_v1_esi22_e2e
+version: 0.3.0
+status: primary_e2e_pilot
+selection: "覆盖 ESI 22 中 12 个彼此差异较大的领域；与搜索主题一一对应，便于复用同一隐藏 gold。"
+instructions_to_system: |
+  请完成完整文献调研。不要编造引用；每条关键结论必须可追溯到纳入论文。论文可以
+  多标签分类。无法得到原始摘要或全文时，明确说明来源状态与限制。
+tasks:
+  - {id: E2E03, source_task: ESI03, scope: landscape, prompt_zh: 调研钙钛矿太阳能电池缺陷钝化与长期稳定性，比较不同钝化策略、表征证据和失效机制。}
+  - {id: E2E04, source_task: ESI04, scope: landscape, prompt_zh: 调研 CAR-T 疗法在实体瘤中的递送和浸润障碍，区分临床、动物和体外证据。}
+  - {id: E2E06, source_task: ESI06, scope: method_lookup, prompt_zh: 调研合成控制法进行因果推断的适用条件、诊断方法和常见失效模式。}
+  - {id: E2E10, source_task: ESI10, scope: landscape, prompt_zh: 调研髓系抑制细胞在肿瘤微环境中的来源、免疫抑制机制与治疗靶向证据。}
+  - {id: E2E12, source_task: ESI12, scope: method_lookup, prompt_zh: 调研随机矩阵理论用于理解深度神经网络泛化的主要理论路径与实证边界。}
+  - {id: E2E13, source_task: ESI13, scope: landscape, prompt_zh: 调研肠道菌群代谢物影响肠脑轴的机制，区分相关性、人群研究和干预证据。}
+  - {id: E2E14, source_task: ESI14, scope: contradiction_check, prompt_zh: 调研腺嘌呤碱基编辑器的脱靶检测结果，比较 DNA 与 RNA 脱靶、不同检测方法和分歧来源。}
+  - {id: E2E16, source_task: ESI16, scope: landscape, prompt_zh: 调研 tau 蛋白在阿尔茨海默病中跨神经元传播的证据、模型差异与治疗含义。}
+  - {id: E2E17, source_task: ESI17, scope: landscape, prompt_zh: 调研 GLP-1 受体激动剂心血管获益的潜在机制，区分临床结局与机制性证据。}
+  - {id: E2E19, source_task: ESI19, scope: landscape, prompt_zh: 调研 C4 光合作用多次独立起源与趋同演化的系统发育和功能证据。}
+  - {id: E2E20, source_task: ESI20, scope: contradiction_check, prompt_zh: 调研工作记忆训练是否存在远迁移效应，区分训练任务近迁移、远迁移、元分析和可重复性证据。}
+  - {id: E2E22, source_task: ESI22, scope: landscape, prompt_zh: 调研快速射电暴宿主星系观测和起源模型，梳理各类模型可解释的证据与关键反例。}

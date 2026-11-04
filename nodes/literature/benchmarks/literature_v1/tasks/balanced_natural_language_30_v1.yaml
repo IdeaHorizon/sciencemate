@@ -1,0 +1,206 @@
+suite: literaturebench_balanced_natural_language_30_v1
+version: 0.1.0
+status: draft_unscored
+language: zh-CN
+design: >-
+  独立于 ESI22 的自然语言学术检索题集。按 OECD Frascati 六大研究领域分层抽样，
+  自然科学 6、工程 5、医学 5、农业 4、社会科学 5、人文 5；题目考察文献检索，不考 E2E 综述、全文或图片。
+prompt_rule: >-
+  prompt_zh 是完整、原样输入的研究问题。对话产品可统一附加题库说明中的书目输出要求；
+  不得逐平台重写问题、附加关键词、预置 DOI 或指定应找到的论文。
+chat_output_contract_zh: >-
+  请按相关程度排序，最多列出 20 篇可核验的学术文献；不足 20 篇不要凑数。
+  每篇给出标题、作者、年份、期刊或其他出处、DOI 或原文链接，并用一句话说明它与问题哪一部分直接相关。
+  请标明综述、原始研究、书籍或章节等类型；无法核实的字段留空，不要编造文献。
+scoring_notes: >-
+  前 10 篇相关性和前 20 篇证据覆盖率由跨系统合并候选池双人盲评；
+  同时记录重复、书目信息真实性、文献类型错误、耗时和失败。
+  人文学科不以 DOI 缺失直接扣分，核验 DOI 或稳定的出版方/机构原文链接。
+field_quotas:
+  natural_sciences: 6
+  engineering_and_technology: 5
+  medical_and_health_sciences: 5
+  agricultural_and_veterinary_sciences: 4
+  social_sciences: 5
+  humanities_and_arts: 5
+tasks:
+  - id: NL01
+    broad_field: natural_sciences
+    focus: astronomy
+    probes: [concept_translation, evidence_types, method_vs_application]
+    prompt_zh: >-
+      我想了解引力波“标准警报器”如何用于测量哈勃常数。有明确宿主星系的事件和没有明确宿主的事件，各自采用什么思路处理距离与红移？请帮我找方法论文和实际观测论文，并特别留意讨论系统误差与结果分歧的研究。
+  - id: NL02
+    broad_field: natural_sciences
+    focus: environmental_science
+    probes: [broad_recall, causal_evidence, scale_difference]
+    prompt_zh: >-
+      城市绿地究竟能在多大程度上缓解夏季热岛效应？我想比较卫星遥感、地面实测与城市模拟得到的结论，并弄清绿地规模和周边建成环境为什么会改变降温效果。请找直接研究这些问题的论文，不要只给一般性的城市绿化倡议。
+  - id: NL03
+    broad_field: natural_sciences
+    focus: chemistry
+    probes: [mechanism, precision, competing_explanations]
+    prompt_zh: >-
+      我在查铜基催化剂把二氧化碳电还原为乙烯的机理。哪些研究讨论了铜表面结构、局域 pH 与中间体覆盖度对产物选择性的影响？请同时找原位表征和计算研究，看看它们对关键步骤的解释是否一致。
+  - id: NL04
+    broad_field: engineering_and_technology
+    focus: energy_engineering
+    probes: [method_comparison, practical_validation, precision]
+    prompt_zh: >-
+      如果要在锂离子电池发生热失控之前预警，气体、温度、电压以及数据驱动方法各有哪些证据支持？请找有实验验证的研究，区分单体电池与电池组场景，并说明哪些工作真正报告了预警提前量。
+  - id: NL05
+    broad_field: engineering_and_technology
+    focus: civil_engineering
+    probes: [concept_disambiguation, field_validation, method_comparison]
+    prompt_zh: >-
+      我想评估数字孪生能否改善桥梁疲劳损伤监测。请找把传感器数据、结构模型与疲劳寿命预测联系起来的论文，优先比较真实桥梁验证和纯仿真研究，不要把一般的桥梁健康监测都算作数字孪生。
+  - id: NL06
+    broad_field: engineering_and_technology
+    focus: environmental_engineering
+    probes: [method_comparison, quantitative_outcomes, broad_recall]
+    prompt_zh: >-
+      海水淡化膜污染有什么经过验证的预测和控制办法？我想比较机理模型、机器学习预测以及膜材料或运行参数优化的效果。请找能报告污染程度、通量恢复或能耗等结果的论文，而不只是介绍技术概念。
+  - id: NL07
+    broad_field: medical_and_health_sciences
+    focus: clinical_informatics
+    probes: [external_validation, population_difference, negative_evidence]
+    prompt_zh: >-
+      机器学习预测脓毒症的模型在换医院或换人群后还能保持效果吗？请找开发研究、外部验证研究和系统综述，重点看预警时间、误报以及数据泄漏问题；如果有结论不一致的研究，也请一并列出。
+  - id: NL08
+    broad_field: medical_and_health_sciences
+    focus: neurology
+    probes: [longitudinal_evidence, case_definition, negative_evidence]
+    prompt_zh: >-
+      长期新冠患者的认知障碍会随时间恢复吗？请找纵向随访研究，并与横断面研究或对照组研究区分开。特别关注认知测量方法、感染前基线是否可得，以及不同研究对恢复程度为何得出不同结论。
+  - id: NL09
+    broad_field: medical_and_health_sciences
+    focus: cardiology
+    probes: [trial_vs_review, treatment_scope, evidence_hierarchy]
+    prompt_zh: >-
+      对射血分数保留型心力衰竭患者，SGLT2 抑制剂的获益主要体现在哪些临床结局？请找关键随机试验、后续汇总分析和有争议的亚组结果，区分住院风险、死亡风险与生活质量，不要把其他心衰类型的证据混进来。
+  - id: NL10
+    broad_field: agricultural_and_veterinary_sciences
+    focus: crop_science
+    probes: [field_vs_greenhouse, traits_vs_yield, precision]
+    prompt_zh: >-
+      小麦根系的哪些性状与干旱条件下的产量稳定性有关？请找田间试验和温室试验分别有哪些证据，并看看深根、根系分枝和水分利用效率之间是否存在取舍；不要只列研究根系形态而没有产量结果的文章。
+  - id: NL11
+    broad_field: agricultural_and_veterinary_sciences
+    focus: precision_agriculture
+    probes: [quantitative_outcomes, field_validation, method_comparison]
+    prompt_zh: >-
+      基于土壤水分传感器的精准灌溉，是否真的能在不减产的情况下节水？请找与常规灌溉直接比较的田间研究，尽量涵盖不同作物和气候条件，并区分节水率、产量与投入成本这几类结果。
+  - id: NL12
+    broad_field: agricultural_and_veterinary_sciences
+    focus: aquaculture
+    probes: [intervention_evidence, source_diversity, negative_evidence]
+    prompt_zh: >-
+      水产养殖中的抗生素使用会怎样影响环境里的耐药基因？请找养殖场实测、传播机制和减用抗生素干预的研究，并辨别相关性观察与能够支持因果解释的证据。
+  - id: NL13
+    broad_field: social_sciences
+    focus: economics
+    probes: [causal_design, long_term_outcomes, contradictory_evidence]
+    prompt_zh: >-
+      直接给低收入家庭现金，会改善儿童后续的教育成果吗？请找随机试验和其他可信的因果识别研究，分别看短期入学、长期完成学业等结果，并指出哪些研究发现效果不明显或只对特定群体有效。
+  - id: NL14
+    broad_field: social_sciences
+    focus: labor_studies
+    probes: [concept_translation, regional_diversity, empirical_vs_theory]
+    prompt_zh: >-
+      外卖和网约车平台的算法管理如何影响劳动者的自主性与收入？请找不同国家或地区的实证研究，区分派单、绩效评价和申诉机制，不要把所有“数字平台劳动”论文都当作直接证据。
+  - id: NL15
+    broad_field: social_sciences
+    focus: communication_studies
+    probes: [intervention_effect, controlled_studies, durability]
+    prompt_zh: >-
+      社交媒体上的事实核查或媒介素养干预，能否持续减少错误信息的传播？请找有对照设计的研究及系统综述，区分即时改变态度、长期记忆和真实转发行为，而不是只报告受试者说自己会怎么做。
+  - id: NL16
+    broad_field: humanities_and_arts
+    focus: archaeology_and_history
+    probes: [evidence_type_diversity, interdisciplinary_matching, interpretive_caution]
+    prompt_zh: >-
+      古 DNA 研究改变了我们对欧洲青铜时代人口迁移的哪些历史解释？请找把遗传证据与考古材料放在一起讨论的研究，也找对“遗传变化等于文化替代”这一推断提出限制或批评的论文。
+  - id: NL17
+    broad_field: humanities_and_arts
+    focus: literary_studies
+    probes: [named_work_disambiguation, competing_interpretations, non_stem_coverage]
+    prompt_zh: >-
+      文学研究如何通过《藻海无边》重新解读《简·爱》中的殖民与帝国叙事？请找直接比较这两部作品的学术论文，呈现至少两种不同的解释路径，不要把小说原著的版本或书评当成研究论文。
+  - id: NL18
+    broad_field: humanities_and_arts
+    focus: museum_studies_and_ethics
+    probes: [concept_disambiguation, legal_vs_ethical_evidence, non_stem_coverage]
+    prompt_zh: >-
+      对殖民时期流散的博物馆藏品，“归还原属地”在法律、伦理和博物馆实践中分别有什么争论？请找讨论具体返还案例的学术研究，也找比较不同立场的论文；不要只给新闻报道或机构声明。
+  - id: NL19
+    broad_field: natural_sciences
+    focus: mathematics
+    probes: [theoretical_vs_empirical, exact_scope, tradeoff]
+    prompt_zh: >-
+      我想弄清最优传输问题加入熵正则化后，计算速度提高的代价是什么。请找分析 Sinkhorn 算法收敛、近似误差和正则化强度选择的理论论文，也找在实际数据任务上检验这些权衡的研究；不要把所有最优传输应用都当作直接答案。
+  - id: NL20
+    broad_field: natural_sciences
+    focus: computer_and_information_sciences
+    probes: [method_comparison, ablation_evidence, citation_accuracy]
+    prompt_zh: >-
+      在检索增强生成系统里，重排序检索结果和扩大模型上下文窗口，分别有什么证据表明能减少回答中的错误引文？请找直接比较或做过消融实验的论文，留意评测任务、模型规模以及论文是否真正核对了引文所支持的内容。
+  - id: NL21
+    broad_field: natural_sciences
+    focus: biological_sciences
+    probes: [field_vs_laboratory, tradeoff, negative_evidence]
+    prompt_zh: >-
+      珊瑚在高温白化后改变共生藻组成，能否提高下次海洋热浪中的耐热性？请找野外观测与控制实验，也找讨论生长或繁殖代价的研究，区分不同珊瑚物种和不同共生藻类型。
+  - id: NL22
+    broad_field: engineering_and_technology
+    focus: electrical_engineering
+    probes: [mechanism, reliability, accelerated_vs_field_test]
+    prompt_zh: >-
+      碳化硅功率 MOSFET 的栅氧化层为什么会退化，哪些因素最影响器件长期可靠性？请找机理研究、加速老化试验和实际工作条件下的验证，区分阈值漂移、击穿及不同失效模式。
+  - id: NL23
+    broad_field: engineering_and_technology
+    focus: materials_engineering
+    probes: [defect_mechanism, measurement, quantitative_outcomes]
+    prompt_zh: >-
+      金属增材制造件中的孔隙缺陷怎样影响疲劳寿命？请找把孔隙形状或位置与疲劳试验结果联系起来的研究，并比较计算机断层扫描、超声等无损检测方法能否识别真正危险的缺陷；不要只给一般的工艺介绍。
+  - id: NL24
+    broad_field: medical_and_health_sciences
+    focus: public_health
+    probes: [cohort_evidence, confounding, exposure_measurement]
+    prompt_zh: >-
+      长期暴露于 PM2.5 是否会增加儿童新发哮喘的风险？请找有明确暴露评估和随访结局的队列研究及系统综述，注意家庭、交通与社会经济因素的混杂，并区分哮喘新发与既有哮喘加重。
+  - id: NL25
+    broad_field: medical_and_health_sciences
+    focus: pharmacology_and_clinical_trials
+    probes: [benefit_harm_balance, trial_vs_extension, outcome_disambiguation]
+    prompt_zh: >-
+      阿尔茨海默病的抗淀粉样蛋白抗体治疗，在随机试验中显示了多大程度的临床获益，又有哪些淀粉样蛋白相关影像异常等风险？请找关键试验和后续分析，区分生物标志物变化与患者实际功能变化，也不要把不同药物的结果混为一谈。
+  - id: NL26
+    broad_field: agricultural_and_veterinary_sciences
+    focus: veterinary_sciences
+    probes: [field_intervention, diagnostic_strategy, quantitative_outcomes]
+    prompt_zh: >-
+      奶牛干奶期乳房炎防控能否从常规给所有牛用抗生素，改为依据检测结果选择性用药？请找农场现场试验和系统综述，比较后续乳房炎、产奶表现与抗生素使用量，并说明快速检测方法会怎样影响结果。
+  - id: NL27
+    broad_field: social_sciences
+    focus: education
+    probes: [causal_design, group_heterogeneity, long_term_outcomes]
+    prompt_zh: >-
+      疫情期间学校停课和转为线上教学，对不同社会经济背景学生的学习差距造成了什么影响？请找使用纵向成绩、准实验设计或可靠对照组的研究，区分短期学习损失与返校后的恢复，不要只列学生感受调查。
+  - id: NL28
+    broad_field: social_sciences
+    focus: law_and_public_policy
+    probes: [fairness_definition, empirical_vs_normative, competing_evidence]
+    prompt_zh: >-
+      刑事司法中的算法风险评估是否真的比人工判断更公平？请找检验预测误差及不同群体差异的实证研究，也找讨论公平标准相互冲突的法律或政策论文；请区分“预测准确”与“程序或结果公平”。
+  - id: NL29
+    broad_field: humanities_and_arts
+    focus: philosophy_and_ethics
+    probes: [concept_disambiguation, competing_arguments, non_stem_coverage]
+    prompt_zh: >-
+      当人工智能系统参与影响个人权利的决策时，提供“解释”是否足以说明这个决定是正当的？请找区分解释、理由说明与责任归属的哲学或伦理学论文，呈现不同立场，不要把纯技术性的可解释性算法论文当作全部答案。
+  - id: NL30
+    broad_field: humanities_and_arts
+    focus: linguistics_and_cultural_studies
+    probes: [case_comparison, outcome_definition, non_stem_coverage]
+    prompt_zh: >-
+      濒危语言复兴中，学校开课和社区日常使用分别起什么作用？请找比较具体语言社区的语言学或文化研究，关注儿童是否真正继续使用该语言，而不只是课程开设或学习人数的变化。

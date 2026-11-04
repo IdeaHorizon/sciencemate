@@ -53,7 +53,8 @@ class ResearchSettingsWrite(BaseModel):
 
 
 class EffectiveResearchLayerOut(BaseModel):
-    kind: Literal["institution", "group", "personal"]
+    #: 只有个人层：机构 / 研究组两层在 RFC X2 就没了（`services/research_settings._effective_layers`）。
+    kind: Literal["personal"]
     name: str
     editable: bool
     instruction_count: int = Field(ge=0)

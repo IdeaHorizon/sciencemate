@@ -11,7 +11,10 @@ import html
 import hashlib
 import json
 import re
+import time
 import zipfile
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
@@ -24,6 +27,7 @@ from nodes.data.planning.schemas import canonical_filename_identity
 from nodes.data.planning.store import PlanningStore, approved_plan
 from nodes.data.progress import emit_progress
 
+from .lazy_domain_tools import DEFAULT_DOWNLOAD_MAX_BYTES, DEFAULT_DOWNLOAD_TIMEOUT_SECONDS
 from .scientific_assets import (
     ARCHIVE_SUFFIXES,
     DATASET_SUFFIXES,
@@ -226,6 +230,10 @@ def _is_scientific_asset_link(url: str, label: str = "", snippet: str = "", asse
         return bool(urlparse(url).scheme in {"http", "https"})
     if asset_kind == "dataset" and ext in _SCIENTIFIC_DATA_EXTENSIONS:
         return True
+    if asset_kind == "dataset" and re.search(
+        r"subset|opendap|catalog|metadata|\bapi\b", f"{url} {label}", flags=re.I
+    ):
+        return True
     if asset_kind == "parameters" and ext in _PARAMETER_EXTENSIONS:
         return True
     if asset_kind == "archive" and ext in _ARCHIVE_EXTENSIONS:
@@ -369,6 +377,20 @@ def _url_is_allowed(url: str) -> tuple[bool, str]:
     return True, ""
 
 
+def http_retry_delay(result: dict[str, Any]) -> float:
+    """Respect server cooldowns without shortening them to fit a local budget."""
+    delay = 30.0 if result.get("status_class") == "rate_limited" else 0.5
+    guidance = str(result.get("retry_after") or "").strip()
+    if guidance:
+        try:
+            delay = float(int(guidance)) if guidance.isdigit() else (
+                parsedate_to_datetime(guidance) - datetime.now(timezone.utc)
+            ).total_seconds()
+        except (ValueError, TypeError, OverflowError):
+            pass
+    return max(0.0, delay)
+
+
 def _extract_download_links(
     page_url: str,
     text: str,
@@ -410,8 +432,16 @@ def _extract_download_links(
             "mesh_useful_score": str(_mesh_useful_score(absolute, label)),
             "scientific_asset_score": str(_scientific_asset_score(absolute, label, asset_kind=asset_kind)),
         })
+        # Preserve the catalog's advertised protocol, not a guess from .nc or
+        # another suffix. Service URLs can require a client or subset query.
+        service = re.search(r"\b(HTTPServer|OPeNDAP|NetcdfSubset|NCSS|WMS|WCS)\b", label, re.I)
+        if service:
+            links[-1].update({
+                "service_type": service.group(1),
+                "access_type": "file_download" if service.group(1).lower() == "httpserver" else "data_service",
+            })
     score_key = "mesh_useful_score" if asset_kind in {"geometry", "geometry_or_mesh", "mesh", "structure"} else "scientific_asset_score"
-    links.sort(key=lambda item: int(item.get(score_key) or "0"), reverse=True)
+    links.sort(key=lambda item: (item.get("access_type") == "file_download", int(item.get(score_key) or "0")), reverse=True)
     del links[limit:]
     return links
 
@@ -545,7 +575,7 @@ async def _github_download_or_discover(
         ext = Path(name.lower()).suffix
         if item_type == "file" and download_url:
             useful = (
-                _is_mesh_useful_link(download_url, name)
+                True if asset_kind == "validation_reference" else _is_mesh_useful_link(download_url, name)
                 if asset_kind in {"geometry", "geometry_or_mesh", "mesh", "structure"}
                 else _is_scientific_asset_link(download_url, name, asset_kind=asset_kind)
             )
@@ -558,7 +588,7 @@ async def _github_download_or_discover(
                     "scientific_asset_score": str(_scientific_asset_score(download_url, name, asset_kind=asset_kind)),
                 })
         elif item_type == "dir" and html_url:
-            if _is_mesh_useful_link(html_url, name):
+            if asset_kind == "validation_reference" or _is_mesh_useful_link(html_url, name):
                 links.append({
                     "url": html_url,
                     "label": f"{name}/",
@@ -866,8 +896,9 @@ async def data_web_download(
     state: State,
     url: str,
     output_name: str = "",
-    max_bytes: int = 50_000_000,
+    max_bytes: int = DEFAULT_DOWNLOAD_MAX_BYTES,
     discover_links: bool = True,
+    discovery_only: bool = False,
     download_first_matching_link: bool = False,
     link_pattern: str = "",
     allow_non_mesh_file: bool = False,
@@ -875,7 +906,7 @@ async def data_web_download(
     asset_kind: str = "geometry_or_mesh",
     expected_filename: str = "",
     expected_revision: str = "",
-    timeout_seconds: float = 30.0,
+    timeout_seconds: float = DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
     **_: Any,
 ) -> dict[str, Any]:
     """Download a public file into the current run state root.
@@ -888,13 +919,30 @@ async def data_web_download(
     url = (url or "").strip()
     asset_kind = str(asset_kind or "geometry_or_mesh").strip().lower()
     _authorized_by_approved_search = bool(_.get("_authorized_by_approved_search"))
-    discovery_only = bool(_.get("_discovery_only"))
+    discovery_only = discovery_only or bool(_.get("_discovery_only"))
     if not _authorized_by_approved_search:
         _witness_reference_plan_context(state, "data_web_download")
         store = PlanningStore(state)
         reference_status = store.approval_status("reference_evidence_only")
         reference_record = store.get_plan(reference_status.get("approved_plan_id")) if reference_status.get("approved") else None
-        plan = reference_record.get("plan") if reference_record else (approved_plan(state) or {})
+        active_step = state.hook_state.get("_active_preprocessing_step") or {}
+        plan = (
+            reference_record.get("plan")
+            if reference_record and active_step.get("plan_kind") != "preprocessing_generation"
+            else (approved_plan(state) or {})
+        )
+        # The executor may repair an approved step's arguments without
+        # replacing its DAG. Authorize that effective call, not its stale URL.
+        # This context is executor-owned; direct tool calls still use the plan.
+        approval = store.approval_status(active_step.get("plan_kind") or "preprocessing_generation")
+        if (active_step.get("plan_id") == approval.get("approved_plan_id") and approval.get("approved")
+                and active_step.get("tool_name") == "data_web_download"
+                and isinstance(active_step.get("tool_arguments"), dict)):
+            plan = {**plan, "generation_steps": [
+                {**step, "tool_arguments": active_step["tool_arguments"]}
+                if step.get("id") == active_step.get("step_id") and step.get("tool_name") == "data_web_download"
+                else step for step in plan.get("generation_steps") or []
+            ]}
         authorized, reason, _authorized_request = _plan_authorizes_reference_download(plan, url)
         if not authorized:
             emit_progress(state, "web_download_blocked", "not authorized by approved plan", reason=reason)
@@ -954,7 +1002,7 @@ async def data_web_download(
             cached_result = {**cached, "status": "success", "cache_hit": True}
             remember_downloaded_scientific_asset(state, cached_result)
             return cached_result
-    max_bytes = max(1024, min(int(max_bytes or 50_000_000), 250_000_000))
+    max_bytes = max(1024, int(max_bytes or DEFAULT_DOWNLOAD_MAX_BYTES))
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -962,8 +1010,9 @@ async def data_web_download(
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml,text/plain,application/octet-stream,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": "identity",
     }
-    timeout_seconds = max(5.0, min(float(timeout_seconds or 30.0), 60.0))
+    timeout_seconds = max(5.0, float(timeout_seconds or DEFAULT_DOWNLOAD_TIMEOUT_SECONDS))
     async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True) as client:
         github_result = await _github_download_or_discover(
             client=client,
@@ -982,9 +1031,109 @@ async def data_web_download(
         )
         if github_result is not None:
             return github_result
+        data = bytearray()
+        expected_bytes = None
+        validator = ""
+        validator_header = ""
+        stalled_attempts = 0
+        transfer_attempts = 0
+        progress_bytes = 0
+        progress_at = time.monotonic()
+        error_body = b""
         try:
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
+            # Bound reads during transfer, including metadata probes of large
+            # dataset endpoints. Do not fetch the entire object just to learn
+            # that it exceeds the cap or that it is a catalog page.
+            while True:
+                offset = len(data)
+                transfer_attempts += 1
+                request_headers = dict(headers)
+                resuming = bool(data)
+                if resuming:
+                    request_headers.update({"Range": f"bytes={len(data)}-",
+                                            "If-Range": validator})
+                part = bytearray()
+                try:
+                    # timeout_seconds is the documented connection/read idle
+                    # timeout. A healthy slow stream must not lose its prefix
+                    # merely because total transfer time exceeds that value.
+                    async with client.stream("GET", url, headers=request_headers) as response:
+                        length = response.headers.get("content-length", "")
+                        total = int(length) if length.isdigit() else None
+                        span = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("content-range", ""))
+                        if resuming and not response.is_error:
+                            if (response.status_code != 206 or not span or int(span[1]) != len(data)
+                                    or int(span[2]) != expected_bytes - 1
+                                    or int(span[3]) != expected_bytes
+                                    or response.headers.get(validator_header, validator) != validator
+                                    or response.headers.get("content-encoding", "identity").lower() != "identity"):
+                                return {"status": "error", "status_class": "permanent", "url": url,
+                                        "error": "Remote file identity or byte range changed; incomplete segments were not published."}
+                            total = int(span[3])
+                        elif response.status_code == 206:
+                            return {"status": "error", "status_class": "permanent", "url": url,
+                                    "error": "Unsolicited partial response cannot be published as a complete file."}
+                        if not discovery_only and not response.is_error and total is not None and total > max_bytes:
+                            return {"status": "error", "status_class": "size_limit", "url": str(response.url),
+                                    "expected_bytes": total, "max_bytes": max_bytes,
+                                    "error": f"Remote file is {total} bytes, exceeding max_bytes={max_bytes}; select an advertised subset or explicitly raise the transfer budget if resources permit."}
+                        probe = discovery_only or response.is_error
+                        if not probe and not resuming:
+                            # Keep the initial stream open. Range is recovery, not
+                            # a reason to turn one healthy transfer into many GETs.
+                            identity = response.headers.get("content-encoding", "identity").lower() == "identity"
+                            expected_bytes = total if identity else None
+                            if identity and total and response.headers.get("accept-ranges", "").lower() == "bytes":
+                                etag = response.headers.get("etag", "")
+                                validator_header = "etag" if etag and not etag.startswith("W/") else "last-modified"
+                                validator = response.headers.get(validator_header, "")
+                        read_limit = (min(max_bytes, 4096 if response.is_error else 65536) if probe
+                                      else expected_bytes if expected_bytes is not None else max_bytes)
+                        target = part if probe else data
+                        async for chunk in response.aiter_bytes(chunk_size=16384):
+                            if len(target) + len(chunk) > read_limit:
+                                if not probe:
+                                    return {"status": "error", "status_class": "size_limit", "url": str(response.url),
+                                            "error": f"Response exceeded its declared range or max_bytes={max_bytes}; no partial file was published."}
+                                target.extend(chunk[:read_limit - len(target)])
+                                break
+                            target.extend(chunk)
+                            if not probe and (len(data) - progress_bytes >= 4 * 1024 * 1024
+                                              or time.monotonic() - progress_at >= 30):
+                                progress_bytes = len(data)
+                                progress_at = time.monotonic()
+                                emit_progress(state, "web_download_progress", "receiving file stream",
+                                              bytes=len(data), total_bytes=expected_bytes)
+                        if response.is_error:
+                            error_body = bytes(part)
+                            response.raise_for_status()
+                        if not probe and expected_bytes is not None and len(data) != expected_bytes:
+                            raise httpx.RemoteProtocolError("Incomplete HTTP response", request=response.request)
+                except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+                    # A progressing transfer may disconnect repeatedly. Keep
+                    # its verified prefix, bounded by idle time and consecutive
+                    # stalls, rather than restarting the file after one resume.
+                    stalled_attempts = 0 if len(data) > offset else stalled_attempts + 1
+                    delay = 1.0 if stalled_attempts else 0.0
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        if exc.response.status_code not in {429, 503}:
+                            raise
+                        delay = http_retry_delay({
+                            "status_class": "rate_limited",
+                            "retry_after": exc.response.headers.get("retry-after", ""),
+                        })
+                    if (validator and expected_bytes and 0 < len(data) < expected_bytes
+                            and stalled_attempts < 2 and delay < timeout_seconds):
+                        if delay:
+                            await asyncio.sleep(delay)
+                        emit_progress(state, "web_download_retry", "resuming interrupted stream",
+                                      offset=len(data), total_bytes=expected_bytes, attempt=transfer_attempts + 1,
+                                      retry_delay_seconds=delay)
+                        continue
+                    raise
+                data.extend(part)
+                break
+            data = bytes(data)
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
             return {
@@ -994,24 +1143,28 @@ async def data_web_download(
                 # unverified candidate URL and hides the actionable cause.
                 "status_class": "rate_limited" if status_code in {429, 503} else ("transient" if status_code in {408, 425} or status_code >= 500 else "permanent"),
                 "error": f"HTTP {status_code}",
-                "url": url,
+                "http_status": status_code,
+                "retry_after": exc.response.headers.get("retry-after", ""),
+                "url": str(exc.response.url),
+                "response_excerpt": _clean_html(error_body.decode("utf-8", errors="replace"))[:2000],
+                "bytes_received": len(data),
+                "expected_bytes": expected_bytes,
+                "transfer_attempts": transfer_attempts,
+                "retry_exhausted": bool(data),
+                "message": "The HTTP download channel received a server response; inspect the status and response before changing the endpoint. This is not a DNS failure.",
             }
-        except httpx.RequestError as exc:
+        except (httpx.RequestError, TimeoutError) as exc:
             return {
                 "status": "error",
                 "status_class": "transient",
                 "error": f"{type(exc).__name__}: {exc}",
                 "url": url,
+                "bytes_received": len(data),
+                "expected_bytes": expected_bytes,
+                "transfer_attempts": transfer_attempts,
+                "retry_exhausted": bool(data) or isinstance(exc, TimeoutError),
+                "message": "The connection stalled or transport recovery failed; no partial file was published. timeout_seconds limits inactivity, not total transfer time.",
             }
-        data = response.content
-        if len(data) > max_bytes:
-            return {
-                "status": "error",
-                "error": f"download exceeded max_bytes={max_bytes}",
-                "url": str(response.url),
-                "content_length": len(data),
-            }
-
         if _looks_like_html(response, data):
             text = data.decode(response.encoding or "utf-8", errors="replace")
             links = _extract_download_links(
@@ -1026,7 +1179,7 @@ async def data_web_download(
                 chosen = None
                 for link in links:
                     haystack = f"{link.get('url', '')} {link.get('label', '')}"
-                    if pattern is None or pattern.search(haystack):
+                    if link.get("access_type") != "data_service" and (pattern is None or pattern.search(haystack)):
                         chosen = link
                         break
                 if chosen:
@@ -1048,8 +1201,8 @@ async def data_web_download(
                 "status": "needs_download_selection" if discover_links else "error",
                 "status_class": None if discover_links else "not_downloadable_asset",
                 "message": (
-                    "URL 是 HTML 页面。已提取候选几何/数据下载链接；请选择一个链接再次调用 data_web_download，"
-                    "或设置 download_first_matching_link=true。"
+                    "URL 是 HTML 页面。候选链接可能是文件下载或数据服务；按服务类型和大小选择文件下载，"
+                    "或先探查服务元数据以构建有界子集请求。仅更改文件名不会转换协议或裁剪数据。"
                     if discover_links
                     else "URL 返回的是 HTML 页面而不是真实几何/网格文件，已拒绝保存。"
                 ),
@@ -1058,6 +1211,7 @@ async def data_web_download(
                 "content_type": response.headers.get("content-type", ""),
                 "download_links": links,
                 "download_link_count": len(links),
+                "page_excerpt": _clean_html(text)[:12000],
             }
 
         if discovery_only:
@@ -1071,6 +1225,12 @@ async def data_web_download(
                     "extension": Path(urlparse(resolved_url).path).suffix.lower(),
                 }],
                 "download_link_count": 1,
+                "content_type": response.headers.get("content-type", ""),
+                "content_length": response.headers.get("content-length"),
+                "metadata_excerpt": (
+                    data.decode(response.encoding or "utf-8", errors="replace")[:12000]
+                    if response.headers.get("content-type", "").startswith("text/") else ""
+                ),
             }
 
         filename = _safe_filename(output_name) if output_name else _filename_from_response(url, response)
@@ -1181,6 +1341,7 @@ async def data_web_download(
                         "archive": _extract_mesh_archive(existing),
                         "cache_hit": True,
                         "deduplicated_by_sha256": True,
+                        "acquired_at": datetime.now(timezone.utc).isoformat(),
                     }
                     download_index[url] = result
                     index_path.write_text(json.dumps(download_index, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1224,10 +1385,10 @@ async def data_web_download(
             "asset_kind": asset_kind,
             "asset_profile": inspect_scientific_asset_path(preferred_asset_file or destination),
             "usage_note": (
-                "For Gmsh/OpenFOAM mesh generation, pass saved_path as geometry_file/cad_file/"
-                "stl_file/step_file/geo_file/msh_file according to the downloaded format. "
-                "Record url and sha256 in manifest/source_trace."
+                "Bind saved_path to the consuming step's declared local input; inspect asset_profile "
+                "before processing. Record url and sha256 in manifest/source_trace."
             ),
+            "acquired_at": datetime.now(timezone.utc).isoformat(),
         }
         download_index[url] = result
         download_index[str(response.url)] = result

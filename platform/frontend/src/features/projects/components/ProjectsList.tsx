@@ -58,7 +58,7 @@ export function ProjectsList({ onCreate }: { onCreate?: () => void }) {
       <Empty
         icon={<FolderKanban size={20} />}
         title={t({ zh: "还没有项目", en: "No projects yet" })}
-        hint={t({ zh: "建一个项目，研究会话就有了共享的上下文、证据边界和发表历史。", en: "Create a project to give research sessions a shared context, evidence boundary, and publication history." })}
+        hint={t({ zh: "新建一个项目，开始你的第一项研究。", en: "Create a project to start your first piece of research." })}
         // 这句话叫人「建一个项目」，按钮就得在这句话旁边。
         //
         // 原来只有右上角一个细边框的「新建项目」—— 2026-09-17 走查时用户盯着
@@ -109,8 +109,8 @@ export function ProjectsList({ onCreate }: { onCreate?: () => void }) {
         const org = group.home?.kind === "organisation" ? group.home : null;
         const dark = org !== null && !org.reachable;
         const why: Phrase | null = !org ? null
-          : org.needs_sign_in ? { zh: "要重新登录一下", en: "Needs signing in again" }
-          : !org.reachable ? { zh: "连不上 —— 这是上次看到的", en: "Out of reach — this is what was last seen" }
+          : org.needs_sign_in ? { zh: "需要重新登录", en: "Needs signing in again" }
+          : !org.reachable ? { zh: "无法连接，显示的是上次获取的内容", en: "Unreachable; showing what was last fetched" }
           : null;
         return (
           <section key={group.key} className={`project-group${dark ? " is-out-of-reach" : ""}`}>

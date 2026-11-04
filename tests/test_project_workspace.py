@@ -110,6 +110,51 @@ async def test_node_reads_upstream_but_cannot_write_it(tmp_path: Path) -> None:
     assert (project / "experiments/results.md").read_text() == "measured=7\n"
 
 
+@pytest.mark.asyncio
+async def test_archived_fulltext_is_readable_and_searchable_but_not_writable(tmp_path, monkeypatch):
+    library = tmp_path / "user-library"
+    monkeypatch.setenv("HARNESS_LITERATURE_HOME", str(library))
+    paper = library / "papers" / "arxiv-example" / "paper" / "paper.txt"
+    paper.parent.mkdir(parents=True)
+    paper.write_text("Abstract\nMethods\nvalidated on 500 samples\nResults\n")
+    project = _worktree(tmp_path)
+    state = State.new("literature", tmp_path / "runtime", project_id="p", project_worktree=project)
+
+    read = await execute("read_file", state, path=str(paper), offset=1, limit=2)
+    search = await execute("search_files", state, path=str(paper), pattern="500 samples")
+    listing = await execute("list_files", state, path=str(paper.parent))
+    write = await execute("write_file", state, path=str(paper), content="tampered")
+    assert read["status"] == "success" and "Methods" in read["content"]
+    assert read["truncated"] and read["next_offset"] == 3
+    assert search["status"] == "success" and search["matches"]
+    assert listing["status"] == "success" and listing["entries"]
+    assert write["status"] == "error" and paper.read_text().startswith("Abstract")
+
+
+@pytest.mark.asyncio
+@pytest.mark.requires_symlink
+async def test_library_read_grant_excludes_other_state_and_symlink_escapes(tmp_path, monkeypatch):
+    library = tmp_path / "user-library"
+    monkeypatch.setenv("HARNESS_LITERATURE_HOME", str(library))
+    papers = library / "papers"
+    papers.mkdir(parents=True)
+    secret = library / "credentials" / "cookie.txt"
+    secret.parent.mkdir()
+    secret.write_text("must not be read")
+    other = tmp_path / "other-user" / "papers" / "paper.txt"
+    other.parent.mkdir(parents=True)
+    other.write_text("other user's data")
+    (papers / "escape.txt").symlink_to(secret)
+    state = State.new("literature", tmp_path / "runtime", project_id="p",
+                      project_worktree=_worktree(tmp_path))
+    targets = [secret, other, papers / "escape.txt",
+               papers / ".." / "credentials" / "cookie.txt"]
+    for target in targets:
+        result = await execute("read_file", state, path=str(target))
+        assert result["status"] == "error"
+        assert "must not be read" not in str(result)
+
+
 @requires_sandbox
 @pytest.mark.asyncio
 async def test_shell_escape_fails_at_write_time(tmp_path: Path) -> None:

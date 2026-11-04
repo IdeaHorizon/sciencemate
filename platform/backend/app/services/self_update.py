@@ -239,7 +239,8 @@ def parse_manifest(data: bytes, signature_b64: str,
     try:
         manifest = json.loads(data.decode("utf-8"))
     except ValueError as exc:
-        raise UpdateError(f"manifest 不是合法 JSON：{exc}", en=f"the manifest is not valid JSON: {exc}") from exc
+        raise UpdateError("更新清单无法解析，已拒收", en="the update manifest could not be read, so it was rejected",
+                          evidence=f"\n  {exc}") from exc
     if not isinstance(manifest, dict) or manifest.get("schema") != MANIFEST_SCHEMA:
         raise UpdateError(f"manifest schema 不是 {MANIFEST_SCHEMA}", en=f"the manifest schema is not {MANIFEST_SCHEMA}")
     for key, kind in (("version", str), ("archive", str), ("sha256", str), ("size", int)):
@@ -462,9 +463,9 @@ def find_the_newest_installable(configured: str, get_json: Callable[[str], Any],
                              assets, manifest, tag, tuple(still_publishing))
         still_publishing.append(StillPublishing(tag, tuple(missing)))
     if not still_publishing:
-        raise NothingPublishedYet(f"{host}/{owner}/{repo} 上还没有正式发布的 release",
+        raise NothingPublishedYet(f"{host}/{owner}/{repo} 还没有发布任何版本",
                                   en=f"{host}/{owner}/{repo} has no published release yet")
-    raise NothingPublishedYet(f"最近 {LOOK_BACK} 个 release 都还没传完："
+    raise NothingPublishedYet(f"最近 {LOOK_BACK} 个版本都还在上传中："
                               + "；".join(str(s) for s in still_publishing),
                               en=f"none of the last {LOOK_BACK} releases has finished uploading: "
                               + "; ".join(str(s) for s in still_publishing))
@@ -609,9 +610,10 @@ def check_for_update(data_root: Path, harness_dir: Path | None, configured_sourc
         status.error_kind = "rejected"
         return status, None, None, {}
     except Exception as exc:  # 网络、超时、404 —— 拉不到就是拉不到，不影响使用
+        # 原话（异常类名 + 消息）单独放：「关于」页把它折在「技术细节」里，不拼进那句话。
         status.error_cause = f"{type(exc).__name__}: {exc}"
-        status.error = say({"zh": "拿不到更新信息：{cause}", "en": "Could not fetch update information: {cause}"},
-                           lang, cause=status.error_cause)
+        status.error = say({"zh": "无法连接更新服务器，请检查网络。",
+                            "en": "Could not reach the update server. Check your network connection."}, lang)
         status.error_kind = "unreachable"
         return status, None, None, {}
     source, assets, manifest = found.source, found.assets, found.manifest
@@ -790,15 +792,15 @@ def apply_staged_at_launch(data_root: Path) -> str | None:
     staged = payload_root(data_root) / "staged" / version
     try:
         if not _looks_like_a_payload(staged):
-            raise UpdateError(f"暂存的 {version} 不完整（缺 agent_loop.py 或版本标记）",
-                              en=f"the staged {version} is incomplete (agent_loop.py or the version marker is missing)")
+            raise UpdateError(f"已下载的 {version} 不完整（缺少必要文件）",
+                              en=f"The downloaded {version} is incomplete (required files are missing)")
         problem = why_the_payload_cannot_start(staged)
         if problem:
             raise UpdateError(
-                f"{version} 的后端在这份安装上起不来（{problem}）—— 没有切过去，"
-                "当前版本原样继续。这一版要重新下载安装包。",
-                en=f"the {version} backend cannot start on this installation ({problem}); it was not switched "
-                   "in and the current version carries on. This version needs a fresh installer download.")
+                f"{version} 无法在这台电脑上启动，已继续使用当前版本。请重新下载安装包来安装这个版本。",
+                en=f"Version {version} cannot start on this computer, so the current version is "
+                   "still in use. Download the installer again to install this version.",
+                evidence=f"\n  {problem}")
         target = payload_root(data_root) / version
         if target.exists():
             shutil.rmtree(target)
@@ -821,12 +823,13 @@ def apply_staged_at_launch(data_root: Path) -> str | None:
     except Exception as exc:
         try:
             # 两种语言都记下：读它的是「关于」页，而写它的这一刻（启动器里）不知道那一屏
-            # 会是哪种语言。不是 UpdateError 的（代码出错）只有一种原话，照原样记。
-            record = ({"zh": f"{type(exc).__name__}: {exc}", "en": f"{type(exc).__name__}: {exc.en}"}
-                      if isinstance(exc, UpdateError) else f"{type(exc).__name__}: {exc}")
-            apply_error_path(data_root).write_text(
-                json.dumps(record, ensure_ascii=False) if isinstance(record, dict) else record,
-                encoding="utf-8")
+            # 会是哪种语言。「关于」页只说那句话；原话（类名、探针输出）是查问题的证据，
+            # 记在同一个文件的 `evidence` 里，不上界面。
+            said = (exc if isinstance(exc, UpdateError) else UpdateError(
+                "安装更新时出错，已继续使用当前版本", en="Something went wrong while installing the update, "
+                "so the current version is still in use", evidence=f"\n  {type(exc).__name__}: {exc}"))
+            record = {"zh": said.said_in("zh"), "en": said.said_in("en"), "evidence": said.evidence.strip()}
+            apply_error_path(data_root).write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
         except OSError:
             pass
         return None

@@ -119,6 +119,12 @@ async def ingest_items(
     if not deduped:
         return report
 
+    # 内容层的闸（#730）：网络层的 SSRF/词表边界管不到条目**写了什么**。外部作者写的
+    # 标题、摘要会被资讯简报拼进 prompt —— 所以在落库这一条路上就地中和 harness 控制
+    # 标签，模式表看到的东西落成见证（`extra` 里），读的时候由数据框呈现。不拦条目：
+    # 名单是不全的，判决留给读的那一刻。放在补图、归档之前：它们存下来的也是这份。
+    witnesses = {key: _witness_and_neutralise(item) for key, item in deduped.items()}
+
     existing_items = list(
         (
             await db.execute(
@@ -186,6 +192,7 @@ async def ingest_items(
                 }
                 if not existing.summary and item.summary:
                     existing.summary = item.summary
+                existing.extra = extra_with_witness(existing.extra, witnesses.get(key))
                 if not existing.image_url and item.image_url:
                     existing.image_url = item.image_url
             report.duplicates += 1
@@ -212,6 +219,7 @@ async def ingest_items(
             )
             if decision.accepted:
                 domains = list(decision.domains)
+        extra = extra_with_witness(extra, witnesses.get(key))
         record = FeedItem(
             canonical_key=key,
             kind=item.kind,
@@ -242,6 +250,53 @@ async def ingest_items(
             continue
         report.stored += 1
     return report
+
+
+#: 资讯条目里**外部作者写的**那几栏。落库的内容层闸（#730）只看、只改这几栏。
+#:
+#: feed_items 的落库不止 `ingest_items` 一条路：文献目录的投影
+#: （`literature_projection.project_literature_catalog`）直接写这张表。两条路都调
+#: 下面这两个函数 —— 规则只在这一处，第三条路接进来也是调它们，不是再抄一份。
+AUTHOR_WRITTEN_FIELDS = ("title", "summary", "authors", "venue")
+
+
+def neutralise_author_written(values: dict, *, via: str) -> tuple[dict, dict | None]:
+    """中和 `values` 里外部作者写的几栏，返回（新 values，见证 —— 没看到东西就是 None）。
+
+    不拦条目；只有 harness 控制标签在这里就地转义，模式表看到的东西落成见证，读的
+    时候（资讯简报那次模型调用）由数据框呈现、判决现算。
+    （harness 的模块只能在函数里导入：装出来的包先导入 app，harness 根那时还不在
+    sys.path 上 —— tests/test_the_page_must_actually_come_up.py。）
+    """
+    from shared.lib.external_content import witness_at_ingest
+
+    picked = {k: values[k] for k in AUTHOR_WRITTEN_FIELDS if k in values}
+    cleaned, witness = witness_at_ingest(picked, via=via)
+    return {**values, **cleaned}, witness
+
+
+def extra_with_witness(extra: dict | None, witness: dict | None) -> dict:
+    """把见证并进条目的 `extra`。只累积：同一条再落一次库，洗不掉上次看到的东西。"""
+    from shared.lib.external_content import WITNESS_FIELD, merge_witnesses
+
+    out = dict(extra or {})
+    if witness:
+        out[WITNESS_FIELD] = merge_witnesses(out.get(WITNESS_FIELD), witness)
+    return out
+
+
+def _witness_and_neutralise(item: CollectedItem) -> dict | None:
+    """就地中和一条原料里外部作者写的文字，返回见证。"""
+    values, witness = neutralise_author_written(
+        {"title": item.title, "summary": item.summary, "authors": list(item.authors),
+         "venue": item.venue},
+        via="feed.ingest",
+    )
+    item.title = values["title"]
+    item.summary = values["summary"]
+    item.authors = values["authors"]
+    item.venue = values["venue"]
+    return witness
 
 
 def is_stale(

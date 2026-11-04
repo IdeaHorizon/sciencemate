@@ -22,8 +22,9 @@
 1. **收口**：一次性调用只有这一份实现。两份抄件各自演化时不会有任何东西报错
    （`harness_runtime` 早就会 drain stderr 并把它带进错误，两份抄件却没跟上 ——
    这正是"一个问题几份抄件就有几个答案"的样子）。
-2. **失败必须说出为什么**：stderr 一律 drain、按 `secret` 打码、进每一条错误消息。
-   桥只给了个 code（没有 message）时，stderr 是唯一的线索。
+2. **失败必须说出为什么**：stderr 一律 drain、按 `secret` 打码、跟着每一个异常走
+   （`str(异常)` 与日志里看得到）。桥只给了个 code（没有 message）时，stderr 是唯一的
+   线索。它是写给查问题的人的，不进界面上那句话（`SaidToAPerson.evidence`）。
 
 ## 不做什么
 
@@ -59,22 +60,17 @@ async def ask_once(
     """写一行请求，等 `expect` 那个事件。任何一种失败都带上 stderr。
 
     `error` 是调用方的异常工厂 —— 调用方的错误类型是它自己契约的一部分，不该被
-    收口这件事改掉。它按 `error(中文那句, en=英文那句)` 调（`SaidToAPerson` 的形状）：
-    这些错误有的原话透到界面上（KB 裁决、算力授权），两种语言都写。桥自己的话和
-    stderr 是证据，两句里各带一份原样的。`secret` 给了就从 stderr 和消息里打码
-    （子进程的环境里带着模型凭据，traceback 里出现过）。
+    收口这件事改掉。它按 `error(中文那句, en=英文那句, evidence=…)` 调（`SaidToAPerson`
+    的形状）：那两句有的会透到界面上（KB 裁决、算力授权），两种语言都写；stderr 是
+    查问题的证据，放在 `evidence` 里 —— 进 `str(异常)`、进日志，不进说给人听的那句。
+    `secret` 给了就从 stderr 和消息里打码（子进程的环境里带着模型凭据，traceback 里出现过）。
     """
     def say(headline: dict[str, str], stderr: str) -> Exception:
         tail = _redact(stderr, secret).strip()
-        if tail:
-            zh = (f"{headline['zh']}\n  桥的 stderr（末 {STDERR_TAIL_CHARS} 字）："
-                  f"\n{tail[-STDERR_TAIL_CHARS:]}")
-            en = (f"{headline['en']}\n  bridge stderr (last {STDERR_TAIL_CHARS} chars):"
-                  f"\n{tail[-STDERR_TAIL_CHARS:]}")
-        else:
-            zh = f"{headline['zh']}（桥的 stderr 一个字都没有）"
-            en = f"{headline['en']} (the bridge wrote nothing to stderr)"
-        return error(_redact(zh, secret), en=_redact(en, secret))
+        evidence = (f"\n  bridge stderr (last {STDERR_TAIL_CHARS} chars):\n{tail[-STDERR_TAIL_CHARS:]}"
+                    if tail else "\n  (the bridge wrote nothing to stderr)")
+        return error(_redact(headline["zh"], secret), en=_redact(headline["en"], secret),
+                     evidence=evidence)
 
     process = await asyncio.create_subprocess_exec(
         python, "-m", "platform_runtime",
@@ -93,9 +89,8 @@ async def ask_once(
         process.kill()
         # 杀完还要收尸并把它已经说过的话拿到手 —— 超时最需要 stderr。
         _, late = await process.communicate()
-        raise say({"zh": f"harness 桥 {timeout_s:.0f} 秒内没回答（op={request.get('op')!r}）",
-                   "en": f"the harness bridge did not answer within {timeout_s:.0f} seconds "
-                         f"(op={request.get('op')!r})"},
+        raise say({"zh": f"请求超时：{timeout_s:.0f} 秒内没有响应",
+                   "en": f"Request timed out: no response within {timeout_s:.0f} seconds"},
                   (late or b"").decode("utf-8", errors="replace")) from exc
 
     stderr = (stderr_bytes or b"").decode("utf-8", errors="replace")
@@ -121,8 +116,8 @@ async def ask_once(
             # 缺理由），不必去解析给人看的那句话。
             refused.code = str(event.get("code") or "")  # type: ignore[attr-defined]
             raise refused
-    raise say({"zh": f"harness 桥没给出 {expect}（退出码 {process.returncode}）",
-               "en": f"the harness bridge gave no {expect} (exit code {process.returncode})"}, stderr)
+    raise say({"zh": f"后台任务异常退出（退出码 {process.returncode}）",
+               "en": f"The background task exited unexpectedly (exit code {process.returncode})"}, stderr)
 
 
 def _redact(text: str, secret: str | None) -> str:

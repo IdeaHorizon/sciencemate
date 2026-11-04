@@ -235,7 +235,7 @@ export async function addFileToSession(
         ? detail
         : typeof detail?.message === "string"
           ? detail.message
-          : say({ zh: "文件没能交上去（HTTP {status}）", en: "The file could not be uploaded (HTTP {status})" }, lang, { status: response.status });
+          : say({ zh: "上传失败（HTTP {status}）", en: "Upload failed (HTTP {status})" }, lang, { status: response.status });
     throw new ApiError(message, response.status);
   }
   return response.json() as Promise<AddedFile>;

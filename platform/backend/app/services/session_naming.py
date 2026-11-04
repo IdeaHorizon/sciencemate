@@ -41,7 +41,7 @@ from app.services.harness_runtime import (
     harness_subprocess_env,
     the_interpreter_that_runs_the_harness,
 )
-from app.services.model_backends import resolved_api_key
+from app.services.model_backends import credential_is_optional, resolved_api_key
 from app.services.sessions import session_title_is_machine_made
 
 logger = logging.getLogger(__name__)
@@ -82,9 +82,11 @@ async def schedule_session_autoname(
     凭据必须在这里就取出来（`backend` 是绑在调用方事务上的对象），detached
     任务里再去碰它就是在一个已经关掉的 session 上取属性。
     """
-    api_key = resolved_api_key(backend)
+    api_key = resolved_api_key(backend) or ""
     base_url = _provider_base_url(backend)
-    if not api_key or not base_url:
+    # 自建端点（填了 base_url）不鉴权是正常形态，和会话、资讯同一个判据（credential_is_optional）。
+    # 以前这里要 key，用不鉴权的自建模型的人，会话永远是机械标题。
+    if not base_url or (not api_key and not credential_is_optional(backend)):
         # 命名是锦上添花：后端没凭据时保持机械标题，不要把它变成一条报错。
         return None
 
@@ -206,7 +208,8 @@ async def _ask_harness_for_title(
         child_env=child_env,
         timeout_s=_TIMEOUT_SECONDS,
         # 子进程环境里带着模型凭据，它的 traceback 里出现过 —— 打码后才进日志。
-        secret=api_key,
+        # 没有 key（不鉴权的自建端点）就没有要打码的东西：给 None，别拿空串去当一个「值」抹。
+        secret=api_key or None,
     )
     title = event.get("title")
     return title.strip() if isinstance(title, str) else ""

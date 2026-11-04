@@ -101,6 +101,26 @@ async def _initialize_manager_worktree(*, user: User, project_id: str, session_i
     return Path(workspace.path)
 
 
+async def _a_real_baseline(project: Project) -> str:
+    """项目 main 当前的提交 —— 给"会话的 git 基线"一个仓库里真有的值。
+
+    恢复（`/recover`）在源会话没有分支头时要从源会话**自己的 base** 开分支（#1186），
+    于是 base 必须是仓库里存在的提交。从前这里的夹具写 `"0" * 40`：一个不存在的
+    基线，恢复却照样成功 —— 因为那时没有 head 就悄悄退回项目当前的 main。
+    """
+    from app.services.project_repository import get_project_repository
+
+    status = await run_in_repository_thread(
+        get_project_repository().initialize_project,
+        project_id=str(project.id),
+        name=project.name,
+        description=project.description,
+        research_domain=project.research_domain,
+        owner_id=project.owner_id,
+    )
+    return status.head_commit
+
+
 @compiles(JSONB, "sqlite")
 def _compile_jsonb_for_sqlite(_type, _compiler, **_kwargs) -> str:
     """Keep the production JSONB mapping while exercising ProjectConfig locally."""
@@ -898,21 +918,9 @@ async def test_personal_research_settings_are_persistent_and_user_isolated(
         "evidence_standard": "balanced",
         "memory_enabled": True,
         "instructions": [],
+        # 只有个人层：机构 / 研究组两层没有文件、没有写入口，助手读不到（RFC X2）。以前照旧
+        # 报着它们，instruction_count 永远是 0，界面永远显示「未设置」。
         "effective_layers": [
-            {
-                "kind": "institution",
-                "name": "Atrium University",
-                "editable": False,
-                "instruction_count": 0,
-                "summary": "No published institution behavior instructions are active.",
-            },
-            {
-                "kind": "group",
-                "name": "Computational Science Lab",
-                "editable": False,
-                "instruction_count": 0,
-                "summary": "No published research-group behavior instructions are active.",
-            },
             {
                 "kind": "personal",
                 "name": "Researcher",
@@ -2105,7 +2113,7 @@ async def test_the_explicit_interrupt_endpoint_says_why_it_cannot_deliver(
         json={"text": "有人吗"},
     )
     assert response.status_code == 409, response.text
-    assert "Nothing is running" in response.text, (
+    assert "当前没有正在运行的执行" in response.text, (
         f"409 说不出为什么投不进去，调用方只能猜：{response.text}"
     )
 
@@ -2905,7 +2913,7 @@ async def test_lost_kept_alive_pause_becomes_stale_unknown(runtime_client) -> No
             session_id=conversation_id,
             initiating_user_id=user.id,
             title="Lost pause",
-            git_base_commit_sha="0" * 40,
+            git_base_commit_sha=await _a_real_baseline(project),
             created_by_user_id=user.id,
             model_backend_id=backend.id,
             policy_snapshot_id="policy-snapshot-1",
@@ -3009,9 +3017,12 @@ async def test_lost_kept_alive_pause_becomes_stale_unknown(runtime_client) -> No
         # 那段注释：从项目基线重开会把几小时的 checkpoint 丢掉）。从前这一条查的
         # 是两个会话的 ChangeSet 共用 base_revision_id —— 同一件事的投影，而且
         # 投影记的还是"当初的起点"，不是"停下的地方"。
-        assert continuation.git_base_commit_sha == (
-            source.git_head_commit_sha or continuation.git_base_commit_sha
-        ), "接续会话要从源会话停下的地方长出去；源会话没跑过就从项目当前 head"
+        # 这个源会话从没开过工作区（没有分支头），所以起点是**它自己的 base**，
+        # 不是项目当前的 main（#1186：main 上是别人后来的工作）。分支头在、且与
+        # 账本对得上时从分支头接 —— 那条路由 test_a_recovered_session_sees_what_the_original_froze 钉住。
+        assert continuation.git_base_commit_sha == source.git_base_commit_sha, (
+            "源会话没有分支头时，接续会话要从源会话自己的 base 长出去"
+        )
         assert (
             await db.scalar(
                 select(func.count())
@@ -3066,7 +3077,7 @@ async def test_recovery_anchors_on_the_run_that_lost_its_runtime_not_the_newest(
             session_id=conversation_id,
             initiating_user_id=user.id,
             title="Anchor",
-            git_base_commit_sha="0" * 40,
+            git_base_commit_sha=await _a_real_baseline(project),
             created_by_user_id=user.id,
             model_backend_id=backend.id,
         )
@@ -3525,6 +3536,77 @@ async def _noop_async() -> None:
 
 
 @pytest.mark.asyncio
+async def test_discussing_a_pause_keeps_the_reply_visible_and_the_original_card(
+    runtime_client, monkeypatch,
+):
+    from app.services.harness_transcript_ingest import _session_runtime_root
+    from app.services.sessions import append_session_message
+
+    client, factory = runtime_client
+    token = await _token(client, "researcher@atrium.local")
+    project_id = (await client.get("/api/v1/projects/", headers=_headers(token))).json()[0]["id"]
+    created = await client.post(
+        f"/api/v1/projects/{project_id}/sessions", headers=_headers(token),
+        json={"title": "Discuss decision"},
+    )
+    session_id = created.json()["id"]
+    run_id = "run-discuss-decision"
+    async with factory() as db:
+        session = await db.get(SessionProjection, session_id)
+        user_id = session.initiating_user_id
+        db.add(Run(
+            id=run_id, tenant_id=session.tenant_id, workspace_id=session.workspace_id,
+            project_id=project_id, session_id=session_id, status="waiting_human",
+            summary={"executionKernel": "formal_harness"},
+        ))
+        db.add(RunAttempt(
+            tenant_id=session.tenant_id, workspace_id=session.workspace_id,
+            project_id=project_id, session_id=session_id, run_id=run_id,
+            attempt_no=1, status="running",
+        ))
+        await append_session_message(
+            db, session_id=session_id, role="assistant", content="是否修改？",
+            actor_user_id=None, run_id=run_id, offer_id="offer-live",
+        )
+        await db.commit()
+    transcript = _session_runtime_root(project_id, session_id) / "dialogue" / "transcript.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text("")
+    binding = AppRunBinding(user_id, session_id, run_id, session_id)
+    monkeypatch.setattr(harness_session_manager, "paused_binding", lambda *_: binding)
+    monkeypatch.setattr(harness_session_manager, "is_occupied", lambda *_: False)
+
+    async def answer(**kwargs):
+        assert kwargs["answer"] == "为什么建议修改？" and not kwargs.get("choice")
+        return {
+            "status": "paused", "dialogue_only": True, "_session_resumable": True,
+            "run_id": "orchestrator-discussion", "final_text": "因为计量单位不一致。",
+            "tokens_used_delta": 2, "artifact_paths": [], "transcript_path": str(transcript),
+            "pause_id": "decision", "pause_event": {
+                "question": "是否修改？", "pending_tool_call_id": "decision",
+                "offer": {"offer_id": "offer-live"}, "metadata": {"type": "decision_package"},
+            },
+        }
+
+    monkeypatch.setattr(harness_session_manager, "answer", answer)
+    response = await client.post(
+        f"/api/v1/chat/projects/{project_id}/stream", headers=_headers(token),
+        json={
+            "answer": {"kind": "text", "text": "为什么建议修改？"}, "conversation_id": session_id,
+        },
+    )
+    assert response.status_code == 200 and "因为计量单位不一致" in response.text
+    async with factory() as db:
+        messages = list((await db.scalars(select(SessionMessage).where(
+            SessionMessage.session_id == session_id,
+        ).order_by(SessionMessage.sequence))).all())
+        assert messages[0].offer_id == "offer-live"
+        assert messages[-1].role == "assistant" and messages[-1].content == "因为计量单位不一致。"
+        assert messages[-1].offer_id is None  # the explanation isn't hidden behind the old card
+        assert (await db.get(Run, run_id)).status == "waiting_human"
+
+
+@pytest.mark.asyncio
 async def test_answering_a_pause_always_leaves_a_terminal_run(
     runtime_client, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3937,6 +4019,8 @@ async def test_a_message_while_running_routes_to_an_interjection(
         ).scalars().all()
         assert [(m.role, m.content) for m in rows] == [("user", "跑的怎么样了？")]
         assert rows[0].run_id == "run_interject_target"
+        assert done["messageId"] == rows[0].id
+        assert done["messageSequence"] == rows[0].sequence
 
     # message_id 必须随投递一起走到 worker：回执和答复靠它锚回**这条**
     # 消息。丢了它，答复只能挂进 run 的活动窗口 —— 渲染在提问上面
@@ -4053,7 +4137,7 @@ async def test_a_refused_checkpoint_is_witnessed_but_does_not_kill_the_turn(
         if event.get("type") == "progress"
         and event.get("event") == "workspace.checkpoint_failed"
     )
-    assert "没有丢失" in witness["detail"]
+    assert "文件仍在工作区中" in witness["detail"]
 
     async with factory() as observer:
         run = await observer.get(Run, done["run_id"])

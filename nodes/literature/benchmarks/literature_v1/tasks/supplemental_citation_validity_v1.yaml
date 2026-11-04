@@ -1,0 +1,11 @@
+suite: literaturebench_citation_validity_supplement_v1
+version: 0.1.0
+status: supplementary_unscored
+language: zh-CN
+result_limit: 100
+parent_suite: literaturebench_balanced_natural_language_30_v3
+tasks:
+- id: NL20C
+  broad_field: natural_sciences
+  focus: computer_and_information_sciences
+  prompt_zh: 在检索增强生成中，重排序检索结果能否减少错误引文或提高引文可核验性？请找直接测量引文正确率、出处忠实度或错误引用率的实验研究；不要用仅评估回答正确率的论文代替。

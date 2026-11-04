@@ -123,3 +123,19 @@ def test_every_node_harness_enables_it():
                if runs_the_framework_loop(n)
                and "project_orientation" not in (load_harness(n).loop_hooks or [])]
     assert not missing, f"这些节点没接定向层：{missing}"
+
+
+def test_orientation_carries_the_execution_context_facts(tmp_path):
+    """#1263：平台在进程起来之前就知道的事（后端、shell、不可达的东西），必须在开局
+    就送到模型面前 —— 造好了没接到路径上等于没造。这里断言的是渲染结果，不是源码里
+    有没有那个名字。"""
+    root = _worktree(tmp_path)
+    hypo = _state(tmp_path, root, "hypothesis")
+    prereg = hypo.save_artifact("pre_registration", "P", "协议", metadata={})
+    hypo.mark_frozen(prereg["id"])
+    msgs = _project_orientation_on_turn_start(_Ctx(_state(tmp_path, root, "experiment")))
+    assert msgs is not None
+    text = msgs[0].content
+    assert "⚙️ 这一轮的执行上下文" in text
+    assert "- 隔离后端：" in text and "- 模型 shell：" in text
+    assert "写只限自己的作用域" in text

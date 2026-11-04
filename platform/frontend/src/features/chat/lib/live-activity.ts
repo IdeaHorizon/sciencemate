@@ -31,7 +31,7 @@ function projectedStatus(activity: ChatActivity, lang: Language) {
   const recoveryReason = string(activity.raw.reason);
 
   if (rawStatus === "failed" || rawStatus === "error") {
-    return { statusText: say({ zh: "这次执行需要人看一下", en: "Execution needs attention" }, lang), tone: "failed" as const };
+    return { statusText: say({ zh: "执行遇到问题", en: "Execution needs attention" }, lang), tone: "failed" as const };
   }
   if (inner === "llm_retry_scheduled" || inner === "llm_truncation_recovery_injected") {
     return { statusText: say({ zh: "正在重试模型请求", en: "Retrying the model request" }, lang), tone: "attention" as const };
@@ -44,9 +44,9 @@ function projectedStatus(activity: ChatActivity, lang: Language) {
     const maximum = number(activity.raw.max_attempts) ?? number(activity.raw.maxAttempts);
     const counter = attempt && maximum
       ? ` · ${say({ zh: "第 {attempt}/{max} 次重试", en: "retry {attempt}/{max}" }, lang, { attempt, max: maximum })}`
-      : ` · ${say({ zh: "重试中", en: "retrying" }, lang)}`;
+      : ` · ${say({ zh: "正在重试", en: "retrying" }, lang)}`;
     return {
-      statusText: `${say({ zh: "模型没给出可用的回复", en: "The model returned no usable response" }, lang)}${counter}`,
+      statusText: `${say({ zh: "模型未返回可用的回复", en: "The model returned no usable response" }, lang)}${counter}`,
       tone: "attention" as const,
     };
   }
@@ -54,10 +54,10 @@ function projectedStatus(activity: ChatActivity, lang: Language) {
     return { statusText: say({ zh: "正在恢复这次执行", en: "Recovering the execution" }, lang), tone: "attention" as const };
   }
   if (inner === "run_paused" || inner === "run.paused" || inner === "loop_pause" || outer === "harness.pause_required") {
-    return { statusText: say({ zh: "在等你回话", en: "Waiting for your input" }, lang), tone: "attention" as const };
+    return { statusText: say({ zh: "等待你回复", en: "Waiting for your input" }, lang), tone: "attention" as const };
   }
   if (inner === "run.waiting_compute") {
-    return { statusText: say({ zh: "在等后台的研究", en: "Waiting for background research" }, lang), tone: "working" as const };
+    return { statusText: say({ zh: "等待后台任务完成", en: "Waiting for background tasks" }, lang), tone: "working" as const };
   }
   if (
     (inner === "tool_start" || inner === "tool_call" || inner === "tool.progress")
@@ -67,11 +67,11 @@ function projectedStatus(activity: ChatActivity, lang: Language) {
   }
   if (inner === "tool_result" || inner === "tool_long_running") {
     return { statusText: inner === "tool_long_running"
-      ? say({ zh: "在等一个研究工具", en: "Waiting for a research tool" }, lang)
-      : say({ zh: "正在看工具结果", en: "Analyzing tool results" }, lang), tone: "working" as const };
+      ? say({ zh: "等待工具返回结果", en: "Waiting for a tool to finish" }, lang)
+      : say({ zh: "正在分析工具结果", en: "Analyzing tool results" }, lang), tone: "working" as const };
   }
   if (inner === "llm_request" || inner === "llm_start") {
-    return { statusText: say({ zh: "正在想这个研究任务", en: "Thinking through the research task" }, lang), tone: "working" as const };
+    return { statusText: say({ zh: "正在思考", en: "Thinking" }, lang), tone: "working" as const };
   }
   if (inner === "llm_response") {
     return { statusText: say({ zh: "正在生成回复", en: "Generating the response" }, lang), tone: "working" as const };
@@ -80,13 +80,13 @@ function projectedStatus(activity: ChatActivity, lang: Language) {
     // 「Sending the request to DeepSeek · GPUStack (local)」—— 用户看到的是
     // 传输细节，不是研究状态（wangd 2026-08-18：「很奇怪，统一改成 thinking」）。
     // backend 是哪个在 composer 的模型徽标上一直可见，这里不用复读。
-    return { statusText: say({ zh: "在想", en: "Thinking" }, lang), tone: "working" as const };
+    return { statusText: say({ zh: "正在思考", en: "Thinking" }, lang), tone: "working" as const };
   }
   if (inner === "subagent_call_start" || outer === "harness.child_event") {
-    return { statusText: say({ zh: "正在开始一步研究", en: "Starting a research step" }, lang), tone: "working" as const };
+    return { statusText: say({ zh: "正在开始研究步骤", en: "Starting a research step" }, lang), tone: "working" as const };
   }
   if (outer === "harness.background_wait") {
-    return { statusText: say({ zh: "在等后台的研究", en: "Waiting for background research" }, lang), tone: "working" as const };
+    return { statusText: say({ zh: "等待后台任务完成", en: "Waiting for background tasks" }, lang), tone: "working" as const };
   }
   if (
     inner === "platform_context_bound"
@@ -101,7 +101,7 @@ function projectedStatus(activity: ChatActivity, lang: Language) {
     || outer === "harness.progress"
     || outer === "harness.transcript"
   ) {
-    return { statusText: say({ zh: "正在启动项目助手", en: "Starting the Project assistant" }, lang), tone: "working" as const };
+    return { statusText: say({ zh: "正在启动助手", en: "Starting the assistant" }, lang), tone: "working" as const };
   }
   return undefined;
 }
@@ -122,25 +122,25 @@ export function projectLiveActivity(
   const lang = options.lang;
   const view = options.view ?? null;
   if (view?.waitingOn?.kind === "human") {
-    return { statusText: say({ zh: "在等你回话", en: "Waiting for your input" }, lang), tone: "attention" };
+    return { statusText: say({ zh: "等待你回复", en: "Waiting for your input" }, lang), tone: "attention" };
   }
   if (view?.waitingOn?.kind === "permission") {
-    return { statusText: say({ zh: "在等授权", en: "Waiting for permission" }, lang), tone: "attention" };
+    return { statusText: say({ zh: "等待授权", en: "Waiting for permission" }, lang), tone: "attention" };
   }
   if (view?.waitingOn?.kind === "compute") {
-    return { statusText: say({ zh: "在等后台的研究", en: "Waiting for background research" }, lang), tone: "working" };
+    return { statusText: say({ zh: "等待后台任务完成", en: "Waiting for background tasks" }, lang), tone: "working" };
   }
   if (view?.phase === "interrupted") {
     return {
       statusText: say({
-        zh: "这一轮没跑完 —— 执行进程在写下终态之前退出了",
-        en: "This turn did not finish — the execution process exited before recording a final state",
+        zh: "执行意外中断",
+        en: "The run stopped unexpectedly",
       }, lang),
       tone: "attention",
     };
   }
   if (view?.outcome === "failed" || view?.outcome === "cancelled") {
-    return { statusText: say({ zh: "执行失败了", en: "Execution failed" }, lang), tone: "failed" };
+    return { statusText: say({ zh: "执行失败", en: "Execution failed" }, lang), tone: "failed" };
   }
 
   for (let index = activities.length - 1; index >= 0; index -= 1) {
@@ -150,8 +150,8 @@ export function projectLiveActivity(
 
   return {
     statusText: options.running
-      ? say({ zh: "正在启动项目助手", en: "Starting the Project assistant" }, lang)
-      : say({ zh: "读不到执行进展", en: "Execution update unavailable" }, lang),
+      ? say({ zh: "正在启动助手", en: "Starting the assistant" }, lang)
+      : say({ zh: "无法获取执行进度", en: "Could not load progress" }, lang),
     tone: "working",
   };
 }

@@ -18,7 +18,7 @@ test("nothing to say → no banner; a degraded precondition → a yellow banner 
   const model = bannerModel(env([{}]), "zh", null);
   assert.ok(model);
   assert.equal(model.tone, "warning");
-  assert.match(model.title, /会话运行目录建不出来/);
+  assert.match(model.title, /无法创建会话目录/);
   assert.deepEqual(model.lines, ["这一轮的运行记录落在临时目录"]);
   assert.equal(model.repair, null, "没有提案就没有修复按钮");
 });
@@ -30,7 +30,7 @@ test("a fatal event is red and names the code in plain words; a conflict offers 
   }]), "zh", null);
   assert.ok(model);
   assert.equal(model.tone, "error");
-  assert.match(model.title, /写着别人的身份/);
+  assert.match(model.title, /属于其他用户/);
   assert.equal(model.repair, null);
 });
 
@@ -73,8 +73,8 @@ test("an escalated report cannot be dismissed and says which repetition this is"
 
 test("english copy exists for every branch", () => {
   const model = bannerModel(env([{}]), "en", null);
-  assert.match(model?.title ?? "", /precondition/);
-  assert.match(bannerModel(env([{ severity: "fatal", code: "tenant_home_conflict", consequences: [] }]), "en", null)?.title ?? "", /did not start/);
+  assert.match(model?.title ?? "", /may not be saved/);
+  assert.match(bannerModel(env([{ severity: "fatal", code: "tenant_home_conflict", consequences: [] }]), "en", null)?.title ?? "", /could not start/);
 });
 
 test("后端存下的话两种语言都写：横幅按这一屏挑；老事件里的一句字符串照原样给", () => {

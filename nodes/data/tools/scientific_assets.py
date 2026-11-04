@@ -285,7 +285,11 @@ def _tabular_checks(path: Path, delimiter: str) -> tuple[list[dict[str, Any]], d
     return gates, metadata
 
 
-def surface_topology_metrics(cells: list[list[int]]) -> dict[str, Any]:
+def surface_topology_metrics(
+    cells: list[list[int]], *,
+    node_positions: dict[int, tuple[float, float, float]] | None = None,
+    cell_areas: list[float] | None = None,
+) -> dict[str, Any]:
     """Compute representation-independent topology facts for surface cells."""
     cell_edges: list[list[tuple[int, int]]] = []
     edge_counts: Counter[tuple[int, int]] = Counter()
@@ -304,15 +308,17 @@ def surface_topology_metrics(cells: list[list[int]]) -> dict[str, Any]:
         adjacency[right].add(left)
     open_nodes = [node for node, neighbours in adjacency.items() if len(neighbours) != 2]
     unseen = set(adjacency)
-    boundary_components = 0
+    components: list[set[int]] = []
     while unseen:
-        boundary_components += 1
-        stack = [unseen.pop()]
+        component = {unseen.pop()}
+        stack = list(component)
         while stack:
             for neighbour in adjacency[stack.pop()]:
                 if neighbour in unseen:
                     unseen.remove(neighbour)
+                    component.add(neighbour)
                     stack.append(neighbour)
+        components.append(component)
 
     parents = list(range(len(cell_edges)))
 
@@ -331,16 +337,36 @@ def surface_topology_metrics(cells: list[list[int]]) -> dict[str, Any]:
                 parents[right] = left
     nonmanifold = sum(count > 2 for count in edge_counts.values())
     boundary_closed = bool(boundary_edges) and not open_nodes
+    boundary_regions = []
+    if node_positions is not None and cell_areas is not None:
+        for component in sorted(components, key=min):
+            edges = [(node, other) for node in sorted(component)
+                     for other in sorted(adjacency[node]) if node <= other]
+            points = [node_positions[node] for node in component]
+            lengths = [math.dist(node_positions[a], node_positions[b]) for a, b in edges]
+            areas = [cell_areas[index] for index in sorted({edge_owner[edge] for edge in edges})]
+            boundary_regions.append({
+                "n_edges": len(edges),
+                "closed": all(len(adjacency[node]) == 2 for node in component),
+                "bounds_min": [min(p[axis] for p in points) for axis in range(3)],
+                "bounds_max": [max(p[axis] for p in points) for axis in range(3)],
+                "edge_length_min": min(lengths), "edge_length_max": max(lengths),
+                "adjacent_cell_area_min": min(areas), "adjacent_cell_area_max": max(areas),
+                "adjacent_cell_area_mean": sum(areas) / len(areas),
+            })
     return {
         "n_unique_surface_edges": len(edge_counts),
         "n_boundary_edges": len(boundary_edges),
-        "n_boundary_components": boundary_components,
-        "n_closed_boundary_loops": boundary_components if boundary_closed else 0,
+        "n_boundary_components": len(components),
+        "n_closed_boundary_loops": len(components) if boundary_closed else 0,
         "n_open_or_nonmanifold_boundary_nodes": len(open_nodes),
         "n_nonmanifold_surface_edges": nonmanifold,
         "n_surface_components": len({find(cell) for cell in range(len(cell_edges))}) if cell_edges else 0,
         "boundary_loops_closed": boundary_closed,
         "surface_shell_closed": bool(edge_counts) and not boundary_edges and not nonmanifold,
+        **({"boundary_regions": boundary_regions,
+            "boundary_measurement_basis": "Corner vertices; higher-order edge curvature is not measured."}
+           if boundary_regions else {}),
     }
 
 

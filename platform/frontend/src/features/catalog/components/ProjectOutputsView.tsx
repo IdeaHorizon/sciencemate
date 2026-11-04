@@ -11,10 +11,11 @@ import { useWorkspacePanel } from "@/stores/workspace-panel";
 import { useProjectCatalog } from "../hooks/useCatalog";
 import { artifactKindLabel } from "../lib/kind-label";
 import { TIER_ORDER, groupByTier } from "../lib/group-by-tier";
+import { nodeDisplayName } from "@/features/execution/lib/display-names";
 import { useT, type Phrase, useLanguage } from "@/shared/i18n";
 
 /**
- * 「研究产出」—— 这个项目做出了什么，一页答完。
+ * 「研究成果」—— 这个项目做出了什么，一页答完。
  *
  * ## 为什么需要它（wangd 2026-09-09）
  *
@@ -33,20 +34,20 @@ import { useT, type Phrase, useLanguage } from "@/shared/i18n";
  *
  * ## 分层是排序，不是过滤
  *
- * 「工作过程」默认收起但**照样列出来** —— 少列一条，用户就会以为那件东西
+ * 「过程文件」默认收起但**照样列出来** —— 少列一条，用户就会以为那件东西
  * 不存在。看不见的东西没法被审计。
  */
 
 const TIER_LABEL: Record<CatalogTier, Phrase> = {
   deliverable: { zh: "交付物", en: "Deliverables" },
-  output: { zh: "研究产出", en: "Research outputs" },
-  working: { zh: "工作过程", en: "Working files" },
+  output: { zh: "其他成果", en: "Other outputs" },
+  working: { zh: "过程文件", en: "Working files" },
 };
 
 const TIER_HINT: Record<CatalogTier, Phrase> = {
-  deliverable: { zh: "已冻结的永久产出 —— 论文、图、预注册、结果数据。", en: "Frozen, permanent outputs: papers, figures, pre-registrations, result data." },
-  output: { zh: "研究产出，但还没冻结，或者是证据而不是交付物。", en: "Research outputs that are not frozen yet, or are evidence rather than deliverables." },
-  working: { zh: "收据、快照、压缩日志这类框架内务。列出来是为了可审计，不是给你读的。", en: "Receipts, snapshots and compaction logs — framework bookkeeping. Listed so it can be audited, not so you read it." },
+  deliverable: { zh: "已定稿的论文、图、预注册和结果数据。", en: "Finalized papers, figures, pre-registrations and result data." },
+  output: { zh: "还没定稿的成果，以及作为证据使用的材料。", en: "Outputs not yet finalized, and material used as evidence." },
+  working: { zh: "研究过程中自动生成的记录、快照和日志，一般不需要查看。", en: "Records, snapshots and logs generated automatically during research. You usually don't need to open these." },
 };
 
 function iconFor(entry: CatalogEntry) {
@@ -71,11 +72,11 @@ export function ProjectOutputsView({ projectId }: { projectId: string }) {
   return (
     <WorkspacePanelHost projectId={projectId} mainClassName="project-outputs-main">
       {catalog.isLoading && !catalog.data ? (
-        <p className="muted">{t({ zh: "正在读这个项目的产出…", en: "Reading this project's outputs…" })}</p>
+        <p className="muted">{t({ zh: "正在加载研究成果…", en: "Loading research outputs…" })}</p>
       ) : catalog.error ? (
-        <p className="muted">{t({ zh: "读不到研究产出：{detail}", en: "Could not read the research outputs: {detail}" }, { detail: String((catalog.error as Error).message) })}</p>
+        <p className="muted">{t({ zh: "无法加载研究成果：{detail}", en: "Couldn't load research outputs: {detail}" }, { detail: String((catalog.error as Error).message) })}</p>
       ) : (catalog.data?.entries.length ?? 0) === 0 ? (
-        <p className="muted">{t({ zh: "这个项目还没有产出 —— agent 冻结第一件产物之后会出现在这里。", en: "This project has no outputs yet — they appear once the agent freezes the first one." })}</p>
+        <p className="muted">{t({ zh: "还没有研究成果。助手在会话中生成成果后，会显示在这里。", en: "No research outputs yet. Outputs the assistant creates in a session will appear here." })}</p>
       ) : (
         <div className="project-outputs">
           {TIER_ORDER.map((tier) => (
@@ -103,7 +104,7 @@ function TierSection({
 }) {
   const t = useT();
   if (entries.length === 0 && tier === "working") return null;
-  // 交付物默认展开：那是用户来这一页要看的东西。工作过程默认收起。
+  // 交付物默认展开：那是用户来这一页要看的东西。过程文件默认收起。
   const open = tier !== "working";
   return (
     <details className={`project-outputs-tier is-${tier}`} open={open}>
@@ -113,7 +114,7 @@ function TierSection({
       </summary>
       <p className="project-outputs-hint">{t(TIER_HINT[tier])}</p>
       {entries.length === 0 ? (
-        <p className="muted">{t({ zh: "这一档还是空的。", en: "This tier is empty." })}</p>
+        <p className="muted">{t({ zh: "这一组还没有内容。", en: "Nothing here yet." })}</p>
       ) : (
         <ul className="project-outputs-list">
           {entries.map((entry) => (
@@ -143,8 +144,8 @@ function OutputRow({
         <strong>{entry.name}</strong>
         <small>
           {kind} · v{entry.version}
-          {entry.ownerNode ? ` · ${entry.ownerNode}` : ""}
-          {entry.frozen ? t({ zh: " · 已冻结", en: " · frozen" }) : ""}
+          {entry.ownerNode ? ` · ${nodeDisplayName(entry.ownerNode, lang)}` : ""}
+          {entry.frozen ? t({ zh: " · 已定稿", en: " · finalized" }) : ""}
         </small>
       </div>
       {entry.frozen && <Snowflake size={12} className="project-outputs-frozen" />}

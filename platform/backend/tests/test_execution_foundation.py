@@ -22,6 +22,7 @@ from app.api.v1.execution import get_runtime_tenant_id, router
 from app.auth import get_current_user
 from app.config import settings
 from app.database import Base, get_db
+from app.services.say import spoken
 from app.models.execution import (
     EXECUTION_TABLES,
     AttemptStatus,
@@ -1242,7 +1243,7 @@ async def test_read_api_is_exclusive_and_tenant_fail_closed(
         assert unauthenticated.status_code == 401
         assert unauthenticated.json() == {
             "code": "unauthorized",
-            "message": "Invalid authentication credentials",
+            "message": "登录已失效，请重新登录。",
         }
 
         api.dependency_overrides[get_current_user] = override_user
@@ -1610,7 +1611,7 @@ async def test_tool_failure_keeps_its_reason_and_who_is_at_fault(
         (
             {"status": "error", "returncode": 2, "stderr_tail": "lammps: no such file"},
             "tool_error",
-            "命令退出码 2：lammps: no such file",
+            "命令执行失败（退出码 2）：lammps: no such file",
         ),
     ]
     for index, (preview, expected_code, expected_message) in enumerate(cases):
@@ -1634,7 +1635,11 @@ async def test_tool_failure_keeps_its_reason_and_who_is_at_fault(
         failed = [event for event in events if event.kind == "tool.failed"]
         assert len(failed) == 1, f"{preview!r} 没被判成失败"
         assert failed[0].payload["errorCode"] == expected_code
-        assert failed[0].payload["errorMessage"].startswith(expected_message)
+        # 平台自己合成的那句两种语言都存了，读的那一屏挑一边（`spoken`）。
+        assert spoken(failed[0].payload["errorMessage"], "zh").startswith(expected_message)
+        if expected_message.startswith("命令执行失败"):
+            assert spoken(failed[0].payload["errorMessage"], "en") == (
+                "Command failed (exit code 2): lammps: no such file")
         # 崩了的那一类要带出事地点；驳回那一类没有 traceback 可言。
         if expected_code == "tool_exception":
             assert "run_node.py" in " ".join(failed[0].payload["errorTracebackTail"])

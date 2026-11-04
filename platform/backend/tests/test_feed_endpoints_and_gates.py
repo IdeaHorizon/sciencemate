@@ -5,8 +5,6 @@
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import pytest
 from sqlalchemy import delete
 import pytest_asyncio
@@ -20,6 +18,7 @@ from app.models.feed import FeedEngagement, FeedItem, FeedSource, FeedVisibility
 from app.models.user import User
 from app.services.feed.collectors import CollectedItem
 from app.services.feed.ingest import ingest_items
+from tests._clock import just_now
 
 _ME ="aaaa1111-1111-4111-8111-111111111111"
 _COLLEAGUE = "bbbb2222-2222-4222-8222-222222222222"
@@ -139,6 +138,70 @@ async def test_replaying_the_same_engagement_is_idempotent_not_a_500(feed_client
 
 
 @pytest.mark.asyncio
+async def test_a_paper_from_literature_search_lands_in_the_saved_tab(feed_client) -> None:
+    """检索页上的「收藏」以前只是页面里的一个状态：刷新就没了，也进不了「收藏」页签。
+
+    现在它落在资讯收藏同一张表里：按 DOI 找到（或建出）那一条，再记一次 save。
+    """
+    client, db, _current, _users = feed_client
+    paper = {
+        "title": "Machine-learned potentials for silicon",
+        "doi": "10.1234/ML.Si.2026",
+        "url": None,
+        "authors": ["A. Author", "B. Author"],
+        "venue": "Physical Review B",
+        "published": "2026-5",
+        "abstract": "We fit a potential.",
+    }
+    first = await client.post("/api/v1/feed/saved-papers", json=paper)
+    assert first.status_code == 201, first.text
+    body = first.json()
+    assert body["saved"] is True and body["kind"] == "paper"
+    assert body["url"] == "https://doi.org/10.1234/ml.si.2026"
+    # 再点一次是幂等的：不多建一条论文，也不多记一次收藏。
+    again = await client.post("/api/v1/feed/saved-papers", json=paper)
+    assert again.status_code == 201 and again.json()["id"] == body["id"]
+    rows = (await db.execute(select(FeedItem).where(FeedItem.canonical_key == "doi:10.1234/ml.si.2026"))).scalars().all()
+    assert len(rows) == 1
+    saves = (await db.execute(select(FeedEngagement).where(
+        FeedEngagement.item_id == body["id"], FeedEngagement.action == "save"))).scalars().all()
+    assert len(saves) == 1
+
+    saved = {item["id"] for item in (await client.get("/api/v1/feed/items", params={"saved": "true"})).json()}
+    assert body["id"] in saved, "收下了，却不在「收藏」页签里"
+
+    # 文献投影事后把它判成不合格，也不该从这个人的收藏里悄悄消失。
+    row = rows[0]
+    row.extra = {**(row.extra or {}), "literature_catalog": True, "literature_eligible": False}
+    await db.flush()
+    saved = {item["id"] for item in (await client.get("/api/v1/feed/items", params={"saved": "true"})).json()}
+    assert body["id"] in saved, "被投影判成不合格之后，收藏里少了一条"
+
+    # 取消收藏走现成的那条路。
+    assert (await client.delete(f"/api/v1/feed/items/{body['id']}/engagement/save")).status_code == 204
+    saved = {item["id"] for item in (await client.get("/api/v1/feed/items", params={"saved": "true"})).json()}
+    assert body["id"] not in saved
+
+
+@pytest.mark.asyncio
+async def test_saving_a_paper_the_feed_already_has_reuses_that_item(feed_client) -> None:
+    client, db, _current, _users = feed_client
+    response = await client.post("/api/v1/feed/saved-papers", json={
+        "title": "Same paper, found by search", "url": "https://arxiv.org/abs/2401.00001v2"})
+    assert response.status_code == 201, response.text
+    assert response.json()["id"] == "aaaaaaaa-0000-4000-8000-000000000001"
+    assert response.json()["title"] == "A public paper", "已经收过的那一条被检索结果覆盖了"
+
+
+@pytest.mark.asyncio
+async def test_a_paper_without_a_doi_or_link_is_refused_in_words(feed_client) -> None:
+    client, _db, _current, _users = feed_client
+    response = await client.post("/api/v1/feed/saved-papers", json={"title": "No identity at all"})
+    assert response.status_code == 422
+    assert "DOI" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_dismissed_card_is_hidden_even_when_pool_snapshot_is_stale(feed_client, monkeypatch) -> None:
     from app.api.v1 import feed
     from app.schemas.feed import FeedCard, FeedItemOut, FeedTodayOut
@@ -160,6 +223,31 @@ async def test_dismissed_card_is_hidden_even_when_pool_snapshot_is_stale(feed_cl
     after = (await client.get(url)).json()
     assert after["feed"] == []
     assert after["has_more"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_english_reader_does_not_wait_for_chinese_translations(feed_client, monkeypatch) -> None:
+    """推荐卡片要等中文译文，只该发生在中文界面。
+
+    11-04 在英文界面点科研资讯：前端已经不等译文了（#1288），推荐页还是空的 —— 这一层
+    照旧把没有中文译文的卡全滤掉。英文读者读原文，译文对他不是「备好」的条件。
+    """
+    from app.api.v1 import feed
+    from app.schemas.feed import FeedCard, FeedItemOut, FeedTodayOut
+
+    client, _db, _current, _users = feed_client
+    card = FeedCard(item=FeedItemOut(id="aaaaaaaa-0000-4000-8000-000000000001", kind="paper",
+                                     title="A public paper", summary="Untranslated abstract."),
+                    recommendation_sources=["domain"])
+    async def pool(*_args, **_kwargs):
+        return FeedTodayOut(feed=[card])
+    monkeypatch.setattr(feed, "recommendation_pool", pool)
+
+    url = "/api/v1/feed/today?limit=21&offset=0&ready_only=true"
+    english = (await client.get(url, headers={"X-Interface-Language": "en"})).json()["feed"]
+    assert [row["item"]["id"] for row in english] == [card.item.id], "英文界面还在等中文译文"
+    chinese = (await client.get(url, headers={"X-Interface-Language": "zh"})).json()["feed"]
+    assert chinese == [], "中文界面不该显示还没有译文的卡"
 
 
 @pytest.mark.asyncio
@@ -237,7 +325,7 @@ async def test_today_says_so_when_it_has_nothing_personal_to_offer(feed_client) 
 @pytest.mark.asyncio
 async def test_today_pages_recommendations_without_losing_or_repeating_items(feed_client) -> None:
     client, db, _current, _users = feed_client
-    now = datetime.now(UTC)
+    now = just_now()
     db.add_all([
         FeedItem(
             canonical_key=f"url:https://example.test/daily/{index}",
@@ -343,6 +431,10 @@ async def test_an_edition_that_never_collects_does_not_promise_a_first_round(
     reason = body["empty_reason"]
     assert reason == COPY["empty.no_collector_here"]["zh"]
     assert "几分钟" not in reason, "又在一台不采集的机器上承诺采集时间了"
+    # 资讯请求从不转给组织服务器（不带 X-Organisation、不是项目级路径），连了组织也看不到组织采集的
+    # 内容 —— 这句话不能再这么许诺（11-04 核过）。
+    assert "组织" not in reason, f"又在许诺一件做不到的事：{reason}"
+    assert "organisation" not in COPY["empty.no_collector_here"]["en"].lower()
 
     # 会采集的组织档返回真实进度，不再无条件承诺“几分钟内完成”。
     monkeypatch.setattr(assembly, "background_collection_enabled", lambda: True)
@@ -435,7 +527,7 @@ async def test_recommendation_progress_counts_pending_matches_and_distinguishes_
         rows.append(FeedItem(
             id=str(uuid4()), canonical_key=str(uuid4()), kind='paper', title=title,
             url='https://example.org/paper', authors=[], domains=domains,
-            published_at=datetime.now(UTC), visibility=FeedVisibility.PLATFORM,
+            published_at=just_now(), visibility=FeedVisibility.PLATFORM,
             extra={'literature_catalog': True, 'literature_preparation': 'ready' if ready else 'pending'},
         ))
     db.add_all(rows)

@@ -87,6 +87,7 @@ INTERRUPTED_PARENT_STATUSES / WAITING_STATUSES / IN_FLIGHT），5 个各自不�
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
@@ -129,16 +130,16 @@ _OUTCOME: dict[str, str] = {
 #: 漏一种在这里就看得见，而不是等英文界面上冒出一句中文。
 _LABEL: dict[str, dict[str, str]] = {
     "ok": {"zh": "已完成", "en": "Completed"},
-    "ok_with_warning": {"zh": "完成，有警告", "en": "Completed with warnings"},
-    "incomplete": {"zh": "没跑完", "en": "Did not finish"},
+    "ok_with_warning": {"zh": "已完成（有警告）", "en": "Completed with warnings"},
+    "incomplete": {"zh": "未完成", "en": "Did not finish"},
     "failed": {"zh": "失败", "en": "Failed"},
     "cancelled": {"zh": "已取消", "en": "Cancelled"},
 }
 
 _PHASE_LABEL: dict[str, dict[str, str]] = {
-    "interrupted": {"zh": "中断", "en": "Interrupted"},
+    "interrupted": {"zh": "已中断", "en": "Interrupted"},
     "ended_unknown": {"zh": "已结束", "en": "Finished"},
-    "running": {"zh": "正在跑", "en": "Running"},
+    "running": {"zh": "运行中", "en": "Running"},
 }
 
 #: 「这个会话还没跑过任何一轮」。它曾经是下面那个分支里一句写死的 "Ready" ——
@@ -146,14 +147,17 @@ _PHASE_LABEL: dict[str, dict[str, str]] = {
 #: 时在会话标题旁看见的就是它）。状态词只有一张表，新的也要进来。
 _IDLE_LABEL: dict[str, str] = {"zh": "待命", "en": "Ready"}
 
+#: 只读的人看到的输入框锁定原因，调用方没给更具体的原因时用它。
+_VIEW_ONLY: dict[str, str] = {"zh": "你只能查看这个会话。", "en": "You can view this Session only."}
+
 _WAITING_LABEL: dict[str, dict[str, str]] = {
-    "human": {"zh": "等你回答", "en": "Needs your answer"},
-    "permission": {"zh": "等你授权", "en": "Needs your approval"},
-    "compute": {"zh": "等算力", "en": "Waiting for compute"},
+    "human": {"zh": "等待你回答", "en": "Needs your answer"},
+    "permission": {"zh": "等待你授权", "en": "Needs your approval"},
+    "compute": {"zh": "等待算力", "en": "Waiting for compute"},
 }
 
 
-def _say(phrase: dict[str, str], lang: str) -> str:
+def _say(phrase: Mapping[str, str], lang: str) -> str:
     """缺哪种语言就退回中文 —— 少一句翻译不该让整个 view 拼不出来。"""
     return phrase.get(lang) or phrase["zh"]
 
@@ -230,8 +234,9 @@ def answer_affordance(
     waiting: dict[str, Any] | None,
     pause: dict[str, Any] | None,
     may_drive: bool,
-    readonly_reason: str | None = None,
+    readonly_reason: str | Mapping[str, str] | None = None,
     readonly_until: str | None = None,
+    lang: str = "zh",
 ) -> dict[str, Any]:
     """**答案从哪儿进来** —— 整个平台只有这一处回答它。
 
@@ -255,9 +260,11 @@ def answer_affordance(
         # `until` = 这个判断自己会过期的时刻（别人的驾驶权租约到点）。给出来，
         # 客户端就能安排"到点再问一次"，而不是自己把租约再算一遍 —— 决定
         # 「什么时候再问」是客户端的事，决定「答案是什么」不是。
+        # 拒绝原因显示在锁住的输入框上，是界面上的字：两种语言并排写，按这一屏说。
+        reason = readonly_reason or _VIEW_ONLY
         blocked: dict[str, Any] = {
             "via": VIA_NONE,
-            "reason": readonly_reason or "You can view this Session only.",
+            "reason": _say(reason, lang) if isinstance(reason, Mapping) else reason,
         }
         if readonly_until:
             blocked["until"] = readonly_until
@@ -278,7 +285,7 @@ def build_session_view(
     run: Run | None,
     *,
     pause: dict[str, Any] | None,
-    readonly_reason: str | None = None,
+    readonly_reason: str | Mapping[str, str] | None = None,
     readonly_until: str | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
@@ -296,6 +303,7 @@ def build_session_view(
         may_drive=bool(kwargs.get("may_drive", True)),
         readonly_reason=readonly_reason,
         readonly_until=readonly_until,
+        lang=str(kwargs.get("lang", "zh")),
     )
     return view
 

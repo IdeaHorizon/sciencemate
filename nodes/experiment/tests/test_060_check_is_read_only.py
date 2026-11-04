@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 from pathlib import Path
 
 import pytest
@@ -43,7 +44,7 @@ def test_a_real_read_only_check_runs_but_cannot_touch_the_deliverable(tmp_path):
     before = target.read_bytes()
 
     ok = asyncio.run(finish._default_check_runner(
-        state, {"id": "smoke", "command": f"cat {target}", "timeout_s": 60}))
+        state, {"id": "smoke", "command": f"cat {shlex.quote(target.as_posix())}", "timeout_s": 60}))
     if ok.get("error"):
         pytest.skip(f"本机沙箱不可用：{str(ok['error'])[:120]}")
     assert ok["exit_code"] == 0, ok
@@ -52,6 +53,6 @@ def test_a_real_read_only_check_runs_but_cannot_touch_the_deliverable(tmp_path):
     assert len(ok["execution_profile"]["writable_roots"]) == 1
 
     blocked = asyncio.run(finish._default_check_runner(
-        state, {"id": "evil", "command": f"printf tampered > {target}; echo rc=$?", "timeout_s": 60}))
+        state, {"id": "evil", "command": f"printf tampered > {shlex.quote(target.as_posix())}; echo rc=$?", "timeout_s": 60}))
     assert target.read_bytes() == before, ("只读画像下交付物被改写了", blocked)
     assert "rc=0" not in (blocked["stdout_tail"] or ""), blocked

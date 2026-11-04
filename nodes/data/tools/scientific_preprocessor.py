@@ -58,26 +58,15 @@ from .geometry_assets import (
     canonical_parameter_bindings,
     flatten_parameter_groups,
     geometry_file_from_params,
+    parameter_binding_value as binding_value,
 )
 from .human_input_utils import (
     extract_naca_code as _extract_naca_code,
-    has_valid_airfoil_geometry,
     is_placeholder_value,
-    looks_like_public_reference_request,
-    original_intent_allows_airfoil_mesh,
-    original_user_request_text_from_state,
-    pause_for_input as _pause_for_input,
-    surrogate_geometry_explicitly_approved,
 )
 from .mesh_iteration_advisor import (
-    CANONICAL_CFD_MESH_INTENT_PATTERNS,
     explicit_mesh_contract as _match_cfd_case_profile,
-    _resolve_mesh_iteration_inputs,
-    detect_special_domain_requirements,
-    geometry_parameters_need_reference_resolution,
     looks_like_turbomachinery_blade,
-    public_geometry_reference_request,
-    special_domain_reference_request,
 )
 from .scientific_assets import (
     downloaded_dataset_candidates,
@@ -166,24 +155,6 @@ DISCIPLINE_DEFAULTS: dict[str, dict[str, Any]] = {
         ],
     },
 }
-
-def _canonical_cfd_mesh_matches_original_intent(
-    state: State,
-    mesh_type: str,
-    intent_text: str,
-    params: dict[str, Any],
-) -> bool:
-    if surrogate_geometry_explicitly_approved(params):
-        return True
-    pattern = CANONICAL_CFD_MESH_INTENT_PATTERNS.get(str(mesh_type or "").strip().lower())
-    if not pattern:
-        return True
-    original = original_user_request_text_from_state(state)
-    source_text = original or intent_text
-    if looks_like_turbomachinery_blade(source_text or "", params):
-        return False
-    return bool(re.search(pattern, source_text or "", flags=re.IGNORECASE))
-
 
 def _slugify(text: str, fallback: str = "scientific_case") -> str:
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", text.strip())[:80].strip("_")
@@ -321,71 +292,14 @@ def _explicit_required_file_names(params: dict[str, Any]) -> set[str]:
     return names
 
 
-def _request_bound_needs_solver_templates(params: dict[str, Any]) -> bool:
-    """Return whether a caller-scoped request actually names solver inputs.
-
-    A request-bound mesh is an asset delivery, not a request for a runnable CFD
-    case.  Keeping this decision next to the existing template selector makes
-    the package builder follow the normalized asset contract instead of an
-    internal ``write_domain_templates`` hint from a fallback plan.
-    """
-    analysis = params.get("requirement_analysis")
-    if not isinstance(analysis, dict):
-        return True
-    request = analysis.get("preprocessing_request")
-    if not isinstance(request, dict):
-        return True
-    if request.get("review_profile") != "request_bound":
-        return True
-    assets = request.get("requested_assets")
-    if not isinstance(assets, list) or not assets:
-        assets = analysis.get("required_files") or []
-    for item in assets:
-        if not isinstance(item, dict):
-            item = {"name_or_role": item}
-        contract = normalize_asset_contract(item)
-        representation = str(contract.get("representation") or "").casefold()
-        role_text = " ".join(
-            str(item.get(key) or "")
-            for key in (
-                "id", "asset_id", "name_or_role", "filename", "format",
-                "scientific_role", "purpose", "reason", "content_constraints",
-            )
-        ).casefold()
-        composite_solver_asset = bool(re.search(
-            r"simulation[_ -]?case|solver[_ -]?input|input[_ -]?deck|complete[_ -]?.*input",
-            role_text,
-            flags=re.I,
-        ))
-        if representation == "simulation_case" or composite_solver_asset:
-            return True
-        if representation == "mesh" or re.search(
-            r"mesh|checkmesh|quality|audit|visualization|polyMesh|网格|质量|审计",
-            role_text,
-            flags=re.I,
-        ):
-            continue
-        capability = canonical_workflow_capability(item)
-        if capability in {"configuration_generation", "preprocessing_script_generation"}:
-            return True
-        if re.search(
-            r"(?:^|/)(?:0/(?:u|p)|controlDict|fvSchemes|fvSolution|transportProperties|"
-            r"incar|kpoints|poscar|potcar|namelist|.*\.nml|.*\.cfg|.*\.conf)$",
-            role_text,
-            flags=re.I,
-        ):
-            return True
-    return False
-
-
 def _should_write_discipline_templates(selected_discipline: str, params: dict[str, Any]) -> bool:
     if params.get("domain_specific_generation_deferred") is True:
         return False
-    if not _request_bound_needs_solver_templates(params):
-        return False
-    explicit = str(params.get("write_domain_templates") or params.get("generate_solver_templates") or "").lower()
-    if explicit in {"1", "true", "yes"}:
-        return True
+    explicit = params.get("write_domain_templates", params.get("generate_solver_templates"))
+    if explicit is not None:
+        # The approved producer contract already decides whether to write a
+        # solver case. Do not reinterpret it from a filename-only caller list.
+        return str(explicit).lower() in {"1", "true", "yes"}
     required_names = " ".join(sorted(_explicit_required_file_names(params)))
     if selected_discipline == "electronic_structure":
         return bool(
@@ -790,8 +704,13 @@ def _extract_numbers(spec: str) -> dict[str, Any]:
     )
     if far_field_match:
         far_field = float(far_field_match.group(1))
-        out["far_field"] = far_field
-        out["required_far_field"] = far_field
+        # A body-clearance requirement is not an exact radius/coordinate.
+        # Emitting both would make the caller-control receipt reject the
+        # adapter's necessary domain expansion after successful meshing.
+        if re.search(r"distance|距离", far_field_match.group(0), flags=re.I):
+            out["required_far_field"] = far_field
+        else:
+            out["far_field"] = far_field
     diameter_match = re.search(
         rf"(?:diameter|直径)\s*(?:[A-Za-z]\s*)?(?:为|=|:|：)?\s*{scientific_value}",
         spec,
@@ -1026,134 +945,6 @@ def _has_turbomachinery_cascade_domain(params: dict[str, Any]) -> bool:
     return pitch_ok and inlet_outlet_ok and periodic_ok
 
 
-def _has_airfoil_coordinates(parameters: dict[str, Any]) -> bool:
-    return has_valid_airfoil_geometry(parameters)
-
-
-def _airfoil_parameter_prompt(airfoil_name: str | None, params: dict[str, Any]) -> dict[str, Any]:
-    name = airfoil_name or ""
-    example_name = name or "custom_airfoil"
-    parameter_template = {
-        "mesh_type": "airfoil_gmsh",
-        "geometry": {
-            "type": "custom",
-            "airfoil_name": name,
-            "airfoil_dat_path": "/absolute/path/to/profile.dat",
-        },
-        "flow": {
-            "angle_of_attack": params.get("angle_of_attack", 0),
-            "reynolds_number": params.get("reynolds_number", 500000),
-            "mach_number": params.get("mach_number", 0.2),
-        },
-        "domain": {
-            "domain_type": params.get("domain_type", "c"),
-            "far_field": params.get("far_field", 25),
-            "wake_length": params.get("wake_length", 25),
-            "span": params.get("span", 0.1),
-        },
-        "mesh_density": {
-            "n_surface": params.get("n_surface", 241),
-            "h_airfoil": params.get("h_airfoil", 0.008),
-            "h_farfield": params.get("h_farfield", 0.8),
-            "boundary_layer_first": params.get("boundary_layer_first", 0.001),
-            "boundary_layer_thickness": params.get("boundary_layer_thickness", 0.04),
-            "boundary_layer_ratio": params.get("boundary_layer_ratio", 1.15),
-            "quality_preset": params.get("quality_preset", "robust"),
-        },
-        "outputs": {
-            "convert_to_openfoam": params.get("convert_to_openfoam", True),
-            "write_tecplot": params.get("write_tecplot", True),
-        },
-    }
-    prompt_examples = [
-        (
-            f"请生成 {example_name} 翼型 OpenFOAM 网格，攻角 "
-            f"{params.get('angle_of_attack', 0)} 度，Re="
-            f"{params.get('reynolds_number', 500000)}。翼型几何文件："
-            f"/absolute/path/to/profile.dat。使用 airfoil_gmsh，"
-            "输出 OpenFOAM polyMesh 和 Tecplot dat。其他网格参数可以使用默认 robust 设置。"
-        ),
-        {
-            "mesh_type": "airfoil_gmsh",
-            "airfoil_name": name,
-            "airfoil_dat_path": "/absolute/path/to/profile.dat",
-            "angle_of_attack": params.get("angle_of_attack", 0),
-            "reynolds_number": params.get("reynolds_number", 500000),
-            "quality_preset": "robust",
-            "convert_to_openfoam": True,
-            "write_tecplot": True,
-        },
-    ]
-    return _pause_for_input(
-        question=(
-            f"请提供非 NACA 翼型 {name or 'custom airfoil'} 的几何文件绝对路径，"
-            "或直接粘贴翼型坐标数组/坐标文本。"
-        ),
-        context=(
-            "该翼型不是标准 NACA 代号。为避免生成错误翼型，data 节点不会回退为 NACA0012。\n"
-            "坐标格式示例见 nodes/data/examples/airfoils/README.md。\n\n"
-            "可直接回复该几何文件的绝对路径。"
-        ),
-        metadata={
-            "input_kind": "airfoil_geometry",
-            "airfoil_name": name,
-            "required_fields": ["airfoil_dat_path 或 airfoil_coordinate_text 或 airfoil_coordinates"],
-            "parameter_template": parameter_template,
-            "prompt_examples": prompt_examples,
-            "resume_instruction": (
-                "把用户回答解析为 airfoil_dat_path；如果回答不是路径，则尝试作为 "
-                "airfoil_coordinate_text。然后用更新后的 parameters 重新调用原前处理工具。"
-            ),
-        },
-    ) | {
-        "reason": (
-            f"非 NACA 翼型 {name!r} 需要用户提供翼型几何坐标。"
-            "不能在缺少几何文件时回退生成 NACA0012。"
-        ),
-        "message": (
-            "请补充该翼型的几何文件或坐标数组后再生成网格。坐标格式示例见 "
-            "nodes/data/examples/airfoils/README.md。不要建议改用 NACA 翼型；"
-            "用户已经指定了非 NACA 翼型。"
-        ),
-        "required_fields": [
-            "airfoil_dat_path 或 airfoil_coordinate_text 或 airfoil_coordinates",
-        ],
-        "prompt_examples": prompt_examples,
-        "do_not_suggest": [
-            "不要建议改用 NACA0012/NACA0024 或其他 NACA 翼型",
-            "不要把 NACA 翼型推荐表作为方案",
-        ],
-        "parameter_template": parameter_template,
-    }
-
-
-def _naca_or_profile_required_prompt(params: dict[str, Any]) -> dict[str, Any]:
-    return _pause_for_input(
-        question="请提供明确的 NACA 代号或真实二维坐标轮廓后再生成翼型前处理包。",
-        context=(
-            "当前请求走翼型/NACA 网格路径，但没有检测到显式 naca_code，也没有 "
-            "airfoil_dat_path/airfoil_coordinate_text/airfoil_coordinates。data 节点不会默认回退到 "
-            "NACA0012。请提供 naca_code（例如 0015）或真实 profile 坐标文件；如果公开数据分为多段，"
-            "先用 prepare_scientific_mesh(operation='build_profile') 合成闭合轮廓。"
-        ),
-        metadata={
-            "input_kind": "airfoil_geometry",
-            "required_fields": [
-                "naca_code",
-                "airfoil_dat_path",
-                "airfoil_coordinate_text",
-                "airfoil_coordinates",
-                "coordinate_profile_path",
-            ],
-            "parameters": params,
-            "resume_instruction": (
-                "把用户回复解析为 naca_code 或真实坐标文件路径；若是多个坐标段，先调用 "
-                "prepare_scientific_mesh(operation='build_profile')，再重试 build_scientific_preprocessing_package。"
-            ),
-        },
-    )
-
-
 def _infer_mesh_type(discipline: str, spec: str, parameters: dict[str, Any]) -> str:
     text = f"{spec}\n{_json_dumps(parameters)}".lower()
     if parameters.get("coordinate_profile_path") or parameters.get("profile_dat_path"):
@@ -1181,20 +972,6 @@ def _infer_mesh_type(discipline: str, spec: str, parameters: dict[str, Any]) -> 
             if candidate.replace("_lattice", "") in text or candidate in text:
                 return candidate
     return DISCIPLINE_DEFAULTS.get(discipline, DISCIPLINE_DEFAULTS["unknown"])["mesh_type"]
-
-
-def _apply_cfd_profile_defaults(params: dict[str, Any], profile: dict[str, Any] | None) -> None:
-    if not profile:
-        return
-    for target, aliases in (profile.get("parameter_aliases") or {}).items():
-        if target not in params:
-            for alias in aliases or []:
-                if alias in params:
-                    params[target] = params[alias]
-                    break
-    for key, value in (profile.get("defaults") or {}).items():
-        params.setdefault(key, value)
-    params.setdefault("case_type", profile.get("case_type"))
 
 
 def _read_csv_profile(path: Path) -> dict[str, Any]:
@@ -1593,73 +1370,93 @@ def _csm_files(parameters: dict[str, Any]) -> dict[str, str]:
     )
     # Execution overrides translate the locked values into producer controls.
     # Merge nested fields so repairing a condition's kind cannot drop its value.
-    bindings = merge_parameter_updates(bindings, canonical_parameter_bindings({
-        key: parameters[key] for key in set(bindings) | {"boundary_conditions", "loads"}
+    overrides = canonical_parameter_bindings({
+        key: parameters[key] for key in set(bindings) | {"material", "geometry", "boundary_conditions", "loads"}
         if isinstance(parameters.get(key), dict)
-    }))
+    })
+    # Use the same region identity as this adapter's region_name lookup.
+    # Other formats retain their own naming semantics at their boundaries.
+    for source in (bindings, overrides):
+        for group in ("boundary_conditions", "loads"):
+            if isinstance(source.get(group), dict):
+                source[group] = {str(name).casefold(): controls for name, controls in source[group].items()}
+    bindings = merge_parameter_updates(bindings, overrides)
     discipline = (analysis or {}).get("discipline") or {}
     thermal = parameters.get("discipline") == "heat_transfer" or (
         isinstance(discipline, dict) and discipline.get("primary") == "heat_transfer"
     )
+    software = str(((analysis or {}).get("simulation_software") or {}).get("name") or "").casefold()
 
-    def binding_value(group: dict[str, Any], *names: str, default: Any = None) -> Any:
-        values = {
-            re.sub(r"[^a-z0-9]+", "", str(key).casefold()): value
-            for key, value in group.items()
-        }
-        for name in names:
-            token = re.sub(r"[^a-z0-9]+", "", name.casefold())
-            if token in values and values[token] not in (None, ""):
-                return values[token]
-        return default
+    def bound_value(group: str, *names: str, default: Any = None) -> Any:
+        nested = bindings.get(group)
+        return binding_value(nested if isinstance(nested, dict) else {}, *names,
+                             default=binding_value(bindings, *names,
+                                                   default=binding_value(parameters, *names, default=default)))
 
-    material = bindings.get("material") if isinstance(bindings.get("material"), dict) else {}
-    conductivity = binding_value(material, "thermal_conductivity", "conductivity", "k", default=binding_value(parameters, "thermal_conductivity", "conductivity", "k"))
+    conductivity = bound_value("material", "thermal_conductivity", "conductivity", "k")
     if thermal and (conductivity is None or not re.search(
         r"steady|稳态", str(parameters.get("calculation_type") or (analysis or {}).get("calculation_type") or ""), flags=re.I
     )):
         raise ValueError("Thermal deck assembly requires supplied conductivity and a steady-state formulation; other formulations need an explicit generation step.")
-    youngs_modulus = binding_value(
-        material,
-        "youngs_modulus", "youngs_modulus_mpa", "young_modulus", "E_MPa", "E",
-        default=parameters.get("youngs_modulus", parameters.get("young_modulus", 210e9)),
+    youngs_modulus = bound_value(
+        "material",
+        "youngs_modulus", "youngs_modulus_mpa", "young_modulus", "elastic_modulus", "E_MPa", "E",
     )
-    poisson_ratio = binding_value(
-        material, "poisson_ratio", "nu", default=parameters.get("poisson_ratio", 0.3)
-    )
-    density = binding_value(material, "density", "rho", default=parameters.get("density"))
-    geometry = bindings.get("geometry") if isinstance(bindings.get("geometry"), dict) else {}
-    thickness = binding_value(
-        geometry, "thickness", "thickness_mm", default=parameters.get("thickness", 1.0)
-    )
+    poisson_ratio = bound_value("material", "poisson_ratio", "nu")
+    if not thermal and (youngs_modulus is None or poisson_ratio is None):
+        raise ValueError("Structural deck assembly requires material.youngs_modulus and material.poisson_ratio "
+                         "in the model's consistent units. Translate supplied material bindings to those controls; "
+                         "do not substitute an SI default for missing or unrecognized material data.")
+    density = bound_value("material", "density", "rho")
+    thickness = bound_value("geometry", "thickness", "thickness_mm",
+                            default=bound_value("mesh", "thickness", "thickness_mm", default=1.0))
     mesh_result = parameters.get("mesh_generation_result")
     mesh_path = Path(str((mesh_result or {}).get("solver_mesh_file") or "")).expanduser()
     requested_paths = parameters.get("requested_output_paths") or {}
     output_name = next((
-        Path(str(value)).name for value in requested_paths.values()
+        str(value) for value in requested_paths.values()
         if Path(str(value)).suffix.lower() == ".inp"
+        and not Path(str(value)).is_absolute() and ".." not in Path(str(value)).parts
     ), "model.inp")
     if not mesh_path.is_file():
-        return {}
+        # Cite the actual upstream asset so the executor repairs its export,
+        # rather than asking this consumer to invent a missing representation.
+        raise FileNotFoundError(2,
+            "Solver-deck assembly requires a readable INP mesh in mesh_generation_result.solver_mesh_file; "
+            "export the existing mesh with solver_mesh_format='inp' before assembling the requested solver input.",
+            str((mesh_result or {}).get("mesh_file") or mesh_path),
+        )
 
     mesh_text = mesh_path.read_text(encoding="utf-8", errors="replace")
     blocks = re.split(r"(?=^\*)", mesh_text, flags=re.M)
     nodes: dict[int, tuple[float, float]] = {}
-    node_block = next((block for block in blocks if block.upper().startswith("*NODE")), "")
+    node_block = next((block for block in blocks if block.partition("\n")[0].split(",")[0].strip().upper() == "*NODE"), "")
     for match in re.finditer(
         r"(?m)^\s*(\d+)\s*,\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)", node_block
     ):
         nodes[int(match.group(1))] = (float(match.group(2)), float(match.group(3)))
     removed_ids: set[int] = set()
-    boundary_elements: dict[int, tuple[int, int]] = {}
+    boundary_elements: dict[int, tuple[int, ...]] = {}
     boundary_groups: dict[str, set[int]] = {}
     kept_blocks: list[str] = []
+    requested_element = str(bound_value("mesh", "element_type", default="")).upper()
     for block in blocks:
         header = block.splitlines()[0] if block.splitlines() else ""
         element_type = re.search(r"\bTYPE\s*=\s*([^,\s]+)", header, flags=re.I)
-        if thermal and header.upper().startswith("*ELEMENT") and element_type:
+        if (not thermal and header.upper().startswith("*ELEMENT") and element_type
+                and re.fullmatch(r"(?:CPS|CPE|CAX)(?:3|4|6|8)R?", requested_element)):
+            source_type = element_type.group(1).upper()
+            if source_type.startswith(("CPS", "CPE", "CAX", "M3D")):
+                source_nodes = re.search(r"(\d+)R?$", source_type).group(1)
+                target_nodes = re.search(r"(\d+)R?$", requested_element).group(1)
+                if source_nodes != target_nodes:
+                    raise ValueError(f"Mesh element {source_type} cannot be relabeled {requested_element}; regenerate the mesh with the requested node count.")
+                block = block[:element_type.start(1)] + requested_element + block[element_type.end(1):]
+                element_type = re.search(r"\bTYPE\s*=\s*([^,\s]+)", block.splitlines()[0], flags=re.I)
+        if thermal and "calculix" not in software and header.upper().startswith("*ELEMENT") and element_type:
             # Gmsh's INP export names topology with mechanical element families.
-            # Change formulation only; retain all nodes and connectivity/order.
+            # Abaqus requires DC2D; CalculiX keeps CPS/CPE with *HEAT TRANSFER.
+            # Retain all nodes and connectivity/order.
             mapped = re.sub(r"^(?:CPS|CPE)(3|4|6|8)$", r"DC2D\1", element_type.group(1), flags=re.I)
             if re.match(r"(?:CPS|CPE|CAX|C3D|S|M3D)", mapped, flags=re.I):
                 raise ValueError(f"No thermal formulation mapping for {mapped}; use an explicit solver-input generation step.")
@@ -1668,10 +1465,15 @@ def _csm_files(parameters: dict[str, Any]) -> dict[str, str]:
         if header.upper().startswith("*ELEMENT") and element_type and not re.match(
             r"(?:CPS|CPE|CAX|C3D|DC2D|S|M3D)", element_type.group(1), flags=re.I
         ):
-            for match in re.finditer(r"(?m)^\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", block):
-                element_id = int(match.group(1))
+            for line in block.splitlines()[1:]:
+                if not line.strip() or line.lstrip().startswith("**"):
+                    continue
+                element_id, *connectivity = [int(value.strip()) for value in line.split(",") if value.strip()]
                 removed_ids.add(element_id)
-                boundary_elements[element_id] = (int(match.group(2)), int(match.group(3)))
+                if element_type.group(1).upper() in {"T2D3", "T3D3"} and len(connectivity) == 3:
+                    # INP quadratic trusses put the midside node second.
+                    connectivity = [connectivity[0], connectivity[2], connectivity[1]]
+                boundary_elements[element_id] = tuple(connectivity)
             continue
         if header.upper().startswith("*ELSET"):
             ids = {int(value) for value in re.findall(r"\b\d+\b", "\n".join(block.splitlines()[1:]))}
@@ -1695,34 +1497,34 @@ def _csm_files(parameters: dict[str, Any]) -> dict[str, str]:
         return matches[0]
 
     load_value_keys = (
-        "magnitude", "pressure", "pressure_mpa", "traction", "traction_mpa",
+        "magnitude", "magnitude_mpa", "pressure", "pressure_mpa", "traction", "traction_mpa",
         "stress", "stress_mpa", "value", "P",
     )
     boundary_specs = dict(bindings.get("boundary_conditions") or {})
     load_specs = dict(bindings.get("loads") or {})
     if thermal and load_specs:
         raise ValueError("Thermal sources need an explicit solver-input generation step; mechanical CLOAD assembly is not applicable.")
-    load_defaults = {
-        key: value for key, value in load_specs.items()
-        if not canonical_condition_region(key)
-    }
+    load_defaults, region_loads = {}, {}
+    for key, value in load_specs.items():
+        region = canonical_condition_region(key, value, nsets)
+        (region_loads if region else load_defaults)[region or key] = value
+    load_specs = region_loads
     for key, value in list(boundary_specs.items()):
-        region = canonical_condition_region(key)
+        region = canonical_condition_region(key, value, nsets)
         load_like = bool(re.search(
-            r"(?i)(?:\b(?:load|force|traction|stress|pressure)\b|载荷|应力|压力)",
+            r"(?i)(?:\b(?:load|force|traction|stress|pressure|tensile|compressive)\b|载荷|应力|压力)",
             f"{key} {value}".replace("_", " "),
         ))
         if region and load_like:
             load_specs.setdefault(region, value if isinstance(value, (str, dict)) else {"magnitude": value})
             if not isinstance(value, dict):
                 boundary_specs.pop(key)
-    for key, value in list(load_specs.items()):
-        region = canonical_condition_region(key)
-        if not isinstance(value, dict) and region:
-            load_specs.pop(key)
-            load_specs.setdefault(region, value if isinstance(value, str) else {"magnitude": value})
     boundary_lines: list[str] = []
     for region, controls in boundary_specs.items():
+        if not canonical_condition_region(region, controls, nsets):
+            continue  # Group-level units/defaults are not boundary assignments.
+        if controls == {}:
+            continue  # Explicitly cleared condition; do not restore an inferred/default constraint.
         constraint = controls if isinstance(controls, str) else (
             binding_value(controls, "type", "kind", "constraint") if isinstance(controls, dict) else None
         )
@@ -1747,33 +1549,47 @@ def _csm_files(parameters: dict[str, Any]) -> dict[str, str]:
                 raise ValueError(f"Unsupported thermal boundary at {region}: {controls!r}; revise the solver input contract.")
             boundary_lines.append(f"{region_name(region)}, 11, 11, {temperature}")
             continue
+        if re.fullmatch(r"free|unconstrained|自由", str(constraint or "").strip(), flags=re.I):
+            if isinstance(controls, dict) and controls.keys() - {"type", "kind", "constraint"}:
+                raise ValueError(f"Free boundary at {region!r} also declares controls: {controls!r}; resolve the conflicting assignment.")
+            continue  # Natural mechanical boundary: no prescribed displacement.
         if re.fullmatch(r"fixed|clamped|encastre|固定|完全固定|固支", str(constraint or "").strip(), flags=re.I):
             # Let the solver constrain the active DOFs; do not assume that
             # every mesh has the same dimension or element formulation.
             boundary_lines.append(f"{region_name(region)}, ENCASTRE")
             continue
         if isinstance(controls, str):
-            if re.search(r"(?i)load|traction|stress|pressure", controls):
-                load_specs.setdefault(region, controls)
-                continue
-            controls = {
-                f"u{dof}": 0
-                for dof in re.findall(r"(?i)u([123])", controls)
-            }
+            assignments = re.split(r"[,;]", controls)
+            if not all(re.fullmatch(
+                r"\s*(?:u[1-6]\s*=\s*)+[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?\s*",
+                assignment, flags=re.I,
+            ) for assignment in assignments):
+                raise ValueError(f"Unsupported boundary controls at {region!r}: {controls!r}; use explicit u1..u6 values, type='fixed' or type='free'.")
+            controls = {f"u{dof}": float(assignment.rsplit("=", 1)[1])
+                        for assignment in assignments for dof in re.findall(r"(?i)u([1-6])", assignment)}
         if not isinstance(controls, dict):
-            continue
+            raise ValueError(f"Unsupported boundary controls at {region!r}: {controls!r}; specify the condition kind or displacement DOFs.")
         if binding_value(controls, *load_value_keys) is not None:
             load_specs.setdefault(region, controls)
         name = region_name(region)
         before = len(boundary_lines)
-        for dof_name, value in controls.items():
+        for dof_name in controls:
             match = re.fullmatch(r"u([1-6])", str(dof_name), flags=re.I)
             if match:
+                value = binding_value(controls, str(dof_name))
                 boundary_lines.append(f"{name}, {match.group(1)}, {match.group(1)}, {value}")
         if len(boundary_lines) == before and region not in load_specs:
             raise ValueError(f"Unsupported boundary controls at {region!r}: {controls!r}; use explicit u1..u6 values or type='fixed', or an explicit solver-input writer.")
     load_lines: list[str] = []
+    if load_defaults and not load_specs:
+        raise ValueError(
+            "Load quantities have no assigned mesh region; bind the requested load to a physical region "
+            "before solver-deck assembly. Do not discard an unassigned force or treat it as traction."
+        )
+    applied_loads: dict[tuple[Any, ...], str] = {}
     for region, load in load_specs.items():
+        if isinstance(load, (int, float)):
+            load = {"magnitude": load}
         if isinstance(load, str):
             values = re.findall(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", load)
             load = {
@@ -1783,7 +1599,7 @@ def _csm_files(parameters: dict[str, Any]) -> dict[str, str]:
                     "",
                 ),
             }
-        if not isinstance(load, dict):
+        if not isinstance(load, dict) or not load:
             continue
         load = {**load_defaults, **load}
         name = region_name(region)
@@ -1799,18 +1615,38 @@ def _csm_files(parameters: dict[str, Any]) -> dict[str, str]:
         weights: dict[int, float] = {}
         seen_edges: set[tuple[int, int]] = set()
         for element_id in boundary_groups.get(name, set()):
-            left, right = boundary_elements.get(element_id, (0, 0))
-            if left not in nodes or right not in nodes:
-                continue
+            connectivity = boundary_elements.get(element_id, ())
+            if len(connectivity) not in {2, 3} or any(node not in nodes for node in connectivity):
+                raise ValueError(f"Unsupported boundary edge {element_id} in load region {name!r}.")
+            left, right = connectivity[:2]
             edge = tuple(sorted((left, right)))
             if edge in seen_edges:
                 continue
             seen_edges.add(edge)
-            length = math.dist(nodes[left], nodes[right])
-            weights[left] = weights.get(left, 0.0) + length / 2.0
-            weights[right] = weights.get(right, 0.0) + length / 2.0
+            if len(connectivity) == 2:
+                length = math.dist(nodes[left], nodes[right])
+                for node in connectivity:
+                    weights[node] = weights.get(node, 0.0) + length / 2.0
+            else:
+                # Consistent quadratic-edge traction, including the midside
+                # node. Endpoint-only forces change the finite-element load.
+                for xi, weight in ((-math.sqrt(3/5), 5/9), (0.0, 8/9), (math.sqrt(3/5), 5/9)):
+                    shape = (xi * (xi - 1) / 2, xi * (xi + 1) / 2, 1 - xi * xi)
+                    derivative = (xi - 0.5, xi + 0.5, -2 * xi)
+                    jacobian = math.hypot(*(sum(d * nodes[node][axis] for node, d in zip(connectivity, derivative))
+                                            for axis in (0, 1)))
+                    for node, value in zip(connectivity, shape):
+                        weights[node] = weights.get(node, 0.0) + weight * jacobian * value
         if not weights:
             raise ValueError(f"Load region {name!r} has no boundary edges; repair the physical group and regenerate the mesh.")
+        identity = (tuple(sorted(seen_edges)), dof, sign * float(magnitude) * float(thickness))
+        if identity in applied_loads:
+            raise ValueError(
+                f"Ambiguous duplicate load assignments: {applied_loads[identity]!r} and {region!r} apply "
+                "the same traction to identical boundary edges. Resolve against the locked request; "
+                "clear a redundant alias with parameters.loads[region] = {}, rather than doubling the load."
+            )
+        applied_loads[identity] = region
         load_lines.extend(
             f"{node}, {dof}, {sign * float(magnitude) * float(thickness) * weight:.12g}"
             for node, weight in sorted(weights.items())
@@ -1822,9 +1658,6 @@ def _csm_files(parameters: dict[str, Any]) -> dict[str, str]:
     region = explicit_elsets[0] if explicit_elsets else (
         continuum_elsets[0] if continuum_elsets else "ALL_ELEMENTS"
     )
-    software = str(
-        ((analysis or {}).get("simulation_software") or {}).get("name") or ""
-    ).casefold()
     structure = bindings.get("structure") if isinstance(bindings.get("structure"), dict) else {}
     part_name = re.sub(
         r"[^A-Za-z0-9_-]+", "_", str(structure.get("part_name") or "MODEL")
@@ -2103,6 +1936,9 @@ def _poscar_species_from_text(value: str) -> list[str]:
 def _normalize_calculation_stages(spec: str, parameters: dict[str, Any]) -> list[dict[str, Any]]:
     raw = parameters.get("calculation_stages")
     analysis = parameters.get("requirement_analysis")
+    if isinstance(analysis, dict) and isinstance(analysis.get("calculation_stages"), list):
+        # Approved structured stages, including an empty scope, are authoritative.
+        return copy.deepcopy(analysis["calculation_stages"])
     if not isinstance(raw, list) and isinstance(analysis, dict):
         raw = analysis.get("calculation_stages")
     stages: list[dict[str, Any]] = []
@@ -4240,7 +4076,7 @@ def _apply_mesh_stage_requirements(
     far_field_values.extend(_stage_text_numeric_values(
         relevant_stages,
         (
-            r"(?:far[- ]?field|远场)(?:\s*(?:radius|distance|extent|半径|距离|范围))?"
+            r"(?:far[- ]?field|远场)(?:\s*(?:radius|extent|半径|范围))?"
             r"\s*(?:=|:|≈|~|为)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:c|chord|弦长)?",
         ),
     ))
@@ -4248,8 +4084,16 @@ def _apply_mesh_stage_requirements(
     if required_far_field is not None:
         current_far_field = _numeric_requirement(effective.get("far_field")) or 0.0
         effective["far_field"] = max(current_far_field, required_far_field)
-        effective["required_far_field"] = required_far_field
-        contract["applied"]["required_far_field"] = required_far_field
+        contract["applied"]["far_field"] = effective["far_field"]
+    # A prescribed radius/coordinate is not a minimum body clearance.
+    clearances = [_numeric_requirement(raw) for raw in plan_values("required_far_field")]
+    clearances.extend(
+        _extract_numbers(_stage_text(item)).get("required_far_field")
+        for item in relevant_stages
+    )
+    if any(value is not None for value in clearances):
+        effective["required_far_field"] = max(value for value in clearances if value is not None)
+        contract["applied"]["required_far_field"] = effective["required_far_field"]
 
     y_plus_values = [
         value for value in (
@@ -7385,24 +7229,88 @@ def _organize_mesh_auxiliary_files(package_dir: Path, assets: dict[str, Any] | N
     return assets
 
 
-def _write_mesh_delivery_index(package_dir: Path, assets: dict[str, Any] | None) -> dict[str, Any] | None:
+def mesh_report_consistency(files: dict[str, str], assets: dict[str, Any]) -> dict[str, Any]:
+    """Compare delivered report fields with the mesh producer's recorded facts.
+
+    This checks transcription, not geometry or solver validity. In particular,
+    agreement with an input parameter is never an achieved-size measurement.
+    """
+    checks, issues = {}, []
+    native = assets.get("mesh_review") or {}
+    counts = ((native.get("openfoam_check_mesh") or {}).get("observations") or {}).get("counts") or {}
+    expected = {
+        "audit/mesh_quality.json": {(): assets.get("quality")},
+        "audit/mesh_delivery.json": {
+            ("grid_parameters",): assets.get("grid_params"),
+            ("parameter_basis", "executed_controls"): assets.get("grid_params"),
+            ("mesh_selection", "actual_cell_count"): counts.get("cells"),
+            ("mesh_selection", "plan_contract"): native.get("plan_contract"),
+            ("mesh_review_status",): native.get("status"),
+            **{("openfoam_check_mesh", key): value for key, value in
+               (native.get("openfoam_check_mesh") or {}).items()
+               if key in {"status", "returncode", "mesh_ok_marker", "failed_checks"}},
+        },
+    }
+    for name, fields in expected.items():
+        if name not in files:
+            continue
+        try:
+            report = json.loads(files[name])
+        except (ValueError, TypeError):
+            continue  # The existing format validator owns malformed JSON.
+        for path, value in fields.items():
+            if value is None:
+                continue  # An absent producer measurement cannot establish agreement.
+            actual = report
+            for key in path:
+                actual = actual.get(key) if isinstance(actual, dict) else None
+            pointer = "/" + "/".join(path) if path else ""
+            check = f"report_matches_producer_receipt:{name}#{pointer}"
+            checks[check] = actual == value
+            if not checks[check]:
+                issues.append({"code": "mesh_report_receipt_mismatch", "severity": "major",
+                    "file": name, "repair_kind": "derived_report", "repairable": True,
+                    "message": f"{name}#{pointer} differs from the mesh producer receipt.",
+                    "recommendation": "Rebuild the cited report from the preserved producer facts; keep valid mesh and controls unchanged."})
+    return {"checks": checks, "issues": issues}
+
+
+def package_report_rebuild_contract(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Reports this assembler can rebuild from preserved producer receipts.
+
+    This is a capability declaration, not permission to rewrite arbitrary audit
+    files or repair the underlying assets by editing their reported numbers.
+    """
+    owned = {item.get("path") for item in candidate.get("delivery_files") or [] if isinstance(item, dict)}
+    paths = sorted(owned & {"audit/mesh_delivery.json", "audit/mesh_quality.json", "audit/mesh_review.json"})
+    return {"strategy": "reinvoke_preserving_dependencies", "files": paths} if paths else {}
+
+
+def _write_mesh_delivery_index(
+    package_dir: Path, assets: dict[str, Any] | None, *, delivery_dir: Path | None = None,
+) -> dict[str, Any] | None:
+    """Index the native mesh and its viewer entry; companion exports are optional."""
     if not assets:
         return None
-    poly_dir = Path(str(assets.get("polyMesh_dir") or ""))
-    surface = Path(str(assets.get("tecplot_file") or ""))
-    if not poly_dir.exists() or not surface.is_file() or surface.stat().st_size <= 0:
-        return None
+    from .scientific_mesh import mesh_parameter_basis
 
-    canonical_surface = surface
+    # Also normalizes old producer checkpoints before the same receipts enter
+    # the delivery index, manifest and review_context. No geometry is regenerated.
+    assets["parameter_basis"] = mesh_parameter_basis(assets)
+    poly_dir = Path(str(assets.get("polyMesh_dir") or ""))
+    canonical_surface = Path(str(assets.get("tecplot_file") or package_dir / "visualization" / "mesh_surface.dat"))
     canonical_volume = Path(str(assets.get("tecplot_volume_file") or package_dir / "visualization" / "mesh_volume.dat"))
     core_files = {
         name: poly_dir / name
         for name in ("points", "faces", "owner", "neighbour", "boundary")
     }
-    openfoam_case_dir = Path(str(assets.get("openfoam_case_dir") or poly_dir.parent.parent)).resolve()
+    if not poly_dir.is_dir() or not all(path.is_file() for path in core_files.values()):
+        return None
+    openfoam_case_dir = poly_dir.parent.parent.resolve()
     foam_marker = openfoam_case_dir / "case.foam"
     foam_marker.write_text("// OpenFOAM case marker\n", encoding="utf-8")
     mesh_review = assets.get("mesh_review") or {}
+    check_mesh = mesh_review.get("openfoam_check_mesh") or {}
     grid_params = assets.get("grid_params") or {}
     actual_cell_count = (
         (assets.get("openfoam_validation") or {}).get("n_cells")
@@ -7416,10 +7324,6 @@ def _write_mesh_delivery_index(package_dir: Path, assets: dict[str, Any] | None)
         "polyMesh_files": {
             name: {"path": str(path.resolve()), "bytes": path.stat().st_size}
             for name, path in core_files.items()
-        },
-        "tecplot_surface": {
-            "path": str(canonical_surface.resolve()),
-            "bytes": canonical_surface.stat().st_size,
         },
         "openfoam_marker": str(foam_marker.resolve()),
         "mesh_review_status": mesh_review.get("status"),
@@ -7438,9 +7342,26 @@ def _write_mesh_delivery_index(package_dir: Path, assets: dict[str, Any] | None)
         },
         "grid_parameters": grid_params,
         "parameter_basis": assets.get("parameter_basis") or {},
-        "openfoam_validation": assets.get("openfoam_validation"),
+        # Structural read-back and native checkMesh are different checks.
+        # A missing optional parser receipt says nothing about checkMesh.
+        **({"openfoam_validation": assets["openfoam_validation"]}
+           if assets.get("openfoam_validation") else {}),
+        "openfoam_check_mesh": {
+            **{key: check_mesh[key]
+               for key in ("status", "returncode", "mesh_ok_marker", "failed_checks")
+               if key in check_mesh},
+            "evidence_file": "audit/mesh_review.json",
+            "evidence_pointer": "/openfoam_check_mesh",
+        } if check_mesh else {"status": "not_recorded"},
+        "validation_scope": "Mesh validation only; a complete solver configuration or runnable simulation is not certified.",
         "deliverable_valid": bool(assets.get("deliverable_valid", True)),
     }
+    if canonical_surface.is_file() and canonical_surface.stat().st_size > 0:
+        index["tecplot_surface"] = {
+            "path": str(canonical_surface.resolve()),
+            "bytes": canonical_surface.stat().st_size,
+        }
+        assets["tecplot_file"] = str(canonical_surface.resolve())
     if canonical_volume.is_file():
         index["tecplot_volume"] = {
             "path": str(canonical_volume.resolve()),
@@ -7449,15 +7370,16 @@ def _write_mesh_delivery_index(package_dir: Path, assets: dict[str, Any] | None)
     audit_dir = package_dir / "audit"
     audit_dir.mkdir(parents=True, exist_ok=True)
     index_path = audit_dir / "mesh_delivery.json"
-    index_path.write_text(_json_dumps(index), encoding="utf-8")
-    assets["tecplot_file"] = str(canonical_surface.resolve())
+    index_path.write_text(_json_dumps(remap_published_paths(
+        index, package_dir, delivery_dir or package_dir,
+    )), encoding="utf-8")
     assets["mesh_delivery_index"] = str(index_path.resolve())
     assets["openfoam_marker"] = str(foam_marker.resolve())
     for path in (canonical_surface, canonical_volume, foam_marker, index_path, *core_files.values()):
-        if not path.exists():
+        if not path.is_file():
             continue
         value = str(path.resolve())
-        if value not in assets["written_files"]:
+        if value not in assets.setdefault("written_files", []):
             assets["written_files"].append(value)
     return index
 
@@ -7515,8 +7437,6 @@ async def _build_scientific_preprocessing_package(
         generate_mesh_assets = False
         generate_model_assets = False
     _apply_downloaded_geometry_assets_to_params(state, spec, params)
-    original_spec = original_user_request_text_from_state(state)
-    intent_spec = "\n".join(part for part in (original_spec, spec) if part)
     if not isinstance(params.get("requirement_analysis"), dict):
         params.update({k: v for k, v in _extract_numbers(spec).items() if k not in params})
         params.update({k: v for k, v in _extract_airfoil_mesh_density_numbers(spec).items() if k not in params})
@@ -7583,25 +7503,19 @@ async def _build_scientific_preprocessing_package(
             requirement_analysis,
         )
     review_profile = str(preprocessing_request.get("review_profile") or "request_bound")
-    # The caller-declared stage scope is the source of truth for generated mesh
-    # controls. This occurs before any mesher/router call, so no designer/critic
-    # cycle is needed for an ordinary local repair.
-    params = _apply_mesh_stage_requirements(
-        params,
-        calculation_stages,
-    )
+    if generate_mesh_assets is None:
+        generate_mesh_assets = _explicit_mesh_assets_requested(spec, selected_discipline, params)
+    else:
+        generate_mesh_assets = bool(generate_mesh_assets)
+    if generate_mesh_assets:
+        params = _apply_mesh_stage_requirements(params, calculation_stages)
     emit_progress(
         state,
         "package_discipline",
         selected_discipline,
         solver=defaults["solver_family"],
     )
-    if generate_mesh_assets is None:
-        generate_mesh_assets = _explicit_mesh_assets_requested(spec, selected_discipline, params)
-    else:
-        generate_mesh_assets = bool(generate_mesh_assets)
-    cfd_profile = _match_cfd_case_profile(spec, params) if selected_discipline == "cfd" else None
-    mesh_type = _infer_mesh_type(selected_discipline, spec, params)
+    mesh_type = _infer_mesh_type(selected_discipline, spec, params) if generate_mesh_assets else str(params.get("mesh_type") or "")
     provided_mesh_result = params.get("mesh_generation_result")
     if isinstance(provided_mesh_result, dict):
         # Execution bookkeeping belongs to the checkpoint, not to consumers
@@ -7610,6 +7524,7 @@ async def _build_scientific_preprocessing_package(
                                 if key not in {"effective_arguments", "repair_history"}}
         params["mesh_generation_result"] = provided_mesh_result
     if isinstance(provided_mesh_result, dict) and provided_mesh_result.get("status") == "success":
+        mesh_type = str(provided_mesh_result.get("mesh_type") or mesh_type)
         params.setdefault(
             "case_dir",
             provided_mesh_result.get("case_dir")
@@ -7635,121 +7550,20 @@ async def _build_scientific_preprocessing_package(
             reviewed_mesh_type = str(existing_mesh_assets.get("mesh_type") or "").strip()
         if reviewed_mesh_type:
             mesh_type = reviewed_mesh_type
-    special_domain = (
-        detect_special_domain_requirements(
-            intent_spec,
-            params,
-            case_type=str(params.get("case_type") or mesh_type or ""),
-            include_complete=True,
-        )
-        if selected_discipline == "cfd"
-        else None
-    )
-    if not existing_mesh_assets and special_domain and mesh_type in {
-        "airfoil_gmsh",
-        "airfoil_ogrid",
-        "coordinate_profile_gmsh",
-        "structured_rect",
-        "cylinder_flow",
-        "cylinder_gmsh",
-        "sphere",
-        "pipe_flow",
-        "converging_diverging_nozzle",
-    }:
-        if not special_domain.get("missing_fields"):
-            special_domain = {
-                **special_domain,
-                "missing_fields": ["适配该特殊拓扑的 geometry_file/mesh_type 或专用网格生成路径"],
-            }
-        return special_domain_reference_request(intent_spec, params, special_domain)
-    if (
-        selected_discipline == "cfd"
-        and not existing_mesh_assets
-        and mesh_type in {"airfoil_gmsh", "airfoil_ogrid"}
-        and not original_intent_allows_airfoil_mesh(state, spec, params)
-    ):
-        return public_geometry_reference_request(intent_spec, params, case_type="public_geometry")
-    if (
-        selected_discipline == "cfd"
-        and not existing_mesh_assets
-        and not _canonical_cfd_mesh_matches_original_intent(state, mesh_type, intent_spec, params)
-    ):
-        return public_geometry_reference_request(intent_spec, params, case_type="public_geometry")
-    if selected_discipline == "cfd" and not existing_mesh_assets and geometry_parameters_need_reference_resolution(params):
-        advisor_result = await _resolve_mesh_iteration_inputs(
-            state,
-            spec=spec,
-            case_type=str(params.get("case_type") or mesh_type or ""),
-            parameters=_json_dumps(params),
-        )
-        if advisor_result.get("status") in {"needs_input", "needs_reference_search", "needs_geometry_processing", "error"}:
-            return advisor_result
-        if advisor_result.get("status") == "success":
-            params.update(advisor_result.get("resolved_parameters") or {})
-            mesh_type = _infer_mesh_type(selected_discipline, spec, params)
-    if selected_discipline == "cfd":
-        _apply_cfd_profile_defaults(params, cfd_profile)
-        if not existing_mesh_assets and mesh_type in {"public_geometry", "custom_geometry", "generic_gmsh"} and not params.get("geometry_file"):
-            return public_geometry_reference_request(spec, params, case_type=str((cfd_profile or {}).get("case_type") or mesh_type))
-    if (
-        selected_discipline == "cfd"
-        and mesh_type == "airfoil_gmsh"
-        and looks_like_turbomachinery_blade(intent_spec, params)
-        and not str(params.get("isolated_blade_approximation_confirmed") or "").lower() in {"1", "true", "yes"}
-        and not _has_turbomachinery_cascade_domain(params)
-    ):
-        return public_geometry_reference_request(intent_spec, params, case_type="public_geometry")
-    if (
-        selected_discipline == "cfd"
-        and mesh_type == "coordinate_profile_gmsh"
-        and looks_like_turbomachinery_blade(intent_spec, params)
-        and not _has_turbomachinery_cascade_domain(params)
-    ):
-        return public_geometry_reference_request(intent_spec, params, case_type="public_geometry")
-    if selected_discipline == "cfd" and mesh_type == "coordinate_profile_gmsh":
-        special_profile_domain = detect_special_domain_requirements(
-            intent_spec,
-            params,
-            case_type=str(params.get("case_type") or "coordinate_profile_gmsh"),
-            include_complete=True,
-        )
-        if special_profile_domain:
-            if not special_profile_domain.get("missing_fields"):
-                special_profile_domain = {
-                    **special_profile_domain,
-                    "missing_fields": ["适配该特殊拓扑的 profile 通道/周期域生成器"],
-                }
-            return special_domain_reference_request(intent_spec, params, special_profile_domain)
-    if selected_discipline == "cfd" and mesh_type in {"airfoil_gmsh", "airfoil_ogrid"}:
-        if not original_intent_allows_airfoil_mesh(state, spec, params):
-            return public_geometry_reference_request(intent_spec, params, case_type="public_geometry")
-        params.setdefault("mesh_type", mesh_type)
-        params.setdefault("quality_preset", "robust")
-        params.setdefault("convert_to_openfoam", True)
-        params.setdefault("write_tecplot", True)
-        for key in ("airfoil_dat_path", "airfoil_coordinate_text", "airfoil_coordinates"):
-            if key in params and is_placeholder_value(params.get(key)):
-                params.pop(key, None)
-        if (
-            not _has_airfoil_coordinates(params)
-            and not existing_mesh_assets
-            and (
-                looks_like_turbomachinery_blade(intent_spec, params)
-                or looks_like_public_reference_request(spec)
-            )
-        ):
-            return public_geometry_reference_request(intent_spec, params, case_type="public_geometry")
-        if airfoil_name and not naca_code and not _has_airfoil_coordinates(params) and not existing_mesh_assets:
-            return _airfoil_parameter_prompt(airfoil_name, params)
-        if not naca_code and not _has_airfoil_coordinates(params) and not existing_mesh_assets:
-            return _naca_or_profile_required_prompt(params)
+    if generate_mesh_assets and not (provided_mesh_result or existing_mesh_assets):
+        issue = {
+            "code": "missing_mesh_dependency", "repair_kind": "plan_structure",
+            "message": "Package assembly requires a bound mesh producer result or existing mesh.",
+            "required_change": "Bind the mesh-producing step as a dependency; assembly never creates a replacement mesh.",
+        }
+        return {"status": "needs_revision", "issues": [issue],
+                "revision_contract": revision_contract([issue], scope="plan")}
 
     case_name = _slugify(output_name or params.get("case_name", "") or spec)
     package_dir, final_package_dir = prepare_package_staging(
         state,
         str(preprocessing_request.get("delivery_name") or ""),
     )
-    mesh_delivery: dict[str, Any] | None = None
 
     dataset_profile: dict[str, Any] = {}
     if data_path:
@@ -7794,7 +7608,7 @@ async def _build_scientific_preprocessing_package(
     write_discipline_templates = _should_write_discipline_templates(selected_discipline, params)
     request_bound_asset_only = (
         review_profile == "request_bound"
-        and not _request_bound_needs_solver_templates(params)
+        and not write_discipline_templates
     )
     poscar_recovery_result: dict[str, Any] | None = None
     if write_discipline_templates and (
@@ -7809,7 +7623,18 @@ async def _build_scientific_preprocessing_package(
             else:
                 files.update(_provided_material_files(params))
         else:
-            files.update(_simulation_stage_generator(selected_discipline, input_params))
+            try:
+                files.update(_simulation_stage_generator(selected_discipline, input_params))
+            except FileNotFoundError as exc:
+                return {
+                    "status": "needs_revision",
+                    "error": str(exc),
+                    "issues": [{
+                        "code": "input_asset_unavailable", "severity": "critical",
+                        "file": str(exc.filename or ""), "message": str(exc),
+                        "required_change": "Repair the cited input's producer and rebuild its consumers; preserve the scientific request.",
+                    }],
+                }
     if not write_discipline_templates and selected_discipline == "electronic_structure":
         if material_solver == "vasp":
             files.update(_vasp_files({
@@ -7896,44 +7721,9 @@ async def _build_scientific_preprocessing_package(
         if isinstance(provided_mesh_result, dict)
         else None
     )
-    mesh_variant_results: list[dict[str, Any]] = []
     if mesh_generation_result is None and existing_mesh_assets:
         mesh_generation_result = existing_mesh_assets
-    elif mesh_generation_result is None and generate_mesh_assets:
-        try:
-            from .scientific_mesh import prepare_scientific_mesh
-
-            mesh_generation_result = await prepare_scientific_mesh(
-                state=state,
-                spec=spec,
-                discipline=selected_discipline,
-                mesh_type=mesh_type,
-                case_dir="",
-                parameters=_json_dumps(params),
-                operation="prepare",
-                generate_mesh=True,
-            )
-        except Exception as exc:
-            mesh_generation_result = {
-                "status": "error",
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        if (
-            selected_discipline == "cfd"
-            and mesh_generation_result
-            and mesh_generation_result.get("status") == "success"
-        ):
-            from .profile_mesh_variants import generate_cfd_profile_mesh_variants
-
-            mesh_variant_results = await generate_cfd_profile_mesh_variants(
-                state=state,
-                selected_discipline=selected_discipline,
-                params=params,
-                package_dir=package_dir,
-                mesh_generation_result=mesh_generation_result,
-                calculation_stages=calculation_stages,
-            )
-
+    mesh_variant_results = list((mesh_generation_result or {}).get("profile_variants") or [])
     if mesh_generation_result and mesh_generation_result.get("status") == "success":
         mesh_generation_result = _stage_runtime_mesh_asset(mesh_generation_result, package_dir)
         mesh_generation_result = _organize_mesh_reproducibility_files(package_dir, mesh_generation_result)
@@ -7968,21 +7758,8 @@ async def _build_scientific_preprocessing_package(
             )
     preliminary_mesh_generation_result = mesh_generation_result
 
-    mesh_convergence_variant_results: dict[str, list[dict[str, Any]]] = {}
-    if (
-        mesh_generation_result
-        and mesh_generation_result.get("status") == "success"
-        and calculation_stages
-    ):
-        mesh_convergence_variant_results = await _generate_mesh_convergence_variants(
-            state=state,
-            spec=intent_spec,
-            selected_discipline=selected_discipline,
-            params=params,
-            package_dir=package_dir,
-            calculation_stages=calculation_stages,
-            mesh_generation_result=mesh_generation_result,
-        )
+    mesh_convergence_variant_results = dict((mesh_generation_result or {}).get("convergence_variants") or {})
+    if mesh_convergence_variant_results:
         convergence_reference_mesh = _reference_mesh_from_convergence_variants(
             mesh_convergence_variant_results
         )
@@ -8044,8 +7821,8 @@ async def _build_scientific_preprocessing_package(
         if asset_routing.get("unresolved"):
             files["audit/runtime_asset_routing.json"] = _json_dumps(asset_routing)
         mesh_generation_result = _organize_mesh_auxiliary_files(package_dir, mesh_generation_result)
-        if mesh_generation_result.get("polyMesh_dir") and mesh_generation_result.get("tecplot_file"):
-            mesh_delivery = _write_mesh_delivery_index(package_dir, mesh_generation_result)
+        if mesh_generation_result.get("polyMesh_dir"):
+            _write_mesh_delivery_index(package_dir, mesh_generation_result, delivery_dir=final_package_dir)
         if stage_records:
             _refresh_workflow_manifest(
                 files,
@@ -8147,12 +7924,6 @@ async def _build_scientific_preprocessing_package(
     extra_written_names = ["README.md"]
     if params.get("packaged_data_relative_path"):
         extra_written_names.append(str(params["packaged_data_relative_path"]))
-    if mesh_delivery:
-        extra_written_names.extend([
-            "visualization/mesh_surface.dat",
-            "visualization/mesh_volume.dat",
-            "audit/mesh_delivery.json",
-        ])
     package_written_file_names = sorted(set([
         *files.keys(), *mesh_written_files, *extra_written_names,
     ]))
@@ -8421,7 +8192,10 @@ async def _build_scientific_preprocessing_package(
         *([
             "- Internal adapter: `generic`",
         ] if selected_discipline == "unknown" and reported_discipline != "unknown" else []),
-        f"- Solver family: `{defaults['solver_family']}`",
+        f"- Solver family: `{defaults['solver_family']}`" + (
+            "" if declared_solver and str(declared_solver).lower() not in {"unknown", "unspecified"}
+            else " (discipline default; not a declaration of solver-specific delivery)"
+        ),
         *([f"- Mesh type: `{mesh_type}`"] if generate_mesh_assets or mesh_generation_result else []),
         *([f"- NACA code: `{params['naca_code']}`"] if params.get("naca_code") else []),
         *([f"- Angle of attack: `{params['angle_of_attack']} deg`"] if params.get("angle_of_attack") is not None else []),
@@ -8537,6 +8311,9 @@ async def _build_scientific_preprocessing_package(
         "mesh_type": mesh_type,
         "solver_family": defaults["solver_family"],
         "written_files": [str(path.resolve()) for path in staged_files],
+        "report_rebuild": package_report_rebuild_contract({"delivery_files": delivery_files}),
+        "derived_report_files": [str((staging_package_dir_abs / path).resolve()) for path in
+                                 package_report_rebuild_contract({"delivery_files": delivery_files}).get("files", [])],
         "mesh_generation_result": mesh_generation_result,
         "n_written_files": n_written,
         "size_bytes": size_bytes,
@@ -8565,6 +8342,10 @@ def _merge_approved_package_step_arguments(
     kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     """Preserve approved structured package arguments on manual tool calls."""
+    active_step = getattr(state, "hook_state", {}).get("_active_preprocessing_step") or {}
+    if active_step.get("tool_name") == "build_scientific_preprocessing_package":
+        return kwargs  # The executor already bound the exact approved step.
+
     def coerce_parameters(value: Any, field_name: str) -> dict[str, Any]:
         if isinstance(value, dict):
             return dict(value)

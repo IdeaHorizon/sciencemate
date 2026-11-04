@@ -284,7 +284,7 @@ export function projectExecution(
           : tools.length > 0
             ? say({ zh: "研究工具", en: "Research tools" }, lang)
             : status === "error"
-              ? say({ zh: "这一步没做成", en: "Research step failed" }, lang)
+              ? say({ zh: "这一步失败", en: "Research step failed" }, lang)
               : say(STEP, lang),
         summary: endView?.summary ?? startView.summary,
         status,

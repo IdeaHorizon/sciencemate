@@ -186,8 +186,6 @@
   font-family: var(--font-mono); font-size: var(--font-size-caption); white-space: pre-wrap;
   border-top: 1px solid var(--color-border); color: var(--color-fg-muted);
 }
-.session-review-updates { padding: 5px 3px; color: var(--color-fg-muted); font-size: var(--font-size-meta); text-decoration: none; }
-.session-review-updates:hover { color: var(--color-fg); }
 .session-header-actions details { position: relative; }
 .session-header-actions details > summary { display: grid; place-items: center; width: 29px; height: 29px; color: var(--color-fg-muted); border-radius: 5px; list-style: none; cursor: pointer; }
 .session-header-actions details > summary::-webkit-details-marker { display: none; }
@@ -276,9 +274,7 @@
 .session-conflict-comparison button:hover { color: var(--color-fg); border-bottom-color: var(--color-fg-muted); }
 .session-conflict-comparison button:disabled { cursor: wait; opacity: .5; }
 .session-conflict-permission { display: block; margin-top: 8px; color: var(--color-warning); font-size: var(--font-size-caption); }
-.session-changes-loading,
-.session-kb-boundary { margin: 9px 0 0; color: var(--color-fg-subtle); font-size: var(--font-size-caption); line-height: 1.5; }
-.session-kb-boundary { padding-top: 10px; border-top: 1px solid color-mix(in srgb, var(--color-border) 65%, transparent); }
+.session-changes-loading { margin: 9px 0 0; color: var(--color-fg-subtle); font-size: var(--font-size-caption); line-height: 1.5; }
 .session-run-verification-error { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: min(820px, calc(100% - 48px)); margin: 10px auto 0; padding: 10px 0; color: var(--color-fg-muted); border-top: 1px solid color-mix(in srgb, var(--color-danger) 38%, var(--color-border)); border-bottom: 1px solid color-mix(in srgb, var(--color-danger) 38%, var(--color-border)); }
 .session-run-verification-error > span { display: grid; gap: 2px; }
 .session-run-verification-error strong { color: var(--color-fg); font-size: var(--font-size-meta); font-weight: 570; }
@@ -345,8 +341,7 @@
   .session-header-meta { margin-top: 4px; }
   .session-instruction-audit-trigger { max-width: 62vw; margin-top: 4px; }
   .session-header-actions > button,
-  .session-header-actions > .session-action-conflict,
-  .session-review-updates { display: none; }
+  .session-header-actions > .session-action-conflict { display: none; }
   .session-mobile-action { display: flex !important; }
   .session-document-canvas .chat-area .messages { padding: 28px 15px; }
   .session-changes-inner { width: calc(100% - 30px); }
@@ -723,11 +718,6 @@ body:has(.session-inspector-resizer.is-dragging) { cursor: col-resize; user-sele
 .session-about-facts dt { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
 .session-about-facts dd { margin: 0; color: var(--color-fg); font-size: var(--font-size-meta); }
 .session-about-instruction-label { display: flex; align-items: center; gap: 5px; margin: 16px 0 0; padding-top: 14px; border-top: 1px solid var(--color-border); color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
-
-/* ⋯ 上的小点：项目往前走了要有人知道，但它不值一个常驻按钮。 */
-.session-header-actions details > summary.has-badge { position: relative; }
-.session-header-actions details > summary.has-badge::after { content: ""; position: absolute; top: 4px; right: 4px; width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent, var(--color-fg)); }
-.session-header-actions details .session-review-updates > i { width: 6px; height: 6px; margin-left: auto; border-radius: 50%; background: var(--color-accent, var(--color-fg)); }
 /* 菜单分组：不可逆的操作和随便点的操作之间要有一条线。 */
 .session-header-actions details .session-menu-sectioned { margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--color-border); border-radius: 0; }
 

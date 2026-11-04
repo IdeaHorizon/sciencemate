@@ -144,6 +144,10 @@ blocking_check_aggregates:
 # 重新生成登记表骨架：
 #   python tests/test_model_commands_reach_the_os_through_one_throat.py
 subprocess_call_sites:
+  - file: core/ssh_transport.py
+    sites: [call]
+    argv_source: framework
+    reason: "已认证 Project Resource 的 SSH 控制面：本机只执行固定 OpenSSH + 框架提供的远端 Python 模板，账号/目标来自经服务层校验且与凭据绑定的登记；模型命令只通过 JSON stdin 送到已授权远程账户，不插入本机 shell。进程组由 process_control 接管；远端运行器作为模板数据上传，不在本机导入。"
   - file: shared/lib/cancellable_subprocess.py
     sites: [spawn_and_wait, spawn_and_wait]
     argv_source: throat
@@ -162,6 +166,18 @@ subprocess_call_sites:
     sites: [_memory_wall, _probe_landlock, _rc]
     argv_source: framework
     reason: "_probe_landlock：问内核 Landlock ABI（起 _landlock_exec.py abi）；_rc 是它的内部函数，起四次探针——同一条 TCP connect 与同一条 UDP socket 各在 --network allow / deny 下跑一遍做对照：allow 必须连得上 / 建得出，deny 必须被拒；只测 deny 会把监听器没起来当成被拒（#797 WP-01，#1180 加 UDP）。_memory_wall：命令失败后问 systemd 这条命令那片 slice 的 cgroup 路径（systemctl --user show -p ControlGroup），读它的 memory.events 判是不是撞了内存墙（#1179）；argv 是 which 出来的 systemctl + 后端自己起的 slice 名"
+  - file: core/gpu.py
+    sites: [visible_indices]
+    argv_source: framework
+    reason: "nvidia-smi --query-gpu=index 只读查询，argv 固定，可执行文件路径来自 which；回答「看得见哪几张卡」给分卡与 gpu_capability 用（#893 阶段 1）"
+  - file: core/isolation/wsl.py
+    sites: [_exec, list_distros]
+    argv_source: framework
+    reason: "wsl 执行目标的 Windows 一侧（worker，Medium IL）：_exec 起 wsl.exe -d <发行版> --exec 跑 wslpath（量挂载根）与 _wsl_entry.py probe（在发行版里真探一次 linux 后端能守到什么）；list_distros 起 wsl.exe -l -q 列已注册的发行版给设置页。argv 全是框架拼的，发行版名经 core.execution_target 的写法校验。模型命令不走这里——它由 prepare 交给咽喉起（RFC_WINDOWS_EXECUTION_TARGETS D9）"
+  - file: core/isolation/_wsl_entry.py
+    sites: [run]
+    argv_source: framework
+    reason: "wsl 执行目标在发行版里的那一层：Popen 起的是 linux 后端 prepare 交回的 argv（bwrap → 我们的 _exec.py 垫片 → 载荷），它是墙的一部分、经咽喉（wsl.exe）起，与 _landlock_exec.py 同一个位置；本进程看着它跑完、收尾、在 wsl.exe 那头断开时整组杀掉"
   - file: core/isolation/_landlock_exec.py
     sites: [main]
     argv_source: framework
@@ -261,6 +277,13 @@ subprocess_call_sites:
       session_naming._ask_harness_for_title 各手抄了一遍，两份抄件都把子进程的
       stderr 收了又扔掉 —— 于是 Windows 上 autoname 失败只留下一个光秃秃的
       `runtime_error`。收成一处后，那两个调用点从这份名单里消失是**预期**的。
+  - file: platform/backend/app/services/cnki_browser.py
+    sites: [ensure]
+    argv_source: framework
+    reason: >
+      启动受管知网浏览器：可执行文件来自服务器配置或本机探测，profile 只使用已验证的
+      用户 UUID。argv 的调试回环地址、端口及启动选项均由框架固定构造，不执行模型
+      命令；Browser.close 持有并收走该进程，服务关闭时由采集器统一清理。
   - file: platform/backend/app/services/harness_sessions.py
     sites: [_popen_with_pipes_this_loop_can_read, _popen_with_pipes_this_loop_can_read,
             _probe, probe_runtime_environment]
@@ -271,9 +294,9 @@ subprocess_call_sites:
       `asyncio.windows_utils.Popen`（overlapped 管道，proactor 才接得上），
       POSIX 走 `subprocess.Popen`；两条都在同一个函数里，所以它在名单上出现两次。
   - file: platform/backend/app/services/project_repository.py
-    sites: [_git, _git_blob_bytes, _git_env, _git_exit_code]
+    sites: [_git_blob_bytes, _run_git]
     argv_source: framework
-    reason: "项目仓库 git plumbing"
+    reason: "项目仓库 git plumbing：_run_git 是文本模式 git 的唯一出口（UTF-8/replace + C locale），_git_blob_bytes 按字节取 blob"
   - file: platform/backend/app/services/self_update.py
     sites: [why_the_payload_cannot_start]
     argv_source: framework
@@ -286,10 +309,10 @@ subprocess_call_sites:
     owner: cuib
     reason: "pdftotext 读模型指定的参考文献 PDF"
   - file: nodes/data/tools/mesh_generator.py
-    sites: [_import_fluent_reference_mesh, generate_airfoil_gmsh_mesh, generate_airfoil_gmsh_mesh, generate_coordinate_profile_cascade_gmsh_mesh, generate_coordinate_profile_cascade_gmsh_mesh, generate_cylinder_gmsh_mesh, generate_cylinder_gmsh_mesh, generate_geometry_file_gmsh_mesh, generate_geometry_file_gmsh_mesh, generate_geometry_file_gmsh_mesh, run_openfoam_check_mesh]
+    sites: [_cad_entity_bounds, _import_fluent_reference_mesh, generate_airfoil_gmsh_mesh, generate_airfoil_gmsh_mesh, generate_coordinate_profile_cascade_gmsh_mesh, generate_coordinate_profile_cascade_gmsh_mesh, generate_cylinder_gmsh_mesh, generate_cylinder_gmsh_mesh, generate_geometry_file_gmsh_mesh, generate_geometry_file_gmsh_mesh, generate_geometry_file_gmsh_mesh, read_gmsh_mesh_quality, run_openfoam_check_mesh]
     argv_source: model_paths
     owner: cuib
-    reason: "gmsh / openfoam checkMesh 在宿主上跑，case 目录与几何文件来自工具参数；这是现存最大的一片宿主执行面，PR B 起原生后端可用后应改走 spawn_and_wait"
+    reason: "gmsh / openfoam checkMesh 在宿主上跑，case 目录与几何文件来自工具参数；新增两处只测量 CAD 包围盒与把实际网格读回 ASCII MSH2，命令模板固定，不执行模型脚本。现存 model_paths 执行面仍由 #1183 跟踪迁移到 spawn_and_wait。"
   - file: nodes/data/tools/preprocessing_capabilities.py
     sites: [_validate_generated_artifact_format]
     argv_source: model_paths
@@ -297,6 +320,18 @@ subprocess_call_sites:
     reason: "bash -n 语法检查模型生成的脚本（只解析不执行）"
 
   # ── nodes/experiment（owner lujy）──
+  - file: nodes/experiment/tools/slurm_ssh.py
+    sites: [_execute]
+    argv_source: framework
+    reason: >
+      Slurm 控制与文件传输的有界 OpenSSH 协议端：目标为已验证的 host/user/port，
+      argv 由框架引用编码；可信个人 SSH 配置提供认证，禁用 agent/X11/端口转发和
+      LocalCommand。实际计算仍由远端 Slurm 执行；此宿主调用只负责传输和带身份回执。
+
+  - file: nodes/experiment/tools/bash_paths.py
+    sites: [_msys_absolute_path]
+    argv_source: framework
+    reason: "Windows 上把模型 bash 里的 MSYS 路径换成 Windows 绝对路径：argv 是随包 MSYS 运行时里的 cygpath.exe 加固定参数，路径走 stdin 不进 argv；只读查询、2 秒超时、不经 shell（#1271）"
   - file: nodes/experiment/tools/build_graph.py
     sites: [_run]
     argv_source: framework
@@ -306,9 +341,9 @@ subprocess_call_sites:
     argv_source: framework
     reason: "wrap_with_cgroup 把模型构建命令包成本文件的 guard 进程后经 safe_run_bash → spawn_and_wait 进墙；Popen 的两处是 guard 作为 payload 在墙内起自己的 argv[1:]；另两处是 systemctl 探针"
   - file: nodes/experiment/tools/repro_snapshot.py
-    sites: [_run]
+    sites: [_run, _run_under_env]
     argv_source: framework
-    reason: "shell 串只有本文件 f-string 拼的工具探针（command -v / --version 等），路径经 shlex.quote；git 查询走 argv 不经 shell（#943）"
+    reason: "固定工具探针与 git 查询；_run_under_env 通过 Core prepare_attempt_command 建立只读执行边界后加载所选脚本，使用唯一 marker 确认初始化，输出有界并清理 Core launch，不在宿主直接 source 模型脚本。"
   - file: nodes/experiment/tools/resource_fetch.py
     sites: [_git_head]
     argv_source: framework

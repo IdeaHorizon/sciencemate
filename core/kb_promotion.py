@@ -32,6 +32,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from shared.lib.external_content import WITNESS_FIELD, merge_witnesses
+
 # ── 车道 ────────────────────────────────────────────────────────────────────
 
 LANE_MECHANICAL = "mechanical"
@@ -473,12 +475,18 @@ def promotion_scan(state: Any, *, drafts: dict[str, dict] | None = None) -> dict
 
 
 def promote(state: Any, candidate: Candidate, *, approved_by: str,
-            project_id: str, at: str) -> dict:
+            project_id: str, at: str, via: str = "kb.promote") -> dict:
     """把一条合格候选写进 org —— 连同它的证据闭包，原子。
 
     org 记录是**新写入**，不是就地改标：`scope` 一旦定了不漂移（既有不变量），
     而且两层 schema 本来就该各自演化。原 project 条目留在原地，
     org 条目带 `promoted_from` 回链。
+
+    `via` 是见证上记的入库点（#730）：机械车道 `kb.promote`，管理员采纳 `kb.adopt`。
+    project 记录上的见证**显式带过河**：它不是 canonical 字段，不随继承表走；而
+    project 层入库时已经中和掉的控制标签，此刻在 org 这边再扫是扫不出来的 ——
+    不带过来，「这段文字当初夹着 `</framework-notice>`」这件事就在晋升这一步丢了，
+    而 org 层恰恰是之后每次开题都会被机械注入的那一层。
     """
     if not candidate.eligible:
         return {"status": "error", "code": "candidate_not_eligible",
@@ -494,7 +502,7 @@ def promote(state: Any, candidate: Candidate, *, approved_by: str,
     if candidate.source_kind == "chunks":
         src = _get_kb(state, "chunks", candidate.source_id)
         rec = _write_biblio(state, src, prov=prov,
-                            source_chunk_id=candidate.source_id) if src else None
+                            source_chunk_id=candidate.source_id, via=via) if src else None
         if rec is None:
             return {"status": "error", "code": "biblio_not_written",
                     "blocking": [f"{candidate.source_id}: 读不到这段文献或它没有外部锚"]}
@@ -526,9 +534,9 @@ def promote(state: Any, candidate: Candidate, *, approved_by: str,
         if not src:
             continue
         if _has_external_anchor(src):
-            rec = _write_biblio(state, src, prov=prov, source_chunk_id=ev_id)
+            rec = _write_biblio(state, src, prov=prov, source_chunk_id=ev_id, via=via)
         else:
-            rec = _write_evidence_record(state, src, prov=prov)
+            rec = _write_evidence_record(state, src, prov=prov, via=via)
         if rec:
             written.append(rec["id"])
 
@@ -560,13 +568,15 @@ def promote(state: Any, candidate: Candidate, *, approved_by: str,
             "晋升自尚未注册受控词条的项目结论；词条归并由 curator 的 org 维护轮处理")
     body["sources"] = list(written) or list(src_rec.get("sources") or [])
     body["replication_count"] = 1        # 首次晋升 = 一次观察；复现由 dreaming 归并累加
-    rec, _ = state.write_kb("claims", body)
+    if src_rec.get(WITNESS_FIELD):
+        body[WITNESS_FIELD] = src_rec[WITNESS_FIELD]
+    rec, _ = state.write_kb("claims", body, ingest_point=via)
     written.append(rec["id"])
     return {"status": "success", "org_id": rec["id"], "written": written}
 
 
 def _write_biblio(state: Any, chunk: dict, *, prov: dict,
-                  source_chunk_id: str) -> dict | None:
+                  source_chunk_id: str, via: str = "kb.promote") -> dict | None:
     """写一条 org 书目条目。
 
     **它不是 project chunk 的副本。**副本走不通也不该走：chunk 是内容寻址的，
@@ -582,11 +592,12 @@ def _write_biblio(state: Any, chunk: dict, *, prov: dict,
                 "at": prov["at"]}
     return _upsert_biblio(state, anchor=anchor,
                           text=str(chunk.get("text") or ""),
-                          takeaway=takeaway, prov=prov)
+                          takeaway=takeaway, prov=prov,
+                          witness=chunk.get(WITNESS_FIELD), via=via)
 
 
 def _write_evidence_record(state: Any, chunk: dict, *,
-                           prov: dict) -> dict | None:
+                           prov: dict, via: str = "kb.promote") -> dict | None:
     """自产证据过河：正文带过去，产物本体留在源项目，锚记成可核对的指针。
 
     org 卡要自足 —— 读它的人不该为了看一眼证据去 mount 另一个项目。所以
@@ -609,19 +620,24 @@ def _write_evidence_record(state: Any, chunk: dict, *,
         "origin_artifact_id": origin,
         "origin_artifact_frozen": True,   # 三查之一已验过（check_evidence_frozen）
     }
-    for k in ("origin_artifact_version", "origin_content_hash", "origin_run_id"):
+    for k in ("origin_artifact_version", "origin_content_hash", "origin_run_id",
+              WITNESS_FIELD):
         if chunk.get(k):
             body[k] = chunk[k]
     try:
-        rec, _ = state.write_kb("chunks", body)
+        rec, _ = state.write_kb("chunks", body, ingest_point=via)
         return rec
     except Exception:
         return None
 
 
 def _upsert_biblio(state: Any, *, anchor: str, text: str,
-                   takeaway: dict, prov: dict) -> dict | None:
-    """同锚合并：已有该锚的 org 书目 → 追加读后结论；否则新建。"""
+                   takeaway: dict, prov: dict, witness: dict | None = None,
+                   via: str = "kb.promote") -> dict | None:
+    """同锚合并：已有该锚的 org 书目 → 追加读后结论；否则新建。
+
+    同锚合并时正文不变（org 那条是先到的那份），但这一份的见证照样并进去：
+    两个项目读的是同一个锚，一个看到了注入，组织就该知道。"""
     for rec in _list_kb(state, "chunks"):
         if rec.get("scope") == "org" and rec.get("source") == anchor:
             readings = list(rec.get("group_readings") or [])
@@ -629,14 +645,19 @@ def _upsert_biblio(state: Any, *, anchor: str, text: str,
                        for r in readings):
                 readings.append(takeaway)
             merged = {**rec, "group_readings": readings}
-            out, _ = state.write_kb("chunks", merged)
+            if witness:
+                merged[WITNESS_FIELD] = merge_witnesses(rec.get(WITNESS_FIELD), witness)
+            out, _ = state.write_kb("chunks", merged, ingest_point=via)
             return out
-    out, _ = state.write_kb("chunks", {
+    body = {
         "text": text, "source": anchor, "scope": "org",
         "org_kind": KIND_BIBLIO,
         "group_readings": [takeaway],
         "promoted_from": {**prov, "source_id": takeaway["source_chunk_id"]},
-    })
+    }
+    if witness:
+        body[WITNESS_FIELD] = witness
+    out, _ = state.write_kb("chunks", body, ingest_point=via)
     return out
 
 
@@ -940,7 +961,7 @@ def adopt(state: Any, proposal_id: str, *, approved_by: str, at: str) -> dict:
         org_id = _already_in_org(state, candidate, str(rec["project_id"]))
         if org_id is None:
             done = promote(state, candidate, approved_by=approved_by,
-                           project_id=str(rec["project_id"]), at=at)
+                           project_id=str(rec["project_id"]), at=at, via="kb.adopt")
             if done.get("status") != "success":
                 return {"status": "error", "code": "promote_failed",
                         "error": "；".join(done.get("blocking") or [str(done.get("code"))])}

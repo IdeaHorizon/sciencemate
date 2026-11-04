@@ -1,25 +1,4 @@
-"""post-producing flow 由**运行时**走完，调度器一轮都不花（Move 1d）。
-
-## 改之前
-
-flow 的三步（后为两步）由调度器逐步照抄执行：提醒 hook 每轮把下一步调用**连参数
-都打印出来**，模型抄一遍，框架再用一排墙防它抄错。
-
-    ⏳ NEXT: Step 2 — call _reviewer
-    run_node(node_type='_reviewer', node_inputs={
-      'artifact_id': 'pre_registration__t1', 'source_node_type': 'hypothesis',
-      'producer_run_id': 'r_hyp',
-    })
-
-**框架已经能把答案连参数一起打印出来** —— 能被打印出来的东西不是判断，是手续。
-代价：一个 session 32M tokens 里调度器烧掉 16.2M（50.5%），大头在这条走廊上
-抄参数、撞墙、读错误、换个姿势再抄。
-
-## 改之后
-
-一次 `run_node(<producing>)` 内部把 review → decision 走完，返回决策 pause。
-调度器只在真正要判断的地方被叫醒。
-"""
+"""审查自动执行，结果先回调度器；决策框不能抢在调度器解释之前弹出。"""
 from __future__ import annotations
 
 import pytest
@@ -65,6 +44,9 @@ class _State:
     def append_transcript(self, kind, **kw):
         self.transcript.append((kind, kw))
 
+    def read_artifact(self, artifact_id):
+        return {"id": artifact_id, "content": "具体审查意见"}
+
 
 def _entry(**over):
     e = {
@@ -79,19 +61,18 @@ def _entry(**over):
 
 
 @pytest.mark.asyncio
-async def test_runtime_dispatches_the_reviewer_then_presents_the_decision(runtime):
+async def test_runtime_returns_review_material_before_any_decision_pause(runtime):
     state = _State(_entry())
 
     out = await rn._run_post_producing_flow(state, "hypothesis", {"child_run_id": "r_hyp"})
 
-    assert [c[0] for c in runtime.calls] == ["_reviewer", "present_decision_package"], (
-        "运行时必须自己把两步走完 —— 调度器不该被要求抄参数"
-    )
+    assert [c[0] for c in runtime.calls] == ["_reviewer"]
     # 参数由运行时从账本取，不靠模型传对
     assert runtime.calls[0][1]["producer_run_id"] == "r_hyp"
     assert runtime.calls[0][1]["artifact_id"] == "pre_registration__t1"
-    # 返回的是决策 pause：调度器下一次醒来看到的是**人的答复**，不是"该调谁了"
-    assert out["status"] == "pause"
+    assert "pause_event" not in out
+    assert out["post_node_review"]["critique"]["content"] == "具体审查意见"
+    assert state.hook_state["pending_post_node_flow"][0]["decision_state"] == "pending"
 
 
 @pytest.mark.asyncio
@@ -115,27 +96,27 @@ async def test_no_flow_entry_means_no_chain(runtime):
 
 
 @pytest.mark.asyncio
-async def test_no_artifacts_skips_review_but_still_presents(runtime):
-    """没有可审产物 → 如实记 skipped，仍然呈递（别把人挡在流程外面）。"""
+async def test_no_artifacts_reports_skipped_review_without_popping_a_card(runtime):
     state = _State(_entry(artifact_ids=[]))
 
     out = await rn._run_post_producing_flow(state, "hypothesis", {"child_run_id": "r_hyp"})
 
-    assert [c[0] for c in runtime.calls] == ["present_decision_package"]
+    assert runtime.calls == []
     assert state.transcript[0][0] == "post_node_review_skipped_no_artifacts"
-    assert out["status"] == "pause"
+    assert out["post_node_review"]["review_state"] == "skipped"
+    assert out["post_node_review"]["critique"] is None
 
 
 @pytest.mark.asyncio
-async def test_review_already_done_goes_straight_to_the_decision(runtime):
+async def test_review_already_done_returns_material_without_repeating_it(runtime):
     """resume 回来时 review 已经做过 —— 不重复审。"""
     state = _State(_entry(review_state="done",
                           review_critique_artifact_id="review_critique__x"))
 
-    await rn._run_post_producing_flow(state, "hypothesis", {"child_run_id": "r_hyp"})
+    out = await rn._run_post_producing_flow(state, "hypothesis", {"child_run_id": "r_hyp"})
 
-    assert [c[0] for c in runtime.calls] == ["present_decision_package"]
-    assert runtime.calls[0][1]["review_critique_artifact_id"] == "review_critique__x"
+    assert runtime.calls == []
+    assert out["post_node_review"]["review_critique_artifact_id"] == "review_critique__x"
 
 
 @pytest.mark.asyncio
@@ -165,3 +146,29 @@ async def test_an_authorized_revision_is_not_re_reviewed(runtime):
 
     assert out is None, "已授权动作在途，不该再呈递一次决策包"
     assert runtime.calls == []
+
+
+@pytest.mark.asyncio
+async def test_review_failure_is_returned_as_a_failure_not_a_research_finding(monkeypatch):
+    async def failed_review(*args, **kwargs):
+        return {"status": "error", "error": "review endpoint timed out"}
+
+    monkeypatch.setattr(rn, "_run_node_tool", failed_review)
+    state = _State(_entry())
+    out = await rn._run_post_producing_flow(state, "hypothesis", {"child_run_id": "r_hyp"})
+    assert "pause_event" not in out
+    assert out["post_node_review"]["review_state"] == "failed_awaiting_human"
+    assert out["post_node_review"]["critique"] is None
+    assert out["post_node_review"]["review_failed_reason"] == "review endpoint timed out"
+
+
+@pytest.mark.asyncio
+async def test_a_reviewers_own_question_still_reaches_the_user(monkeypatch):
+    paused = {"status": "pause", "pause_event": {"question": "Which supplied dataset should be reviewed?"}}
+
+    async def paused_review(*args, **kwargs):
+        return paused
+
+    monkeypatch.setattr(rn, "_run_node_tool", paused_review)
+    out = await rn._run_post_producing_flow(_State(_entry()), "hypothesis", {"child_run_id": "r_hyp"})
+    assert out == paused

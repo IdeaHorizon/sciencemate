@@ -1,22 +1,25 @@
-"""Designer/Critic tools for reasoning before scientific preprocessing execution."""
+"""Requirement analysis, executable planning and deterministic contract validation."""
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import asyncio
+import time
 from copy import deepcopy
+from glob import has_magic
 from urllib.parse import quote, unquote, urlparse
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from core.llm import LLMClient, LLMMessage
+from nodes.data.model_client import data_model_client, reasoning_options
 from core.llm_providers import get_provider
 from core.state import State
 from core.tool_registry import ToolDefinition, all_tool_names, get_tool, register_tool
 from nodes.data.pipeline_contract import merge_parameter_updates, needs_input_result, pipeline_outcome, revision_contract
 from nodes.data.planning.schemas import (
-    CRITIC_DIMENSIONS,
     acquisition_contract_errors,
     acquisition_dimension_conflict,
     blocked_placeholder_markers,
@@ -27,11 +30,11 @@ from nodes.data.planning.schemas import (
     normalize_asset_contract,
     normalize_official_locator,
     normalize_software_identity,
-    normalize_critique,
     normalize_plan,
     normalize_task_scope_contract,
     canonical_workflow_capability,
-    is_pipeline_infrastructure_step,
+    _step_workflow_capability,
+    asset_requires_mesh as _asset_requires_mesh,
     tool_allowed_in_plan_kind,
     validate_plan,
     EXTERNAL_WORKFLOW_CAPABILITIES,
@@ -40,14 +43,14 @@ from nodes.data.planning.store import PlanningStore, canonical_hash
 from nodes.data.planning.request_contract import (
     build_preprocessing_work_order,
     caller_request_text,
-    decisive_input_gaps,
     normalize_preprocessing_request,
+    requirement_authority_context,
     validate_preprocessing_request,
 )
-from nodes.data.progress import emit_progress
-from .discipline_identifier import discipline_from_solver, extract_solver_name, identify_discipline
+from nodes.data.progress import emit_progress, model_call_timing
+from .discipline_identifier import DISCIPLINE_REGISTRY, discipline_from_solver, extract_solver_name, identify_discipline
 from .scientific_assets import SCIENTIFIC_ASSET_SUFFIXES, inspect_scientific_asset_path
-from .input_inspection import inspect_input_path
+from .input_inspection import _TEXT_BASENAMES, _resolve as _resolve_input_path, inspect_input_path
 _PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
 # This is an input-character guard, separate from the model's output-token
 # limit.  Keep it aligned with the data-node planning budget; focused revision
@@ -55,13 +58,6 @@ _PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
 _PLANNING_INPUT_BUDGET_CHARS = 65_536
 # Stable module-level alias used by planning payload construction.
 _PLANNING_PAYLOAD_BUDGET_CHARS = _PLANNING_INPUT_BUDGET_CHARS
-
-
-def _adapter_required_files(existing: list[dict[str, Any]], names: list[str]) -> list[dict[str, Any]]:
-    """Use the domain adapter without importing optional domains at bootstrap."""
-    from .cfd_case_router import merge_adapter_required_files
-
-    return merge_adapter_required_files(existing, names)
 
 
 def _serialized_payload(value: Any) -> str:
@@ -75,7 +71,6 @@ def _load_prompt(name: str) -> str:
 
 DESIGNER_SYSTEM_PROMPT = _load_prompt("preprocessing_designer.md")
 REQUIREMENT_ANALYST_SYSTEM_PROMPT = _load_prompt("preprocessing_requirement_analyst.md")
-CRITIC_SYSTEM_PROMPT = _load_prompt("preprocessing_critic.md")
 
 
 def _planning_agent_max_tokens(role: str) -> int:
@@ -86,7 +81,6 @@ def _planning_agent_max_tokens(role: str) -> int:
         # context_config 对它没有消费者（曾经指向那里的注释在 harness 精简后
         # 就指空了）。规划子代理的输出预算真相源就是这张表，env 可覆盖。
         "designer": 32768,
-        "critic": 32768,
     }
     role_key = re.sub(r"[^A-Z0-9]+", "_", str(role or "").upper()).strip("_")
     raw = (
@@ -101,10 +95,9 @@ def _planning_agent_max_tokens(role: str) -> int:
 
 
 def _planning_agent_attempts(role: str) -> int:
-    # One correction pass is enough for a structural Analyst mismatch.  The
-    # retry carries the exact missing authorization and avoids immediately
-    # dropping to a lossy fallback after the first malformed scope.
-    defaults = {"requirement_analyst": 2, "designer": 2, "critic": 1}
+    # Correct malformed agent contracts within the same role before asking
+    # the pipeline to reconsider an otherwise valid work order.
+    defaults = {"requirement_analyst": 2, "designer": 2}
     role_key = re.sub(r"[^A-Z0-9]+", "_", str(role or "").upper()).strip("_")
     raw = os.getenv(f"DATA_{role_key}_RETRIES", "").strip()
     try:
@@ -142,13 +135,126 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     raise ValueError("LLM response did not contain a valid JSON object")
 
 
+def _normalize_request_bound_ownership(analysis: dict[str, Any], request: dict[str, Any]) -> None:
+    """Bind names and owners to caller authority before protocol validation."""
+    if request.get("review_profile") != "request_bound":
+        return
+    authority = caller_request_text(request, preprocessing_request=request) + json.dumps(
+        {key: request.get(key) for key in ("requested_assets", "acceptance_criteria")},
+        ensure_ascii=False,
+    )
+    # Semantic boundary requirements remain in the original request. Only
+    # caller-specified names form an exact materialized-name contract.
+    boundaries = analysis.get("boundary_contract", [])
+    if isinstance(boundaries, list):
+        analysis["boundary_contract"] = [
+            item for item in boundaries
+            if not isinstance(item, dict) or (
+                str(item.get("name") or "").strip()
+                and re.search(rf"(?<![A-Za-z0-9_]){re.escape(str(item['name']).strip())}(?![A-Za-z0-9_])", authority)
+            )
+        ]
+    consumer = request.get("consumer") or {}
+    node = str(consumer.get("node") or "") if isinstance(consumer, dict) else ""
+    stages = {str(item.get("id") or "") for item in analysis.get("calculation_stages") or []
+              if isinstance(item, dict)}
+    if node and node not in stages:
+        for item in analysis.get("required_files") or []:
+            if not isinstance(item, dict):
+                continue
+            for key in ("stage_id", "owner_stage"):
+                if item.get(key) == node:
+                    item.pop(key)
+            consumers = item.get("consumer_stages") or []
+            if isinstance(consumers, str):
+                consumers = [consumers]
+            if isinstance(consumers, list):
+                item["consumer_stages"] = [value for value in consumers if value != node]
+
+
+def _normalize_solver_mesh_asset(item: dict[str, Any], software: Any) -> dict[str, Any]:
+    """The native solver contract outranks an inferred generic text label.
+
+    Includes/config-only fragments opt out explicitly; reused decks are not
+    reconstructed. This is not an inference from the word 'grid' in prose.
+    """
+    solver = str(software.get("name") or "") if isinstance(software, dict) else str(software)
+    if item.get("edit_source"):
+        return {**item, "requires_mesh_generation": False}
+    if (re.fullmatch(r"abaqus(?:[ /-](?:standard|explicit))?", solver, re.I)
+            and re.search(r"\binp\b", str(item.get("format") or ""), re.I)
+            and item.get("source_strategy") == "local_generation"
+            and item.get("asset_role") in {"solver_input", "parameter_file"}
+            and item.get("requires_mesh_generation") is not False):
+        return {**item, "representation": "simulation_case", "requires_mesh_generation": True}
+    return item
+
+
+def _normalize_edit_assets(analysis: dict[str, Any]) -> None:
+    """Separate an immutable baseline from its edited output, once at ingress."""
+    files = analysis.get("required_files") or []
+    added = []
+    ids = {str(item.get("id", "")).casefold() for item in files if isinstance(item, dict)}
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        if isinstance(item.get("local_match"), str):
+            item["local_match"] = {"path": item["local_match"]}
+        recipe = item.get("generation_recipe")
+        recipe = recipe if isinstance(recipe, dict) else {}
+        source = item.get("edit_source") or recipe.get("edit_source")
+        if not source and item.get("source_strategy") == "local_reuse" and recipe.get("edits"):
+            source = item.get("id")
+        if not isinstance(source, str) or not source:
+            continue
+        item_id = str(item.get("id") or "")
+        if source.casefold() == item_id.casefold():
+            baseline_id = item_id + "_baseline"
+            if baseline_id.casefold() in ids:
+                raise ValueError(f"Edit baseline ID collision: {baseline_id}")
+            baseline = deepcopy(item)
+            for key in ("edit_source", "generation_recipe", "declared_output_path", "preserve_keywords"):
+                baseline.pop(key, None)
+            baseline.update(id=baseline_id, source_strategy="local_reuse", acquisition_kind="local_asset",
+                            workflow_capability="local_asset_reuse", delivery_required=False)
+            added.append(baseline)
+            ids.add(baseline_id.casefold())
+            source = baseline_id
+        item.update(edit_source=source, source_strategy="local_generation", acquisition_kind="generated_artifact",
+                    requires_mesh_generation=False)
+        item.pop("local_match", None)
+        if "preserve_keywords" not in item and recipe.get("preserve_keywords"):
+            item["preserve_keywords"] = recipe["preserve_keywords"]
+        keywords = item.get("preserve_keywords")
+        if keywords is not None and (not isinstance(keywords, list)
+                or any(not isinstance(key, str) or not key.strip() for key in keywords)):
+            raise ValueError("preserve_keywords must be a list of unchanged keyword names")
+        if recipe:
+            item["generation_recipe"] = {k: v for k, v in recipe.items()
+                                         if k not in {"edit_source", "preserve_keywords"}}
+    analysis["required_files"] = [*added, *files]
+    by_id = {str(item.get("id", "")).casefold(): item.get("id")
+             for item in analysis["required_files"] if isinstance(item, dict)}
+    for item in analysis["required_files"]:
+        if isinstance(item, dict) and isinstance(item.get("edit_source"), str):
+            item["edit_source"] = by_id.get(item["edit_source"].casefold(), item["edit_source"])
+
+
 def _validate_agent_payload(
     role: str,
     value: dict[str, Any],
     *,
     review_profile: str = "plan_bound",
+    preprocessing_request: dict[str, Any] | None = None,
 ) -> None:
     if role == "requirement_analyst":
+        if value.get("status") == "needs_input":
+            raise ValueError("Finish the full requirement analysis and use input_request for caller-only missing facts; no standalone needs_input shortcut.")
+        clarification = value.get("input_request")
+        if clarification and (not isinstance(clarification, dict)
+                or not all(clarification.get(key) for key in ("question", "missing_fields", "why_caller_only"))):
+            raise ValueError("input_request needs question, missing_fields and why_caller_only; finish the requirement analysis first.")
+        _normalize_request_bound_ownership(value, preprocessing_request or {})
         discipline = value.get("discipline")
         if isinstance(discipline, str):
             value["discipline"] = {"primary": discipline, "evidence": []}
@@ -184,6 +290,7 @@ def _validate_agent_payload(
                 value[key] = []
         if not isinstance(value.get("required_files"), list):
             raise ValueError("requirement analyst required_files must be an array")
+        _normalize_edit_assets(value)
         delivery_files: list[dict[str, Any]] = []
         runtime_access_dependencies: list[dict[str, Any]] = []
         runtime_tool_requirements: list[dict[str, Any]] = []
@@ -243,6 +350,10 @@ def _validate_agent_payload(
                 locator = ""
                 acquisition_contract = item.get("acquisition_contract")
                 if isinstance(acquisition_contract, dict):
+                    identity = acquisition_contract.get("dataset_identity")
+                    if not declared_filename and isinstance(identity, str) and "/" in identity:
+                        declared_filename = PurePosixPath(identity).name
+                        item["expected_filename"] = declared_filename
                     locator = str(
                         acquisition_contract.get("locator")
                         or acquisition_contract.get("path")
@@ -260,22 +371,32 @@ def _validate_agent_payload(
                             or ""
                         ).strip()
                 if not declared_filename and not PurePosixPath(locator.split("?", 1)[0]).name:
-                    # An unresolved external reference is a planning gap, not
-                    # a malformed caller request. Keep it out of executable
-                    # deliverables until a reference plan supplies an exact
-                    # locator; do not reject the whole analysis at turn zero.
+                    # An unknown locator is an acquisition gap, not permission
+                    # to erase a requested asset. Reference planning must still
+                    # see it, and delivery remains blocked until it is acquired.
                     value.setdefault("unresolved_facts", []).append(
                         f"External asset {item.get('name_or_role') or item.get('id') or index} "
                         "needs an exact filename or acquisition locator."
                     )
-                    continue
             item.update({
                 key: field_value
                 for key, field_value in contract.items()
                 if key != "contradictory_fields"
             })
+            item.update(_normalize_solver_mesh_asset(item, value.get("simulation_software")))
+            contract = normalize_asset_contract(item)
             if not str(item.get("scientific_role") or "").strip():
                 item["scientific_role"] = "preprocessing_input"
+            if (_asset_requires_mesh(item) and contract.get("representation") == "simulation_case"
+                    and re.search(r"\binp\b", str(item.get("format") or ""), re.I)
+                    and not item.get("depends_on")
+                    and not any(candidate.get("source_strategy") == "local_reuse"
+                                for candidate in value.get("required_files") or [] if isinstance(candidate, dict))):
+                bindings = item.get("parameter_bindings") or {}
+                if not isinstance(bindings, dict) or not bindings.get("geometry"):
+                    asset_errors.append(f"{item.get('id')}: a generated self-contained INP embeds a mesh. "
+                                        "Extract the supplied geometry into parameter_bindings.geometry; "
+                                        "do not substitute a handwritten mesh/validator script or invent missing dimensions.")
             if contract.get("fulfillment_kind") == "runtime_access":
                 runtime_access_dependencies.append({
                     "id": str(item.get("id") or f"runtime_access_{index + 1}"),
@@ -374,10 +495,8 @@ def _validate_agent_payload(
         if not isinstance(value.get("discipline"), dict):
             raise ValueError("requirement analyst discipline must be an object")
         software = value.get("simulation_software")
-        if review_profile == "plan_bound" and (
-            not isinstance(software, dict) or not str(software.get("name") or "").strip()
-        ):
-            raise ValueError("requirement analyst simulation_software.name is required")
+        if not isinstance(software, dict):
+            raise ValueError("requirement analyst simulation_software must be an object; name may be null for application-independent assets")
         if review_profile == "plan_bound" and not str(value.get("calculation_type") or "").strip():
             raise ValueError("requirement analyst calculation_type is required")
         known_stage_ids = {
@@ -422,6 +541,16 @@ def _validate_agent_payload(
                     f"requirement analyst required_files[{index}] references unknown stages: {unknown_stages}"
                 )
             item["workflow_capability"] = canonical_workflow_capability(item)
+            bindings = item.get("parameter_bindings")
+            if (_asset_requires_mesh(item, value["task_scope"])
+                    and item.get("representation") == "simulation_case"
+                    and item.get("source_strategy") == "local_generation"
+                    and (not isinstance(bindings, dict) or not bindings)):
+                raise ValueError(
+                    f"required_files[{index}] embeds a generated mesh but lacks parameter_bindings. "
+                    "Bind the supplied geometry/source, physical conditions and material to this asset; "
+                    "keep omitted sizing as producer defaults. Do not turn it into configuration-only delivery."
+                )
     elif role == "designer":
         required = {
             "required_deliverables", "generation_steps", "tool_requirements",
@@ -429,8 +558,6 @@ def _validate_agent_payload(
         missing = sorted(required - set(value))
         if missing:
             raise ValueError(f"designer JSON is missing top-level keys: {missing}")
-    elif role == "critic" and not isinstance(value.get("dimension_scores"), dict):
-        raise ValueError("critic JSON must contain dimension_scores")
 
 
 def _client(state: State, model_name: str = "") -> tuple[LLMClient, str]:
@@ -456,9 +583,12 @@ async def _call_json_agent(
     system_prompt: str,
     payload: dict[str, Any],
     model_name: str = "",
+    reasoning_effort: str | None = None,
 ) -> tuple[dict[str, Any], str, dict[str, Any]]:
     client, resolved_name = _client(state, model_name)
+    client = data_model_client(client)
     max_tokens = _planning_agent_max_tokens(role)
+    call_options = reasoning_options(client, reasoning_effort or ("none" if role == "requirement_analyst" else "low"))
     # Serialize once: the logged size must be the size actually sent.  Pretty
     # printing adds thousands of non-semantic characters to these already
     # structured planning contracts.
@@ -468,6 +598,8 @@ async def _call_json_agent(
         role=role,
         model_name=resolved_name,
         max_output_tokens=max_tokens,
+        reasoning_effort=call_options.get("reasoning_effort", "provider_default"),
+        total_input_chars=len(system_prompt) + len(serialized_payload),
     )
     emit_progress(
         state,
@@ -475,19 +607,43 @@ async def _call_json_agent(
         role,
         model=resolved_name,
         payload_chars=len(serialized_payload),
+        total_input_chars=len(system_prompt) + len(serialized_payload),
         max_output_tokens=max_tokens,
+        reasoning_effort=call_options.get("reasoning_effort", "provider_default"),
     )
-    response = await client.chat(
-        [
-            LLMMessage(role="system", content=system_prompt),
-            LLMMessage(role="user", content=serialized_payload),
-        ],
-        tools=None,
-        max_tokens=max_tokens,
-        temperature=0.1,
-    )
+    started = time.monotonic()
+    try:
+        with model_call_timing() as timing:
+            # A network read timeout is not a whole-response deadline. Keep this
+            # role's recovery bounded instead of inheriting hidden transport loops.
+            async with asyncio.timeout(getattr(client, "timeout", 300)):
+                response = await client.chat(
+                    [
+                        LLMMessage(role="system", content=system_prompt),
+                        LLMMessage(role="user", content=serialized_payload),
+                    ],
+                    tools=None,
+                    max_tokens=max_tokens,
+                    temperature=0.1,
+                    max_retries=1,
+                    **call_options,
+                )
+    except TimeoutError as exc:
+        raise TimeoutError(
+            f"{role} did not complete within {getattr(client, 'timeout', 300)}s "
+            f"(model={resolved_name}, input_chars={len(system_prompt) + len(serialized_payload)}, "
+            f"max_output_tokens={max_tokens}); no complete response was received."
+        ) from exc
     if isinstance(response.usage, dict):
         state.tokens_used += int(response.usage.get("total_tokens") or 0)
+    state.append_transcript(
+        "preprocessing_planning_agent_response", role=role,
+        elapsed_seconds=round(time.monotonic() - started, 2),
+        finish_reason=response.finish_reason, content_chars=len(response.content or ""),
+        completion_tokens=(response.usage or {}).get("completion_tokens"),
+        reasoning_tokens=((response.usage or {}).get("completion_tokens_details") or {}).get("reasoning_tokens"),
+        **timing,
+    )
     if response.finish_reason == "length":
         state.append_transcript(
             "preprocessing_planning_agent_truncated",
@@ -502,6 +658,7 @@ async def _call_json_agent(
             role,
             parsed,
             review_profile=str(request.get("review_profile") or "plan_bound"),
+            preprocessing_request=request,
         )
     except ValueError:
         state.append_transcript(
@@ -524,9 +681,10 @@ async def _call_json_agent_resilient(
     model_name: str = "",
     attempts: int = 3,
 ) -> tuple[dict[str, Any], str, dict[str, Any]]:
-    """Retry transient transport failures and malformed JSON before escalating."""
+    """Correct malformed contracts; preserve transport failures for stage resume."""
     errors: list[str] = []
     retry_payload = dict(payload)
+    direct_output = False
     for attempt in range(1, max(1, attempts) + 1):
         try:
             return await _call_json_agent(
@@ -535,11 +693,13 @@ async def _call_json_agent_resilient(
                 system_prompt=system_prompt,
                 payload=retry_payload,
                 model_name=model_name,
+                reasoning_effort="none" if direct_output else None,
             )
         except Exception as exc:
             errors.append(f"attempt {attempt}: {type(exc).__name__}: {exc}")
+            retrying = isinstance(exc, ValueError) and attempt < attempts
             state.append_transcript(
-                "preprocessing_planning_agent_retry",
+                "preprocessing_planning_agent_retry" if retrying else "preprocessing_planning_agent_failed",
                 role=role,
                 attempt=attempt,
                 error_type=type(exc).__name__,
@@ -548,40 +708,40 @@ async def _call_json_agent_resilient(
             )
             emit_progress(
                 state,
-                "planning_agent_retry",
+                "planning_agent_retry" if retrying else "planning_agent_failed",
                 role,
                 attempt=attempt,
                 error_type=type(exc).__name__,
                 error=str(exc)[:240],
             )
-            if "truncated by the model output limit" in str(exc):
-                break
+            # A transport failure is not malformed JSON and must not trigger
+            # another schema-correction cycle or redesign the approved work.
+            if not isinstance(exc, ValueError):
+                raise
             if attempt < attempts:
-                contract_correction = ""
-                if role == "requirement_analyst":
-                    contract_correction = (
-                        " For each required_files item, choose one acquisition route before emitting it: "
-                        "local_generation + generated_artifact + a local generation capability; "
-                        "external dataset + dataset_acquisition; or official external file + "
-                        "official_file_acquisition. source_strategy=external_download is compatible with "
-                        "official_file_reference or external_dataset because it is a transport method. "
-                        "An analytic NACA/parametric geometry explicitly named by the caller is local_generation; "
-                        "do not label it official/external or geometry_acquisition. "
-                        "Derive allowed_capabilities from the final required_files contracts; do not omit "
-                        "a capability required by an external item. In plan_bound work, stage ownership "
-                        "must use a declared stage; request_bound assets remain owned by their work unit."
-                    )
+                direct_output = direct_output or "output limit" in str(exc)
                 retry_payload = {
                     **payload,
                     "retry_correction": (
-                        "The previous response was malformed or did not match the required top-level "
-                        f"schema ({errors[-1]}). Return one complete JSON object only. Do not return "
-                        "a nested array item as the top-level response."
-                        + contract_correction
+                        f"Correct this response error: {errors[-1]}. "
+                        "Return the current role's complete JSON object, not one nested item. "
+                        "Preserve the request and scientific constraints. Do not solve later stages, "
+                        "expand file/data contents or repeat evidence and instructions. "
+                        "If the output limit was exhausted, finish the contract without comparing alternatives."
                     ),
                 }
                 await asyncio.sleep(min(0.25 * attempt, 0.75))
-    raise RuntimeError("; ".join(errors))
+    raise ValueError("; ".join(errors))
+
+
+def _planning_agent_failure(role: str, exc: Exception) -> dict[str, Any]:
+    # Both transport and schema correction retries have already been attempted.
+    # Re-entering the whole pipeline would send the same request again, not
+    # repair an asset. Preserve the cause instead of relabeling it retryable.
+    category = "planning_protocol_error" if isinstance(exc, ValueError) else "planning_transport_error"
+    return {"status": "externally_blocked", "approved": False,
+            "stop_reason": category, "failure_category": category,
+            "error": f"{role} failed after internal recovery: {type(exc).__name__}: {exc}"}
 
 
 _DETERMINISTIC_STAGE_ADAPTERS = {
@@ -597,10 +757,24 @@ def _deterministic_plan_critical_concerns(plan: dict[str, Any] | None) -> list[s
     analysis = plan.get("requirement_analysis") or {}
     discipline = analysis.get("discipline") or plan.get("discipline") or {}
     primary = str(
-        discipline.get("primary") if isinstance(discipline, dict) else discipline
+        discipline.get("adapter_route") or discipline.get("primary") if isinstance(discipline, dict) else discipline
     ).strip().lower()
     stages = [item for item in analysis.get("calculation_stages") or [] if isinstance(item, dict)]
     concerns: list[str] = []
+    edited_ids = {item["id"] for item in analysis.get("required_files") or []
+                  if isinstance(item, dict) and item.get("edit_source")}
+    steps = {step["id"]: step for step in plan.get("generation_steps") or []}
+    pending = [step["id"] for step in steps.values() if edited_ids.intersection(step.get("outputs") or [])]
+    visited = set()
+    while pending:
+        step_id = pending.pop()
+        if step_id in visited or step_id not in steps:
+            continue
+        visited.add(step_id)
+        step = steps[step_id]
+        if step.get("tool_name") == "prepare_scientific_mesh":
+            concerns.append("An existing-file edit cannot regenerate its mesh. Read edit_source and patch the file, preserving its numerical blocks.")
+        pending.extend(step.get("dependencies") or [])
     uses_deterministic_builder = any(
         isinstance(step, dict)
         and str(step.get("tool_name") or "").strip() == "build_scientific_preprocessing_package"
@@ -618,6 +792,20 @@ def _deterministic_plan_critical_concerns(plan: dict[str, Any] | None) -> list[s
         for item in plan.get("required_deliverables") or []
         if isinstance(item, dict) and str(item.get("id") or "")
     }
+    for source in analysis.get("required_files") or []:
+        contract = normalize_asset_contract(source)
+        if (source.get("required") is not False
+                and contract.get("workflow_capability") == "dataset_acquisition"
+                and contract.get("requires_local_payload")
+                and not (
+                    (deliverables_by_id.get(str(source.get("id") or "")) or {}).get("local_match")
+                    or any(str(source.get("id") or "") in step.get("outputs", [])
+                           for step in plan.get("generation_steps") or [])
+                )):
+            concerns.append(
+                f"Required source {source.get('id')} has no producer or verified local binding in the asset DAG. "
+                "Retain it as an acquired or locally reused dependency; do not replace data processing with text generation."
+            )
     for step in plan.get("generation_steps") or []:
         if not isinstance(step, dict) or step.get("tool_name") != "prepare_scientific_mesh":
             continue
@@ -646,10 +834,30 @@ def _deterministic_plan_critical_concerns(plan: dict[str, Any] | None) -> list[s
                 "resolve missing implementation bindings before executing or searching for replacement geometry."
             )
     for step in plan.get("generation_steps") or []:
-        if not isinstance(step, dict) or step.get("tool_name") != "generate_preprocessing_artifact":
+        if not isinstance(step, dict) or step.get("tool_name") not in {
+            "generate_preprocessing_artifact", "build_scientific_preprocessing_package",
+        }:
             continue
         args = step.get("tool_arguments") or {}
         spec = args.get("artifact_spec") if isinstance(args.get("artifact_spec"), dict) else {}
+        computed_structures = [output_id for output_id in step.get("outputs") or []
+                               if canonical_workflow_capability(deliverables_by_id.get(str(output_id)) or {})
+                               == "atomic_structure_generation"]
+        if step.get("tool_name") == "build_scientific_preprocessing_package":
+            if computed_structures and not any(
+                canonical_workflow_capability(deliverables_by_id.get(str(input_id)) or {})
+                == "atomic_structure_generation"
+                or normalize_asset_contract(deliverables_by_id.get(str(input_id)) or {}).get("representation")
+                in {"structure", "atomic_structure", "crystal_structure", "particle_structure", "molecular_structure"}
+                for input_id in step.get("inputs") or []
+            ):
+                concerns.append(f"Package step {step.get('id')} cannot compute structures {computed_structures}; bind a real structure producer first.")
+            continue
+        if computed_structures:
+            concerns.append(
+                f"Step {step.get('id')} must compute structure outputs {computed_structures} with a structure "
+                "producer or executable script, not enumerate coordinates in a text-writer response."
+            )
         external_outputs = [
             output_id for output_id in step.get("outputs") or []
             if (deliverable := deliverables_by_id.get(str(output_id)))
@@ -658,6 +866,8 @@ def _deterministic_plan_critical_concerns(plan: dict[str, Any] | None) -> list[s
         acquisition_document = (
             str(spec.get("artifact_kind") or "") == "external_dataset_acquisition"
             and not acquisition_contract_errors(spec.get("acquisition_contract") or spec)
+            and not any(normalize_asset_contract(deliverables_by_id[output_id]).get("requires_local_payload")
+                        for output_id in external_outputs)
         )
         if external_outputs and not acquisition_document:
             concerns.append(
@@ -666,112 +876,10 @@ def _deterministic_plan_critical_concerns(plan: dict[str, Any] | None) -> list[s
     return concerns
 
 
-def _reconcile_framework_covered_critic_concerns(
-    plan: dict[str, Any],
-    raw: dict[str, Any],
-) -> dict[str, Any]:
-    """Keep remote Critic semantics, but remove false blocking claims.
-
-    The Critic sees a compact projection and can mistake framework-owned
-    deferred contracts for missing work.  These cases are already enforced by
-    deterministic validation or by the executor, so they must not prevent an
-    otherwise valid generation plan from executing.  Genuine semantic,
-    scope, safety, and contradictory-parameter concerns remain untouched.
-    """
-    if not isinstance(raw, dict) or not isinstance(plan, dict):
-        return raw
-    external_document_count = 0
-    script_artifact_count = 0
-    configuration_artifact_count = 0
-    complete_configuration_contract_count = 0
-    for deliverable in plan.get("required_deliverables") or []:
-        if isinstance(deliverable, dict) and normalize_asset_contract(deliverable).get("is_external"):
-            external_document_count += 1
-    for step in plan.get("generation_steps") or []:
-        if not isinstance(step, dict):
-            continue
-        spec = (step.get("tool_arguments") or {}).get("artifact_spec")
-        spec = spec if isinstance(spec, dict) else {}
-        if re.search(
-            r"configuration|namelist|json|yaml|toml",
-            str(spec.get("format") or ""),
-            re.I,
-        ):
-            configuration_artifact_count += 1
-            if spec.get("evidence") and spec.get("acceptance_criteria"):
-                complete_configuration_contract_count += 1
-        if re.search(
-            r"python|shell|bash|script",
-            str(spec.get("format") or step.get("tool_capability") or ""),
-            re.I,
-        ):
-            script_artifact_count += 1
-
-    def is_framework_covered(text: str) -> bool:
-        lowered = text.casefold()
-        specialized_step = any(
-            str(step.get("tool_name") or "").strip()
-            in {"prepare_scientific_mesh", "build_scientific_preprocessing_package"}
-            for step in plan.get("generation_steps") or []
-            if isinstance(step, dict)
-        )
-        if specialized_step and re.search(
-            r"artifact[_ ]spec|output[_ ]paths|generic artifact specification",
-            lowered,
-        ) and re.search(
-            r"prepare[_ ]scientific[_ ]mesh|build[_ ]scientific[_ ]preprocessing[_ ]package|"
-            r"assemble[_ ]preprocessing[_ ]package|package assembly|mesh",
-            lowered,
-        ):
-            # These registered domain tools expose a structured mesh/package
-            # contract; the generic writer fields are intentionally absent.
-            return True
-        if (
-            ("duplicate" in lowered and re.search(r"id|deliverable|contract", lowered))
-            or "conflicting acquisition contract" in lowered
-        ):
-            # validate_plan already rejects duplicate stage/deliverable/step
-            # IDs. A valid plan cannot have the duplicate the model inferred
-            # from repeated scientific names.
-            return True
-        if script_artifact_count and "runtime_dependenc" in lowered:
-            # The artifact writer records direct imports after generation; a
-            # Designer declaration is useful but not a planning gate.
-            return True
-        if external_document_count and re.search(
-            r"acquisition|download|provider|dataset identifier|request parameter|"
-            r"concrete (?:provider )?url|source url|download step",
-            lowered,
-        ):
-            # Large/unknown datasets are intentionally represented by a
-            # complete acquisition document. Missing request dimensions or a
-            # failed search are deferred dependencies, not generation failure.
-            return True
-        if (
-            configuration_artifact_count
-            and configuration_artifact_count == complete_configuration_contract_count
-            and re.search(r"namelist|configuration", lowered)
-            and re.search(
-                r"authoritative evidence|physical correctness|non.?empt|syntax",
-                lowered,
-            )
-        ):
-            # Parameter semantics are checked against the Research Plan and
-            # final file content by the artifact/package reviewers. Lack of a
-            # separate manual example is not an execution blocker.
-            return True
-        return False
-
-    critical = [
-        str(item).strip()
-        for item in raw.get("critical_concerns") or []
-        if str(item).strip() and not is_framework_covered(str(item))
-    ]
-    return {**raw, "critical_concerns": critical}
 
 
-def _deterministic_critic_fallback(
-    validation: dict[str, Any], error: Exception, plan: dict[str, Any] | None = None,
+def _plan_contract_review(
+    validation: dict[str, Any], plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a schema/safety approval receipt without pretending it is a model score."""
     valid = bool(validation.get("valid"))
@@ -788,10 +896,7 @@ def _deterministic_critic_fallback(
             "schema_must_be_valid": True,
             "critical_concerns_allowed": 0,
         },
-        "fallback": {
-            "type": "deterministic_schema_and_safety_validation",
-            "reason": f"Deterministic validation selected: {type(error).__name__}: {error}",
-        },
+
     }
 
 
@@ -813,19 +918,32 @@ def _unique_slug(value: str, used: set[str], default: str = "item") -> str:
 
 def _declared_relative_output(item: dict[str, Any], fallback_id: str) -> str:
     """Preserve an upstream filename/path while enforcing workspace-relative output."""
-    candidates = [
-        item.get(key) for key in (
-            "declared_output_path", "output_path", "relative_path",
-            "filename", "file_name", "expected_filename", "path",
-        )
-    ]
+    fmt = str(item.get("format") or "").strip().lower().lstrip(".")
+    format_suffix = next((suffix for suffix in SCIENTIFIC_ASSET_SUFFIXES if suffix[1:] == fmt), "")
+    path_keys = ("declared_output_path", "output_path", "relative_path",
+                 "filename", "file_name", "expected_filename", "path")
+    candidates = [item.get(key) for key in path_keys]
+    # Preserve a caller pattern's file type when the format is descriptive
+    # (for example gmsh_msh4), while choosing a concrete basename below.
+    format_suffix = format_suffix or next((
+        PurePosixPath(str(value)).suffix for value in [*candidates, item.get("name_or_role"), item.get("name")]
+        if value and has_magic(str(value)) and PurePosixPath(str(value)).suffix in SCIENTIFIC_ASSET_SUFFIXES
+    ), "")
     for raw in candidates:
         value = str(raw or "").strip().replace("\\", "/")
-        if not value:
+        if not value or has_magic(value):
             continue
         path = PurePosixPath(value)
         if path.is_absolute() or ".." in path.parts:
             continue
+        if value.endswith("/") and format_suffix:
+            # A caller's destination directory is not the requested file.
+            # Reuse the normal filename selection within that directory.
+            filename = _declared_relative_output({
+                key: entry for key, entry in item.items()
+                if key not in path_keys or not str(entry or "").strip().replace("\\", "/").endswith("/")
+            }, fallback_id)
+            return str(path / filename)
         return str(path)
     # Opaque tracker IDs (for example F001) are plan identities, never a
     # downstream filename.  Prefer the declared scientific role and derive a
@@ -833,9 +951,16 @@ def _declared_relative_output(item: dict[str, Any], fallback_id: str) -> str:
     # every discipline and avoids requiring the publisher to know an
     # application's private file list.
     role = str(item.get("name_or_role") or item.get("name") or "").strip()
-    if role:
+    if role in _TEXT_BASENAMES:
+        return role
+    if role and not has_magic(role):
         role_path = PurePosixPath(role.replace("\\", "/"))
         if not role_path.is_absolute() and ".." not in role_path.parts:
+            if role_path.suffix and not re.search(r"\s", role):
+                return str(role_path)
+            if _asset_contract_role(item) == "report":
+                # Filenames mentioned in a report title are its subjects.
+                return _slug(role, fallback_id) + (format_suffix or ".md")
             role_name = role_path.name
             if "/" not in role and re.search(r"[A-Za-z0-9]", role_name):
                 native_name = re.search(
@@ -861,28 +986,24 @@ def _declared_relative_output(item: dict[str, Any], fallback_id: str) -> str:
                             else role_parts[position - 1] if position else "input"
                         )
                         normalized = f"namelist.{suffix_part.casefold()}"
-                    fmt = str(item.get("format") or "").lower()
                     if "python" in fmt and not normalized.endswith(".py"):
                         normalized += ".py"
                     elif any(token in fmt for token in ("shell", "bash")) and not normalized.endswith(".sh"):
                         normalized += ".sh"
                     elif "json" in fmt and not normalized.endswith(".json"):
                         normalized += ".json"
-                    else:
-                        suffix = next(
-                            (value for value in SCIENTIFIC_ASSET_SUFFIXES if value[1:] == fmt),
-                            "",
-                        )
-                        if suffix and not normalized.endswith(suffix):
-                            normalized += suffix
+                    elif format_suffix and not normalized.endswith(format_suffix):
+                        normalized += format_suffix
                     return normalized
                 return role_name
     # IDs such as namelist.input, POSCAR and KPOINTS are meaningful filenames;
     # retain their spelling instead of converting them to a slug.
     raw_id = str(item.get("id") or fallback_id).strip().replace("\\", "/")
-    if re.fullmatch(r"[A-Za-z0-9_.-]+", raw_id):
+    if raw_id in _TEXT_BASENAMES:
         return raw_id
-    return str(fallback_id)
+    if re.fullmatch(r"[A-Za-z0-9_.-]+", raw_id):
+        return raw_id + (format_suffix if format_suffix and not PurePosixPath(raw_id).suffix else "")
+    return str(fallback_id) + format_suffix
 
 
 def _format_for_declared_output(path: str, declared_format: Any) -> str:
@@ -908,94 +1029,42 @@ def _acquisition_output_path(item: dict[str, Any], fallback_id: str) -> str:
     return f"acquisition/{stem}.acquisition.json"
 
 
-_GENERIC_ASSET_IDENTITY_TOKENS = {
-    "asset", "data", "dataset", "file", "input", "output", "stage",
-    "script", "program", "configuration", "config", "parameter",
-    "observational", "external", "acquisition", "reference", "run",
-    "processing", "diagnostic", "diagnostics",
-}
-
-
-def _asset_identity_tokens(item: dict[str, Any]) -> set[str]:
-    """Return stable scientific-identity tokens, excluding delivery wording."""
-    text = " ".join(
-        str(item.get(key) or "")
-        for key in ("name_or_role", "name", "filename", "file_name", "scientific_role")
-    ).casefold()
-    aliases = {"reanalysis": "analysis", "ctl": "ctrl", "calculation": "calc"}
-    tokens = {
-        aliases.get(token, token)
-        for token in re.findall(r"[a-z0-9]+", text)
-    }
-    return tokens - _GENERIC_ASSET_IDENTITY_TOKENS
-
-
 def _same_stage_asset(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    """Match equivalent stage assets from Analyst and Research Plan structure."""
+    """Coalesce explicit identities, never similar descriptions of different files."""
     if str(left.get("stage_id") or "").strip() != str(right.get("stage_id") or "").strip():
         return False
-    # Two explicitly named files are distinct deliverables even when their
-    # scientific role words overlap (for example a Gmsh ``.geo`` script and
-    # its ``.msh`` output).  Only coalesce them when their declared physical
-    # filename is the same; logical IDs and prose role names remain aliases.
-    left_filename = next(
-        (
-            canonical_filename_identity(left.get(key))
-            for key in ("expected_filename", "filename", "file_name", "declared_output_path")
-            if str(left.get(key) or "").strip()
-        ),
-        "",
-    )
-    right_filename = next(
-        (
-            canonical_filename_identity(right.get(key))
-            for key in ("expected_filename", "filename", "file_name", "declared_output_path")
-            if str(right.get(key) or "").strip()
-        ),
-        "",
-    )
-    if left_filename and right_filename and left_filename != right_filename:
-        return False
-    left_contract = normalize_asset_contract(left)
-    right_contract = normalize_asset_contract(right)
-    left_tokens = _asset_identity_tokens(left)
-    right_tokens = _asset_identity_tokens(right)
-    if not left_tokens or not right_tokens:
-        return False
-    overlap = left_tokens & right_tokens
-    semantic_match = bool(
-        left_tokens <= right_tokens
-        or right_tokens <= left_tokens
-        or len(overlap) >= 2
-        or len(overlap) / len(left_tokens | right_tokens) >= 0.6
-    )
-    if bool(left_contract.get("is_external")) != bool(right_contract.get("is_external")):
-        local_item, local_contract = (
-            (left, left_contract) if not left_contract.get("is_external") else (right, right_contract)
-        )
-        return bool(
-            semantic_match
-            and canonical_workflow_capability(local_item) == "local_artifact_generation"
-            and not any(local_item.get(key) for key in (
-                "generation_recipe", "generation_method", "derivation_method",
-            ))
-        )
-    if not left_contract.get("is_external"):
-        def local_family(value: dict[str, Any]) -> str:
-            capability = canonical_workflow_capability(value)
-            return (
-                "script" if capability == "preprocessing_script_generation"
-                else "text" if capability in {"configuration_generation", "local_artifact_generation"}
-                else capability
-            )
-        if local_family(left) != local_family(right):
-            return False
-        if local_family(left) == "script" and overlap & {
-            "download", "extract", "extraction", "perturb", "perturbation",
-            "post", "validation", "validate", "calc", "test", "synthesis",
-        }:
-            return True
-    return semantic_match
+    for source, derived in ((left, right), (right, left)):
+        dependencies = derived.get("depends_on") or derived.get("dependencies") or []
+        if str(source.get("id") or "") in (dependencies if isinstance(dependencies, list) else [dependencies]):
+            return False  # A product and its input are distinct, even with the same basename.
+    sources = [item.get("acquisition_contract") or {} for item in (left, right)]
+    if all(isinstance(source, dict) and source for source in sources):
+        # A source basename is not its identity: species directories and
+        # dataset subsets can legitimately contain identically named files.
+        for key in ("provider", "dataset_identity", "request_parameters", "locator", "url", "path"):
+            if all(source.get(key) not in (None, "", {}, []) for source in sources) and sources[0][key] != sources[1][key]:
+                return False
+    filenames = []
+    for item in (left, right):
+        name = next((str(item[key]).strip() for key in (
+            "declared_output_path", "output_path", "expected_filename", "filename", "file_name"
+        ) if item.get(key)), "")
+        role = str(item.get("name_or_role") or item.get("name") or "").strip()
+        if not name and role and PurePosixPath(role).suffix and not re.search(r"\s", role):
+            name = role
+        filenames.append(str(PurePosixPath(name.replace("\\", "/"))) if name else "")
+    if all(filenames):
+        return filenames[0] == filenames[1]
+    identities = [
+        {str(item[key]).strip() for key in ("id", "logical_asset_id") if item.get(key)}
+        for item in (left, right)
+    ]
+    if all(identities):
+        return bool(identities[0] & identities[1])
+    # Stage role declarations can omit IDs. Only an exact role alias may
+    # complete one; overlapping words do not establish asset identity.
+    left_role = str(left.get("name_or_role") or "").strip()
+    return bool(left_role and left_role == str(right.get("name_or_role") or "").strip())
 
 
 def _coalesce_stage_assets(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1167,7 +1236,6 @@ def _scope_analysis_to_data_node(task_context: str | dict[str, Any], analysis: d
     scope, so this node prepares assets for the supplied stages without ranking,
     selecting, projecting, or deferring hypotheses.
     """
-    analysis = _ensure_authoritative_caller_assets(task_context, analysis)
     request = analysis.get("preprocessing_request") if isinstance(analysis.get("preprocessing_request"), dict) else {}
     if request.get("review_profile") == "request_bound":
         # A direct asset request is complete when that asset is generated and
@@ -1180,49 +1248,10 @@ def _scope_analysis_to_data_node(task_context: str | dict[str, Any], analysis: d
             item for item in request.get("requested_assets") or []
             if isinstance(item, dict)
         ]
-        if requested:
-            requested_keys = {
-                str(value).strip().casefold()
-                for item in requested
-                for value in (
-                    item.get("asset_id"), item.get("filename"), item.get("name_or_role"),
-                    *(item.get("dependencies") or [])
-                )
-                if str(value or "").strip()
-            }
-            scoped = [
-                item for item in required
-                if any(
-                    str(item.get(key) or "").strip().casefold() in requested_keys
-                    for key in ("id", "name_or_role", "expected_filename", "declared_output_path")
-                )
-            ]
-            if scoped:
-                required = scoped
-            else:
-                # Keep the ingress contract usable even when the Analyst used
-                # a different internal id. The request asset itself is the
-                # only safe fallback; do not retain unrelated stage files.
-                required = [
-                    {
-                        "id": str(item.get("asset_id") or item.get("filename") or f"requested_asset_{index + 1}"),
-                        "name_or_role": item.get("filename") or item.get("asset_id"),
-                        "expected_filename": item.get("filename"),
-                        "format": item.get("format"),
-                        "reason": item.get("purpose"),
-                        "acceptance_criteria": item.get("content_constraints") or [],
-                        **{
-                            key: deepcopy(item[key])
-                            for key in (
-                                "scientific_role", "representation", "source_strategy",
-                                "generation_recipe", "parameter_bindings", "workflow_capability",
-                            )
-                            if item.get(key) not in (None, "", [], {})
-                        },
-                    }
-                    for index, item in enumerate(requested)
-                ]
-        elif _caller_explicitly_requests_mesh(task_context, analysis):
+        # Preserve the analyzed scientific assets and their dependencies. A
+        # filename pattern is a delivery constraint, not a reason to erase an
+        # executable producer. Publication checks the original requested paths.
+        if not requested and any(_asset_requires_mesh(item, analysis.get("task_scope")) for item in required):
             # Only a registered parametric producer owns its intermediates.
             # A prose compiler's generic "mesh" item is not such a producer
             # and must never replace the Analyst's source/parameter bindings.
@@ -1341,58 +1370,6 @@ def _fallback_generation_context(
     return _compact_text(payload, 4000)
 
 
-def _asset_requires_mesh(item: dict[str, Any]) -> bool:
-    bindings = item.get("parameter_bindings")
-    return (
-        bool(item.get("requires_mesh_generation"))
-        or canonical_workflow_capability(item) == "mesh_generation"
-        or bool(
-            isinstance(bindings, dict)
-            and isinstance(bindings.get("mesh"), dict)
-            and bindings["mesh"]
-        )
-    )
-
-
-def _caller_explicitly_requests_mesh(
-    task_context: str | dict[str, Any] | None,
-    analysis: dict[str, Any] | None = None,
-) -> bool:
-    """Use the normalized asset contract before falling back to caller prose."""
-    required_files = (
-        analysis.get("required_files")
-        if isinstance(analysis, dict) else None
-    )
-    if isinstance(required_files, list) and any(
-        _asset_requires_mesh(item) for item in required_files if isinstance(item, dict)
-    ):
-        return True
-    request = analysis.get("preprocessing_request") if isinstance(analysis, dict) else None
-    text = caller_request_text(task_context, preprocessing_request=request)
-    if not text:
-        return False
-    if re.search(
-        r"\b(?:poscar|incar|kpoints|potcar|cif|brillouin|monkhorst|electronic\s+structure|dft)\b|"
-        r"晶体|原子坐标|分数坐标|倒易空间|布里渊区|采样网格",
-        text,
-        flags=re.I,
-    ):
-        return False
-    requests_output = bool(re.search(
-        r"\b(?:generate|create|build|produce|regenerate|deliver|write)\b|"
-        r"生成|创建|构建|重新生成|交付|写入",
-        text,
-        flags=re.I,
-    ))
-    requests_mesh = bool(re.search(
-        r"\b(?:computational|finite[- ]?element|surface|volume)?\s*mesh(?:ing)?\b|"
-        r"polyMesh|网格(?:划分|加密|单元|节点)?",
-        text,
-        flags=re.I,
-    ))
-    return requests_output and requests_mesh
-
-
 def _mesh_requirement_from_caller(
     task_context: str | dict[str, Any],
     analysis: dict[str, Any],
@@ -1404,11 +1381,7 @@ def _mesh_requirement_from_caller(
         (
             item for item in request.get("requested_assets") or []
             if isinstance(item, dict)
-            and re.search(
-                r"mesh|网格|polymesh|blockmesh|snappyhexmesh|gmsh",
-                json.dumps(item, ensure_ascii=False, default=str),
-                flags=re.I,
-            )
+            and _asset_requires_mesh(item)
         ),
         next((
             item for item in analysis.get("required_files") or []
@@ -1487,58 +1460,6 @@ def _mesh_requirement_from_caller(
     }
 
 
-def _ensure_authoritative_caller_assets(
-    task_context: str | dict[str, Any],
-    analysis: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """Reconcile Analyst output with immutable caller deliverable intent."""
-    if not isinstance(analysis, dict):
-        return analysis or {}
-    updated = dict(analysis)
-    required = [deepcopy(item) for item in updated.get("required_files") or [] if isinstance(item, dict)]
-    original_required = deepcopy(required)
-    request = updated.get("preprocessing_request") if isinstance(updated.get("preprocessing_request"), dict) else {}
-    requested_mesh = any(
-        isinstance(item, dict)
-        and re.search(r"mesh|网格|polymesh|blockmesh|snappyhexmesh|gmsh", json.dumps(item, ensure_ascii=False, default=str), flags=re.I)
-        for item in request.get("requested_assets") or []
-    )
-    mesh_intent = _caller_explicitly_requests_mesh(task_context, updated) or requested_mesh
-    if mesh_intent:
-        for item in required:
-            contract = normalize_asset_contract(item)
-            if (
-                str(contract.get("representation") or "").lower() == "simulation_case"
-                and str(contract.get("source_strategy") or "").lower() == "local_generation"
-            ):
-                item["requires_mesh_generation"] = True
-    # The Analyst already interprets prose (including negation and inputs).
-    # Do not append regex-discovered filenames from the fallback compiler to
-    # that result. Structured caller assets are reconciled by the request contract.
-    if mesh_intent and not any(_asset_requires_mesh(item) for item in required):
-        required.append(_mesh_requirement_from_caller(task_context, updated))
-    if required != original_required:
-        updated["required_files"] = required
-        if str(updated.get("calculation_type") or "").strip() in {"", "caller-scoped preprocessing asset generation"}:
-            updated["calculation_type"] = "mesh_generation_preprocessing"
-        updated["task_scope"] = _task_scope_contract(updated)
-    # ``task_scope`` is an Analyst projection for request-bound work. It cannot
-    # veto the mesh asset derived once from the immutable caller request.
-    if mesh_intent and request.get("review_profile") == "request_bound":
-        scope = dict(updated.get("task_scope") or {})
-        scope["allowed_capabilities"] = sorted({
-            *[str(value) for value in scope.get("allowed_capabilities") or []],
-            "mesh_generation",
-        })
-        scope["excluded_capabilities"] = sorted({
-            str(value) for value in scope.get("excluded_capabilities") or []
-            if str(value) != "mesh_generation"
-        })
-        scope["required_capabilities_outside_scope"] = []
-        updated["task_scope"] = scope
-    return updated
-
-
 def _requires_spatial_mesh_assets(
     analysis: dict[str, Any],
     required_files: list[dict[str, Any]],
@@ -1564,7 +1485,7 @@ def _requires_spatial_mesh_assets(
     ):
         return False
     return any(
-        _asset_requires_mesh(item) for item in required_files if isinstance(item, dict)
+        _asset_requires_mesh(item, task_scope) for item in required_files if isinstance(item, dict)
     )
 
 
@@ -1663,7 +1584,7 @@ def _generic_artifact_generation_step(
     """Build the single generic writer contract used by every planning path."""
     item_id = str(item.get("id") or "artifact")
     request_bound = analysis.get("review_profile") == "request_bound"
-    stage_id = "" if request_bound else str(item.get("stage_id") or "package")
+    stage_id = "" if request_bound else str(item.get("stage_id") or "")
     normalized_contract = normalize_asset_contract(item)
     external_asset = bool(normalized_contract.get("is_external"))
     declared_path = str(item.get("declared_output_path") or item_id)
@@ -1758,6 +1679,10 @@ def _constructive_geometry_contract(
     geometry values already bound to that deck are authoritative local input;
     they must not be reclassified as a missing public geometry file.
     """
+    if any(item.get("source_strategy") == "local_reuse"
+           and item.get("representation") in {"geometry", "geometry_definition"}
+           for item in analysis.get("required_files") or [] if isinstance(item, dict)):
+        return None  # A supplied geometry must be consumed, never reconstructed.
     discipline = analysis.get("discipline") or {
         "primary": (analysis.get("task_scope") or {}).get("discipline")
     }
@@ -1792,6 +1717,9 @@ def _constructive_geometry_contract(
         bindings = item.get("parameter_bindings")
         if not isinstance(bindings, dict):
             continue
+        from .geometry_assets import canonical_parameter_bindings
+
+        bindings = canonical_parameter_bindings(bindings)
         geometry = bindings.get("geometry")
         mesh = bindings.get("mesh")
         # Requirement models do not always group caller-bound values.  In a
@@ -1801,6 +1729,12 @@ def _constructive_geometry_contract(
         constructive = geometry if isinstance(geometry, dict) and geometry else bindings
         if constructive:
             contract = {"geometry": deepcopy(constructive)}
+            if ("type" not in contract["geometry"]
+                    and re.search(r"rectangle|rectangular|矩形", task_text, re.I)
+                    and re.search(r"circular\s+hole|圆孔", task_text, re.I)
+                    and re.search(r"\b2\s*[- ]?d\b|二维", task_text, re.I)
+                    and {"hole_radius", "hole_center"} <= constructive.keys()):
+                contract["geometry"]["type"] = "rectangle_with_circular_hole"
             if isinstance(mesh, dict) and mesh:
                 contract["mesh"] = deepcopy(mesh)
             # Preserve explicit regions and recover regions embedded in
@@ -1808,14 +1742,19 @@ def _constructive_geometry_contract(
             from .geometry_assets import canonical_condition_region
 
             regions = [*boundary_names, *[
-                canonical_condition_region(region)
+                canonical_condition_region(region, controls, boundary_names)
                 for group in ("boundary_conditions", "loads")
                 if isinstance(bindings.get(group), dict)
                 for region, controls in (bindings.get(group) or {}).items()
-                if controls not in (None, "", [], {}) and canonical_condition_region(region)
+                if controls not in (None, "", [], {}) and canonical_condition_region(region, controls, boundary_names)
             ]]
             if regions:
                 contract["named_regions"] = list(dict.fromkeys(regions))
+                contract["region_definitions"] = {
+                    group: deepcopy(bindings[group])
+                    for group in ("boundary_conditions", "loads")
+                    if isinstance(bindings.get(group), dict) and bindings[group]
+                }
             return item, contract
     return None
 
@@ -1824,7 +1763,7 @@ def _deterministic_designer_fallback_plan(
     task_context: str | dict[str, Any],
     requirement_analysis: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Build a conservative schema-valid plan when the Designer service is unavailable."""
+    """Compile confirmed requirements through the existing native/text producers."""
     analysis = _normalize_requirement_analysis(
         _best_requirement_analysis(
             requirement_analysis,
@@ -1832,7 +1771,6 @@ def _deterministic_designer_fallback_plan(
         )
         or {}
     )
-    analysis = _ensure_authoritative_caller_assets(task_context, analysis)
     analysis = _scope_analysis_to_data_node(task_context, analysis)
     if not isinstance(analysis.get("preprocessing_request"), dict):
         analysis["preprocessing_request"] = normalize_preprocessing_request(task_context)
@@ -1883,7 +1821,7 @@ def _deterministic_designer_fallback_plan(
                 stage_role_owners.setdefault(key, set()).add(stage_id)
 
     def belongs_to_declared_stage(item: dict[str, Any]) -> bool:
-        if analysis.get("review_profile") == "request_bound":
+        if analysis.get("review_profile") == "request_bound" or not declared_stage_ids:
             return True
         explicit_stage = str(item.get("stage_id") or "").strip()
         if explicit_stage:
@@ -1930,7 +1868,7 @@ def _deterministic_designer_fallback_plan(
     }
 
     def infer_stage_id(item: dict[str, Any], fallback: str = "package") -> str:
-        if analysis.get("review_profile") == "request_bound":
+        if analysis.get("review_profile") == "request_bound" or not declared_stage_ids:
             return ""
         declared = str(item.get("stage_id") or item.get("source_stage_id") or "").strip()
         if declared:
@@ -2003,7 +1941,7 @@ def _deterministic_designer_fallback_plan(
             canonical_workflow_capability(item) == "mesh_generation"
             and re.search(r"openfoam", software_name, flags=re.I)
             and not PurePosixPath(declared_output_path).suffix
-            and not declared_output_path.casefold().rstrip("/").endswith("constant/polymesh")
+            and "polymesh" not in {part.casefold() for part in PurePosixPath(declared_output_path).parts}
         ):
             declared_output_path = "constant/polyMesh"
         stage_id = infer_stage_id(item)
@@ -2056,7 +1994,7 @@ def _deterministic_designer_fallback_plan(
         })
 
     composite_mesh_asset = any(
-        _asset_requires_mesh(item)
+        _asset_requires_mesh(item, analysis.get("task_scope"))
         and canonical_workflow_capability(item) != "mesh_generation"
         for item in required_files
     )
@@ -2112,9 +2050,14 @@ def _deterministic_designer_fallback_plan(
     ):
         caller_parameters.pop(key, None)
     requested_paths = [
-        str(item.get("expected_filename") or item.get("declared_output_path") or item.get("format") or "")
+        str(value)
         for item in required_files
+        for value in (_declared_relative_output(item, str(item.get("id") or "artifact")), item.get("format"))
+        if value
     ]
+    requested_paths.extend(str(item["filename"]) for item in
+        (analysis.get("preprocessing_request") or {}).get("requested_assets") or []
+        if isinstance(item, dict) and item.get("filename"))
     requested_suffixes = {
         suffix
         for value in requested_paths
@@ -2150,7 +2093,7 @@ def _deterministic_designer_fallback_plan(
         ),
         **(
             {"solver_mesh_format": "inp"}
-            if ".inp" in requested_suffixes or any(str(value).strip().lower() == "inp" for value in requested_paths)
+            if ".inp" in requested_suffixes or any(str(value).strip().lower().lstrip(".") == "inp" for value in requested_paths)
             else {}
         ),
         **(
@@ -2162,37 +2105,44 @@ def _deterministic_designer_fallback_plan(
         ),
     }
     # Keep one format-based visualization policy for plans and direct calls.
-    for item in required_files:
-        output_preferences = ((item.get("parameter_bindings") or {}).get("outputs") or {})
-        if isinstance(output_preferences, dict) and "write_tecplot" in output_preferences:
-            common_parameters.setdefault("write_tecplot", output_preferences["write_tecplot"])
     from .geometry_assets import mesh_visualization_requested
 
-    common_parameters.setdefault("write_tecplot", mesh_visualization_requested(
+    common_parameters["write_tecplot"] = mesh_visualization_requested(
         common_parameters, requested_paths + [item.get("format") for item in required_files],
-    ))
+    )
     from .geometry_assets import geometry_file_from_params, existing_geometry_like_path
 
-    bound_geometry = geometry_file_from_params(common_parameters) or next((
-        path for item in required_files
-        if (path := geometry_file_from_params(item.get("parameter_bindings") or {}))
-    ), "")
+    bound_geometry = ""
+    # Only explicitly referenced inspected inputs, never an arbitrary file
+    # from a directory listing or a previous delivery, can bind the source.
+    candidates = set()
+    input_text = json.dumps(request_inputs, ensure_ascii=False, default=str)
+    for item in analysis.get("local_asset_inventory") or []:
+        path = existing_geometry_like_path(item.get("path"))
+        references = [path] if path else []
+        if path and item.get("requested_path"):
+            references.append(str(item["requested_path"]))
+        if path and Path(path).is_relative_to(Path.cwd()):
+            references.append(str(Path(path).relative_to(Path.cwd())))
+        # A service input can resolve an erroneous caller-relative path.
+        # Require explicit reference and inspection, not a same-name scan.
+        if any(reference in task_text or reference in input_text for reference in references):
+            candidates.add(path)
+    if len(candidates) == 1:
+        bound_geometry = candidates.pop()
     if not bound_geometry:
-        # Only explicitly referenced inspected inputs, never an arbitrary file
-        # from a directory listing or a previous delivery, can bind the source.
-        candidates = set()
-        input_text = json.dumps(request_inputs, ensure_ascii=False, default=str)
-        for item in analysis.get("local_asset_inventory") or []:
-            path = existing_geometry_like_path(item.get("path"))
-            references = [path] if path else []
-            if path and Path(path).is_relative_to(Path.cwd()):
-                references.append(str(Path(path).relative_to(Path.cwd())))
-            # A service input can resolve an erroneous caller-relative path.
-            # Require explicit reference and inspection, not a same-name scan.
-            if any(reference in task_text or reference in input_text for reference in references):
-                candidates.add(path)
-        if len(candidates) == 1:
-            bound_geometry = candidates.pop()
+        bound_geometry = geometry_file_from_params(common_parameters) or next((
+            path for item in required_files
+            if (path := geometry_file_from_params(item.get("parameter_bindings") or {}))
+        ), "")
+    if not bound_geometry:
+        supplied_geometry = {
+            path for item in request_inputs if isinstance(item, dict)
+            and item.get("kind") in {"geometry", "mesh", "geometry_or_mesh"}
+            if (path := existing_geometry_like_path(item.get("path")))
+        }
+        if len(supplied_geometry) == 1:
+            bound_geometry = supplied_geometry.pop()
     if bound_geometry:
         common_parameters["geometry_file"] = bound_geometry
     requested_formats = {str(item.get("format") or "").lower() for item in required_files}
@@ -2214,14 +2164,17 @@ def _deterministic_designer_fallback_plan(
             common_parameters["geometry_file"] = recovered_path
     request_bound = analysis.get("review_profile") == "request_bound"
     primary_name = str(
-        discipline.get("primary") or ""
+        discipline.get("adapter_route") or discipline.get("primary") or ""
     ).strip().lower() if isinstance(discipline, dict) else str(discipline).strip().lower()
     software_name = str(
         (analysis.get("simulation_software") or {}).get("name") or ""
     ).strip().lower()
-    use_solver_template_adapter = (
-        primary_name in _DETERMINISTIC_STAGE_ADAPTERS
-        and software_name not in {"", "generic", "generic_preprocessing", "unknown"}
+    # A discipline is not a solver capability: e.g. the MD starter template
+    # neither constructs particles nor implements arbitrary LAMMPS force fields.
+    use_solver_template_adapter = bool(
+        (primary_name in {"cfd", "heat_transfer"} and "openfoam" in software_name)
+        or (primary_name in {"csm", "heat_transfer"} and re.search(r"abaqus|calculix", software_name))
+        or (primary_name == "electronic_structure" and software_name == "vasp")
     )
     solver_template_assets = [
         item for item in required_files
@@ -2229,11 +2182,8 @@ def _deterministic_designer_fallback_plan(
             "configuration_generation",
             "preprocessing_script_generation",
         }
-        and not re.search(
-            r"mesh|checkmesh|quality|audit|visualization|polymesh|网格|质量|审计",
-            json.dumps(item, ensure_ascii=False, default=str),
-            flags=re.I,
-        )
+        and normalize_asset_contract(item).get("asset_role") not in {"report", "preprocessing_script"}
+        and normalize_asset_contract(item).get("representation") not in {"mesh", "text_log"}
     ]
     steps: list[dict[str, Any]] = []
     geometry_dependency = ""
@@ -2243,6 +2193,7 @@ def _deterministic_designer_fallback_plan(
     )
     if constructive_geometry:
         source_asset, geometry_bindings = constructive_geometry
+        common_parameters["geometry"] = deepcopy(geometry_bindings["geometry"])
         # Internal region bindings must materialize for their consumers even
         # when the caller did not prescribe literal mesh-group names.
         common_parameters["expected_boundaries"] = list(dict.fromkeys([
@@ -2268,29 +2219,25 @@ def _deterministic_designer_fallback_plan(
             "delivery_required": False,
             "required": False,
             "format": "Gmsh .geo geometry definition",
+            "target_software": {"name": "Gmsh"},
             "generation_recipe": (
-                "Write concise Gmsh OpenCASCADE geometry and sizing commands from the supplied bindings. "
-                "Keep the requested topological dimension and define its physical region plus named "
-                "boundaries; for a 2-D contract use planar curves/surfaces and 2-D primitives, never "
-                "3-D volume primitives, and do not extrude merely because it has a section thickness. "
-                "After OpenCASCADE BooleanDifference/Fragments, store returned entity tags in arrays; "
-                "use the returned surface array directly instead of searching for that surface again. "
-                "Use documented Gmsh list expressions: curves[] = Boundary{Surface{fluid[]};}; "
-                "select entities with Curve In BoundingBox{xmin,ymin,zmin,xmax,ymax,zmax}; or obtain "
-                "an entity's bounds with bbox[] = BoundingBox Curve{tag};. These are different operations "
-                "(https://gmsh.info/doc/texinfo/#Expressions). Use a nonzero selection tolerance on all three axes. Do not "
-                "invent list/set helper functions; select each required group directly with documented Gmsh statements. Do not "
-                "add replacement Line/Circle entities or assume that deleted entity tags still exist. Reuse "
-                "those selections in sizing fields instead of hard-coding post-boolean curve tags. Every "
-                "requested physical boundary group must match its geometric region, not just be nonempty. "
-                "Select regions by their geometric predicates; the complement of a few named boundary "
-                "conditions is not necessarily the intended feature. Apply sizing only to the intended "
-                "regions and preserve the caller's requested spatial transition. "
-                "Use supplied absolute mesh sizes in geometry units and the specified polynomial element order; "
-                "do not multiply an already absolute size by itself via Mesh.MeshSizeFactor. "
-                "Leave mesh execution and output serialization to the mesher; do not add Mesh/Save commands "
-                "or Mesh.Format/MshFileVersion/Binary settings to a geometry definition. "
-                "Set Mesh.SaveGroupsOfNodes=1 and never hand-write mesh nodes or elements."
+                "Write a compact, valid Gmsh OpenCASCADE geometry and sizing definition. "
+                "Preserve the requested geometry, units and topological dimension; section thickness "
+                "alone does not require extrusion. Define the physical domain and requested boundary "
+                "regions from their region_definitions and actual constructed entities. Use named Physical "
+                "groups with the exact declared boundary names. After topology changes, use region[] = Curve In "
+                "BoundingBox {xmin-eps,ymin-eps,zmin-eps,xmax+eps,ymax+eps,zmax+eps}; with a nonzero geometric "
+                "tolerance, or BoundingBox Curve {tag}; on actual boundary entities. Do not use undocumented "
+                "Curve{tag}->{parameter} coordinate evaluation or test a curved edge's bounding-box midpoint as if it lay on the curve. "
+                "Condition values identify regions here; applying solver conditions belongs to the downstream deck. "
+                "Use finite sizing throughout the domain and resolve local features with adjacent-cell "
+                "refinement and the requested spatial transition. Preserve supplied absolute sizes and "
+                "element order; for omitted sizes choose and briefly document meaningful feature-scale defaults. "
+                "Use documented field constructors: Field[1] = Distance; Field[1].CurvesList = {hole[]}; "
+                "Field[2] = Threshold; Field[2].InField = 1; (replace hole[] with the actual curves). "
+                "Field types are unquoted constructor names, not .Field properties. List-valued options "
+                "require brace-delimited lists, including array references. Leave mesh execution, "
+                "node/element enumeration and output serialization to the downstream mesher."
             ),
             "parameter_bindings": geometry_bindings,
             "parameter_binding_mode": "semantic",
@@ -2323,7 +2270,11 @@ def _deterministic_designer_fallback_plan(
             "tool_arguments": {
                 "spec": task_text,
                 "discipline": discipline.get("primary") or "unknown",
-                "parameters": json.dumps(common_parameters, ensure_ascii=False),
+                "parameters": json.dumps({
+                    **common_parameters,
+                    "requested_output_paths": {key: value for key, value in common_parameters["requested_output_paths"].items()
+                                               if key in mesh_output_ids},
+                }, ensure_ascii=False),
                 "operation": "prepare",
                 "generate_mesh": True,
             },
@@ -2344,11 +2295,12 @@ def _deterministic_designer_fallback_plan(
     package_outputs = [item for item in outputs if item not in mesh_output_ids and (
         not requires_mesh_assets
         or (use_solver_template_adapter and any(
-            str(asset.get("id")) == item and (_asset_requires_mesh(asset) or asset in solver_template_assets)
+            str(asset.get("id")) == item and (_asset_requires_mesh(asset, analysis.get("task_scope")) or asset in solver_template_assets)
             for asset in required_files
         ))
     )]
-    if not package_outputs:
+    if not package_outputs and common_parameters.get("convert_to_openfoam"):
+        # The case adapter materializes the multi-file polyMesh directory.
         package_outputs = list(mesh_output_ids)
     steps.append({
         "id": "assemble_preprocessing_package",
@@ -2379,7 +2331,7 @@ def _deterministic_designer_fallback_plan(
                         required_files
                         and (
                             not request_bound
-                            or (solver_template_assets and use_solver_template_adapter)
+                            or ((solver_template_assets or composite_mesh_asset) and use_solver_template_adapter)
                         )
                     )
                 ),
@@ -2410,19 +2362,27 @@ def _deterministic_designer_fallback_plan(
     # package adapter, which can generate a coherent multi-file case in one
     # step.  The generic one-file writer remains the fallback for standalone
     # text assets and unsupported disciplines.
-    use_generic_writer = not (solver_template_assets and use_solver_template_adapter)
-    if use_generic_writer and (
+    use_generic_writer = not ((solver_template_assets or composite_mesh_asset) and use_solver_template_adapter)
+    if requires_mesh_assets or (use_generic_writer and (
         (primary_name not in _DETERMINISTIC_STAGE_ADAPTERS and not requires_mesh_assets)
         or (direct_asset_request and not requires_mesh_assets)
         or (writer_eligible_assets and not requires_mesh_assets)
-    ):
-        steps = [step for step in steps if step.get("tool_name") != "build_scientific_preprocessing_package"]
-        selected_tools.discard("build_scientific_preprocessing_package")
+    )):
+        if not requires_mesh_assets:
+            steps = [step for step in steps if step.get("tool_name") != "build_scientific_preprocessing_package"]
+            selected_tools.discard("build_scientific_preprocessing_package")
+        produced_ids = {str(output) for step in steps for output in step.get("outputs") or []}
+        native_steps = [step for step in steps if step.get("tool_name") == "prepare_scientific_mesh"]
         for item in deliverables:
-            if not item.get("required", True) or item.get("type") == "reference_evidence":
+            if (not item.get("required", True) or item.get("type") == "reference_evidence"
+                    or str(item.get("id")) in produced_ids):
                 continue
             item_id = str(item.get("id") or "")
             external_asset = bool(normalize_asset_contract(item).get("is_external"))
+            if external_asset and normalize_asset_contract(item).get("requires_local_payload"):
+                # No executable acquisition recipe is compiled here. Leave the
+                # missing producer visible to validation and the Designer.
+                continue
             if not external_asset and not _asset_contract_allows_fallback(item):
                 # A locally-derived runtime product belongs to the downstream
                 # execution graph, not to a data-node artifact writer.
@@ -2433,11 +2393,32 @@ def _deterministic_designer_fallback_plan(
                 # deliverable, but it never pretends the dataset itself was
                 # downloaded into the workspace.
                 item["declared_output_path"] = _acquisition_output_path(item, item_id)
-            steps.append(_generic_artifact_generation_step(item, analysis))
-        selected_tools.add("generate_preprocessing_artifact")
+            writer = _generic_artifact_generation_step(item, analysis)
+            # Supplement an existing native route, never replace it just to
+            # produce a requested report or other text sidecar. Native receipts
+            # become evidence only after their producers have actually run.
+            writer["dependencies"] = [step["id"] for step in native_steps]
+            writer["inputs"] = list(dict.fromkeys([
+                *writer["inputs"], *(output for step in native_steps for output in step.get("outputs") or []),
+            ]))
+            steps.append(writer)
+            selected_tools.add("generate_preprocessing_artifact")
+    # A terminal report must observe the materialized assets it describes.
+    # Independent writers otherwise run in lexical order, possibly reporting
+    # on files that do not yet exist. Explicitly consumed reports keep their
+    # declared upstream role rather than gaining a circular dependency.
+    report_ids = {str(item["id"]) for item in deliverables if item.get("asset_role") == "report"}
+    for step in steps:
+        own_outputs = set(step.get("outputs") or [])
+        if (step.get("tool_name") != "generate_preprocessing_artifact" or not own_outputs & report_ids
+                or any(own_outputs & set(other.get("inputs") or []) for other in steps if other is not step)):
+            continue
+        sources = [other for other in steps if other is not step and set(other.get("outputs") or []) - report_ids]
+        step["dependencies"] = list(dict.fromkeys([*step.get("dependencies", []), *(other["id"] for other in sources)]))
+        step["inputs"] = list(dict.fromkeys([*step.get("inputs", []), *(output for other in sources for output in other.get("outputs") or [])]))
     fallback_plan = normalize_plan({
         "schema_version": "1.0",
-        "task_summary": "Deterministic local-first preprocessing plan generated after Designer service failure.",
+        "task_summary": "Local-first preprocessing work order compiled from confirmed requirements.",
         "discipline": discipline,
         "simulation_software": software,
         "requirement_analysis": {
@@ -2474,24 +2455,13 @@ def _deterministic_designer_fallback_plan(
             for item in analysis.get("unresolved_facts") or []
         ],
         "risks": [
-            "Designer service was unavailable; deterministic fallback delegates generation to registered "
-            "discipline tools and relies on package review to block invalid or unsupported assets."
+            "Compiled producer routes still require artifact and authority review before publication."
         ],
         "reproducibility": {
             "workspace_layout": "data_preprocessing/fallback",
             "provenance_records": ["task_context", "requirement_analysis", "plan_hash", "tool_results"],
         },
     })
-    produced_ids = {str(output) for step in fallback_plan["generation_steps"] for output in step.get("outputs") or []}
-    for item in fallback_plan["required_deliverables"]:
-        if (str(item.get("id")) not in produced_ids
-            and request_bound and not analysis.get("preprocessing_request", {}).get("requested_assets")
-            and item.get("output_path_is_explicit") is False):
-            # Inferred, unowned files are implementation proposals, not new
-            # caller obligations. The semantic gate still checks the complete
-            # original request, including requested reports without filenames.
-            item.update(required=False, delivery_required=False,
-                        requirement_basis="Unassigned implementation proposal; review delivered content against the original request.")
     # Model-authored and deterministic plans cross the same canonical boundary.
     # This keeps the fallback from maintaining a parallel artifact contract.
     repair_analysis = deepcopy(analysis)
@@ -2499,21 +2469,23 @@ def _deterministic_designer_fallback_plan(
 
 
 def _analysis_supports_deterministic_execution(analysis: dict[str, Any] | None) -> bool:
-    """Use the local DAG when upstream already supplied an auditable plan."""
+    """Compile explicit producer contracts; schema and delivery review still gate execution."""
     if not isinstance(analysis, dict):
         return False
     stages = [item for item in analysis.get("calculation_stages") or [] if isinstance(item, dict)]
     required = [item for item in analysis.get("required_files") or [] if isinstance(item, dict)]
+    if any(item.get("edit_source") for item in required):
+        return False  # Bind the edit method, especially computed selections, before execution.
+    # Compiling a text writer/package assembler does not compute structures or
+    # transformed datasets. Let Designer bind an executable producer for these
+    # contracts instead of publishing a starter template and discovering omissions.
+    if (any(canonical_workflow_capability(item) == "atomic_structure_generation"
+            and normalize_asset_contract(item).get("source_strategy") == "local_generation" for item in required)
+            or (not any(_asset_requires_mesh(item, analysis.get("task_scope")) for item in required)
+                and any(normalize_asset_contract(item).get("source_strategy") == "local_generation"
+                        and not _asset_contract_allows_fallback(item) for item in required))):
+        return False
     scope = analysis.get("task_scope") if isinstance(analysis.get("task_scope"), dict) else {}
-    try:
-        confidence = float(analysis.get("confidence") or 0.0)
-    except (TypeError, ValueError):
-        confidence = 0.0
-    if confidence <= 0.0 and stages:
-        try:
-            confidence = min(float(stage.get("confidence") or 0.0) for stage in stages)
-        except (TypeError, ValueError):
-            confidence = 0.0
     stage_ids = {
         str(stage.get("id") or "").strip()
         for stage in stages
@@ -2531,10 +2503,9 @@ def _analysis_supports_deterministic_execution(analysis: dict[str, Any] | None) 
     ]
     request_bound = str(analysis.get("review_profile") or "").strip() == "request_bound"
     return bool(
-        (request_bound or confidence >= 0.75)
-        and required
+        required
         and scope.get("allowed_capabilities")
-        and (request_bound or (stages and stage_ids.issubset(stage_contract_ids)))
+        and (request_bound or stage_ids.issubset(stage_contract_ids))
         and delivery_contracts
         and all(not contract.get("contradictory_fields") for contract in delivery_contracts)
         and all(
@@ -2572,43 +2543,15 @@ def _is_publisher_stage_contract(item: dict[str, Any]) -> bool:
     return package_placeholder
 
 
-def _is_deferred_data_product(item: dict[str, Any], contract: dict[str, Any]) -> bool:
-    """Identify data products represented by a recipe, not a writable file.
-
-    The data node packages configuration, acquisition, and transformation
-    instructions; it does not execute the scientific workflow merely to make
-    a NetCDF/GRIB/intermediate result appear.  This classification uses the
-    normalized representation and declared source strategy, never a solver
-    name or filename convention.
-    """
-    if str(contract.get("source_strategy") or "") != "local_generation":
-        return False
-    representation = str(contract.get("representation") or "").lower()
-    format_text = str(item.get("format") or "").lower()
-    is_data_product = (
-        representation in {"spatial_field", "dataset", "grib_dataset", "netcdf_dataset"}
-        or bool(re.search(r"\b(?:netcdf|grib|hdf|intermediate)\b|数据场|数据集", format_text, flags=re.I))
-    )
-    return is_data_product
-
-
 def _normalize_requirement_analysis(raw: dict[str, Any]) -> dict[str, Any]:
     analysis = dict(raw) if isinstance(raw, dict) else {}
     request = analysis.get("preprocessing_request")
     if isinstance(request, dict) and request.get("review_profile") == "request_bound":
+        _normalize_request_bound_ownership(analysis, request)
         authority = caller_request_text(request, preprocessing_request=request) + json.dumps(
             {key: request.get(key) for key in ("requested_assets", "acceptance_criteria")},
             ensure_ascii=False,
         )
-        # Exact boundary names are caller requirements, not Analyst defaults.
-        # Preserve physical intent in the original request; do not turn a
-        # suggested representation into an additional mechanical rejection.
-        # inputs may contain the service's expanded spec, not user constraints.
-        analysis["boundary_contract"] = [
-            item for item in analysis.get("boundary_contract") or []
-            if isinstance(item, dict) and str(item.get("name") or "").strip()
-            and re.search(rf"(?<![A-Za-z0-9_]){re.escape(str(item['name']).strip())}(?![A-Za-z0-9_])", authority)
-        ]
     if isinstance(analysis.get("discipline"), str):
         analysis["discipline"] = {"primary": analysis["discipline"], "evidence": []}
     if isinstance(analysis.get("simulation_software"), (str, dict)):
@@ -2640,6 +2583,16 @@ def _normalize_requirement_analysis(raw: dict[str, Any]) -> dict[str, Any]:
                 item for item in candidates if item is not primary
             ]
     software_contract = analysis.get("simulation_software")
+    discipline_contract = analysis.get("discipline")
+    if isinstance(discipline_contract, dict) and isinstance(software_contract, dict):
+        primary = str(discipline_contract.get("primary") or "").strip().lower()
+        if not discipline_contract.get("adapter_route") and primary not in DISCIPLINE_REGISTRY:
+            # Descriptive discipline names are not adapter IDs. Preserve the
+            # declared scientific domain and resolve the implementation via
+            # the existing solver registry, as execution already does.
+            adapter = discipline_from_solver(str(software_contract.get("name") or ""))
+            if adapter:
+                analysis["discipline"] = {**discipline_contract, "adapter_route": adapter}
     if isinstance(software_contract, dict):
         # Preprocessor identity is part of the same contract.  Preserve an
         # explicitly supplied preprocessor_version, only filling it from a
@@ -2662,6 +2615,7 @@ def _normalize_requirement_analysis(raw: dict[str, Any]) -> dict[str, Any]:
     for key in ("calculation_stages", "required_files", "optional_files", "evidence", "assumptions", "unresolved_facts", "search_queries"):
         if not isinstance(analysis.get(key), list):
             analysis[key] = []
+    _normalize_edit_assets(analysis)
     analysis_text = json.dumps(analysis, ensure_ascii=False, default=str)
     valid_naca_codes = list(dict.fromkeys(
         _normalise_profile_code(match.group(0))
@@ -2672,13 +2626,45 @@ def _normalize_requirement_analysis(raw: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(item, dict):
             normalized_required_files.append(item)
             continue
-        item = dict(item)
+        item = _normalize_solver_mesh_asset(dict(item), analysis.get("simulation_software"))
+        # Match caller file identities before deriving a name from model prose.
+        # A glob constrains acceptable files; it is never a literal output path.
+        identities = {canonical_filename_identity(item.get(key)) for key in
+                      ("id", "name_or_role", "expected_filename", "declared_output_path")}
+        filenames = {str(asset.get("filename") or "") for asset in (request or {}).get("requested_assets", [])
+                     if isinstance(asset, dict) and asset.get("filename")
+                     and not has_magic(str(asset["filename"]))
+                     and canonical_filename_identity(asset["filename"]) in identities - {""}}
+        if len(filenames) == 1:
+            item["declared_output_path"] = filenames.pop()
+        if item.get("parameter_binding_source") != "stage_explicit_parameters":
+            # A model's claimed "caller supplied" basis is not provenance.
+            # Only actual structured caller bindings are literal file locks;
+            # inferred implementations remain subject to original-request review.
+            # Classify provenance even before a binding map exists, so the
+            # Designer can fill an Analyst omission without repair erasing it.
+            identities = {str(item.get(key) or "") for key in ("id", "name_or_role", "expected_filename")}
+            caller_asset = next((asset for asset in (request or {}).get("requested_assets", [])
+                                 if isinstance(asset, dict) and asset.get("parameter_bindings")
+                                 and any(str(asset.get(key) or "") in identities - {""}
+                                         for key in ("asset_id", "filename", "id"))), {})
+            if caller_asset:
+                item["available_stage_parameters"] = {
+                    **item.get("available_stage_parameters", {}), **(item.get("parameter_bindings") or {}),
+                }
+                item["parameter_bindings"] = deepcopy(caller_asset["parameter_bindings"])
+            item["parameter_binding_source"] = "caller_contract" if caller_asset else "analyst_inference"
         # Logical deliverable IDs cross Analyst, Designer, executor, Publisher,
         # and Reviewer boundaries.  Canonicalize them at the first boundary;
         # normalizing only Designer outputs left stage contracts with ``F001``
         # while the executable plan delivered ``f001``.
         if str(item.get("id") or "").strip():
             item["id"] = _slug(str(item["id"]))
+        # An authorized embedded discretization needs a producer even when
+        # its optional sizing defaults were omitted. Persist that fact once,
+        # rather than letting later gates infer it from parameter-group shape.
+        if _asset_requires_mesh(item, analysis.get("task_scope")):
+            item["requires_mesh_generation"] = True
         acquisition_contract = item.get("acquisition_contract")
         if isinstance(acquisition_contract, dict):
             retrieval = acquisition_contract.get("retrieval_instructions")
@@ -3113,13 +3099,6 @@ def _normalize_requirement_analysis(raw: dict[str, Any]) -> dict[str, Any]:
         ):
             item["fulfillment_kind"] = "runtime_output"
             item["delivery_required"] = False
-        if _is_deferred_data_product(item, contract):
-            # Keep the asset visible in stage provenance, but do not require
-            # a text-artifact writer to fabricate a scientific data file.
-            # Its declared generator/acquisition recipe is packaged with the
-            # owning stage and executed later under the approved workflow.
-            item["fulfillment_kind"] = "runtime_output"
-            item["delivery_required"] = False
         if contract.get("fulfillment_kind") == "runtime_access":
             dependency_id = str(item.get("id") or "")
             if dependency_id not in known_runtime_access:
@@ -3323,8 +3302,23 @@ def _apply_upstream_discipline_authority(
     return updated
 
 
-def _structured_context_object(value: str | dict[str, Any]) -> dict[str, Any]:
+def _structured_context_object(
+    value: str | dict[str, Any], *, authority_only: bool = False,
+) -> dict[str, Any]:
     if isinstance(value, dict):
+        if authority_only:
+            request = value.get("preprocessing_request")
+            if isinstance(request, dict) and isinstance(request.get("authority_snapshot"), dict):
+                snapshot = request["authority_snapshot"]
+                # Bound inputs contain service implementation hints. Only the
+                # original caller scope may trigger deterministic compilation.
+                context = (
+                    _structured_context_object(snapshot.get("request")) or snapshot
+                    if set(snapshot) == {"request"} else snapshot
+                )
+                return {**context, "requested_assets": request.get("requested_assets") or []}
+            if value.get("request_source") == "caller_or_experiment_node":
+                return _structured_context_object(value.get("user_request"))
         return value
     text = str(value or "").strip()
     if not text:
@@ -3398,6 +3392,8 @@ def _apply_structured_stage_scope(
             if stage_id not in declared_scope_ids:
                 declared_scope_ids.append(stage_id)
             source_by_stage.setdefault(stage_id, entry)
+    if not declared_scope_ids:
+        return analysis
     # The normalized request remains the complete scope authority.  Structured
     # entries enrich its stage records; they never select or discard branches.
     planned_stage_ids = [
@@ -3439,7 +3435,7 @@ def _apply_structured_stage_scope(
                 },
                 "evidence": [
                     *list(current.get("evidence") or []),
-                    {"source_type": "upstream_data_stage_scope", "detail": _compact_text(entry, 900)},
+                    *([{"source_type": "upstream_data_stage_scope", "detail": _compact_text(entry, 900)}] if entry else []),
                 ],
             })
         result = dict(analysis)
@@ -3466,79 +3462,16 @@ def _coerce_requirement_analysis(raw: Any) -> dict[str, Any] | None:
     return None
 
 
-def _requirement_analysis_score(
-    value: dict[str, Any] | None,
-) -> tuple[int, int, int, int, int, int, int]:
-    analysis = _coerce_requirement_analysis(value)
-    if not isinstance(analysis, dict):
-        return (-1, -1, -1, -1, -1, -1, -1)
-    discipline = analysis.get("discipline") or {}
-    discipline_evidence = (
-        discipline.get("evidence") or []
-        if isinstance(discipline, dict)
-        else []
-    )
-    has_declared_upstream_discipline = bool(
-        isinstance(discipline, dict)
-        and (
-            discipline.get("declared")
-            or any(
-                isinstance(item, dict)
-                and item.get("source_type") == "upstream_research_plan"
-                for item in discipline_evidence
-            )
-        )
-    )
-    stages = [
-        item for item in analysis.get("calculation_stages") or []
-        if isinstance(item, dict) and str(item.get("id") or "").strip()
-    ]
-    stage_contract_ids = {
-        str(item.get("stage_id") or "").strip()
-        for item in analysis.get("stage_input_contracts") or []
-        if isinstance(item, dict) and str(item.get("stage_id") or "").strip()
-    }
-    normalized_stage_contract = bool(stages) and stage_contract_ids == {
-        str(item.get("id") or "").strip() for item in stages
-    }
-    # The model-independent Analyst result is authoritative.  A minimal
-    # caller fallback may contain more prose-discovered filenames than the
-    # Analyst result, but it must never outrank the confirmed contract merely
-    # because it has a larger list.  This was the route that replaced an
-    # OpenFOAM mesh request with NACA coordinate files after reference search.
-    source = str(
-        (analysis.get("task_scope") or {}).get("source")
-        if isinstance(analysis.get("task_scope"), dict)
-        else ""
-    ).strip().lower()
-    fallback = bool(analysis.get("fallback")) or source == "asset_contract_fallback"
-    confirmed_scope = source in {
-        "structured_data_asset_scope", "research_plan_scope", "caller_contract",
-    }
-    return (
-        int(not fallback),
-        int(confirmed_scope),
-        # A normalized stage/interface contract is downstream-executable and
-        # must outrank a larger raw fallback.
-        int(normalized_stage_contract),
-        int(has_declared_upstream_discipline),
-        len(stages),
-        len(analysis.get("required_files") or []),
-        int(bool((analysis.get("simulation_software") or {}).get("name")))
-        if isinstance(analysis.get("simulation_software"), dict)
-        else int(bool(analysis.get("simulation_software"))),
-    )
-
-
 def _best_requirement_analysis(*values: Any) -> dict[str, Any] | None:
-    candidates = [
-        _coerce_requirement_analysis(value)
-        for value in values
-        if _coerce_requirement_analysis(value) is not None
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=_requirement_analysis_score)
+    """Prefer the current analysis, then stored analysis, then explicit fallback.
+
+    More inferred files do not make an older interpretation more authoritative.
+    Plan reconciliation separately protects confirmed required deliveries.
+    """
+    return next(
+        (analysis for value in values if (analysis := _coerce_requirement_analysis(value))),
+        None,
+    )
 
 
 def _is_registered_tool_name(value: Any) -> bool:
@@ -3781,29 +3714,34 @@ def _direct_request_filenames(text: str, context: dict[str, Any]) -> list[str]:
 
 def _has_structured_requirement_contract(task_context: str | dict[str, Any]) -> bool:
     """Return whether caller assets/stages can be compiled without interpretation."""
-    context = _structured_context_object(task_context)
-    return any(
-        any(isinstance(item, dict) for item in _structured_values(context, key))
-        for key in ("required_files", "requested_assets", "calculation_stages")
+    context = _structured_context_object(task_context, authority_only=True)
+    assets = [
+        item for key in ("required_files", "requested_assets")
+        for item in _structured_values(context, key)
+    ]
+    # A filename list (even normalized into objects) specifies delivery scope,
+    # not how to produce it. Guessing text_artifact here bypassed the Analyst
+    # for native meshes and other scientific formats. Stage names alone likewise
+    # cannot establish a complete asset contract.
+    return bool(assets) and all(
+        isinstance(item, dict) and all(item.get(key) for key in (
+            "scientific_role", "representation", "source_strategy",
+        ))
+        for item in assets
     )
 
 
 def _compile_explicit_requirements(task_context: str | dict[str, Any]) -> dict[str, Any] | None:
     """Compile an explicit authority contract without scientific inference."""
-    context = _structured_context_object(task_context)
+    if not _has_structured_requirement_contract(task_context):
+        return None
+    context = _structured_context_object(task_context, authority_only=True)
     preprocessing_request = normalize_preprocessing_request(task_context)
     text = (
         task_context
         if isinstance(task_context, str)
         else json.dumps(task_context, ensure_ascii=False, default=str)
     )
-    request_text = caller_request_text(
-        task_context,
-        preprocessing_request=preprocessing_request,
-    ) or str(text)
-    if not str(text or "").strip():
-        return None
-
     structured_stages = [
         dict(item) for item in _structured_values(context, "calculation_stages")
         if isinstance(item, dict)
@@ -3832,31 +3770,13 @@ def _compile_explicit_requirements(task_context: str | dict[str, Any]) -> dict[s
                 if item.get(key) not in (None, "", [], {})
             },
         })
-    # Once the caller has supplied structured required_files/requested_assets,
-    # do not add filenames inferred from incidental prose (for example a
-    # NACA code mentioned as geometry context).  The structured request is the
-    # scope authority and inferred names are only a fallback for prose-only
-    # requests.
-    filenames = [] if structured_files else _direct_request_filenames(request_text, context)
     evidence = [{
         "source_type": "caller_request",
         "detail": "Derived only from the explicit caller-scoped preprocessing request.",
     }]
-    naca_match = re.search(r"(?<![A-Za-z0-9])NACA[ _-]?(\d{4,5})(?!\d)", request_text, flags=re.I)
-    local_request = bool(re.search(
-        r"\b(generate|create|write|build|derive|convert|transform|prepare)\b|"
-        r"生成|创建|写入|构建|解析式|转换|前处理",
-        request_text,
-        flags=re.I,
-    ))
     required_files: list[dict[str, Any]] = []
     for index, item in enumerate(structured_files):
         normalized = dict(item)
-        structured_naca = re.search(
-            r"(?<![A-Za-z0-9])NACA[ _-]?(\d{4,5})(?!\d)",
-            json.dumps(normalized, ensure_ascii=False, default=str),
-            flags=re.I,
-        )
         normalized.setdefault("id", _slug(
             normalized.get("name_or_role")
             or normalized.get("expected_filename")
@@ -3874,169 +3794,21 @@ def _compile_explicit_requirements(task_context: str | dict[str, Any]) -> dict[s
             "consequences_if_missing",
             "The caller-requested preprocessing delivery is incomplete.",
         )
-        declared_name = str(
-            normalized.get("expected_filename")
-            or normalized.get("declared_output_path")
-            or normalized.get("name_or_role")
-            or ""
-        ).replace("\\", "/")
-        declared_suffix = PurePosixPath(declared_name).suffix.lower()
-        mesh_intent = _caller_explicitly_requests_mesh(
-            task_context,
-            {"preprocessing_request": preprocessing_request},
-        )
-        if local_request and not any(
-            normalized.get(key)
-            for key in ("source_strategy", "acquisition_kind", "acquisition_contract")
-        ):
-            declared_mesh_output = declared_name.casefold().rstrip("/").endswith("constant/polymesh") or declared_suffix == ".msh" or (
-                declared_suffix == ".geo" and mesh_intent
-            )
-            normalized.update({
-                "asset_role": normalized.get("asset_role") or (
-                    "geometry_or_discretization_asset"
-                    if structured_naca or declared_mesh_output else "parameter_file"
-                ),
-                "scientific_role": normalized.get("scientific_role") or (
-                    "computational_mesh"
-                    if declared_mesh_output
-                    else "airfoil_coordinate_profile"
-                    if structured_naca else "requested_preprocessing_asset"
-                ),
-                "representation": normalized.get("representation") or (
-                    "mesh" if declared_mesh_output
-                    else "coordinate_profile"
-                    if structured_naca else "text_artifact"
-                ),
-                "workflow_capability": (
-                    "mesh_generation" if declared_mesh_output
-                    else "local_artifact_generation"
-                ),
-                "source_strategy": "local_generation",
-                "acquisition_kind": "generated_artifact",
-                "generation_recipe": normalized.get("generation_recipe") or (
-                    "Generate and validate the caller-requested computational mesh."
-                    if declared_mesh_output
-                    else
-                    f"Analytical NACA {structured_naca.group(1)} coordinate construction"
-                    if structured_naca else "caller_declared_generation"
-                ),
-            })
         required_files.append(normalized)
 
-    for index, filename in enumerate(filenames):
-        if any(
-            str(item.get("expected_filename") or item.get("name_or_role") or "").casefold()
-            == filename.casefold()
-            for item in required_files
-        ):
-            continue
-        is_naca = bool(naca_match and PurePosixPath(filename).name.casefold() == f"naca{naca_match.group(1)}.dat".casefold())
-        is_mesh = filename.casefold().rstrip("/").endswith("constant/polymesh") or PurePosixPath(filename).suffix.lower() == ".msh"
-        is_configuration = not is_naca and not is_mesh and (
-            "/" in filename or not PurePosixPath(filename).suffix
-        )
-        required_files.append({
-            "id": _slug(filename, f"requested_asset_{index + 1}"),
-            "name_or_role": filename,
-            "expected_filename": filename,
-            "declared_output_path": filename,
-            "format": (
-                "two-column XY coordinate text" if is_naca
-                else "validated computational mesh" if is_mesh
-                else "configuration text" if is_configuration
-                else (PurePosixPath(filename).suffix.lstrip(".") or "text artifact")
-            ),
-            "asset_role": "geometry_or_discretization_asset" if is_naca or is_mesh else "parameter_file",
-            "scientific_role": (
-                "airfoil_coordinate_profile" if is_naca
-                else "computational_mesh" if is_mesh
-                else "solver_configuration" if is_configuration
-                else "requested_preprocessing_asset"
-            ),
-            "representation": "coordinate_profile" if is_naca else "mesh" if is_mesh else "configuration" if is_configuration else "text_artifact",
-            "workflow_capability": "mesh_generation" if is_mesh else "configuration_generation" if is_configuration else "local_artifact_generation",
-            "source_strategy": "local_generation",
-            "acquisition_kind": "generated_artifact",
-            "generation_recipe": (
-                f"Analytical NACA {naca_match.group(1)} coordinate construction"
-                if is_naca else "Generate and validate the caller-requested computational mesh."
-                if is_mesh else "caller_declared_configuration"
-                if is_configuration else "caller_declared_generation"
-            ),
-            "reason": "The caller explicitly requested this output file.",
-            "evidence": evidence,
-            "confidence": 1.0,
-            "consequences_if_missing": "The requested preprocessing delivery is incomplete.",
-        })
-
-    if (
-        _caller_explicitly_requests_mesh(
-            task_context,
-            {"preprocessing_request": preprocessing_request},
-        )
-        and not any(_asset_requires_mesh(item) for item in required_files)
-    ):
-        required_files.append(_mesh_requirement_from_caller(
-            task_context,
-            {"preprocessing_request": preprocessing_request},
-        ))
-
-    if not required_files:
-        for stage in structured_stages:
-            for role in stage.get("required_file_roles") or []:
-                role_text = str(role or "").strip()
-                if not role_text:
-                    continue
-                required_files.append({
-                    "id": _slug(role_text, "requested_asset"),
-                    "name_or_role": role_text,
-                    "format": "caller-declared preprocessing artifact",
-                    "asset_role": "parameter_file",
-                    "scientific_role": role_text,
-                    "representation": "text_artifact",
-                    "workflow_capability": "local_artifact_generation",
-                    "source_strategy": "local_generation",
-                    "acquisition_kind": "generated_artifact",
-                    "generation_recipe": "caller_declared_stage_asset",
-                    "reason": "Explicitly declared in the caller stage contract.",
-                    "evidence": evidence,
-                    "confidence": 1.0,
-                    "consequences_if_missing": "The caller stage cannot be launched.",
-                })
     if not required_files:
         return None
 
     request_bound = preprocessing_request["review_profile"] == "request_bound"
-    if not structured_stages and not request_bound:
-        structured_stages = [{
-            "id": "caller_preprocessing_request",
-            "name": "caller preprocessing request",
-            "calculation_type": "generate and review the explicitly requested preprocessing assets",
-            "parameters": {
-                "naca_profile": naca_match.group(1) if naca_match else None,
-            },
-            "required_file_roles": [
-                str(item.get("name_or_role") or item.get("id"))
-                for item in required_files
-            ],
-            # These are Data-service deliverables consumed by the caller, not
-            # runtime outputs produced by a downstream simulation stage.
-            "prepared_assets": [str(item.get("id")) for item in required_files],
-            "expected_outputs": [],
-            "dependencies": [],
-            "evidence": evidence,
-        }]
-    else:
-        for index, stage in enumerate(structured_stages):
-            stage.setdefault("id", f"caller_stage_{index + 1}")
-            stage.setdefault(
-                "calculation_type",
-                stage.get("name") or "caller-declared preprocessing stage",
-            )
-            stage.setdefault("parameters", {})
-            stage.setdefault("dependencies", [])
-            stage.setdefault("evidence", evidence)
+    for index, stage in enumerate(structured_stages):
+        stage.setdefault("id", f"caller_stage_{index + 1}")
+        stage.setdefault(
+            "calculation_type",
+            stage.get("name") or "caller-declared preprocessing stage",
+        )
+        stage.setdefault("parameters", {})
+        stage.setdefault("dependencies", [])
+        stage.setdefault("evidence", evidence)
     if len(structured_stages) == 1 and not request_bound:
         stage_id = str(structured_stages[0].get("id") or "caller_preprocessing_request")
         for item in required_files:
@@ -4085,7 +3857,7 @@ async def _inspect_paths_from_context(
     state: State,
     task_context: str | dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Inspect declared absolute paths, including bounded nearby recovery."""
+    """Inspect declared inputs relative to the task workspace when necessary."""
     # Search text leaves, not serialized JSON: escaped newlines previously
     # joined a path to the following paragraph and hid valid local inputs.
     def text_leaves(value: Any):
@@ -4112,11 +3884,19 @@ async def _inspect_paths_from_context(
         r"/(?:Users|home|tmp|private|var|opt|data|workspace|mnt)/[^\n\r\t,;，；。\"`<>]+)",
         text,
     )
+    candidates.extend(re.findall(
+        r"(?<![A-Za-z0-9_:/~.\-])(?:\./|\.\./)?"
+        r"(?:[A-Za-z0-9_.\-]+/)+[A-Za-z0-9_.\-]+\.[A-Za-z0-9]+",
+        text,
+    ))
     inspections: list[dict[str, Any]] = []
     selected: list[Path] = []
     for raw_path in candidates:
         cleaned = raw_path.strip().strip("'\"`()[]{}<>：:")
-        path = Path(cleaned).expanduser()
+        # A geographic coordinate pair is prose, not a relative filename.
+        if re.fullmatch(r"\d+(?:\.\d+)?[NS]/\d+(?:\.\d+)?[EW]", cleaned, flags=re.I):
+            continue
+        path = _resolve_input_path(state, cleaned)
         try:
             exists = path.exists()
         except OSError:
@@ -4177,6 +3957,8 @@ async def _inspect_paths_from_context(
             )
             continue
         if result.get("status") == "success":
+            if not Path(cleaned).expanduser().is_absolute():
+                result["requested_path"] = cleaned
             inspections.append(result)
             selected.append(Path(result["path"]))
     return inspections
@@ -4314,7 +4096,7 @@ def _asset_contract_allows_fallback(value: Any) -> bool:
         and str(item.get("generation_recipe") or "").strip()
     ):
         return True
-    return representation in {"text_artifact", "python", "shell", "bash", "script", "namelist", "json", "yaml", "toml", "configuration", "config", "manifest", "parameter_file"}
+    return representation in {"text_artifact", "text_log", "python", "shell", "bash", "script", "namelist", "json", "yaml", "toml", "configuration", "config", "manifest", "parameter_file"}
 
 
 def _recovered_local_assets(value: Any) -> list[dict[str, Any]]:
@@ -4383,14 +4165,15 @@ def _usable_reference_evidence(value: Any) -> list[dict[str, Any]]:
         if item.get("source") == "recoverable_generation_blocker":
             continue
         # Authored upstream evidence has no tool status and remains valid.
-        # Tool evidence is retained only when it succeeded or contains a real
-        # downloaded/local file discovered by the deterministic path scanner.
+        # Catalog observations and transport diagnostics are evidence too,
+        # not materialized payloads. Dropping them forces repeated discovery.
         if (
             not status
             or status == "success"
             or (
-                status == "error"
-                and str(item.get("tool_name") or result.get("tool_name") or "") == "data_web_search"
+                status in {"error", "needs_download_selection"}
+                and str(item.get("tool_name") or result.get("tool_name") or "")
+                in {"data_web_search", "data_web_download"}
             )
             or _recovered_local_assets([item])
         ):
@@ -4446,7 +4229,12 @@ def _reference_retrieval_metadata(
         return (len(expected_tokens & candidate_tokens), -len(text))
 
     dataset_reference = str(source.get("asset_role") or "").strip().lower() == "external_dataset_reference"
-    for entry in analysis.get("reference_evidence") or []:
+    # Prefer materialized downloads over older discovery leads for the same
+    # asset. A recovered acquisition route must survive the Designer pass.
+    evidence = [entry for entry in analysis.get("reference_evidence") or [] if isinstance(entry, dict)]
+    for entry in sorted(reversed(evidence), key=lambda entry: not bool(
+        (entry.get("result") if isinstance(entry.get("result"), dict) else entry).get("saved_path")
+    )):
         if not isinstance(entry, dict):
             continue
         identities = {
@@ -4486,6 +4274,7 @@ def _reference_retrieval_metadata(
         local_assets = _recovered_local_assets([entry])
         if local_assets:
             recovered = local_assets[0]
+            url = str(result.get("url") or recovered.get("source") or "")
             return {
                 "local_match": {
                     "path": recovered["path"],
@@ -4494,9 +4283,31 @@ def _reference_retrieval_metadata(
                     "match_basis": ["approved_reference_download"],
                     "provenance": "approved_public_download",
                 },
-                "url": str(result.get("url") or recovered.get("source") or ""),
+                "url": url,
+                "retrieval_instructions": {
+                    "locator": url, "locator_kind": "url",
+                    "approved_source_evidence": [{
+                        "source_type": "approved_reference_download", "request_id": request_id,
+                        "url": url, "sha256": result.get("sha256"),
+                    }],
+                },
                 "source_discovery": discovery,
                 **size_evidence,
+            }
+        if result.get("status") == "needs_download_selection":
+            return {
+                "source_discovery": discovery,
+                **size_evidence,
+                "retrieval_instructions": {
+                    "locator": explicit_source,
+                    "locator_kind": "catalog_url",
+                    "access_candidates": deepcopy(result.get("download_links") or []),
+                    "verification_required": True,
+                    "approved_source_evidence": [{
+                        "source_type": "reference_catalog_inspection",
+                        "request_id": request_id, "url": explicit_source,
+                    }],
+                },
             }
         candidate_entries: list[dict[str, Any]] = []
         if result.get("url") or result.get("source"):
@@ -4642,6 +4453,9 @@ def record_reference_execution_evidence(
     ) -> dict[str, Any]:
         nonlocal persisted_evidence
         enriched_fields = dict(fields)
+        if status in {"execution_error", "candidate_invalid", "plan_contract_error"}:
+            enriched_fields["diagnostics"] = {key: value for key, value in (evidence_entry.get("result") or {}).items()
+                                              if key in {"url", "http_status", "status_class", "error", "response_excerpt", "repair_error", "execution_attempts"}}
         contract = request_contracts.get(str(enriched_fields.get("request_id") or ""), {})
         contract = normalize_asset_contract(contract) if contract else {}
         for key in ("materialization_kind", "requires_local_payload", "fulfillment_kind"):
@@ -4665,7 +4479,7 @@ def record_reference_execution_evidence(
         if step.get("tool_name") not in {"data_web_search", "data_web_download"}:
             continue
         result = executed.get("result") if isinstance(executed.get("result"), dict) else {}
-        arguments = step.get("tool_arguments") if isinstance(step.get("tool_arguments"), dict) else {}
+        arguments = {**(step.get("tool_arguments") or {}), **(result.get("effective_arguments") or {})}
         gap_id = str(arguments.get("gap_id") or step_id.removeprefix("search_") or "")
         request_id = _reference_request_id(step_id)
         entry = {
@@ -4673,6 +4487,7 @@ def record_reference_execution_evidence(
             "gap_id": gap_id,
             "request_id": request_id,
             "tool_name": str(step.get("tool_name") or "data_web_search"),
+            "query": arguments.get("query") or "",
             "asset_role": str(arguments.get("asset_role") or "").strip().lower(),
             "workflow_capability": str(arguments.get("workflow_capability") or "").strip().lower(),
             "requires_exact_file": arguments.get("requires_exact_file"),
@@ -4715,7 +4530,7 @@ def record_reference_execution_evidence(
         permanent_acquisition_failure = (
             step.get("tool_name") == "data_web_download"
             and (
-                str(result.get("status_class") or "").lower() == "permanent"
+                str(result.get("status_class") or "").lower() in {"permanent", "size_limit"}
                 or bool(re.search(r"\bHTTP\s+(?:4\d\d)\b", result_error, flags=re.I))
             )
         )
@@ -4742,7 +4557,7 @@ def record_reference_execution_evidence(
         # ``no_result`` is reserved for a successful search response whose
         # result list is empty.  Transport/tool errors remain open for
         # deterministic recovery and must never masquerade as evidence.
-        if not has_result and result_status not in {"success", "ok", "completed"}:
+        if result_status not in {"success", "ok", "completed", "needs_download_selection"}:
             persist_outcome(gap_id, "execution_error", {
                 "request_id": request_id,
                 "asset_role": arguments.get("asset_role") or "",
@@ -5194,11 +5009,8 @@ def _reference_download_is_exact(result: dict[str, Any], request_id: str, argume
         re.search(r"(?:raw\.githubusercontent\.com|/(?:blob|raw)/)", url, flags=re.I)
         and re.search(r"\b(?:v?\d+(?:\.\d+)+|commit|revision|tag)\b|/[0-9a-f]{7,40}(?:\b|/)", url, flags=re.I)
     )
-    # Some authoritative releases expose a stable direct file URL without
-    # embedding the release tag in the path.  The approved acquisition
-    # contract supplies the expected revision in that case; keep the hash and
-    # exact filename checks, but do not force a GitHub URL shape on other
-    # official hosts.
+    # Direct data/metadata files need exact URL/name/hash evidence, not a Git
+    # revision. Preserve a declared revision when there is one.
     declared_locator = str(
         arguments.get("source_locator") or arguments.get("expected_path") or ""
     ).strip()
@@ -5209,14 +5021,17 @@ def _reference_download_is_exact(result: dict[str, Any], request_id: str, argume
         direct_contract_match = bool(
             declared_host
             and declared_host == result_host
+            and urlparse(declared_locator).path == urlparse(url).path
+            and urlparse(declared_locator).query == urlparse(url).query
             and _is_authoritative_public_source_url(declared_locator)
             and canonical_filename_identity(Path(urlparse(declared_locator).path).name)
             == canonical_filename_identity(filename or url)
         )
     has_revision = has_revision or bool(
-        direct_contract_match and expected_revision
+        direct_contract_match
         and (
-            not requested_revision
+            not expected_revision
+            or not requested_revision
             or requested_revision.lower() == expected_revision.lower()
         )
     )
@@ -5656,6 +5471,8 @@ def _task_scope_contract(analysis: dict[str, Any]) -> dict[str, Any]:
             for item in analysis.get("required_files") or []
             if isinstance(item, dict)
         }
+        if any(_asset_requires_mesh(item) for item in analysis.get("required_files") or [] if isinstance(item, dict)):
+            asset_capabilities.add("mesh_generation")
         spatial_capabilities = {
             "geometry_acquisition", "mesh_generation", "atomic_structure_generation",
         }
@@ -5799,6 +5616,19 @@ def _final_reference_revision(
 def _targeted_search_requests_from_analysis(analysis: dict[str, Any]) -> list[dict[str, Any]]:
     scope = _task_scope_contract(analysis)
     analysis["task_scope"] = scope
+    caller_urls = list(dict.fromkeys(
+        url.rstrip("。；，、") for url in re.findall(r"https?://[^\s<>\"\)]+", caller_request_text(
+            {}, preprocessing_request=analysis.get("preprocessing_request") or {}
+        ))
+    ))
+    # Service context can supply locators without becoming scientific authority.
+    source_urls = list(dict.fromkeys([*caller_urls, *[
+        url.rstrip("。；，、") for url in re.findall(
+            r"https?://[^\s<>\"\)]+", _serialized_payload(analysis.get("preprocessing_request") or {})
+        )
+    ]]))
+    dataset_inputs = [item for item in analysis.get("required_files") or []
+                      if canonical_workflow_capability(item) == "dataset_acquisition"]
     routing_audit = {
         "selected_capability": None,
         "selected_by": scope.get("source") or "research_plan_scope",
@@ -6098,7 +5928,7 @@ def _targeted_search_requests_from_analysis(analysis: dict[str, Any]) -> list[di
                     )
                 )
             )
-            requires_exact_file = not geometry_discovery
+            requires_exact_file = not (geometry_discovery or dataset_reference)
             if requires_exact_file and not dataset_reference and not expected_filename:
                 # An exact-file acquisition contract may provide a repository
                 # locator instead of duplicating the basename in a separate
@@ -6142,6 +5972,11 @@ def _targeted_search_requests_from_analysis(analysis: dict[str, Any]) -> list[di
                 expected_revision=item.get("expected_revision"),
             )
             expected_filename = normalize_declared_filename(expected_filename or name) if requires_exact_file else ""
+            if requires_exact_file and not expected_path:
+                matches = [url for url in source_urls
+                           if Path(unquote(urlparse(url).path)).name == expected_filename]
+                if len(matches) == 1:
+                    expected_path = matches[0]
             expected_identity = canonical_filename_identity(expected_filename)
             if expected_identity and any(
                 completed_identity == expected_identity
@@ -6155,37 +5990,35 @@ def _targeted_search_requests_from_analysis(analysis: dict[str, Any]) -> list[di
                 continue
             if dataset_reference:
                 dataset_contract = normalize_acquisition_contract(item)
-                if not acquisition_contract_errors(dataset_contract) and dataset_contract.get("source_ready"):
-                    retrieval = dataset_contract.get("retrieval_instructions") or {}
-                    if dataset_contract.get("delivery_mode") == "direct_download":
-                        direct_dataset_url = str(retrieval.get("url") or retrieval.get("locator") or "").strip()
-                        requests.append({
-                            "id": f"download_{item_id}",
-                            "missing": name,
-                            "reason": "Download the declared small dataset before generation.",
-                            "query": "",
-                            "url": direct_dataset_url,
-                            "tool": "data_web_download",
-                            "web_search_allowed": False,
-                            "search_mode": "approved_small_dataset_download",
-                            "asset_kind": "dataset",
-                            "asset_role": "external_dataset_reference",
-                            "workflow_capability": "dataset_acquisition",
-                            "gap_id": item_id,
-                            "documentation_reference": True,
-                            "auto_discover_downloads": False,
-                            "max_discovery_pages": 0,
-                            "generation_phase": "pre_generation",
-                        })
-                        continue
-                    # Provider metadata makes a document actionable, but only
-                    # an actual locator proves discovery already happened.
-                    if re.match(
-                        r"^https?://",
-                        str(retrieval.get("url") or retrieval.get("locator") or ""),
-                        flags=re.I,
-                    ):
-                        continue
+                retrieval = dataset_contract.get("retrieval_instructions") or {}
+                dataset_url = str(retrieval.get("locator") or "").strip()
+                if not dataset_url and len(caller_urls) == 1 and len(dataset_inputs) == 1:
+                    # Supply a missing locator, never overwrite a selected endpoint.
+                    dataset_url = caller_urls[0]
+                source_failed = _reference_status_by_request(analysis).get(item_id) in {"execution_error", "candidate_invalid"}
+                if not source_failed and re.match(r"^https?://", dataset_url, flags=re.I):
+                    # Inspect a supplied catalog/API before asking the Designer
+                    # to select its bounded payload. A dataset endpoint is not
+                    # an exact repository file, nor proof of downloaded data.
+                    requests.append({
+                        "id": item_id,
+                        "missing": name,
+                        "reason": "Inspect the declared dataset source before selecting retrieval parameters.",
+                        "url": dataset_url,
+                        "tool": "data_web_download",
+                        "asset_kind": "dataset",
+                        "asset_role": "external_dataset_reference",
+                        "workflow_capability": "dataset_acquisition",
+                        "gap_id": item_id,
+                        "requires_exact_file": False,
+                        "discover_links": True,
+                        "discovery_only": (
+                            dataset_contract.get("delivery_mode") != "direct_download"
+                            or bool(retrieval.get("request_parameters"))
+                        ),
+                        "generation_phase": "pre_generation",
+                    })
+                    continue
             official_locator = (
                 {
                     **declared_locator,
@@ -6193,7 +6026,6 @@ def _targeted_search_requests_from_analysis(analysis: dict[str, Any]) -> list[di
                 }
                 if not dataset_reference else {}
             )
-            locator_has_repository = bool(official_locator.get("repository_url"))
             locator_has_file = bool(official_locator.get("path"))
             locator_filename_mismatch = bool(
                 locator_has_file
@@ -6201,38 +6033,22 @@ def _targeted_search_requests_from_analysis(analysis: dict[str, Any]) -> list[di
                 and canonical_filename_identity(PurePosixPath(official_locator.get("path")).name)
                 != canonical_filename_identity(expected_filename)
             )
-            # An exact official-file contract cannot be downgraded to a weak
-            # search when it has neither a version nor a usable locator. A
-            # repository root is the one intentional exception: it is a
-            # bounded discovery request for the missing file path.
-            if requires_exact_file and not dataset_reference and (
-                locator_filename_mismatch
-                or
-                (locator_has_file and not expected_revision)
-                or (not expected_revision and not expected_path)
-            ):
+            direct_url = _official_file_candidate_url({}, {
+                "expected_filename": expected_filename, "expected_path": expected_path,
+                "expected_revision": expected_revision, "locator_contract": official_locator,
+            }) if requires_exact_file and not dataset_reference and expected_filename else ""
+            # Repository revisions are not a prerequisite for ordinary HTTPS
+            # data/metadata files. An exact declared URL retains its own identity.
+            # Missing repository/version metadata is what discovery resolves;
+            # only contradictory supplied identities block the search itself.
+            if requires_exact_file and not dataset_reference and locator_filename_mismatch:
                 routing_audit["contract_errors"].append({
                     "asset_id": item_id,
-                    "reason": (
-                        "repository locator filename does not match expected_filename"
-                        if locator_filename_mismatch else
-                        "exact official-file acquisition requires a target revision"
-                        if locator_has_file else
-                        "official-file acquisition requires a repository locator or target revision"
-                    ),
+                    "reason": "repository locator filename does not match expected_filename",
                     "expected_filename": expected_filename,
                     "expected_path": expected_path,
                 })
                 continue
-            direct_url = _official_file_candidate_url(
-                {},
-                {
-                    "expected_filename": expected_filename,
-                    "expected_path": expected_path,
-                    "expected_revision": expected_revision,
-                    "locator_contract": official_locator,
-                },
-            ) if requires_exact_file and not dataset_reference and expected_filename and expected_revision else ""
             query_asset = (
                 f'"{expected_filename}"'
                 if expected_filename and not dataset_reference else name
@@ -6303,7 +6119,7 @@ def _targeted_search_requests_from_analysis(analysis: dict[str, Any]) -> list[di
                 ),
                 "asset_kind": (
                     "dataset" if dataset_reference else
-                    "official_file" if requires_exact_file else
+                    "reference" if requires_exact_file else
                     "geometry_or_mesh"
                 ),
                 "documentation_reference": True,
@@ -6319,7 +6135,7 @@ def _targeted_search_requests_from_analysis(analysis: dict[str, Any]) -> list[di
                 "requires_exact_file": requires_exact_file,
                 "expected_filename": "" if dataset_reference or not requires_exact_file else expected_filename,
                 "expected_revision": "" if dataset_reference or not requires_exact_file else expected_revision,
-                "expected_path": "" if dataset_reference or not requires_exact_file else (official_locator.get("path") or expected_path),
+                "expected_path": "" if dataset_reference or not requires_exact_file else (direct_url or official_locator.get("path") or expected_path),
                 "repository_url": "" if dataset_reference else official_locator.get("repository_url", ""),
                 "revision": "" if dataset_reference else official_locator.get("revision", ""),
                 "path": "" if dataset_reference else official_locator.get("path", ""),
@@ -6571,7 +6387,8 @@ def _targeted_search_requests_from_analysis(analysis: dict[str, Any]) -> list[di
         expected_identity = canonical_filename_identity(request.get("expected_filename"))
         key = (
             "official_file",
-            f"{expected_identity}@{str(request.get('expected_revision') or '').strip().lower()}",
+            f"{expected_identity}@{str(request.get('expected_revision') or '').strip().lower()}:"
+            f"{str(request.get('expected_path') or request.get('missing') or '').casefold()}",
         ) if (
             str(request.get("workflow_capability") or "") == "official_file_acquisition"
             and expected_identity
@@ -6603,7 +6420,10 @@ def _build_reference_search_plan(
     deliverable_id = f"reference_evidence_{request_id}"
     query = str(request.get("query") or "").strip()
     tool_name = str(request.get("tool") or "data_web_search").strip()
+    is_download = tool_name == "data_web_download"
     asset_kind = str(request.get("asset_kind") or "").strip()
+    if asset_kind in {"official_file", "reference_file", "reference"}:
+        asset_kind = "official_file" if is_download else "reference"
     if not asset_kind:
         raise ValueError("reference request must declare asset_kind")
     # A reference plan has a narrower lifetime than the generation plan.  If
@@ -6631,7 +6451,6 @@ def _build_reference_search_plan(
         })
         reference_scope["required_capabilities_outside_scope"] = []
     reference_analysis["task_scope"] = reference_scope
-    is_download = tool_name == "data_web_download"
     deliverables = [{
             "id": deliverable_id,
             "name": f"Reference evidence for {request.get('missing') or request_id}",
@@ -6664,11 +6483,12 @@ def _build_reference_search_plan(
                         for key in ("repository_url", "revision", "path")
                         if request.get(key)
                     },
-                    "allow_non_mesh_file": asset_kind in {"official_file", "reference_file"},
+                    "allow_non_mesh_file": asset_kind == "official_file",
                     # An acquisition plan has already selected one exact URL;
                     # it must fetch that object rather than reopen link
                     # discovery and change targets.
-                    "discover_links": False,
+                    "discover_links": bool(request.get("discover_links")),
+                    "discovery_only": bool(request.get("discovery_only")),
                     "download_first_matching_link": False,
                 } if is_download else {
                     "query": query,
@@ -6822,12 +6642,7 @@ def _approve_reference_search_plan(
 
 
 def _reference_acquisition_requests(analysis: dict[str, Any]) -> list[dict[str, Any]]:
-    """Turn only explicitly small, actionable candidates into downloads.
-
-    Large or unknown-size datasets remain acquisition documents. Discovery is
-    deduplicated by request id; a search miss is preserved as document
-    provenance rather than promoted to a failed generation plan.
-    """
+    """Acquire concrete candidates; leave dataset service selection to Designer."""
     ledger = analysis.get("reference_gap_status") or {}
     entries = _load_reference_evidence_from_analysis(analysis)
     active_request_ids = {
@@ -6881,10 +6696,12 @@ def _reference_acquisition_requests(analysis: dict[str, Any]) -> list[dict[str, 
         if not request_id:
             continue
         if asset_role == "external_dataset_reference":
-            # Search evidence can upgrade a dataset to a direct download only
-            # when the Research Plan (or evidence) declares a small payload.
-            # Otherwise the generation plan publishes the complete acquisition
-            # document and no second URL-only acquisition step is created.
+            if matching_result.get("status") == "needs_download_selection":
+                # Catalog links/metadata belong to the Designer. Reissuing
+                # the same endpoint cannot select or subset a dataset.
+                continue
+            # Only a concrete small payload can be acquired mechanically here.
+            # Subset/API selection is part of the final executable work order.
             dataset_source = {
                 **(source_contract if isinstance(source_contract, dict) else {}),
                 "reference_status": status,
@@ -7012,7 +6829,7 @@ def _reference_acquisition_requests(analysis: dict[str, Any]) -> list[dict[str, 
                 state_dict.get("asset_kind")
                 or matching_result.get("asset_kind")
                 or evidence.get("asset_kind")
-                or ("official_file" if requires_exact_file else "geometry_or_mesh")
+                or ("reference" if requires_exact_file else "geometry_or_mesh")
             ).strip() or "geometry_or_mesh",
             "asset_role": asset_role,
             "workflow_capability": str(
@@ -7241,6 +7058,10 @@ def _reference_gap_blocks_generation(gap: dict[str, Any]) -> bool:
     }:
         return False
     status = str(gap.get("status") or "").strip().lower()
+    if status == "execution_error" and gap.get("requires_local_payload") is True:
+        # A failed transport is not missing scientific input or a usable
+        # acquisition guide when the current task requires actual data.
+        return True
     if status == "deferred_dependency":
         # A provider/parser outage is recoverable for an external dataset:
         # generation can still publish the download-method document and keep
@@ -7334,14 +7155,19 @@ def _next_reference_action(
     contract_errors = routing_audit.get("contract_errors") or []
     if contract_errors:
         return {
-            "status": "needs_input",
+            "status": "needs_revision",
             "approved": False,
             "reason": "reference_request_contract_incomplete",
             "stop_reason": "reference_plan_contract_error",
             "error": (
-                "An exact official-file reference request is incomplete; provide a repository/file "
-                "locator and target revision before any search or download is authorized."
+                "Reconcile the incomplete reference contract with the original request and supplied "
+                "source locators; ask for input only when the source identity is genuinely unspecified."
             ),
+            "revision_contract": revision_contract([
+                {"code": "reference_contract_incomplete", "asset_id": item.get("asset_id"),
+                 "message": item.get("reason"), "required_change": "Bind the supplied source locator to this asset; preserve its identity."}
+                for item in contract_errors
+            ], scope="plan"),
             "contract_errors": contract_errors,
             "requirement_analysis": analysis,
             "targeted_search_requests": [],
@@ -7368,7 +7194,19 @@ def _next_reference_action(
             ),
             requests=acquisition_requests,
         )
-    ledger = PlanningStore(state).load_reference_state().get("gaps") or {}
+    reference_state = PlanningStore(state).load_reference_state()
+    ledger = reference_state.get("gaps") or {}
+    # An unavailable entry point can still be located through public metadata.
+    # Reuse the reference driver, once per source/query, rather than immediately
+    # asking the caller to perform the same discovery outside Data.
+    attempted_searches = {(item.get("request_id"), item.get("query") or (item.get("result") or {}).get("query"))
+                          for item in reference_state.get("evidence") or []
+                          if item.get("tool_name") == "data_web_search"}
+    discovery = [item for item in search_requests
+                 if item.get("tool") == "data_web_search"
+                 and (item.get("id"), item.get("query")) not in attempted_searches]
+    if discovery:
+        return _search_response_for_gaps(state, analysis, reason="locate_unresolved_reference_source", requests=discovery)
     open_gaps = [
         item for item in ledger.values()
         if isinstance(item, dict)
@@ -7405,7 +7243,7 @@ def _next_reference_action(
                 "approved": False,
                 "reason": "reference_ledger_no_progress_before_designer",
                 "stop_reason": f"reference_{status}",
-                "error": "The reference ledger has an unresolved execution state.",
+                "error": gap.get("error") or "The reference ledger has an unresolved execution state.",
                 "reference_gap": gap,
                 "requirement_analysis": analysis,
                 "targeted_search_requests": [],
@@ -8034,25 +7872,41 @@ def _apply_local_asset_reuse(
     inventory: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Bind inspected inputs once, preserving source identity through planning."""
-    if not inventory:
+    edit_sources = {item.get("edit_source") for item in analysis.get("required_files") or []
+                    if isinstance(item, dict) and isinstance(item.get("edit_source"), str)}
+    if not inventory and not edit_sources:
         return analysis
     for item in analysis.get("required_files") or []:
         if not isinstance(item, dict):
             continue
+        is_edit_source = item.get("id") in edit_sources
+        if is_edit_source and (item.get("requested_path") or item.get("source_path")):
+            # A named existing baseline must be resolved, never fabricated if
+            # inspection misses it or the Analyst mislabels its source route.
+            item["requested_path"] = item.get("requested_path") or item["source_path"]
+            item.update(normalize_asset_contract({**item, "source_strategy": "local_reuse",
+                                                 "acquisition_kind": "local_asset", "workflow_capability": "local_asset_reuse"}))
         contract = normalize_asset_contract(item)
-        if not contract.get("is_external") and contract.get("source_strategy") != "local_reuse":
+        if not is_edit_source and not contract.get("is_external") and contract.get("source_strategy") != "local_reuse":
             continue
         declared_paths = {
             str(item.get(key) or "").strip()
-            for key in ("declared_output_path", "expected_filename", "name_or_role")
+            for key in ("requested_path", "source_path", "declared_output_path", "expected_filename", "name_or_role")
         } - {""}
+        if isinstance(item.get("local_match"), dict) and item["local_match"].get("path"):
+            declared_paths.add(str(item["local_match"]["path"]))
+        if is_edit_source:
+            declared_paths = {str(item.get(key) or "").strip() for key in ("requested_path", "source_path")} - {""} or declared_paths
         absolute_paths = {str(Path(value).expanduser()) for value in declared_paths if Path(value).expanduser().is_absolute()}
         exact_matches = [candidate for candidate in inventory if (absolute_paths or declared_paths).intersection({
             candidate["path"], str(candidate.get("requested_path") or ""),
-            *([] if absolute_paths else [Path(candidate["path"]).name]),
+            *([] if absolute_paths or (is_edit_source and any("/" in value for value in declared_paths))
+              else [Path(candidate["path"]).name]),
         })]
         if absolute_paths and not exact_matches:
             continue
+        if is_edit_source and not exact_matches:
+            continue  # A revision baseline cannot be substituted by a similar-format input.
         expected_format = _format_family(
             item.get("format") or contract.get("representation")
         )
@@ -8103,6 +7957,9 @@ def _apply_local_asset_reuse(
                     "provenance": candidate.get("provenance"),
                 },
             })
+            if is_edit_source and not item["local_match"]["sha256"]:
+                with Path(candidate["path"]).open("rb") as stream:
+                    item["local_match"]["sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
     analysis["local_asset_inventory"] = inventory
     return analysis
 
@@ -8197,7 +8054,7 @@ def _compact_requirement_analysis(analysis: dict[str, Any] | None) -> dict[str, 
                     key: item.get(key)
                     for key in (
                         "source_type", "source", "url", "title", "path", "query", "status",
-                        "reference_status", "asset_kind", "format", "data_model_kind",
+                        "reference_status", "asset_kind", "format", "data_model_kind", "error", "status_class",
                     )
                     if item.get(key) not in (None, "", [], {})
                 }
@@ -8217,6 +8074,14 @@ def _compact_requirement_analysis(analysis: dict[str, Any] | None) -> dict[str, 
             source = item.get("result") if isinstance(item.get("result"), dict) else item
             entry = compact_evidence([source], limit=1)
             if entry:
+                entry[0].update({
+                    key: source[key] for key in ("download_links", "content_type", "content_length")
+                    if source.get(key) not in (None, "", [], {})
+                })
+                excerpt = source.get("page_excerpt") or source.get("metadata_excerpt")
+                if excerpt:
+                    entry[0]["metadata_excerpt"] = _compact_text(excerpt, 6000)
+                entry[0]["request_id"] = item.get("request_id") or item.get("gap_id")
                 references.append(entry[0])
         return references[:8]
 
@@ -8236,11 +8101,6 @@ def _compact_requirement_analysis(analysis: dict[str, Any] | None) -> dict[str, 
             # Runtime products are recorded in their owning stage contract.
             # They are never text artifacts for the Designer to reproduce.
             continue
-        if str(item.get("source_strategy") or "") == "local_reuse":
-            # The verified local-match path remains in the authoritative
-            # analysis and is materialized by Publisher.  Designer has no
-            # route to choose for it, so replaying it is pure prompt noise.
-            continue
         reference_status = reference_status_by_request.get(str(item.get("id") or ""), "")
         # Designer chooses only a fulfilment route. Scientific identity,
         # evidence, parameters and interfaces are reattached from the full
@@ -8257,6 +8117,10 @@ def _compact_requirement_analysis(analysis: dict[str, Any] | None) -> dict[str, 
             "workflow_capability": item.get("workflow_capability"),
             "delivery_mode": item.get("delivery_mode"),
             "size_estimate": item.get("size_estimate"),
+            "retrieval_instructions": (
+                normalize_acquisition_contract(item)["retrieval_instructions"]
+                if canonical_workflow_capability(item) == "dataset_acquisition" else None
+            ),
             "source_discovery": (
                 {
                     key: (item.get("source_discovery") or {}).get(key)
@@ -8266,6 +8130,10 @@ def _compact_requirement_analysis(analysis: dict[str, Any] | None) -> dict[str, 
                 if isinstance(item.get("source_discovery"), dict) else None
             ),
             "format": item.get("format"),
+            "edit_source": item.get("edit_source"),
+            "generation_recipe": item.get("generation_recipe"),
+            "preserve_keywords": item.get("preserve_keywords"),
+            "local_match": item.get("local_match"),
             "declared_output_path": (
                 item.get("declared_output_path")
                 or item.get("expected_filename")
@@ -8319,6 +8187,18 @@ def _compact_requirement_analysis(analysis: dict[str, Any] | None) -> dict[str, 
         "data_representations": scope.get("data_representations") or [],
         "stage_ids": scope.get("stage_ids") or [],
     }
+    request = compact.get("preprocessing_request")
+    if isinstance(request, dict) and request.get("authority_snapshot"):
+        # Authority is already preserved in the snapshot. Replaying the
+        # dispatcher's expanded spec here promotes optional implementation
+        # suggestions to a second, conflicting set of caller requirements.
+        compact["preprocessing_request"] = {
+            key: value for key, value in request.items() if key != "purpose"
+        }
+        compact["preprocessing_request"]["inputs"] = [
+            {key: value for key, value in item.items() if key != "spec"}
+            if isinstance(item, dict) else item for item in request.get("inputs") or []
+        ]
     compact.pop("structured_stage_scope", None)
     compact.pop("reference_gap_status", None)
     compact.pop("resolved_gap_ids", None)
@@ -8350,82 +8230,28 @@ def _critic_referenced_step_ids(
     feedback: str | dict[str, Any] | None,
     plan: dict[str, Any] | None,
 ) -> set[str]:
-    """Return persisted step IDs explicitly named by a Critic revision."""
+    """Use structured ownership; legacy prose cannot safely narrow a repair."""
     if not isinstance(plan, dict) or feedback in (None, "", {}):
         return set()
-    # Generation review feedback may carry the full execution result beside
-    # its compact findings. Derive ownership only from those findings;
-    # provenance for every completed step is not a revision target.
-    feedback_scope: Any = feedback
-    feedback_items = (
-        feedback.get("feedback")
-        if isinstance(feedback, dict) and isinstance(feedback.get("feedback"), list)
-        else []
-    )
     known_step_ids = {
         str(step.get("id") or "")
         for step in plan.get("generation_steps") or []
         if isinstance(step, dict) and str(step.get("id") or "")
     }
-    explicit_step_ids = {
-        str(item.get("step_id") or "").strip()
-        for item in feedback_items
-        if isinstance(item, dict) and str(item.get("step_id") or "").strip()
-    } & known_step_ids
-    unowned_feedback = [
-        item for item in feedback_items
-        if isinstance(item, dict) and not str(item.get("step_id") or "").strip()
-    ]
-    if explicit_step_ids and not unowned_feedback:
-        return explicit_step_ids
-    if feedback_items:
-        feedback_scope = unowned_feedback
-    text = json.dumps(feedback_scope, ensure_ascii=False, default=str).lower()
-    referenced: set[str] = set(explicit_step_ids)
-    for step in plan.get("generation_steps") or []:
-        if not isinstance(step, dict):
-            continue
-        step_id = str(step.get("id") or "")
-        arguments = (
-            step.get("tool_arguments")
-            if isinstance(step.get("tool_arguments"), dict)
-            else {}
-        )
-        output_paths = (
-            arguments.get("output_paths")
-            if isinstance(arguments.get("output_paths"), dict)
-            else {}
-        )
-        stable_references = {
-            step_id,
-            str(step.get("stage_id") or ""),
-            *(str(item) for item in step.get("outputs") or []),
-            *(str(item) for item in output_paths),
-            *(str(item) for item in output_paths.values()),
-            *(PurePosixPath(str(item)).name for item in output_paths.values()),
-        }
-        if step_id and any(
-            reference and reference.lower() in text
-            for reference in stable_references
-        ):
-            referenced.add(step_id)
-    # Package review identifies an offending file by stage and public path,
-    # not by the executor's private step id.  Map those stable contracts back
-    # to their owning steps so the existing compact revision path can preserve
-    # every unaffected artifact.
-    referenced_stage_ids = {
-        str(item).lower()
-        for item in re.findall(r"['\"]stage_id['\"]\s*:\s*['\"]([^'\"]+)", text)
-        if item
-    }
-    if referenced_stage_ids:
-        referenced.update(
-            str(step.get("id") or "")
-            for step in plan.get("generation_steps") or []
-            if isinstance(step, dict)
-            and str(step.get("stage_id") or "").lower() in referenced_stage_ids
-        )
-    return referenced
+    if not isinstance(feedback, dict):
+        return known_step_ids
+    contract = feedback.get("revision_contract") or {}
+    findings = [*(feedback.get("feedback") or []), *(contract.get("issues") or [])]
+    # Persisted critiques without ownership remain usable. Do not guess from
+    # substrings: partially matching a critique silently discarded other fixes.
+    if (feedback.get("schema_errors") or feedback.get("last_schema_errors") or not findings
+            or any(not isinstance(item, dict) for item in findings)
+            or (not contract and any(feedback.get(key) for key in (
+        "critical_concerns", "major_concerns", "recommended_changes",
+    )))):
+        return known_step_ids
+    owners = {str(item.get("step_id") or "") for item in findings if isinstance(item, dict)}
+    return owners if owners and owners <= known_step_ids else known_step_ids
 
 
 def _critic_referenced_stage_ids(
@@ -8461,6 +8287,9 @@ def _focus_requirement_analysis(
     """Project a revision contract to the stages named by package review."""
     if not isinstance(analysis, dict) or not stage_ids:
         return analysis
+    stage_ids = stage_ids & {str(stage.get("id") or "") for stage in analysis.get("calculation_stages") or []}
+    if not stage_ids:
+        return analysis
     focused = deepcopy(analysis)
     focused["calculation_stages"] = [
         item for item in focused.get("calculation_stages") or []
@@ -8477,6 +8306,21 @@ def _focus_requirement_analysis(
     for key in ("optional_files", "search_queries", "unresolved_facts"):
         focused.pop(key, None)
     return focused
+
+
+def _compact_producer_parameters(value: Any) -> Any:
+    """Project executable controls without replaying nested planning context."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return value
+    if not isinstance(value, dict):
+        return value
+    return {key: item for key, item in value.items() if key not in {
+        "spec", "requirement_analysis", "preprocessing_request", "preprocessing_work_order",
+        "source_trace", "review_issues", "revision_contract", "reference_evidence",
+    }}
 
 
 def _summarize_previous_plan(
@@ -8505,17 +8349,8 @@ def _summarize_previous_plan(
         }
         if not has_focus or is_focused(step):
             arguments = deepcopy(step.get("tool_arguments") or {})
-            parameters = arguments.get("parameters")
-            if isinstance(parameters, str):
-                try:
-                    parameters = json.loads(parameters)
-                except ValueError:
-                    parameters = None
-            if isinstance(parameters, dict):
-                arguments["parameters"] = {
-                    key: value for key, value in parameters.items()
-                    if key not in {"requirement_analysis", "preprocessing_request", "reference_evidence"}
-                }
+            if "parameters" in arguments:
+                arguments["parameters"] = _compact_producer_parameters(arguments["parameters"])
             result["tool_arguments"] = arguments
         return result
 
@@ -8565,10 +8400,31 @@ def _merge_focused_plan_revision(
 ) -> dict[str, Any]:
     """Replace cited steps while preserving the approved remainder verbatim."""
     explicit_focus_stages = set(focus_stage_ids or set())
-    if not isinstance(previous_plan, dict) or not (focus_step_ids or explicit_focus_stages):
+    if not isinstance(previous_plan, dict):
         return revised_plan
     previous = deepcopy(previous_plan)
     revised = deepcopy(revised_plan)
+
+    def preserve_deliveries(candidate: dict[str, Any]) -> dict[str, Any]:
+        # A proposed filename does not make the confirmed delivery optional.
+        # Route revisions may replace producers, never withdraw their outputs.
+        required = {str(item["id"]) for item in previous.get("required_deliverables") or []
+                    if item.get("id") and item.get("required") is not False
+                    and item.get("delivery_required") is not False}
+        retained = {str(item["id"]) for item in candidate.get("required_deliverables") or []
+                    if item.get("id") and item.get("required") is not False
+                    and item.get("delivery_required") is not False}
+        withdrawn = required - retained
+        previous_files = {str(item.get("id")) for item in
+                          (previous.get("requirement_analysis") or {}).get("required_files") or []}
+        retained_files = {str(item.get("id")) for item in
+                          (candidate.get("requirement_analysis") or {}).get("required_files") or []
+                          if item.get("required") is not False and item.get("delivery_required") is not False}
+        withdrawn |= (required & previous_files) - retained_files
+        if withdrawn:
+            raise ValueError(f"Plan revision cannot withdraw required deliveries {sorted(withdrawn)}; replace their producers instead.")
+        return candidate
+
     previous_steps = [
         item for item in previous.get("generation_steps") or [] if isinstance(item, dict)
     ]
@@ -8580,7 +8436,30 @@ def _merge_focused_plan_revision(
         for item in revised_steps if str(item.get("id") or "")
     }
     previous_ids = {str(item.get("id") or "") for item in previous_steps}
+    removed_ids = set(revised.pop("removed_step_ids", []) or [])
+    allowed_removals = focus_step_ids or {
+        str(step.get("id") or "") for step in previous_steps
+        if str(step.get("stage_id") or "") in explicit_focus_stages
+    }
+    if removed_ids and (preserve_execution_route or not removed_ids <= allowed_removals
+                        or removed_ids & set(revised_by_id)):
+        raise ValueError("removed_step_ids must name only cited steps, omit their replacements, and require a plan-level revision")
+    missing_outputs = {
+        str(item.get("id") or "")
+        for item in (revised.get("requirement_analysis") or {}).get("required_files") or []
+        if isinstance(item, dict)
+    } - {str(output) for step in previous_steps for output in step.get("outputs") or []}
+    additions = [step for step in revised_steps
+                 if not preserve_execution_route and str(step.get("id") or "") not in previous_ids
+                 and set(step.get("outputs") or []) & missing_outputs]
+    if not (focus_step_ids or explicit_focus_stages or additions):
+        # No identified owner is not permission to silently discard a repair.
+        # Validate the revised route normally, retaining the caller authority.
+        return preserve_deliveries({**revised, **({
+            "preprocessing_request": previous["preprocessing_request"],
+        } if "preprocessing_request" in previous else {})})
     replacements: dict[str, dict[str, Any]] = {}
+    split_replacements: dict[str, list[str]] = {}
     replaced_outputs: set[str] = set()
     for step in previous_steps:
         step_id = str(step.get("id") or "")
@@ -8594,12 +8473,26 @@ def _merge_focused_plan_revision(
                           and item not in replacements.values()
                           and set(item.get("outputs") or []) & set(step.get("outputs") or [])]
             replacement = candidates[0] if len(candidates) == 1 else None
+            if (not preserve_execution_route and len(candidates) > 1
+                    and set(step.get("outputs") or []) <= {
+                        output for item in candidates for output in item.get("outputs") or []}):
+                # A package producer can be replaced by several real producers.
+                # Silently dropping those steps left the old failed template in
+                # every revision, however often Designer corrected the route.
+                split_replacements[step_id] = [str(item["id"]) for item in candidates]
+                removed_ids.add(step_id)
+                additions.extend(item for item in candidates if item not in additions)
+                replaced_outputs.update(str(item) for item in step.get("outputs") or [])
         if replacement is not None:
             # A local amendment may omit unchanged execution metadata.
             replacement = {**deepcopy(step), **replacement}
             if preserve_execution_route or replacement.get("tool_name") == step.get("tool_name"):
                 original_args = deepcopy(step.get("tool_arguments") or {})
                 amended_args = deepcopy(replacement.get("tool_arguments") or {})
+                if replacement.get("tool_name") in {"execute_preprocessing_python", "execute_python"}:
+                    for selected, obsolete in (("code", "script_asset"), ("script_asset", "code")):
+                        if amended_args.get(selected) and obsolete not in amended_args:
+                            original_args.pop(obsolete, None)
                 # Parameters may cross the tool boundary as encoded JSON.
                 # Merge them as controls, not as a replace-all string.
                 for arguments in (original_args, amended_args):
@@ -8610,10 +8503,7 @@ def _merge_focused_plan_revision(
                             pass
                 replacement = {**replacement,
                     "tool_arguments": merge_parameter_updates(original_args, amended_args),
-                    "dependencies": list(dict.fromkeys([
-                        *(step.get("dependencies") or []),
-                        *(replacement.get("dependencies") or []),
-                    ])),
+                    "dependencies": list(replacement.get("dependencies") or []),
                 }
                 if isinstance((step.get("tool_arguments") or {}).get("parameters"), str):
                     replacement["tool_arguments"]["parameters"] = json.dumps(
@@ -8624,7 +8514,7 @@ def _merge_focused_plan_revision(
                     **{
                         key: deepcopy(step.get(key))
                         for key in (
-                            "id", "tool_name", "tool_capability", "dependencies",
+                            "id", "tool_name", "tool_capability", "dependencies", "inputs",
                             "outputs", "stage_id", "work_unit_id",
                         )
                     },
@@ -8634,8 +8524,13 @@ def _merge_focused_plan_revision(
 
     merged_steps = [
         deepcopy(replacements.get(str(step.get("id") or ""), step))
-        for step in previous_steps
+        for step in previous_steps if str(step.get("id") or "") not in removed_ids
     ]
+    # Plan-level reconciliation may discover an omitted output with no old
+    # producer. Admit its new writer without replacing unaffected steps.
+    replacement_ids = {str(step.get("id") or "") for step in replacements.values()}
+    additions = [step for step in additions if str(step.get("id") or "") not in replacement_ids]
+    merged_steps.extend(deepcopy(additions))
     # Keep stable IDs at the boundary of a local amendment. Otherwise unchanged
     # consumers still refer to the replaced step's old ID.
     renamed = {str(item.get("id")): old for old, item in replacements.items()
@@ -8653,7 +8548,7 @@ def _merge_focused_plan_revision(
     for step in merged_steps:
         step["id"] = renamed.get(str(step["id"]), step["id"])
     existing_step_ids = {str(item["id"]) for item in merged_steps}
-    pending = list(replacements.values())
+    pending = [*replacements.values(), *additions]
     while pending:
         step = pending.pop()
         for dependency in step.get("dependencies") or []:
@@ -8665,8 +8560,16 @@ def _merge_focused_plan_revision(
             existing_step_ids.add(dependency)
             pending.append(added)
     for step in merged_steps:
-        step["dependencies"] = [renamed.get(str(value), str(value)) for value in step.get("dependencies") or []]
+        step["dependencies"] = list(dict.fromkeys(
+            dependency for value in step.get("dependencies") or []
+            for dependency in (split_replacements.get(str(value)) or
+                               ([renamed.get(str(value), str(value))] if str(value) not in removed_ids else []))
+        ))
         step["tool_arguments"] = rebind(step.get("tool_arguments") or {})
+        if any(f'"$ref": "{old}.' in json.dumps(step["tool_arguments"])
+               or f'"$ref": "{old}"' in json.dumps(step["tool_arguments"])
+               for old in split_replacements):
+            raise ValueError(f"Step {step['id']} still references a split producer; explicitly rebind its input to the replacement output.")
 
     previous_deliverables = {
         str(item.get("id") or ""): deepcopy(item)
@@ -8685,20 +8588,52 @@ def _merge_focused_plan_revision(
         if output_id in revised_deliverables and (
             output_id in replaced_outputs or output_id not in previous_deliverables
         ):
-            previous_deliverables[output_id] = revised_deliverables[output_id]
+            original = previous_deliverables.get(output_id) or {}
+            amended = {**original, **revised_deliverables[output_id]}
+            if preserve_execution_route:
+                for key in ("id", "logical_asset_id", "required", "delivery_required", "format",
+                            "declared_output_path", "output_path_is_explicit", "acceptance_criteria",
+                            "parameter_binding_source"):
+                    if key in original:
+                        amended[key] = deepcopy(original[key])
+                if original.get("parameter_binding_source") != "analyst_inference":
+                    amended["parameter_bindings"] = deepcopy(original.get("parameter_bindings") or {})
+            previous_deliverables[output_id] = amended
 
     result = {
         **previous,
         **{
             key: value
             for key, value in revised.items()
-            if key not in {"required_deliverables", "generation_steps", "tool_requirements"}
+            if key not in {"required_deliverables", "generation_steps", "tool_requirements", "preprocessing_request"}
+            and (not preserve_execution_route or key not in {
+                "preprocessing_request", "preprocessing_work_order", "requirement_analysis",
+                "review_profile", "task_scope", "discipline", "simulation_software",
+            })
         },
         # Omission from a partial amendment is not deletion. This includes
         # publisher-owned inputs and proposals explicitly made non-delivery.
         "required_deliverables": list(previous_deliverables.values()),
         "generation_steps": merged_steps,
     }
+    removed_outputs = {
+        str(output) for step in previous_steps if str(step.get("id")) in removed_ids
+        for output in step.get("outputs") or []
+    } - active_outputs
+    if removed_outputs:
+        request = result.get("preprocessing_request") or {}
+        # Only unused internal/optional outputs can disappear with a step.
+        # The final contract check rejects withdrawal of required deliveries.
+        result["requirement_analysis"] = deepcopy(result.get("requirement_analysis") or {})
+        result["requirement_analysis"]["required_files"] = [
+            item for item in result["requirement_analysis"].get("required_files") or []
+            if str(item.get("id")) not in removed_outputs
+        ]
+        result["required_deliverables"] = [
+            item for item in result["required_deliverables"] if str(item.get("id")) not in removed_outputs
+        ]
+        result["preprocessing_work_order"] = build_preprocessing_work_order(request, result["requirement_analysis"])
+        result["requirement_analysis"]["preprocessing_work_order"] = deepcopy(result["preprocessing_work_order"])
     selected_tools = {
         str(step.get("tool_name") or "")
         for step in merged_steps if str(step.get("tool_name") or "")
@@ -8716,7 +8651,7 @@ def _merge_focused_plan_revision(
             "selected_tools": missing_tools,
         })
     result["tool_requirements"] = tool_requirements
-    return result
+    return preserve_deliveries(result)
 
 
 def _compact_critique_feedback(feedback: str | dict[str, Any] | None) -> str | dict[str, Any] | None:
@@ -8730,6 +8665,7 @@ def _compact_critique_feedback(feedback: str | dict[str, Any] | None) -> str | d
         "critical_concerns": [str(v)[:260] for v in feedback.get("critical_concerns") or []][:2],
         "major_concerns": [str(v)[:260] for v in feedback.get("major_concerns") or []][:5],
         "recommended_changes": [str(v)[:260] for v in feedback.get("recommended_changes") or []][:5],
+        "revision_contract": feedback.get("revision_contract"),
     }
     if isinstance(feedback.get("rejected_plan"), dict):
         compact["rejected_plan"] = _summarize_previous_plan(feedback["rejected_plan"])
@@ -8745,7 +8681,7 @@ def _compact_critique_feedback(feedback: str | dict[str, Any] | None) -> str | d
                 )
                 for key in (
                     "step_id", "tool_name", "stage_id", "deliverable_id", "asset_id", "file", "path",
-                    "code", "severity", "message", "recommendation", "required_change",
+                    "code", "severity", "action", "message", "recommendation", "required_change", "repair_kind",
                     "requirement_id", "comparison",
                     "missing_constraints", "diagnostic_context",
                     "previous_repair_attempts", "last_repair_error",
@@ -8759,262 +8695,6 @@ def _compact_critique_feedback(feedback: str | dict[str, Any] | None) -> str | d
     return compact
 
 
-def _compact_plan_for_critic(plan: dict[str, Any]) -> dict[str, Any]:
-    """Project the persisted plan to the fields the Critic actually evaluates."""
-    analysis = plan.get("requirement_analysis") if isinstance(plan.get("requirement_analysis"), dict) else {}
-
-    def compact_list(value: Any, limit: int = 6, item_limit: int = 220) -> list[str]:
-        values = value if isinstance(value, list) else ([value] if value not in (None, "", {}) else [])
-        return [_compact_text(item, item_limit) for item in values[:limit]]
-
-    def evidence_labels(value: Any, limit: int = 3) -> list[dict[str, str]]:
-        values = value if isinstance(value, list) else ([value] if value not in (None, "", {}) else [])
-        labels: list[dict[str, str]] = []
-        for item in values[:limit]:
-            if isinstance(item, dict):
-                labels.append({
-                    "source": _compact_text(item.get("source") or item.get("source_type") or "unknown", 120),
-                    "detail": _compact_text(item.get("detail") or item.get("key_facts") or "", 180),
-                })
-            else:
-                labels.append({"source": _compact_text(item, 180), "detail": ""})
-        return labels
-
-    stages = []
-    for stage in analysis.get("calculation_stages") or []:
-        if not isinstance(stage, dict):
-            continue
-        parameters = stage.get("parameters") if isinstance(stage.get("parameters"), dict) else {}
-        stages.append({
-            "id": stage.get("id"),
-            "calculation_type": _compact_text(stage.get("calculation_type") or stage.get("name") or "", 180),
-            "dependencies": [str(item) for item in stage.get("dependencies") or []],
-            "parameters": {
-                str(key): _compact_text(value, 180) if isinstance(value, str) else value
-                for key, value in list(parameters.items())[:16]
-            },
-            "evidence": evidence_labels(stage.get("evidence"), 2),
-        })
-
-    deliverables = []
-    for item in plan.get("required_deliverables") or []:
-        if not isinstance(item, dict):
-            continue
-        deliverables.append({
-            "id": item.get("id"),
-            "stage_id": item.get("stage_id"),
-            "type": item.get("type"),
-            "asset_role": item.get("asset_role"),
-            "source_strategy": item.get("source_strategy"),
-            "acquisition_kind": item.get("acquisition_kind"),
-            "format": item.get("format"),
-            "required": item.get("required", True),
-            "requirement_basis": _compact_text(item.get("requirement_basis") or "", 220),
-            "acceptance_criteria": compact_list(item.get("acceptance_criteria"), 5, 180),
-            "evidence": evidence_labels(item.get("evidence"), 2),
-        })
-
-    steps = []
-    for step in plan.get("generation_steps") or []:
-        if not isinstance(step, dict):
-            continue
-        arguments = step.get("tool_arguments") if isinstance(step.get("tool_arguments"), dict) else {}
-        tool_name = str(step.get("tool_name") or "")
-        spec = arguments.get("artifact_spec") if isinstance(arguments.get("artifact_spec"), dict) else {}
-        outputs = {str(item) for item in step.get("outputs") or []}
-        output_paths = arguments.get("output_paths") if isinstance(arguments.get("output_paths"), dict) else {}
-        compact_spec = None
-        if spec:
-            compact_spec = {
-                "purpose": _compact_text(spec.get("purpose") or "", 260),
-                "parameter_sources": compact_list(spec.get("parameter_sources"), 6, 180),
-                "format": spec.get("format"),
-                "acceptance_criteria": compact_list(spec.get("acceptance_criteria"), 6, 180),
-                "runtime_dependencies": [str(item) for item in spec.get("runtime_dependencies") or []][:12],
-                "evidence": evidence_labels(spec.get("evidence"), 2),
-            }
-        steps.append({
-            "id": step.get("id"),
-            "stage_id": step.get("stage_id"),
-            "tool_name": tool_name,
-            "tool_capability": _compact_text(step.get("tool_capability") or "", 160),
-            "dependencies": [str(item) for item in step.get("dependencies") or []],
-            "inputs": compact_list(step.get("inputs"), 6, 160),
-            "outputs": [str(item) for item in step.get("outputs") or []],
-            "output_paths": output_paths,
-            "artifact_spec": compact_spec,
-            "specialized_arguments": {
-                key: arguments.get(key)
-                for key in (
-                    "discipline", "mesh_type", "operation", "parameters",
-                    "workflow_capability", "generate_mesh_assets", "generate_model_assets",
-                    "mesh_generation_result", "data_path", "case_dir",
-                )
-                if arguments.get(key) not in (None, "", [], {})
-            } if tool_name in {
-                "prepare_scientific_mesh", "build_scientific_preprocessing_package"
-            } else None,
-            # Source is intentionally omitted from the Critic payload, but
-            # the schema has already parsed it.  Supply its verifiable
-            # execution contract so a reviewer cannot mistake compaction for
-            # an absent Python program or incomplete path mapping.
-            "execution_contract": {
-                "has_parseable_python_code": bool(str(arguments.get("code") or "").strip()),
-                "output_paths_complete": set(str(item) for item in output_paths) == outputs,
-            } if str(step.get("tool_name") or "") in {"execute_preprocessing_python", "execute_python"} else None,
-            # Downloads write to executor-managed staging. ``output_name`` is
-            # therefore the declared relative destination; the executor
-            # records the final path, URL and SHA-256 after the transfer.
-            "download_contract": {
-                "has_url": bool(str(arguments.get("url") or "").strip()),
-                "output_name": arguments.get("output_name"),
-                "declared_outputs_complete": bool(outputs),
-                "executor_records_sha256": True,
-            } if str(step.get("tool_name") or "") == "data_web_download" else None,
-            "artifact_spec_contract": {
-                "complete": bool(compact_spec) and all(
-                    spec.get(field) not in (None, "", [], {})
-                    for field in ("purpose", "parameter_sources", "format", "evidence", "acceptance_criteria")
-                ),
-                "acceptance_criteria_count": len(spec.get("acceptance_criteria") or []),
-                "evidence_count": len(spec.get("evidence") or []),
-                "display_is_excerpt": bool(compact_spec),
-            } if str(step.get("tool_name") or "") == "generate_preprocessing_artifact" else None,
-            "verification": compact_list(step.get("verification"), 6, 180),
-        })
-
-    return {
-        "schema_version": plan.get("schema_version"),
-        "plan_kind": plan.get("plan_kind"),
-        "task_summary": _compact_text(plan.get("task_summary") or "", 900),
-        "discipline": {
-            "primary": (plan.get("discipline") or {}).get("primary"),
-            "sub_discipline": (plan.get("discipline") or {}).get("sub_discipline"),
-        },
-        "simulation_software": {
-            "name": (plan.get("simulation_software") or {}).get("name"),
-            "version": (plan.get("simulation_software") or {}).get("version"),
-            "preprocessor": (plan.get("simulation_software") or {}).get("preprocessor"),
-        },
-        "calculation_stages": stages,
-        "required_deliverables": deliverables,
-        "generation_steps": steps,
-        "tool_requirements": [
-            {
-                "capability": _compact_text(item.get("capability") or "", 160),
-                "selected_tools": [str(tool) for tool in item.get("selected_tools") or []],
-            }
-            for item in plan.get("tool_requirements") or []
-            if isinstance(item, dict)
-        ],
-        "assumptions": compact_list(plan.get("assumptions"), 10, 220),
-        "unresolved_questions": compact_list(plan.get("unresolved_questions"), 8, 220),
-        "risks": compact_list(plan.get("risks"), 8, 220),
-        "external_dataset_policy": (
-            "Declared small external payloads may be downloaded and verified; large or unknown-size datasets are published as per-step acquisition workflows, and search failures remain documented source-discovery states."
-        ),
-    }
-
-
-def _bound_critic_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Keep Critic input below the configured character budget."""
-    if len(_serialized_payload(payload)) <= _PLANNING_PAYLOAD_BUDGET_CHARS:
-        return payload
-    plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
-    # Evidence prose is useful for traceability but not for the Critic's
-    # deterministic contract review. Remove it before reducing scientific IDs.
-    for stage in plan.get("calculation_stages") or []:
-        if isinstance(stage, dict):
-            stage.pop("evidence", None)
-            stage["parameters"] = {
-                key: value for key, value in list((stage.get("parameters") or {}).items())[:8]
-            }
-    for item in plan.get("required_deliverables") or []:
-        if isinstance(item, dict):
-            item.pop("evidence", None)
-            item["acceptance_criteria"] = list(item.get("acceptance_criteria") or [])[:3]
-    for step in plan.get("generation_steps") or []:
-        if isinstance(step, dict):
-            step.pop("inputs", None)
-            step.pop("verification", None)
-            spec = step.get("artifact_spec")
-            if isinstance(spec, dict):
-                spec.pop("evidence", None)
-                spec["parameter_sources"] = list(spec.get("parameter_sources") or [])[:3]
-                spec["acceptance_criteria"] = list(spec.get("acceptance_criteria") or [])[:3]
-    plan.pop("assumptions", None)
-    plan.pop("unresolved_questions", None)
-    plan.pop("risks", None)
-    if len(_serialized_payload(payload)) <= _PLANNING_PAYLOAD_BUDGET_CHARS:
-        return payload
-    # Last-resort contract projection.  Keep every stage and deliverable, plus
-    # the compact semantic/verification facts the Critic is asked to judge.
-    # Dropping whole artifact specs made the model report those fields as
-    # absent even though deterministic validation had accepted them.
-    plan["task_summary"] = _compact_text(plan.get("task_summary") or "", 300)
-    plan["calculation_stages"] = [
-        {
-            "id": item.get("id"),
-            "calculation_type": _compact_text(item.get("calculation_type") or "", 100),
-            "dependencies": item.get("dependencies") or [],
-        }
-        for item in plan.get("calculation_stages") or []
-        if isinstance(item, dict)
-    ]
-    plan["required_deliverables"] = [
-        {
-            "id": item.get("id"),
-            "stage_id": item.get("stage_id"),
-            "type": item.get("type"),
-            "format": item.get("format"),
-            "required": item.get("required", True),
-        }
-        for item in plan.get("required_deliverables") or []
-        if isinstance(item, dict)
-    ]
-    projected_steps = []
-    for item in plan.get("generation_steps") or []:
-        if not isinstance(item, dict):
-            continue
-        spec = item.get("artifact_spec") if isinstance(item.get("artifact_spec"), dict) else {}
-        projected_steps.append({
-            "id": item.get("id"),
-            "stage_id": item.get("stage_id"),
-            "tool_name": item.get("tool_name"),
-            "dependencies": item.get("dependencies") or [],
-            "outputs": item.get("outputs") or [],
-            "output_paths": item.get("output_paths") or {},
-            "artifact_spec": {
-                "purpose": _compact_text(spec.get("purpose") or "", 140),
-                "format": spec.get("format"),
-                "parameter_sources": [
-                    _compact_text(value, 90)
-                    for value in (spec.get("parameter_sources") or [])[:2]
-                ],
-                "runtime_dependencies": [
-                    _compact_text(value, 90)
-                    for value in (spec.get("runtime_dependencies") or [])[:12]
-                ],
-                "acceptance_criteria": [
-                    _compact_text(value, 110)
-                    for value in (spec.get("acceptance_criteria") or [])[:3]
-                ],
-            } if spec else None,
-            "artifact_spec_contract": item.get("artifact_spec_contract"),
-            "execution_contract": item.get("execution_contract"),
-            "download_contract": item.get("download_contract"),
-            "verification_count": len(item.get("verification") or []),
-        })
-    plan["generation_steps"] = projected_steps
-    if len(_serialized_payload(payload)) > _PLANNING_PAYLOAD_BUDGET_CHARS:
-        # Preserve the complete graph and its Boolean contracts; only prose is
-        # expendable when an unusually large plan still exceeds the boundary.
-        for step in projected_steps:
-            step.pop("artifact_spec", None)
-        plan["task_summary"] = ""
-    return payload
-
-
 def _repair_designer_plan_contract(
     raw: dict[str, Any],
     requirement_analysis: dict[str, Any],
@@ -9026,8 +8706,13 @@ def _repair_designer_plan_contract(
     restores the shared contract from RequirementAnalysis and canonicalizes
     filename-like output references to their declared deliverable ids.
     """
-    plan = normalize_plan(raw)
     authoritative = _normalize_requirement_analysis(deepcopy(requirement_analysis))
+    plan = normalize_plan({
+        **raw, "requirement_analysis": authoritative,
+        **{key: deepcopy(authoritative[key]) for key in (
+            "preprocessing_request", "preprocessing_work_order", "review_profile", "task_scope",
+        ) if key in authoritative},
+    })
     # Designer returns only fulfilment decisions.  Scope, scientific identity,
     # stages and evidence are immutable Analyst contracts and serializing them
     # again for every 20+ stage plan was the main cause of truncated JSON.
@@ -9042,6 +8727,7 @@ def _repair_designer_plan_contract(
     plan["review_profile"] = str(
         authoritative.get("review_profile")
         or plan["preprocessing_request"].get("review_profile")
+        or plan.get("review_profile")
         or "request_bound"
     )
     plan.setdefault("reproducibility", {})
@@ -9073,22 +8759,7 @@ def _repair_designer_plan_contract(
     # Keep scope, stages, and evidence sourced from the confirmed analysis;
     # the Designer should decide the executable DAG, not silently expand the
     # research workflow with downstream simulation/post-processing stages.
-    drafted_analysis = dict(plan.get("requirement_analysis") or {})
-    plan["requirement_analysis"] = {
-        **drafted_analysis,
-        **{
-            key: authoritative.get(key)
-            for key in (
-                "calculation_type", "calculation_stages", "required_files", "optional_files",
-                "stage_input_contracts", "boundary_contract",
-                "evidence", "assumptions", "unresolved_facts", "reference_evidence",
-                "reference_gap_status", "completed_reference_request_ids",
-                "task_scope", "preprocessing_request", "preprocessing_work_order",
-                "review_profile",
-            )
-            if authoritative.get(key) not in (None, "", [], {})
-        },
-    }
+    plan["requirement_analysis"] = deepcopy(authoritative)
     basis = plan["requirement_analysis"].get("evidence") or [{
         "source_type": "upstream", "detail": "Confirmed requirement analysis."
     }]
@@ -9116,13 +8787,17 @@ def _repair_designer_plan_contract(
             if isinstance(item, dict)
             and (item.get("description") or item.get("question"))
         ]
-    required_by_alias: dict[str, dict[str, Any]] = {}
+    required_by_alias: dict[str, dict[str, Any] | None] = {}
+    required_by_id = {
+        str(item.get("id") or ""): item
+        for item in authoritative.get("required_files") or [] if isinstance(item, dict)
+    }
+    optional_by_id = {
+        str(item.get("id") or ""): item
+        for item in authoritative.get("optional_files") or [] if isinstance(item, dict)
+    }
     runtime_sources_by_stage: dict[str, list[dict[str, Any]]] = {}
     reference_status_by_id = _reference_status_by_request(authoritative)
-    terminal_reference_status_by_id = _reference_status_by_request(
-        authoritative,
-        allowed_statuses=_VERIFIED_REFERENCE_STATUSES,
-    )
     authoritative_stages_by_id = {
         str(stage.get("id") or "").strip(): stage
         for stage in authoritative.get("calculation_stages") or []
@@ -9167,14 +8842,14 @@ def _repair_designer_plan_contract(
         ):
             key = _normalise_asset_key(value)
             if key:
-                required_by_alias[key] = item
+                existing = required_by_alias.get(key, item)
+                required_by_alias[key] = item if existing == item else None
         if str(item.get("fulfillment_kind") or "") == "runtime_output":
             stage_id = str(item.get("stage_id") or "").strip()
             if stage_id:
                 runtime_sources_by_stage.setdefault(stage_id, []).append(item)
 
-    used_ids: set[str] = set()
-    aliases: dict[str, str] = {}
+    aliases: dict[str, str | None] = {}
     repaired_deliverables: list[dict[str, Any]] = []
     for index, item in enumerate(plan.get("required_deliverables") or [], 1):
         if not isinstance(item, dict):
@@ -9196,13 +8871,13 @@ def _repair_designer_plan_contract(
             # Runtime tools are resolved by the execution environment and may
             # be shared by many stages; they are never package deliverables.
             continue
-        item_id = _slug(str(deliverable.get("id") or deliverable.get("name") or f"deliverable_{index}"))
-        base_id, suffix = item_id, 2
-        while item_id in used_ids:
-            item_id = f"{base_id}_{suffix}"
-            suffix += 1
-        used_ids.add(item_id)
-        source = required_by_alias.get(_normalise_asset_key(item_id)) or required_by_alias.get(
+        # Declared IDs are graph references, not filenames. Preserve them when
+        # checking internal producers/consumers; slugging O1 to o1 here drops
+        # a valid intermediate before the shared alias mapping is constructed.
+        item_id = str(deliverable.get("id") or "").strip() or _slug(
+            str(deliverable.get("name") or f"deliverable_{index}")
+        )
+        source = required_by_id.get(str(deliverable.get("id") or "")) or required_by_alias.get(_normalise_asset_key(item_id)) or required_by_alias.get(
             _normalise_asset_key(deliverable.get("name") or deliverable.get("type"))
         ) or {}
         # A plan may expand one declared runtime product into several runtime
@@ -9220,36 +8895,59 @@ def _repair_designer_plan_contract(
             # to an approved producer. They never become caller deliverables
             # or broaden scientific authority.
             if (
-                deliverable.get("required") is False
-                and deliverable.get("delivery_required") is False
+                deliverable.get("delivery_required") is False
                 and str(deliverable.get("source_strategy") or "") == "local_generation"
-                and str(deliverable.get("declared_output_path") or "").strip()
+                and any(
+                    item_id in (step.get("inputs") or []) or any(
+                        item_id in (producer.get("outputs") or [])
+                        and producer.get("id") in (step.get("dependencies") or [])
+                        for producer in plan.get("generation_steps") or []
+                    )
+                    for step in plan.get("generation_steps") or []
+                )
             ):
-                source = deliverable
+                # Native producers bind actual paths from their result receipts;
+                # only text/Python tools require an output_paths argument. Asset
+                # identity and consumption, not a guessed path, define the DAG.
+                source = {**optional_by_id.get(item_id, {}), **deliverable}
             else:
-                used_ids.discard(item_id)
                 continue
-        if (
-            plan["review_profile"] == "request_bound"
-            and deliverable.get("required") is False
-            and deliverable.get("delivery_required") is False
-            and str(deliverable.get("requirement_basis") or "").strip()
-            and not plan["preprocessing_request"].get("requested_assets")
-            and deliverable.get("output_path_is_explicit") is False
-        ):
-            # Natural-language requests are reviewed against their immutable
-            # snapshot. Analyst-derived route dependencies are not additional
-            # user demands; retain the explicit exclusion for Critic/reviewer.
-            source = {**source, "required": False, "delivery_required": False}
-            for requirement in plan["requirement_analysis"].get("required_files") or []:
-                if str(requirement.get("id") or "") == str(source.get("id") or ""):
-                    requirement.update(required=False, delivery_required=False,
-                                       requirement_basis=deliverable["requirement_basis"])
-        else:
-            deliverable["delivery_required"] = source.get("delivery_required", True)
-            deliverable["required"] = source.get("required", source.get("delivery_required", True))
+        # An executed download produces payload bytes, not the retrieval guide
+        # proposed before endpoint discovery. Keep that one contract through
+        # staging and review instead of publishing NetCDF under a JSON name.
+        download = next((step for step in plan.get("generation_steps") or []
+            if step.get("tool_name") == "data_web_download"
+            and not (step.get("tool_arguments") or {}).get("discovery_only")
+            and any(_normalise_asset_key(output) in {
+                _normalise_asset_key(item_id), _normalise_asset_key(source.get("id"))}
+                for output in step.get("outputs") or [])), None)
+        if download and normalize_asset_contract(source)["materialization_kind"] == "acquisition_document":
+            source = {**source, "requires_local_payload": True,
+                      "acquisition_contract": {**(source.get("acquisition_contract") or {}),
+                                               "delivery_mode": "direct_download"}}
+            if source.get("output_path_is_explicit") is not True:
+                source.pop("declared_output_path", None)
+                deliverable.pop("declared_output_path", None)
+                filename = (download.get("tool_arguments") or {}).get("output_name")
+                if filename:
+                    source["declared_output_path"] = str(PurePosixPath("acquisition") / PurePosixPath(filename).name)
+                    deliverable["declared_output_path"] = source["declared_output_path"]
+            authoritative["required_files"] = [source if item.get("id") == source.get("id") else item
+                                              for item in authoritative.get("required_files") or []]
+        contract = normalize_asset_contract(source)
+        deliverable["delivery_required"] = contract["delivery_required"]
+        deliverable["required"] = source.get(
+            "required", contract["delivery_required"] or contract["materialization_kind"] == "acquired_file"
+        )
+        item_id = str(source.get("id") or item_id)
         deliverable["id"] = item_id
-        current_path = str(deliverable.get("declared_output_path") or "").strip()
+        path_contract = {**source, **deliverable}
+        path_contract.setdefault("path", next((
+            ((step.get("tool_arguments") or {}).get("output_paths") or {}).get(item_id)
+            for step in plan.get("generation_steps") or [] if item_id in (step.get("outputs") or [])
+        ), ""))
+        current_path = _declared_relative_output(path_contract, item_id)
+        deliverable["declared_output_path"] = current_path
         source_path = _declared_relative_output(source or deliverable, item_id)
         # Internal F###/artifact IDs are valid tracking identifiers but not
         # deliverable names. Prose containing an extension mention is not a
@@ -9272,7 +8970,6 @@ def _repair_designer_plan_contract(
             str(deliverable.get("declared_output_path") or ""),
             deliverable.get("format"),
         )
-        contract = normalize_asset_contract({**deliverable, **source})
         # ``normalize_plan`` may have classified the draft before its alias
         # was bound to the authoritative requirement.  Replace the whole
         # routing portion of the contract here; retaining a draft's old
@@ -9283,30 +8980,40 @@ def _repair_designer_plan_contract(
             for key in (
                 "scientific_role", "representation", "asset_role",
                 "source_strategy", "acquisition_kind", "workflow_capability", "is_external",
+                "materialization_kind", "requires_local_payload",
             )
         })
+        # The Designer selects an executable route. It cannot turn its own
+        # preferred method into new authority during a revision. Preserve the
+        # confirmed requirement's basis/evidence/criteria on every plan.
+        deliverable["requirement_basis"] = str(
+            source.get("reason") or "Required by the preprocessing plan."
+        )
+        deliverable["evidence"] = deepcopy(source.get("evidence") or basis)
+        for key in ("edit_source", "generation_recipe", "preserve_keywords"):
+            if source.get(key):
+                deliverable[key] = deepcopy(source[key])
+        deliverable["acceptance_criteria"] = deepcopy(
+            source.get("acceptance_criteria") or [
+                "Artifact exists at the recorded path.",
+                "Declared format and provenance validation are recorded.",
+            ]
+        )
         # The RequirementAnalysis contract is authoritative for acquisition.
         # A Designer may still return a partial acquisition_contract, but that
         # partial object must not hide the source locator (the previous
         # empty-only copy caused valid URLs for external datasets to be lost).
         source_acquisition = source.get("acquisition_contract")
-        draft_acquisition = deliverable.get("acquisition_contract")
         if isinstance(source_acquisition, dict) and source_acquisition:
-            if isinstance(draft_acquisition, dict) and draft_acquisition:
-                merged_acquisition = {
-                    **draft_acquisition,
-                    **deepcopy(source_acquisition),
+            selected_retrieval = (deliverable.get("acquisition_contract") or {}).get("retrieval_instructions") or {}
+            deliverable["acquisition_contract"] = deepcopy(source_acquisition)
+            if selected_retrieval:
+                # Dataset identity is authoritative; endpoint selection and
+                # request encoding belong to the executable acquisition step.
+                deliverable["acquisition_contract"]["retrieval_instructions"] = {
+                    **deepcopy(source_acquisition.get("retrieval_instructions") or {}),
+                    **deepcopy(selected_retrieval),
                 }
-                draft_retrieval = draft_acquisition.get("retrieval_instructions")
-                source_retrieval = source_acquisition.get("retrieval_instructions")
-                if isinstance(draft_retrieval, dict) and isinstance(source_retrieval, dict):
-                    merged_acquisition["retrieval_instructions"] = {
-                        **draft_retrieval,
-                        **deepcopy(source_retrieval),
-                    }
-                deliverable["acquisition_contract"] = merged_acquisition
-            else:
-                deliverable["acquisition_contract"] = deepcopy(source_acquisition)
         for key in (
             "access_method", "dataset_identifier", "provider", "url", "endpoint",
             "request_template", "parameter_binding_mode", "parameter_binding_assertions",
@@ -9325,16 +9032,20 @@ def _repair_designer_plan_contract(
                 key: deepcopy(value)
                 for key, value in reference_metadata.items()
                 if deliverable.get(key) in (None, "", [], {})
-                or key == "retrieval_instructions"
+                or (key == "retrieval_instructions" and reference_metadata.get("local_match"))
+                or (key in {"url", "local_match"} and reference_metadata.get("local_match"))
             })
             # Keep the authoritative locator in the nested contract too.  A
             # stale Designer copy must not override fresh reference evidence
             # when normalize_acquisition_contract is called below.
             nested_contract = dict(deliverable.get("acquisition_contract") or {})
             if reference_metadata.get("retrieval_instructions"):
-                nested_contract["retrieval_instructions"] = deepcopy(
-                    reference_metadata["retrieval_instructions"]
-                )
+                nested_contract["retrieval_instructions"] = {
+                    **deepcopy(reference_metadata["retrieval_instructions"]),
+                    **({} if reference_metadata.get("local_match") else
+                       deepcopy(nested_contract.get("retrieval_instructions") or
+                                deliverable.get("retrieval_instructions") or {})),
+                }
             if reference_metadata.get("url"):
                 nested_contract["url"] = str(reference_metadata["url"])
             if nested_contract:
@@ -9344,27 +9055,19 @@ def _repair_designer_plan_contract(
             # model may describe the delivery route, but cannot replace the
             # verified source path or its match basis.
             deliverable["local_match"] = dict(source["local_match"])
+        else:
+            deliverable.pop("local_match", None)
         # Expected outputs from a declared scientific stage are runtime
         # products.  They remain in the plan as dependency/provenance
         # contracts, but cannot be required from the text artifact writer.
         # This distinction is generic (data, solver outputs, and derived
         # fields alike) and avoids treating a NetCDF/GRIB product as a
         # parameter-file generation failure.
-        fulfillment_kind = str(source.get("fulfillment_kind") or deliverable.get("fulfillment_kind") or "").strip()
-        if fulfillment_kind:
-            deliverable["fulfillment_kind"] = fulfillment_kind
+        fulfillment_kind = str(source.get("fulfillment_kind") or "").strip()
+        deliverable["fulfillment_kind"] = fulfillment_kind
         reference_status = reference_status_by_id.get(str(source.get("id") or ""))
-        verified_reference_status = terminal_reference_status_by_id.get(str(source.get("id") or ""))
-        if contract.get("acquisition_kind") == "external_dataset":
-            # Reference evidence authorizes the source used by the acquisition
-            # document; it never makes the document optional.  This is also
-            # the path used when no network search is needed because the
-            # Research Plan already supplies enough retrieval information.
-            # The lightweight acquisition JSON remains a required dataset
-            # deliverable even when the underlying data is not downloaded.
+        if contract.get("materialization_kind") == "acquisition_document" and contract.get("acquisition_kind") == "external_dataset":
             deliverable["fulfillment_kind"] = "external_dataset_reference"
-            deliverable["delivery_required"] = True
-            deliverable["required"] = True
             # ``format`` describes the file delivered by this generation step.
             # The scientific dataset representation remains in AssetContract
             # and acquisition_contract.expected_output.  Mixing these two made
@@ -9417,36 +9120,6 @@ def _repair_designer_plan_contract(
             })
             if reference_status:
                 deliverable["reference_status"] = reference_status
-        elif verified_reference_status:
-            deliverable["required"] = False
-            deliverable["delivery_required"] = False
-            deliverable["reference_status"] = verified_reference_status
-            deliverable["fulfillment_kind"] = "deferred_external_reference"
-            deliverable.setdefault(
-                "resume_contract",
-                "Acquire and verify the named external reference before executing its consuming stage.",
-            )
-        elif fulfillment_kind == "runtime_output" or source.get("delivery_required") is False:
-            deliverable["required"] = False
-            deliverable.setdefault(
-                "resume_contract",
-                "Produce this runtime output only when its declared stage is executed with available inputs and dependencies.",
-            )
-        else:
-            deliverable.setdefault("required", bool(source) or True)
-        # The Designer selects an executable route. It cannot turn its own
-        # preferred method into new authority during a revision. Preserve the
-        # confirmed requirement's basis/evidence/criteria on every plan.
-        deliverable["requirement_basis"] = str(
-            source.get("reason") or "Required by the preprocessing plan."
-        )
-        deliverable["evidence"] = deepcopy(source.get("evidence") or basis)
-        deliverable["acceptance_criteria"] = deepcopy(
-            source.get("acceptance_criteria") or [
-                "Artifact exists at the recorded path.",
-                "Declared format and provenance validation are recorded.",
-            ]
-        )
         if not str(deliverable.get("stage_id") or "").strip():
             stage_ids = [
                 str(stage.get("id") or "").strip()
@@ -9471,13 +9144,26 @@ def _repair_designer_plan_contract(
         # binds their representation only after choosing an executable route.
         if not normalize_asset_contract(deliverable).get("is_external"):
             binding_contract = source
+            deliverable["parameter_binding_source"] = source.get("parameter_binding_source") or "analyst_inference"
+            proposal = deliverable
+            if not proposal.get("parameter_bindings"):
+                # The schema also permits bindings on a single-output writer's
+                # artifact_spec. Preserve that proposal before copying the
+                # canonical contract back to the writer below.
+                writers = [step for step in plan.get("generation_steps") or []
+                           if step.get("tool_name") == "generate_preprocessing_artifact"
+                           and len(step.get("outputs") or []) == 1
+                           and (step["outputs"][0] == item.get("id")
+                                or required_by_alias.get(_normalise_asset_key(step["outputs"][0])) == source)]
+                if len(writers) == 1:
+                    proposal = (writers[0].get("tool_arguments") or {}).get("artifact_spec") or {}
             if (
                 plan["review_profile"] == "request_bound"
-                and not plan["preprocessing_request"].get("requested_assets")
-                and isinstance(deliverable.get("parameter_bindings"), dict)
-                and str(deliverable.get("parameter_binding_basis") or "").strip()
+                and source.get("parameter_binding_source") == "analyst_inference"
+                and isinstance(proposal.get("parameter_bindings"), dict)
+                and str(proposal.get("parameter_binding_basis") or "").strip()
             ):
-                binding_contract = deliverable
+                binding_contract = proposal
             bindings = next(
                 (
                     dict(candidate)
@@ -9562,15 +9248,17 @@ def _repair_designer_plan_contract(
                     binding_contract["parameter_binding_basis"]
                 )
         repaired_deliverables.append(deliverable)
-        for value in (item_id, deliverable.get("name"), deliverable.get("type"), source.get("id"), source.get("name_or_role")):
+        for value in (item_id, item.get("id"), deliverable.get("name"), deliverable.get("type"), source.get("id"), source.get("name_or_role")):
             key = _normalise_asset_key(value)
             if key:
-                aliases[key] = item_id
+                existing = aliases.get(key, item_id)
+                aliases[key] = item_id if existing == item_id else None
 
     terminal_reference_deliverable_ids = {
         str(item.get("id") or "")
         for item in repaired_deliverables
         if str(item.get("reference_status") or "") in _VERIFIED_REFERENCE_STATUSES
+        and item.get("local_match")
     }
     repaired_steps: list[dict[str, Any]] = []
     removed_step_ids: set[str] = set()
@@ -9598,70 +9286,29 @@ def _repair_designer_plan_contract(
                 # Executables are caller-environment prerequisites, not files produced
                 # by a preprocessing generation step.
                 continue
-            output_id = aliases.get(_normalise_asset_key(output_text))
-            if not output_id:
-                continue
+            output_id = aliases.get(_normalise_asset_key(output_text)) or output_text
             canonical_outputs.append(output_id)
         step["outputs"] = list(dict.fromkeys(canonical_outputs))
-        if not step["outputs"] and not is_pipeline_infrastructure_step(step):
-            # The step has no authoritative deliverable.  Drop it and let a
-            # registered domain tool own any private helper files it needs.
-            removed_step_ids.add(str(step["id"]))
-            continue
         if (
             step["outputs"] and set(step["outputs"]).issubset(terminal_reference_deliverable_ids)
         ):
-            # Reference discovery is executed by the single-request driver.
-            # Once that request reaches a terminal ledger state, a generation
-            # draft must retain only its deferred dependency contract.
+            # Only an already materialized local input can replace a producer;
+            # successful discovery alone never supplies the required bytes.
             removed_step_ids.add(str(step["id"]))
             continue
         arguments = step.get("tool_arguments")
         if not isinstance(arguments, dict):
             arguments = {}
             step["tool_arguments"] = arguments
-        if str(step.get("tool_name") or "") == "prepare_scientific_mesh":
-            # ``coordinate_files`` is an input contract, not a filename the
-            # mesh tool will create.  Designer drafts sometimes leave a
-            # helper name such as ``naca2412.geo`` after the helper step was
-            # discarded above.  For an explicitly named analytic NACA
-            # profile, bind the existing local generator directly and remove
-            # only file references that have no real local source.
-            mesh_context = " ".join(
-                str(value or "")
-                for value in (
-                    arguments.get("spec"),
-                    arguments.get("naca_code"),
-                    arguments.get("airfoil"),
-                    arguments.get("geometry"),
-                )
-            )
-            naca_match = re.search(
-                r"\bNACA\s*[-_ ]?(\d{4,5})(?!\d)",
-                mesh_context,
-                flags=re.I,
-            )
-            coordinate_files = arguments.get("coordinate_files")
-            coordinate_values = (
-                list(coordinate_files)
-                if isinstance(coordinate_files, (list, tuple))
-                else [coordinate_files]
-                if coordinate_files not in (None, "")
-                else []
-            )
-            if naca_match:
-                arguments["naca_code"] = naca_match.group(1)
-                has_concrete_coordinate_file = any(
-                    Path(str(value)).expanduser().is_file()
-                    for value in coordinate_values
-                    if str(value or "").strip()
-                )
-                if coordinate_values and not has_concrete_coordinate_file:
-                    arguments.pop("coordinate_files", None)
-                    step["inputs"] = [
-                        value for value in step.get("inputs") or []
-                        if _normalise_asset_key(value) in required_by_alias
-                    ]
+        if (step.get("tool_name") == "build_scientific_preprocessing_package" and not step["outputs"]
+                and arguments.get("generate_mesh_assets") is False
+                and arguments.get("generate_model_assets") is False
+                and not any(step["id"] in (other.get("dependencies") or [])
+                            for other in plan.get("generation_steps") or [])):
+            # The executor stages and reviews direct outputs already. A leaf
+            # assembler with no generation or declared outputs adds no work.
+            removed_step_ids.add(str(step["id"]))
+            continue
         if str(step.get("tool_name") or "") == "generate_preprocessing_artifact":
             # The artifact writer owns its generated-artifact workspace.  A
             # Designer-provided cwd has no scientific meaning for a text-file
@@ -9698,64 +9345,10 @@ def _repair_designer_plan_contract(
                 else:
                     output_paths = {}
             arguments["output_paths"] = output_paths
-            produced = [
-                entry for entry in repaired_deliverables
-                if entry.get("id") in step["outputs"]
-            ]
-            # A declared scientific-stage output is a runtime product, not a
-            # text artifact that this writer can deliver.  Designer commonly
-            # uses such a product as a shorthand for the helper script or
-            # namelist which will produce it later.  Preserve that runtime
-            # relationship in the arguments, but make the writer's single
-            # output the actual local artifact.  This is deliberately based
-            # on the structured fulfilment contract, never on application or
-            # filename keywords.
-            if produced and all(
-                str(entry.get("fulfillment_kind") or "") == "runtime_output"
-                for entry in produced
-            ):
-                auxiliary_id = _slug(f"{step['id']}_artifact")
-                while auxiliary_id in used_ids:
-                    auxiliary_id = _slug(f"{auxiliary_id}_next")
-                used_ids.add(auxiliary_id)
-                stage_ids = {str(entry.get("stage_id") or "").strip() for entry in produced}
-                stage_id = str(step.get("stage_id") or "").strip()
-                if not stage_id and len(stage_ids - {""}) == 1:
-                    stage_id = next(iter(stage_ids - {""}))
-                path_values = list(output_paths.values()) if isinstance(output_paths, dict) else []
-                declared_path = str(path_values[0] or "").strip() if len(path_values) == 1 else ""
-                fmt = str(spec.get("format") or "generated preprocessing artifact")
-                auxiliary = {
-                    "id": auxiliary_id,
-                    "stage_id": stage_id,
-                    "name": f"Local artifact for {step['id']}",
-                    "type": "generated_auxiliary_artifact",
-                    "format": fmt,
-                    "scientific_role": "preprocessing_configuration",
-                    "source_strategy": "local_generation",
-                    "acquisition_kind": "generated_artifact",
-                    "workflow_capability": "local_artifact_generation",
-                    "required": True,
-                    "requirement_basis": f"Local execution artifact selected by {step['id']}.",
-                    "evidence": basis,
-                    "acceptance_criteria": [
-                        "Artifact exists at the recorded path.",
-                        "Declared format and provenance validation are recorded.",
-                    ],
-                    "parameter_bindings": deepcopy(spec.get("parameter_bindings") or {}),
-                    "parameter_binding_mode": spec.get("parameter_binding_mode") or "semantic",
-                }
-                if declared_path:
-                    auxiliary["declared_output_path"] = declared_path
-                auxiliary.update(normalize_asset_contract(auxiliary))
-                repaired_deliverables.append(auxiliary)
-                step["outputs"] = [auxiliary_id]
-                arguments["runtime_outputs"] = [entry["id"] for entry in produced]
-                arguments["output_paths"] = {auxiliary_id: declared_path}
         if isinstance(arguments, dict) and isinstance(arguments.get("output_paths"), dict):
             canonical_paths: dict[str, Any] = {}
             for raw_id, path in arguments["output_paths"].items():
-                canonical_id = aliases.get(_normalise_asset_key(raw_id)) or _slug(str(raw_id))
+                canonical_id = aliases.get(_normalise_asset_key(raw_id)) or str(raw_id).strip()
                 canonical_paths[canonical_id] = path
             arguments["output_paths"] = canonical_paths
         if not isinstance(step.get("verification"), list) or not step["verification"]:
@@ -9836,17 +9429,21 @@ def _repair_designer_plan_contract(
             continue
         if len(step_outputs) == 1:
             output_contract = step_outputs[0]
+            if (step.get("tool_name") == "data_web_download"
+                    and any(item.get("source_type") == "approved_reference_download" for item in
+                            (output_contract.get("retrieval_instructions") or {}).get("approved_source_evidence") or [])
+                    and output_contract.get("url")):
+                # Keep the acquisition step for cache verification/reacquisition
+                # after cleanup, but never revert to a failed proposed endpoint.
+                arguments["url"] = output_contract["url"]
+            # Asset purpose and execution method are separate contracts. A
+            # computed report is still a report when its writer changes from
+            # text generation to Python. Reuse the schema's tool capability.
             output_capability = (
-                "local_artifact_generation"
-                if str(step.get("tool_name") or "") == "build_scientific_preprocessing_package"
-                else (
-                    "configuration_generation"
-                    if (
-                        str(step.get("tool_name") or "") == "generate_preprocessing_artifact"
-                        and normalize_asset_contract(output_contract).get("is_external")
-                    )
-                    else canonical_workflow_capability(output_contract)
-                )
+                ("configuration_generation" if normalize_asset_contract(output_contract).get("is_external")
+                 else canonical_workflow_capability(output_contract))
+                if str(step.get("tool_name") or "") == "generate_preprocessing_artifact"
+                else _step_workflow_capability({**step, "tool_arguments": arguments})
             )
             if output_capability != "unclassified":
                 step["workflow_capability"] = output_capability
@@ -9857,10 +9454,20 @@ def _repair_designer_plan_contract(
                     if isinstance(arguments.get("artifact_spec"), dict)
                     else {}
                 )
-                # The RequirementAnalysis deliverable is authoritative for
-                # immutable file-level values.  Do not retain bindings copied
-                # from a prior failed plan or invented in a Designer draft.
+                # Bind the consumer-facing purpose as well as explicit values.
+                # A numeric binding subset is not a complete configuration schema.
+                spec["scientific_role"] = output_contract.get("scientific_role") or ""
+                for key in ("edit_source", "generation_recipe", "preserve_keywords"):
+                    if output_contract.get(key):
+                        spec[key] = deepcopy(output_contract[key])
+                spec["target_software"] = deepcopy(
+                    output_contract.get("target_software") or spec.get("target_software")
+                    or plan.get("simulation_software") or {}
+                )
+                # Carry the current bindings AND their provenance; model-derived
+                # proposals must not become immutable in the writer contract.
                 bindings = output_contract.get("parameter_bindings")
+                spec["parameter_binding_source"] = output_contract.get("parameter_binding_source") or "analyst_inference"
                 if isinstance(bindings, dict) and bindings:
                     spec["parameter_bindings"] = deepcopy(bindings)
                     spec["parameter_bindings_required"] = True
@@ -9892,8 +9499,8 @@ def _repair_designer_plan_contract(
                     spec["format"] = declared_format
                 stage_id = str(step.get("stage_id") or "").strip()
                 if (
-                    normalize_asset_contract(output_contract).get("acquisition_kind")
-                    == "external_dataset"
+                    normalize_asset_contract(output_contract).get("materialization_kind") == "acquisition_document"
+                    and normalize_asset_contract(output_contract).get("acquisition_kind") == "external_dataset"
                 ):
                     spec["artifact_kind"] = "external_dataset_acquisition"
                     spec["acquisition_contract"] = normalize_acquisition_contract({
@@ -9902,17 +9509,6 @@ def _repair_designer_plan_contract(
                         "acquisition_contract": output_contract.get("acquisition_contract") or {},
                     })
                 arguments["artifact_spec"] = spec
-        # Runtime data acquisition/execution is intentionally not a package
-        # delivery step.  It has its own approved execution contract; keeping
-        # a Designer-invented step here lets it override the confirmed source
-        # strategy and route outside TaskScopeContract.  Drop only steps whose
-        # complete output set is explicitly runtime-only.
-        if step_outputs and all(
-            str(entry.get("fulfillment_kind") or "") == "runtime_output"
-            for entry in step_outputs
-        ):
-            removed_step_ids.add(str(step["id"]))
-            continue
         repaired_steps.append(step)
     if removed_step_ids:
         for step in repaired_steps:
@@ -9920,40 +9516,6 @@ def _repair_designer_plan_contract(
                 dependency for dependency in step.get("dependencies") or []
                 if str(dependency) not in removed_step_ids
             ]
-
-    produced_deliverables = {
-        str(output)
-        for step in repaired_steps
-        for output in step.get("outputs") or []
-    }
-    for deliverable in repaired_deliverables:
-        deliverable_id = str(deliverable.get("id") or "")
-        if (
-            deliverable_id
-            and deliverable_id not in produced_deliverables
-            and deliverable.get("required", True)
-            and normalize_asset_contract(deliverable).get("acquisition_kind") == "external_dataset"
-        ):
-            repaired_steps.append(
-                _generic_artifact_generation_step(deliverable, authoritative)
-            )
-            produced_deliverables.add(deliverable_id)
-
-    # Re-apply the immutable stage context after merging Designer and compiler
-    # steps; a late-added artifact must not lose its owning stage parameters.
-    for step in repaired_steps:
-        if str(step.get("tool_name") or "") != "generate_preprocessing_artifact":
-            continue
-        arguments = step.get("tool_arguments")
-        spec = arguments.get("artifact_spec")
-        if not isinstance(arguments, dict) or not isinstance(spec, dict):
-            continue
-        stage_id = str(step.get("stage_id") or "").strip()
-        stage_context = stage_parameters_by_id.get(stage_id) or {}
-        if stage_context:
-            existing = spec.get("available_stage_parameters")
-            existing = existing if isinstance(existing, dict) else {}
-            spec["available_stage_parameters"] = {**existing, **deepcopy(stage_context)}
 
     # Designer naturally names a prerequisite by the artifact it needs,
     # whereas the executor DAG names prerequisites by generation-step ID.
@@ -9977,7 +9539,7 @@ def _repair_designer_plan_contract(
             if not raw_dependency:
                 continue
             dependency_key = _normalise_asset_key(raw_dependency)
-            output_id = aliases.get(dependency_key, raw_dependency)
+            output_id = aliases.get(dependency_key) or raw_dependency
             resolved = producer_by_output.get(_normalise_asset_key(output_id))
             if resolved:
                 if resolved != step_id and resolved not in canonical_dependencies:
@@ -10025,10 +9587,29 @@ def _repair_designer_plan_contract(
         # the latter from the former so a Designer cannot disconnect a valid
         # producer merely by omitting the duplicate dependency declaration.
         own_outputs = {_normalise_asset_key(value) for value in step.get("outputs") or []}
-        step["inputs"] = [
-            value for value in step.get("inputs") or []
-            if _normalise_asset_key(value) not in own_outputs
+        # Asset dependencies declared by Analyst must survive compilation too;
+        # otherwise reports can be generated before the files they inspect.
+        required_inputs = [
+            dependency for output in step.get("outputs") or []
+            for contract in [required_by_alias.get(_normalise_asset_key(output)) or {}]
+            for dependency in [*(contract.get("depends_on") or []), contract.get("edit_source")]
+            if dependency
         ]
+        # A script is an input asset too. Resolve its ID with the same alias
+        # table and infer its producer edge instead of asking the model to
+        # repeat that relation in three separate fields.
+        arguments = step.get("tool_arguments") or {}
+        if arguments.get("script_asset"):
+            script = str(arguments["script_asset"])
+            arguments["script_asset"] = aliases.get(_normalise_asset_key(script)) or script
+            required_inputs.append(arguments["script_asset"])
+        step["inputs"] = list(dict.fromkeys(
+            aliases.get(_normalise_asset_key(value)) or str(value)
+            for source in [*(step.get("inputs") or []), *required_inputs,
+                           *((step.get("tool_arguments") or {}).get("input_files") or {})]
+            for value in [source.get("id") or source.get("asset_id") if isinstance(source, dict) else source]
+            if value and _normalise_asset_key(value) not in own_outputs
+        ))
         for input_id in step["inputs"]:
             input_key = _normalise_asset_key(input_id)
             producer = producer_by_output.get(input_key)
@@ -10049,92 +9630,6 @@ def _repair_designer_plan_contract(
             "selected_tools": selected_tools,
         }]
 
-    # A question already covered by a concrete public-reference recovery step
-    # is an execution dependency, not a reason to reject the plan itself.
-    # The step still has to succeed before any dependent generation can use
-    # the recovered fact.  Keep credentials, access controls, and genuinely
-    # unplanned questions blocking.
-    has_reference_recovery = any(
-        str(step.get("tool_name") or "") in {"data_web_search", "data_web_download"}
-        and bool(
-            (step.get("tool_arguments") or {}).get("query")
-            or (step.get("tool_arguments") or {}).get("url")
-        )
-        for step in repaired_steps
-    )
-    runtime_access = {
-        str(item.get("id") or "").strip().casefold(): item
-        for item in authoritative.get("runtime_access_dependencies") or []
-        if isinstance(item, dict) and str(item.get("id") or "").strip()
-    }
-    runtime_outputs = {
-        _normalise_asset_key(value)
-        for item in authoritative.get("required_files") or []
-        if isinstance(item, dict)
-        and str(item.get("fulfillment_kind") or "") == "runtime_output"
-        for value in (item.get("id"), item.get("name_or_role"))
-        if _normalise_asset_key(value)
-    }
-    terminal_reference_keys = {
-        key for key, item in required_by_alias.items()
-        if str(item.get("id") or "").strip() in terminal_reference_status_by_id
-    }
-    for question in plan.get("unresolved_questions") or []:
-        if not isinstance(question, dict) or not question.get("blocking", True):
-            continue
-        question_text = _text_blob(question)
-        question_id = str(question.get("id") or "").strip().casefold()
-        question_key = _normalise_asset_key(question_text)
-        if question_id in runtime_access:
-            question["blocking"] = False
-            question.setdefault("resume_contract", runtime_access[question_id].get("resume_contract"))
-            continue
-        if re.search(
-            r"credential|license|restricted|proprietary|controlled[- ]access|"
-            r"凭证|许可|受控|专有",
-            question_text,
-            flags=re.I,
-        ):
-            question["blocking"] = False
-            question.setdefault(
-                "resume_contract",
-                "Provide the authorized runtime access through the execution environment; do not generate or search for credentials.",
-            )
-            continue
-        if any(key and key in question_key for key in runtime_outputs):
-            question["blocking"] = False
-            question.setdefault(
-                "resume_contract",
-                "The named item is a runtime stage output; fulfil it through its declared acquisition or generation contract when the owning stage is executed.",
-            )
-            continue
-        if any(key and key in question_key for key in terminal_reference_keys):
-            question["blocking"] = False
-            question.setdefault(
-                "resume_contract",
-                "The approved reference request already reached a terminal ledger state; preserve that deferred dependency without reopening planning.",
-            )
-            continue
-        external_dependency = next(
-            (
-                item for key, item in required_by_alias.items()
-                if key and key in question_key and normalize_asset_contract(item).get("is_external")
-            ),
-            None,
-        )
-        if external_dependency is not None:
-            question["blocking"] = False
-            question.setdefault(
-                "resume_contract",
-                "Use the stage-owned acquisition document to retrieve and validate this external dependency before downstream execution.",
-            )
-            continue
-        if has_reference_recovery:
-            question["blocking"] = False
-            question.setdefault(
-                "resume_contract",
-                "Run and verify the plan's targeted public-reference recovery step before using the affected value.",
-            )
     if not str(plan.get("task_summary") or "").strip():
         plan["task_summary"] = "Scientific preprocessing execution plan."
     plan.setdefault("reproducibility", {})
@@ -10143,9 +9638,8 @@ def _repair_designer_plan_contract(
     if plan["review_profile"] == "request_bound":
         plan["preprocessing_work_order"] = build_preprocessing_work_order(
             plan["preprocessing_request"],
-            {**plan["requirement_analysis"], "required_files": plan["required_deliverables"]},
+            authoritative,
         )
-        plan["requirement_analysis"]["preprocessing_work_order"] = plan["preprocessing_work_order"]
     return plan
 
 
@@ -10165,7 +9659,12 @@ def _registered_tool_inventory(requirement_analysis: dict[str, Any] | None = Non
         if str(item).strip()
     } if isinstance(scope, dict) else set()
     include_mesh = "mesh_generation" in allowed_capabilities
-    include_structure = "atomic_structure_generation" in allowed_capabilities
+    include_structure = "atomic_structure_generation" in allowed_capabilities and bool(
+        any(normalize_asset_contract(item).get("source_strategy") != "local_generation"
+               and normalize_asset_contract(item).get("representation")
+               in {"structure", "atomic_structure", "crystal_structure", "molecular_structure"}
+               for item in (requirement_analysis or {}).get("required_files") or [] if isinstance(item, dict))
+    )
 
     inventory: list[dict[str, Any]] = []
     for name in all_tool_names():
@@ -10185,16 +9684,29 @@ def _registered_tool_inventory(requirement_analysis: dict[str, Any] | None = Non
             continue
         if name == "recover_atomic_structure" and not include_structure:
             continue
+        if name == "data_web_download" and "dataset_acquisition" not in allowed_capabilities:
+            continue
         schema = definition.parameters_schema if isinstance(definition.parameters_schema, dict) else {}
         properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
         contract: dict[str, Any] = {
             "required_parameters": list(schema.get("required") or []),
-            "parameter_names": list(properties)[:12],
+            "parameter_names": list(properties),
             "parameter_types": {
                 key: value.get("type", "any")
-                for key, value in list(properties.items())[:12]
+                for key, value in properties.items()
                 if isinstance(value, dict)
             },
+            "parameter_enums": {
+                key: value["enum"] for key, value in properties.items()
+                if isinstance(value, dict) and "enum" in value
+            },
+            "parameter_constraints": {
+                key: {field: _compact_text(value[field], 240) if field == "description" else value[field]
+                      for field in ("description", "default", "minimum", "maximum", "minLength") if field in value}
+                for key, value in properties.items() if isinstance(value, dict)
+                and any(field in value for field in ("description", "default", "minimum", "maximum", "minLength"))
+            },
+            **{key: schema[key] for key in ("oneOf", "anyOf", "allOf") if key in schema},
         }
         # These are the only nested contracts a Designer needs to form an
         # executable plan.  Replaying every tool's full JSON schema consumed
@@ -10213,6 +9725,13 @@ def _registered_tool_inventory(requirement_analysis: dict[str, Any] | None = Non
             "risk_level": definition.risk_level,
             "contract": contract,
         }
+        if name == "build_scientific_preprocessing_package":
+            entry["producer_limits"] = (
+                "Stages existing assets and selected solver templates, not a general generator. "
+                "It cannot construct arbitrary particle/atomic coordinates or transform datasets from prose. "
+                "For such outputs use a script writer plus execute_preprocessing_python, or a compatible "
+                "registered structure producer; the executor publishes their files directly."
+            )
         if name == "generate_preprocessing_artifact":
             artifact_properties = (
                 artifact_schema.get("properties")
@@ -10268,14 +9787,16 @@ def _mesh_planning_contracts(
     return {mesh_type: contracts[mesh_type]} if mesh_type in contracts else contracts
 
 
-def _artifact_context(state: State) -> list[dict[str, Any]]:
+def _artifact_context(state: State, artifact_ids: list[str]) -> list[dict[str, Any]]:
     context: list[dict[str, Any]] = []
-    for item in state.list_artifacts()[:20]:
-        record = state.read_artifact(item["id"]) or {}
+    for artifact_id in dict.fromkeys(artifact_ids):
+        record = state.read_artifact(artifact_id)
+        if not record:
+            continue
         context.append({
-            "id": item["id"],
-            "type": item.get("type"),
-            "name": item.get("name"),
+            "id": artifact_id,
+            "type": record.get("type"),
+            "name": record.get("name"),
             "metadata": record.get("metadata") or {},
             "content_hash": canonical_hash({
                 "content": record.get("content"),
@@ -10286,26 +9807,28 @@ def _artifact_context(state: State) -> list[dict[str, Any]]:
     return context
 
 
-def _stable_task_context_identity(task_context: str | dict[str, Any]) -> Any:
-    """Return only durable caller inputs for cache/source identity."""
-    if isinstance(task_context, str):
-        return re.sub(r"\s+", " ", task_context).strip()
-    if not isinstance(task_context, dict):
-        return str(task_context)
-    durable_keys = (
-        "preprocessing_request", "request_id", "request_kind",
-        "research_plan", "research_plan_id", "pre_registration", "plan",
-        "objective", "user_request", "node_inputs", "inspected_inputs",
-        "required_files", "calculation_stages", "task_scope",
-    )
-    durable = {
-        key: task_context.get(key)
-        for key in durable_keys
-        if task_context.get(key) not in (None, "", [], {})
-    }
-    if durable:
-        return durable
-    return {str(key): value for key, value in task_context.items()}
+def _delivered_asset_inventory(state: State) -> list[dict[str, Any]]:
+    """Expose verified files of visible deliveries, without searching the workspace."""
+    inventory = []
+    for item in state.list_artifacts("dataset")[-20:]:
+        record = state.read_artifact(item["id"]) or {}
+        try:
+            payload = json.loads(record.get("content") or "{}")
+            package = Path(payload["package_dir"]).resolve()
+        except (ValueError, TypeError, KeyError):
+            continue
+        for entry in payload.get("files") or (payload.get("data_model") or {}).get("files") or []:
+            if not isinstance(entry, dict) or not entry.get("sha256"):
+                continue
+            path = (package / str(entry.get("path") or "")).resolve()
+            if not path.is_relative_to(package) or not path.is_file():
+                continue
+            with path.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if digest == entry["sha256"]:
+                inventory.append({"path": str(path), "sha256": entry["sha256"],
+                                  "provenance": "verified_delivery:" + item["id"]})
+    return inventory
 
 
 async def analyze_preprocessing_requirements(
@@ -10318,80 +9841,60 @@ async def analyze_preprocessing_requirements(
     **_: Any,
 ) -> dict[str, Any]:
     reference_evidence = _usable_reference_evidence(reference_evidence)
-    context_text = task_context if isinstance(task_context, str) else json.dumps(task_context, ensure_ascii=False, default=str)
     fresh_inspections = await _inspect_paths_from_context(state, task_context)
     input_inspections = _merge_available_input_inspections(state, fresh_inspections)
-    local_asset_inventory = _local_asset_inventory(task_context, input_inspections)
+    local_asset_inventory = _local_asset_inventory({
+        **(task_context if isinstance(task_context, dict) else {}),
+        "available_local_assets": [
+            *((task_context.get("available_local_assets") or []) if isinstance(task_context, dict) else []),
+            *_delivered_asset_inventory(state),
+        ],
+    }, input_inspections)
     compact_inspections = _compact_input_inspections(input_inspections)
-    planning_documents = _local_planning_documents(input_inspections)
-    upstream_artifacts = _artifact_context(state)
-    # Project history is not an implicit input to a new work order.  Reuse is
-    # explicit through PreprocessingRequest.source_artifact_ids.
+    # The driver binds the request once. Inspection/reference evidence may
+    # refine execution but must not create another identity or authority mode.
     request_hint = state.hook_state.get("_data_current_request")
-    if not isinstance(request_hint, dict):
-        request_hint = normalize_preprocessing_request(task_context)
-    declared_sources = {
-        str(value) for value in request_hint.get("source_artifact_ids") or []
-        if str(value).strip()
-    }
-    upstream_artifacts = [
-        item for item in upstream_artifacts
-        if str(item.get("id") or "") in declared_sources
+    preprocessing_request = (
+        deepcopy(request_hint) if isinstance(request_hint, dict)
+        else normalize_preprocessing_request(task_context, state=state)
+    )
+    # Discovery consumes the original dispatcher context above. Requirement
+    # Interpretation keeps caller authority separate from supplied assets and
+    # alleged defects; execution context must not become another specification.
+    analysis_context = requirement_authority_context(task_context, preprocessing_request)
+    analysis_request = (preprocessing_request if analysis_context is task_context
+                        else analysis_context["preprocessing_request"])
+    context_text = (analysis_context if isinstance(analysis_context, str)
+                    else json.dumps(analysis_context, ensure_ascii=False, default=str))
+    declared_sources = [
+        str(value) for value in preprocessing_request.get("source_artifact_ids") or []
+        if str(value).strip() and value != (preprocessing_request.get("authority") or {}).get("artifact_id")
     ]
-    source_stable_id = canonical_hash({
-        "task_context": _stable_task_context_identity(task_context),
-        "planning_documents": [item.get("content_hash") for item in planning_documents],
-        "upstream_artifacts": [
-            item.get("content_hash") for item in upstream_artifacts
-            if str(item.get("type") or "").lower()
-            in {"research_plan", "pre_registration", "preregistration"}
-        ],
-    })
-    preprocessing_request = normalize_preprocessing_request(
-        task_context,
-        source_artifact_ids=[
-            str(item.get("id")) for item in upstream_artifacts
-            if item.get("id") and str(item.get("type") or "").lower()
-            in {"research_plan", "pre_registration", "preregistration"}
-        ],
-        source_stable_id=source_stable_id,
-        authority_kind_hint=(
-            "pre_registration"
-            if any(str(item.get("type") or "").lower() in {"pre_registration", "preregistration"} for item in upstream_artifacts)
-            else "research_plan"
-            if planning_documents or any(str(item.get("type") or "").lower() == "research_plan" for item in upstream_artifacts)
-            else ""
-        ),
+    upstream_artifacts = _artifact_context(state, declared_sources)
+    planning_documents = (
+        _local_planning_documents(input_inspections)
+        if preprocessing_request.get("review_profile") == "plan_bound" else []
     )
     request_errors = validate_preprocessing_request(preprocessing_request)
     if request_errors:
-        return {
-            "status": "needs_input",
+        return {**needs_input_result(
+            question="Correct the preprocessing request: " + "; ".join(request_errors),
+            missing_fields=request_errors,
+        ),
             "reason_code": "invalid_preprocessing_request",
             "preprocessing_request": preprocessing_request,
             "validation_errors": request_errors,
             "resume": "Correct only the cited PreprocessingRequest fields and rerun requirement analysis.",
         }
-    decisive_gaps = decisive_input_gaps(preprocessing_request)
-    if decisive_gaps:
-        return {
-            "status": "needs_input",
-            "reason_code": "decisive_asset_parameters_missing",
-            "preprocessing_request": preprocessing_request,
-            "missing_inputs": decisive_gaps,
-            "resume_contract": {
-                "action": "supply_missing_asset_parameters",
-                "request_id": preprocessing_request["request_id"],
-                "preserve_request_spec_hash": preprocessing_request["request_spec_hash"],
-            },
-        }
-    # Cache by stable plan inputs and ledger evidence, not by mutable model
-    # wording, scratchpad, or reference-result prose.  Reference evidence is
-    # a separate ledger input and must not force the requirement analyst to
-    # re-derive the same plan.
+    # Cache the Analyst's actual inputs. New source evidence can resolve an
+    # access/requirements question and must not return a pre-evidence answer.
+    # Ordinary acquisition progress still uses the planning loop's existing
+    # ledger merge, without re-running the Analyst.
     request_key = canonical_hash({
         "request_id": preprocessing_request["request_id"],
         "request_spec_hash": preprocessing_request["request_spec_hash"],
+        "analysis_authority": analysis_request,
+        "reference_evidence_hashes": sorted({canonical_hash(item) for item in reference_evidence}),
         "revision_context": ({"contract": review_revision_contract,
                               "previous_analysis": previous_requirement_analysis}
                              if review_revision_contract else None),
@@ -10472,12 +9975,13 @@ async def analyze_preprocessing_requirements(
             for item in local_asset_inventory[:20]
         ],
         "local_planning_documents": planning_documents_payload,
-        "preprocessing_request": preprocessing_request,
+        "preprocessing_request": analysis_request,
+        "execution_context": analysis_context.get("execution_context", {}) if isinstance(analysis_context, dict) else {},
         "caller_declared_discipline": _declared_discipline_from_context(request_context) or None,
         "available_upstream_artifacts": compact_artifacts,
         "deterministic_discipline_hint": identify_discipline(
             text_sample=context_text,
-            metadata=task_context if isinstance(task_context, dict) else None,
+            metadata=analysis_context if isinstance(analysis_context, dict) else None,
         ),
         "reference_evidence": [
             {
@@ -10503,7 +10007,8 @@ async def analyze_preprocessing_requirements(
             "Extract the caller-supplied scope and derive the data, parameter files, "
             "execution contracts, and validation inputs required by every declared stage. "
             "Do not invent objectives, hypotheses, stages, sweeps, or acceptance criteria. Keep JSON concise; "
-            "use unresolved_facts for missing evidence instead of expanding prose. Treat local/upstream "
+            "use unresolved_facts for discoverable evidence and input_request for caller-only missing "
+            "access or inputs; never assume unavailable access is configured. Treat local/upstream "
             "information as scope and parameter evidence; emit targeted official-documentation queries for "
             "named applications when their preprocessing conventions are not explicitly supplied. "
             "Treat assets described as existing, ready, supplied, or reusable as inputs rather than requested "
@@ -10519,7 +10024,7 @@ async def analyze_preprocessing_requirements(
         ),
     }
     payload["mesh_parameter_contracts"] = _mesh_planning_contracts(
-        task_context,
+        analysis_context,
         str((payload["deterministic_discipline_hint"] or {}).get("primary_discipline") or ""),
     )
     state.append_transcript(
@@ -10539,21 +10044,11 @@ async def analyze_preprocessing_requirements(
     # remains available for ambiguous prose and for plan-bound inputs whose
     # stages have not yet been extracted, but it is not a mandatory rewrite
     # layer for either request mode.
-    structured_plan_stages = [
-        item for item in _structured_values(
-            _structured_context_object(task_context), "calculation_stages"
-        ) if isinstance(item, dict)
-    ]
     raw = (
-        _compile_explicit_requirements(task_context)
-        if _has_structured_requirement_contract(task_context) and not review_revision_contract
+        _compile_explicit_requirements(analysis_context)
+        if not review_revision_contract
         else None
     )
-    if (
-        preprocessing_request["review_profile"] == "plan_bound"
-        and not structured_plan_stages
-    ):
-        raw = None
     if raw is not None:
         used_model = "deterministic_explicit_request"
         usage = {}
@@ -10581,16 +10076,12 @@ async def analyze_preprocessing_requirements(
             )
         except Exception as exc:
             raw = (
-                _compile_explicit_requirements(task_context)
-                if _has_structured_requirement_contract(task_context) and not review_revision_contract
+                _compile_explicit_requirements(analysis_context)
+                if not review_revision_contract
                 else None
             )
             if raw is None:
-                return {
-                    "status": "retryable_error",
-                    "stop_reason": "requirement_contract_unavailable",
-                    "error": f"Requirement analyst failed: {type(exc).__name__}: {exc}",
-                }
+                return _planning_agent_failure("requirement_analyst", exc)
             used_model = "explicit_upstream_fallback"
             usage = {}
             state.append_transcript(
@@ -10607,30 +10098,19 @@ async def analyze_preprocessing_requirements(
                 required_files=len(raw.get("required_files") or []),
                 calculation_stages=len(raw.get("calculation_stages") or []),
             )
-    analysis = _normalize_requirement_analysis(raw)
-    analysis["preprocessing_request"] = preprocessing_request
+    if raw.get("input_request"):
+        clarification = raw["input_request"]
+        return {**needs_input_result(question=clarification["question"], missing_fields=clarification["missing_fields"],
+                                     context=str(clarification["why_caller_only"])),
+                "preprocessing_request": preprocessing_request}
+    analysis = _normalize_requirement_analysis({**raw, "preprocessing_request": analysis_request})
     analysis = _apply_upstream_discipline_authority(analysis, request_context)
     if reference_evidence:
         analysis["reference_evidence"] = reference_evidence[:20]
-    scoped_analysis = _apply_structured_stage_scope(analysis, task_context)
+    scoped_analysis = _apply_structured_stage_scope(analysis, analysis_context)
     analysis = _normalize_requirement_analysis(
         _scope_analysis_to_data_node(request_context, _apply_local_asset_reuse(scoped_analysis, local_asset_inventory))
     )
-    if str(preprocessing_request.get("delivery_name") or "") == "preprocessing":
-        discipline = analysis.get("discipline") if isinstance(analysis.get("discipline"), dict) else {}
-        software = (
-            analysis.get("simulation_software")
-            if isinstance(analysis.get("simulation_software"), dict) else {}
-        )
-        semantic_name = "_".join(filter(None, (
-            str(discipline.get("primary") or "").strip(),
-            str(analysis.get("calculation_type") or "").strip(),
-            str(software.get("name") or software.get("primary") or "").strip(),
-        )))
-        preprocessing_request = {
-            **preprocessing_request,
-            "delivery_name": _slug(semantic_name, "preprocessing")[:64],
-        }
     analysis["preprocessing_request"] = preprocessing_request
     analysis["preprocessing_work_order"] = build_preprocessing_work_order(
         preprocessing_request,
@@ -10724,22 +10204,24 @@ async def design_preprocessing_plan(
     store = PlanningStore(state)
     previous = store.latest_plan()
     previous_best_plan = extra.get("_previous_best_plan")
-    context_text = (
-        task_context
-        if isinstance(task_context, str)
-        else json.dumps(task_context, ensure_ascii=False, default=str)
-    )
-    discipline_hint = identify_discipline(
-        text_sample=context_text,
-        metadata=task_context if isinstance(task_context, dict) else None,
-    )
     selected_analysis = _best_requirement_analysis(
         requirement_analysis,
         state.hook_state.get("_data_latest_requirement_analysis"),
         _compile_explicit_requirements(task_context),
     )
-    selected_analysis = _ensure_authoritative_caller_assets(task_context, selected_analysis)
     selected_analysis = _scope_analysis_to_data_node(task_context, selected_analysis)
+    authority_context = requirement_authority_context(
+        task_context, selected_analysis.get("preprocessing_request") or {},
+    )
+    context_text = (
+        authority_context
+        if isinstance(authority_context, str)
+        else json.dumps(authority_context, ensure_ascii=False, default=str)
+    )
+    discipline_hint = identify_discipline(
+        text_sample=context_text,
+        metadata=authority_context if isinstance(authority_context, dict) else None,
+    )
     # A previous plan is useful only for a Critic-directed revision.  On an
     # initial design it is commonly a reference-search plan or failed fallback
     # and merely makes the prompt larger and less focused.
@@ -10747,6 +10229,11 @@ async def design_preprocessing_plan(
         previous_best_plan or (previous.get("plan") if previous else None)
         if critique_feedback not in (None, "", {}) else None
     )
+    if isinstance(critique_feedback, dict) and isinstance(critique_feedback.get("rejected_plan"), dict):
+        # Amend the draft that was actually reviewed. Rolling back to the
+        # highest-scoring draft can silently undo earlier successful repairs.
+        previous_plan = critique_feedback["rejected_plan"]
+        critique_feedback = {key: value for key, value in critique_feedback.items() if key != "rejected_plan"}
     revision_focus_step_ids = _critic_referenced_step_ids(critique_feedback, previous_plan)
     revision_focus_stage_ids = _critic_referenced_stage_ids(
         critique_feedback,
@@ -10771,6 +10258,7 @@ async def design_preprocessing_plan(
         "research_plan_declared_discipline": _declared_discipline_from_context(context_text) or None,
         "deterministic_discipline_hint": discipline_hint,
         "requirement_analysis": compact_analysis,
+        "execution_context": authority_context.get("execution_context", {}) if isinstance(authority_context, dict) else {},
         "registered_preprocessing_tools": _registered_tool_inventory(compact_analysis),
         "previous_best_plan_summary": _summarize_previous_plan(
             previous_plan,
@@ -10778,16 +10266,20 @@ async def design_preprocessing_plan(
             revision_focus_stage_ids,
         ),
         "critic_feedback": _compact_critique_feedback(critique_feedback),
+        "python_environment": state.hook_state.get("_data_python_environment"),
         "instruction": (
             "Produce one preprocessing plan JSON. Use local/upstream evidence for scope and explicit "
             "parameters, and targeted official documentation/repository/example evidence for named "
             "application-specific input conventions. When critic_feedback and previous_best_plan_summary are "
             "present, return only replacement deliverables/steps for revision_focus_step_ids or "
             "revision_focus_stage_ids; the framework "
-            "preserves every other approved step verbatim. Do not replace a verified tool binding merely to "
+            "preserves every other approved step verbatim. To delete a cited redundant step, include its ID "
+            "in top-level removed_step_ids and omit it from generation_steps; omission alone preserves it. "
+            "Removing or replacing steps must retain every confirmed required delivery, even if its filename "
+            "was inferred. Provide a replacement producer; never delete or downgrade its requirement. "
+            "Update consumer dependencies/inputs when replacing its outputs. Do not replace a verified tool binding merely to "
             "address an unrelated concern. After requirement reconciliation, repair against the current "
-            "requirement_analysis and original authority; do not restore superseded inferred deliverables "
-            "just because old feedback still mentions them. Do not "
+            "requirement_analysis and original authority. Do not "
             "repeat the full task text; keep reasons and evidence concise."
         ),
     }
@@ -10812,7 +10304,7 @@ async def design_preprocessing_plan(
 
     def deterministic_result(reason: str) -> dict[str, Any] | None:
         """Use the canonical local route when the Analyst graph is complete."""
-        if not _analysis_supports_deterministic_execution(selected_analysis):
+        if critique_feedback not in (None, "", {}) or not _analysis_supports_deterministic_execution(selected_analysis):
             return None
         fallback_plan = _deterministic_designer_fallback_plan(task_context, selected_analysis)
         fallback_plan = _merge_focused_plan_revision(
@@ -10907,37 +10399,26 @@ async def design_preprocessing_plan(
         deterministic = deterministic_result(f"{type(exc).__name__}: {exc}")
         if deterministic is not None:
             return deterministic
-        if not _analysis_supports_deterministic_execution(selected_analysis):
-            return {
-                "status": "retryable_error",
-                "stop_reason": "designer_unavailable_without_structured_requirements",
-                "error": (
-                    f"Designer failed ({type(exc).__name__}) and the caller request does not "
-                    "contain enough validated stages/assets for a deterministic fallback."
-                ),
-            }
-        fallback_plan = _deterministic_designer_fallback_plan(task_context, selected_analysis)
-        fallback_validation = validate_plan(fallback_plan)
         return {
-            "status": "retryable_error",
-            "error": (
-                f"Designer failed and deterministic fallback was invalid: {type(exc).__name__}: {exc}; "
-                f"fallback_errors={fallback_validation['errors']}"
-            ),
-            "next_actions": [
-                "Use targeted reference recovery for missing local evidence.",
-                "Finalize a blocked report if required lawful assets cannot be obtained.",
-                "Do not request human input solely because the planning model failed.",
-            ],
+            **_planning_agent_failure("designer", exc),
+            "rejected_plan": previous_plan,
+            "last_critique": critique_feedback,
         }
-    repaired_plan = _repair_designer_plan_contract(raw, selected_analysis)
-    repaired_plan = _merge_focused_plan_revision(
-        previous_plan,
-        repaired_plan,
-        revision_focus_step_ids,
-        revision_focus_stage_ids,
-        preserve_execution_route,
-    )
+    # A focused amendment omits unchanged plan metadata. Carry it forward
+    # before normalization inserts empty defaults that look like deletions.
+    repaired_plan = _repair_designer_plan_contract({
+        **{key: deepcopy(previous_plan[key]) for key in ("assumptions", "risks", "reproducibility")
+           if isinstance(previous_plan, dict) and key in previous_plan},
+        **raw,
+    }, selected_analysis)
+    try:
+        repaired_plan = _merge_focused_plan_revision(
+            previous_plan, repaired_plan, revision_focus_step_ids,
+            revision_focus_stage_ids, preserve_execution_route,
+        )
+    except ValueError as exc:
+        return {"status": "needs_revision", "plan": previous_plan, "schema_valid": False,
+                "schema_errors": [str(exc)], "persisted": False}
     validation = validate_plan(repaired_plan)
     if not validation["valid"]:
         state.append_transcript(
@@ -11003,10 +10484,6 @@ async def critique_preprocessing_plan(
     expected_plan_kind: str = "preprocessing_generation",
     **_: Any,
 ) -> dict[str, Any]:
-    try:
-        quality_threshold = max(0.0, min(10.0, float(quality_threshold)))
-    except (TypeError, ValueError):
-        quality_threshold = 8.0
     store = PlanningStore(state)
     expected_plan_kind = str(expected_plan_kind or "preprocessing_generation").strip()
     latest = store.get_plan(plan_id) if str(plan_id or "").strip() else store.latest_plan(expected_plan_kind)
@@ -11051,232 +10528,31 @@ async def critique_preprocessing_plan(
         if latest is None:
             latest = store.save_plan(validation["plan"], source="critic_input")
 
-    deterministic_concerns = _deterministic_plan_critical_concerns(latest["plan"])
-    if deterministic_concerns:
-        # Do not let a remote Critic's numeric score override an immutable
-        # graph invariant such as “caller requested a mesh but this plan only
-        # writes coordinates”.  Persist the findings as ordinary critique
-        # feedback so the bounded planning loop can regenerate the affected
-        # plan rather than executing it.
-        raw_gate = {
-            "dimension_scores": {name: 0.0 for name in CRITIC_DIMENSIONS},
-            "critical_concerns": deterministic_concerns,
-            "major_concerns": [],
-            "recommended_changes": deterministic_concerns,
-        }
-        critique = normalize_critique(raw_gate, validation, overall_score_min=float(quality_threshold))
-        record = store.save_critique(critique, latest)
-        emit_progress(state, "critic_done", "revise", score=critique.get("overall_score"))
-        return {
-            "status": "success",
-            "critique_id": record["critique_id"],
-            "critique_path": record["path"],
-            "plan_id": latest["plan_id"],
-            "critique": critique,
-            "approved": False,
-            "model_used": "deterministic_authority_gate",
-            "usage": {},
-            "fallback_used": True,
-            "reused": record.get("reused", False),
-            "next_action": "Regenerate the plan from the immutable caller requirements before execution.",
-        }
-
-    # A high numeric score cannot substitute for a missing external asset.
-    # Keep the plan in revise/recoverable state until an official, concrete
-    # path/revision (or an equivalent committed artifact) is recorded.
-    evidence_gaps = _unverified_external_deliverable_gaps(latest["plan"])
-    if evidence_gaps:
-        raw_gate = {
-            "dimension_scores": {name: 8.0 for name in CRITIC_DIMENSIONS},
-            "critical_concerns": [
-                f"Required external deliverable {gap} has candidate-only evidence; official path/commit is required."
-                for gap in evidence_gaps
-            ],
-            "major_concerns": [],
-            "recommended_changes": [
-                "Execute the approved exact official reference request once and bind its URL/path/commit to the artifact evidence."
-            ],
-        }
-        critique = normalize_critique(raw_gate, validation, overall_score_min=float(quality_threshold))
-        record = store.save_critique(critique, latest)
-        emit_progress(state, "critic_done", str(critique.get("decision") or "revise"), score=critique.get("overall_score"))
-        return {
-            "status": "success",
-            "critique_id": record["critique_id"],
-            "critique_path": record["path"],
-            "plan_id": latest["plan_id"],
-            "critique": critique,
-            "approved": False,
-            "model_used": "deterministic_evidence_gate",
-            "usage": {},
-            "fallback_used": True,
-            "reused": record.get("reused", False),
-            "next_action": "Resolve the external evidence gaps, then request Critic again.",
-        }
-    existing = store.latest_critique(latest["plan_hash"])
-    if store.is_plan_invalidated(str(latest["plan"].get("plan_kind") or "preprocessing_generation"), latest["plan_id"]):
-        # An old Critic score cannot re-authorize a plan that failed execution
-        # or delivery. Keep the original repair feedback active in the loop.
+    # Plan review checks executable contracts. Scientific acceptance belongs to
+    # the actual files, including after a failed producer has been replaced.
+    if store.is_plan_invalidated(actual_plan_kind, latest["plan_id"]):
         return {
             "status": "success", "plan_id": latest["plan_id"], "approved": False,
-            "critique": {
-                "decision": "revise", "overall_score": 0.0,
-                "critical_concerns": ["The fallback reproduced the invalidated plan without fixing its execution or delivery defects."],
-                "recommended_changes": ["Amend the affected step from the original review findings; do not reuse the failed plan's prior approval."],
-            },
+            "critique": {"decision": "revise", "critical_concerns": [
+                "The candidate reproduces an invalidated plan. Correct its failed producer or dependency."]},
             "model_used": "execution_invalidation", "reused": True,
         }
-    existing_threshold = None
-    if existing is not None:
-        try:
-            existing_threshold = float(
-                (existing.get("critique") or {}).get("approval_requirements", {}).get("overall_score_min")
-            )
-        except (TypeError, ValueError):
-            existing_threshold = None
-    if existing is not None and existing_threshold is not None and abs(existing_threshold - quality_threshold) < 1e-9:
-        critique = existing["critique"]
-        return {
-            "status": "success",
-            "critique_id": existing["critique_id"],
-            "critique_path": existing["path"],
-            "plan_id": latest["plan_id"],
-            "critique": critique,
-            "approved": critique.get("decision") == "approve",
-            "model_used": "persisted_critique",
-            "usage": {},
-            "reused": True,
-            "next_action": (
-                "Proceed with the approved plan."
-                if critique.get("decision") == "approve"
-                else "Revise the plan using this critique before requesting another review."
-            ),
-        }
-    # When the designer endpoint is unavailable, its deterministic fallback is
-    # already schema-validated and contains explicit tool-bound execution
-    # steps.  Recalling a separate remote critic merely creates low-score
-    # churn. Geometry prerequisites are handled before planning; any remaining
-    # named data searches are explicit non-blocking DAG steps after mesh review.
-    # Generation and package reviewers remain mandatory execution gates.
-    if str(latest.get("source") or "") in {
-        "designer:deterministic_explicit_requirements",
-        "designer:deterministic_recovery",
-    }:
-        critique = _deterministic_critic_fallback(
-            validation,
-            RuntimeError("remote Designer unavailable; executing verified deterministic fallback"),
-            latest["plan"],
-        )
-        used_model = "deterministic_fallback"
-        usage = {}
-        state.append_transcript(
-            "preprocessing_critic_deterministic_execution_path",
-            plan_id=latest.get("plan_id"),
-            approved=critique.get("decision") == "approve",
-        )
-    else:
-        try:
-            compact_plan = _compact_plan_for_critic(latest["plan"])
-            critic_payload = {
-                "plan": compact_plan,
-                "deterministic_validation": {
-                    "valid": validation.get("valid"),
-                    "errors": (validation.get("errors") or [])[:30],
-                    "warnings": (validation.get("warnings") or [])[:30],
-                },
-                "review_instruction": (
-                    "Review the compact plan projection. Keep each concern under 240 characters, return at most "
-                    "one critical and five major concerns, and omit recommended_changes when decision=approve. "
-                    "Deterministic validation already checked the full persisted plan."
-                ),
-            }
-            critic_payload = _bound_critic_payload(critic_payload)
-            state.append_transcript(
-                "preprocessing_critic_payload_compacted",
-                payload_chars=len(_serialized_payload(critic_payload)),
-                payload_budget_chars=_PLANNING_PAYLOAD_BUDGET_CHARS,
-                deliverable_count=len(latest["plan"].get("required_deliverables") or []),
-                step_count=len(latest["plan"].get("generation_steps") or []),
-            )
-            emit_progress(
-                state,
-                "critic",
-                "reviewing preprocessing plan",
-                plan_id=latest.get("plan_id"),
-            )
-            raw, used_model, usage = await _call_json_agent_resilient(
-                state,
-                role="critic",
-                system_prompt=CRITIC_SYSTEM_PROMPT,
-                payload=critic_payload,
-                model_name=model_name,
-                attempts=_planning_agent_attempts("critic"),
-            )
-        except Exception as exc:
-            critique = _deterministic_critic_fallback(validation, exc, latest["plan"])
-            used_model = "deterministic_fallback"
-            usage = {}
-            state.append_transcript(
-                "preprocessing_critic_fallback",
-                plan_id=latest.get("plan_id"),
-                approved=critique.get("decision") == "approve",
-                reason=f"{type(exc).__name__}: {exc}",
-            )
-            emit_progress(
-                state,
-                "critic_fallback",
-                "using deterministic critic",
-                approved=critique.get("decision") == "approve",
-            )
-        else:
-            # Schema validation owns structural facts; the remote Critic owns
-            # scientific semantics.  Reconcile by dimension instead of
-            # scanning natural-language concerns for an ever-growing list of
-            # "missing/lacks/absent" phrases.
-            raw = _reconcile_framework_covered_critic_concerns(latest["plan"], raw)
-            if validation.get("valid") and not _deterministic_plan_critical_concerns(latest["plan"]):
-                scores = dict(raw.get("dimension_scores") or {})
-                for name in (
-                    "discipline_and_solver",
-                    "deliverable_completeness",
-                    "tool_compatibility",
-                    "verification_and_reproducibility",
-                    "safety",
-                ):
-                    try:
-                        scores[name] = max(7.0, float(scores.get(name, 0.0)))
-                    except (TypeError, ValueError):
-                        scores[name] = 7.0
-                raw = {**raw, "dimension_scores": scores}
-            critique = normalize_critique(raw, validation, overall_score_min=float(quality_threshold))
+    critique = _plan_contract_review(validation, latest["plan"])
+    evidence_gaps = _unverified_external_deliverable_gaps(latest["plan"])
+    if evidence_gaps:
+        concerns = [f"Required external deliverable {gap} has candidate-only evidence; official path/commit is required."
+                    for gap in evidence_gaps]
+        critique["critical_concerns"].extend(concerns)
+        critique["recommended_changes"].extend(concerns)
+        critique["decision"] = "revise"
     record = store.save_critique(critique, latest)
-    deterministic_validation = used_model == "deterministic_fallback"
-    emit_progress(
-        state,
-        "plan_validation_done" if deterministic_validation else "critic_done",
-        (
-            "deterministic contract validation passed"
-            if deterministic_validation and critique.get("decision") == "approve"
-            else str(critique.get("decision") or "unknown")
-        ),
-        **({} if deterministic_validation else {"score": critique.get("overall_score")}),
-    )
+    approved = critique["decision"] == "approve"
+    emit_progress(state, "plan_validation_done", "deterministic contract validation passed" if approved else "revise")
     return {
-        "status": "success",
-        "critique_id": record["critique_id"],
-        "critique_path": record["path"],
-        "plan_id": latest["plan_id"],
-        "critique": critique,
-        "approved": critique["decision"] == "approve",
-        "model_used": used_model,
-        "usage": usage,
-        "fallback_used": used_model == "deterministic_fallback",
-        "reused": record.get("reused", False),
-        "next_action": (
-            "Proceed with the approved plan."
-            if critique["decision"] == "approve"
-            else "Call design_preprocessing_plan again with this critique_feedback."
-        ),
+        "status": "success", "critique_id": record["critique_id"], "critique_path": record["path"],
+        "plan_id": latest["plan_id"], "critique": critique, "approved": approved,
+        "model_used": "deterministic_schema_and_safety", "usage": {}, "reused": record.get("reused", False),
+        "next_action": "Execute the plan and review the actual files." if approved else "Correct the diagnosed contract defects.",
     }
 
 
@@ -11284,14 +10560,14 @@ def _generation_revision_details(execution_feedback: dict[str, Any] | None) -> l
     """Read the canonical executor/reviewer revision contract."""
     if not isinstance(execution_feedback, dict):
         return []
-    contract = execution_feedback.get("revision_contract")
+    contract = pipeline_outcome(execution_feedback).get("revision_contract")
     values = contract.get("issues") if isinstance(contract, dict) else []
     envelope_step_id = str(
         execution_feedback.get("step_id")
         or execution_feedback.get("failed_step")
         or ""
     ).strip()
-    envelope_tool_name = str(execution_feedback.get("tool_name") or "").strip()
+    envelope_tool_name = str(execution_feedback.get("tool_name") or execution_feedback.get("failed_tool") or "").strip()
     details = []
     described_owners: set[str] = set()
     for item in values:
@@ -11315,7 +10591,10 @@ def _generation_revision_details(execution_feedback: dict[str, Any] | None) -> l
         # their nested review items usually carry only file/code fields. Keep
         # that ownership when feeding the existing targeted revision planner;
         # otherwise it cannot know which approved writer to regenerate.
-        if envelope_step_id and not str(detail.get("step_id") or "").strip():
+        if detail.get("repair_kind") == "plan_structure":
+            detail.pop("step_id", None)
+            detail.pop("source_file", None)
+        elif envelope_step_id and not str(detail.get("step_id") or "").strip():
             detail["step_id"] = envelope_step_id
         if envelope_tool_name and not str(detail.get("tool_name") or "").strip():
             detail["tool_name"] = envelope_tool_name
@@ -11336,6 +10615,9 @@ async def run_preprocessing_planning_loop(
     **_: Any,
 ) -> dict[str, Any]:
     emit_progress(state, "planning_loop", "starting preprocessing planning loop")
+    if execution_feedback and pipeline_outcome(execution_feedback)["kind"] == "revise_asset":
+        return {**execution_feedback, "approved": False,
+                "stop_reason": "local_repair_owned_by_executor"}
     # File-content repair stays in the executor. Planning is re-entered only
     # for a remaining asset-DAG or stage-contract revision.
     local_generation_revision = (
@@ -11343,6 +10625,17 @@ async def run_preprocessing_planning_loop(
         and str(execution_feedback.get("status") or "")
         in {"needs_geometry_processing", "needs_revision"}
     )
+    preserve_execution_route = (
+        local_generation_revision
+        and (pipeline_outcome(execution_feedback).get("revision_contract") or {}).get("scope") in {"asset", "step"}
+    )
+    # A missing producer/path is an implementation gap, not new scientific
+    # input. Preserve confirmed values on the first route repair. Reconcile
+    # requirements only after that targeted repair made no progress.
+    requirements_revision = (
+        local_generation_revision and not preserve_execution_route
+        and (planning_feedback or {}).get("stop_reason") == "generation_revision_no_progress"
+    ) or (planning_feedback or {}).get("stop_reason") == "reference_plan_contract_error"
     revision_request: dict[str, Any] | None = None
     revision_base_record: dict[str, Any] | None = None
     revision_attempt_started = False
@@ -11394,47 +10687,35 @@ async def run_preprocessing_planning_loop(
         latest_analysis = _load_requirement_analysis(state)
         if isinstance(latest_analysis, dict):
             state.hook_state["_data_latest_requirement_analysis"] = latest_analysis
-    if (
-        planning_feedback
-        and not local_generation_revision
-        and pipeline_outcome(planning_feedback)["kind"] != "retry_step"
-    ):
-        # Only caller authority is immutable. Reuse the existing Analyst repair
-        # entry when an internal interpretation/plan has resisted amendment.
-        issues = [*_generation_revision_details(execution_feedback),
-                  *_generation_revision_details(planning_feedback)]
-        issues.append({"code": "planning_recovery", "message": str(
-            planning_feedback.get("error") or planning_feedback.get("stop_reason") or "Planning was not approved."),
-            "required_change": "Reconcile the inferred requirements with the original authority and correct the failed local route.",
-            "diagnostic_context": {
-                "schema_errors": planning_feedback.get("schema_errors") or planning_feedback.get("last_schema_errors"),
-                "last_critique": {key: (planning_feedback.get("last_critique") or {}).get(key)
-                                  for key in ("decision", "critical_concerns", "major_concerns", "recommended_changes")},
-            }})
+    if revision_base_record:
+        # A failed amendment is not a new request. Its accepted work order,
+        # including effective producer repairs, remains the revision baseline.
+        latest_analysis = {
+            **(latest_analysis or {}),
+            **((revision_base_record.get("plan") or {}).get("requirement_analysis") or {}),
+        }
+    if requirements_revision:
+        # Unowned/missing assets may require interpretation repair. A rejected
+        # implementation or schema does not reopen already confirmed requirements.
+        issues = _generation_revision_details(execution_feedback or planning_feedback)
         requirements = await analyze_preprocessing_requirements(
             state, task_context=task_context, reference_evidence=reference_evidence,
             model_name=designer_model_name, review_revision_contract=revision_contract(issues, scope="plan"),
             previous_requirement_analysis=latest_analysis,
         )
     elif (
-        local_generation_revision
+        (local_generation_revision or planning_feedback)
         and isinstance(latest_analysis, dict)
     ):
-        # A package-review revision is a repair of the already approved work
-        # order, not a new request.  Re-reading audit/preprocessing_review.json
-        # as fresh caller input can make the Analyst drop the original assets
-        # (the revision run then designs a plan with zero deliverables). Keep
-        # the normalized analysis that produced the approved plan and only
-        # merge newly persisted reference evidence.
+        # Execution and schema diagnostics amend a work order, not the caller
+        # request. Reinterpreting them through Analyst can change asset identity
+        # or erase deliverables. Preserve the analysis and merge only evidence.
         requirement_analysis = _normalize_requirement_analysis(latest_analysis)
         if reference_evidence:
             requirement_analysis = _normalize_requirement_analysis({
                 **requirement_analysis,
                 "reference_evidence": reference_evidence,
             })
-        requirement_analysis = _ensure_authoritative_caller_assets(
-            task_context, requirement_analysis
-        )
         state.hook_state["_data_latest_requirement_analysis"] = requirement_analysis
         _save_requirement_analysis(state, requirement_analysis)
         requirements = {
@@ -11462,7 +10743,6 @@ async def run_preprocessing_planning_loop(
             **latest_analysis,
             "reference_evidence": reference_evidence,
         })
-        requirement_analysis = _ensure_authoritative_caller_assets(task_context, requirement_analysis)
         state.hook_state["_data_latest_requirement_analysis"] = requirement_analysis
         _save_requirement_analysis(state, requirement_analysis)
         requirements = {
@@ -11495,16 +10775,6 @@ async def run_preprocessing_planning_loop(
     if requirements.get("status") != "success":
         return requirements
     requirement_analysis = requirements["requirement_analysis"]
-    # A successful requirement reconciliation supersedes schema feedback
-    # about the discarded interpretation.  Keeping that stale feedback forces
-    # a complete, executable work order back through the remote Designer and
-    # can replace a registered producer with a model-authored helper script.
-    if (
-        planning_feedback
-        and not local_generation_revision
-        and _analysis_supports_deterministic_execution(requirement_analysis)
-    ):
-        planning_feedback = None
     reference_state = PlanningStore(state).load_reference_state()
     persisted_ledger = reference_state.get("gaps") or {}
     if persisted_ledger:
@@ -11617,6 +10887,7 @@ async def run_preprocessing_planning_loop(
             # concerns.  This is consumed by the compact Designer payload and
             # maps public stage/file identities back to their owning steps.
             "feedback": revision_details,
+            "revision_contract": revision_contract(revision_details, scope="plan"),
             "recommended_changes": [
                 str(item.get("recommendation") or item.get("required_change") or item.get("message") or "")
                 for item in revision_details
@@ -11627,8 +10898,11 @@ async def run_preprocessing_planning_loop(
         if local_generation_revision else None
     )
     if planning_feedback:
+        planning_issues = [*revision_details, *_generation_revision_details(planning_feedback)]
         feedback = {**(feedback or {}), "decision": "revise",
-                    "feedback": [*revision_details, *_generation_revision_details(planning_feedback)],
+                    "feedback": planning_issues,
+                    "revision_contract": revision_contract(planning_issues, scope="plan"),
+                    "schema_errors": planning_feedback.get("last_schema_errors") or planning_feedback.get("schema_errors") or [],
                     "critical_concerns": planning_feedback.get("last_schema_errors") or
                                          [planning_feedback.get("error") or planning_feedback.get("stop_reason")],
                     "rejected_plan": planning_feedback.get("rejected_plan")}
@@ -11644,78 +10918,8 @@ async def run_preprocessing_planning_loop(
     stagnant_rounds = 0
     best_issue_count = float("inf")
     seen_schema_signatures: set[tuple[str, ...]] = set()
+    seen_critique_signatures: set[str] = set()
 
-    # A package Reviewer can identify a missing stage-level launch contract
-    # even when no generation step exists yet.  That is a deterministic graph
-    # completion, not a reason to ask Designer and Critic to reconsider every
-    # already-approved artifact.  Reuse the canonical requirement-to-plan
-    # compiler, merge only the cited stages, and validate through the same
-    # schema/safety gate used when the Critic service is unavailable.
-    structural_stage_ids = {
-        str(item.get("stage_id") or "").strip()
-        for item in revision_details
-        if isinstance(item, dict)
-        and str(item.get("stage_id") or "").strip()
-        and not str(item.get("step_id") or "").strip()
-        and str(item.get("code") or "").startswith("stage_")
-    }
-    if local_generation_revision and best_plan and structural_stage_ids:
-        compiled_plan = _deterministic_designer_fallback_plan(
-            task_context,
-            _scope_analysis_to_data_node(task_context, requirement_analysis),
-        )
-        amended_plan = _merge_focused_plan_revision(
-            best_plan,
-            compiled_plan,
-            set(),
-            structural_stage_ids,
-        )
-        amended_validation = validate_plan(amended_plan)
-        amendment_changed = canonical_hash(amended_plan) != str(
-            (revision_request or {}).get("base_plan_hash") or canonical_hash(best_plan)
-        )
-        if amendment_changed and amended_validation["valid"]:
-            local_critique = _deterministic_critic_fallback(
-                amended_validation,
-                RuntimeError("framework-owned targeted stage-contract amendment"),
-                amended_plan,
-            )
-            if local_critique.get("decision") == "approve":
-                revision_store = PlanningStore(state)
-                revision_store.begin_generation_revision(str((revision_request or {}).get("signature") or ""))
-                revision_attempt_started = True
-                record = revision_store.save_plan(
-                    amended_validation["plan"],
-                    source="designer:deterministic_stage_revision",
-                )
-                critique_record = revision_store.save_critique(local_critique, record)
-                revision_store.close_generation_revision(
-                    str((revision_request or {}).get("signature") or ""),
-                    status="approved",
-                )
-                emit_progress(
-                    state,
-                    "planning_approved",
-                    "targeted stage contract completed without full replanning",
-                    iteration=0,
-                    score=local_critique.get("overall_score"),
-                )
-                return {
-                    "status": "success",
-                    "approved": True,
-                    "stop_reason": "deterministic_stage_revision",
-                    "iterations": 0,
-                    "best_plan_id": record["plan_id"],
-                    "best_score": float(local_critique.get("overall_score") or 0.0),
-                    "history": [{
-                        "iteration": 0,
-                        "plan_id": record["plan_id"],
-                        "critique_id": critique_record["critique_id"],
-                        "decision": "approve",
-                        "stage_ids": sorted(structural_stage_ids),
-                    }],
-                    "planning_status": revision_store.approval_status(),
-                }
     for iteration in range(1, limit + 1):
         if local_generation_revision:
             # Schema/Critic retries must retain the original asset findings;
@@ -11728,7 +10932,7 @@ async def run_preprocessing_planning_loop(
         emit_progress(
             state,
             "work_order_validation" if deterministic_candidate else "planning_iteration",
-            "validating executable work order" if deterministic_candidate else "designer/critic cycle",
+            "validating executable work order" if deterministic_candidate else "design and contract validation",
             iteration=iteration,
         )
         designed = await design_preprocessing_plan(
@@ -11738,11 +10942,7 @@ async def run_preprocessing_planning_loop(
             model_name=designer_model_name,
             requirement_analysis=requirement_analysis,
             _previous_best_plan=best_plan,
-            _preserve_execution_route=(
-                local_generation_revision
-                and not planning_feedback
-                and ((execution_feedback or {}).get("revision_contract") or {}).get("scope") != "plan"
-            ),
+            _preserve_execution_route=preserve_execution_route,
         )
         if designed.get("status") == "needs_revision":
             # An invalid Designer draft is not an authority to create a new
@@ -11751,7 +10951,9 @@ async def run_preprocessing_planning_loop(
             # Otherwise one asset can be searched repeatedly under model-made
             # aliases such as F07 / f07_vtable / s3_vtable.
             feedback = {
+                **(feedback or {}),
                 "decision": "revise",
+                "schema_errors": designed.get("schema_errors") or [],
                 "critical_concerns": designed.get("schema_errors") or [],
                 "recommended_changes": designed.get("schema_errors") or [],
                 "rejected_plan": designed.get("plan"),
@@ -11767,94 +10969,31 @@ async def run_preprocessing_planning_loop(
                 "decision": "schema_rejected_before_persistence",
                 "is_best": False,
             })
-            structural_schema_failure = (
-                len(designed.get("schema_errors") or []) >= 12
-                or sum(
-                    "unknown dependencies" in str(error)
-                    for error in designed.get("schema_errors") or []
-                ) >= 4
-            )
-            # Acquisition locators and request-parameter bindings are
-            # mechanical hand-off fields.  They are completed by the
-            # canonical plan normalizer from RequirementAnalysis and consumer
-            # interfaces; asking the model to rewrite the whole plan again
-            # only repeats the same omission.  Continue remote revision only
-            # for errors that require an actual scientific/design choice.
-            errors_are_acquisition_contract = bool(designed.get("schema_errors")) and all(
-                re.search(r"acquisition[_ ]contract|request_parameters missing", str(error), flags=re.I)
-                for error in designed.get("schema_errors") or []
-            )
-            if (
-                not schema_repeated
-                and not structural_schema_failure
-                and not errors_are_acquisition_contract
-            ):
-                continue
-            # Do not spend the remaining iteration budget replaying the same
-            # invalid JSON contract.  The normalized Analyst DAG already
-            # contains the stage/asset facts required for a conservative plan,
-            # so reuse the existing deterministic executor route instead of
-            # returning an empty blocked report.
-            fallback_plan = _deterministic_designer_fallback_plan(
-                task_context,
-                requirement_analysis,
-            )
-            if local_generation_revision:
-                focus = _critic_referenced_step_ids({"feedback": revision_details}, best_plan)
-                fallback_plan = _merge_focused_plan_revision(
-                    best_plan, fallback_plan, focus,
-                    _critic_referenced_stage_ids({"feedback": revision_details}, best_plan, focus),
-                )
-            fallback_validation = validate_plan(fallback_plan)
-            if not fallback_validation["valid"] or _deterministic_plan_critical_concerns(fallback_plan):
-                issues = [{
-                    "code": "plan_schema_invalid",
-                    "message": str(error),
-                    "required_change": str(error),
-                } for error in fallback_validation["errors"][:20]]
+            if schema_repeated:
                 return {
-                    "status": "needs_revision",
-                    "approved": False,
+                    "status": "needs_revision", "approved": False,
                     "stop_reason": "repeated_schema_failure",
-                    "iterations": iteration,
-                    "best_plan_id": best_plan_id,
-                    "best_score": best_score,
-                    "history": history,
-                    "last_schema_errors": list(schema_signature),
+                    "schema_errors": designed.get("schema_errors") or [],
                     "rejected_plan": designed.get("plan"),
-                    "fallback_errors": fallback_validation["errors"][:20],
-                    "revision_contract": revision_contract(issues, scope="plan"),
+                    "revision_contract": revision_contract([
+                        {"code": "plan_schema_invalid", "message": str(error),
+                         "required_change": str(error)}
+                        for error in designed.get("schema_errors") or []
+                    ], scope="plan"),
+                    "history": history,
                     "planning_status": PlanningStore(state).approval_status(),
                 }
-            record = PlanningStore(state).save_plan(
-                fallback_validation["plan"],
-                source="designer:deterministic_recovery",
-            )
-            emit_progress(
-                state,
-                "designer_fallback",
-                "using deterministic recovery after repeated schema failures",
-                plan_id=record["plan_id"],
-            )
-            designed = {
-                "status": "success",
-                "plan_id": record["plan_id"],
-                "plan_hash": record["plan_hash"],
-                "plan_path": record["path"],
-                "plan": record["plan"],
-                "schema_valid": True,
-                "schema_errors": [],
-                "schema_warnings": fallback_validation["warnings"],
-                "model_used": "deterministic_schema_recovery",
-                "usage": {},
-                "fallback_used": True,
-            }
+            continue
         if designed.get("status") != "success":
             return {
                 **designed,
                 "iteration": iteration,
                 "history": history,
             }
+        # Carry the validated contract forward without losing required deliveries.
+        requirement_analysis = designed["plan"]["requirement_analysis"]
+        state.hook_state["_data_latest_requirement_analysis"] = requirement_analysis
+        _save_requirement_analysis(state, requirement_analysis)
         if local_generation_revision and revision_request:
             if not revision_attempt_started:
                 PlanningStore(state).begin_generation_revision(
@@ -11870,8 +11009,7 @@ async def run_preprocessing_planning_loop(
         )
         if reviewed.get("status") != "success":
             return {
-                "status": "retryable_error",
-                "error": "Critic failed during planning loop.",
+                **reviewed,
                 "iteration": iteration,
                 "critic_result": reviewed,
                 "rejected_plan": designed.get("plan"),
@@ -11884,13 +11022,11 @@ async def run_preprocessing_planning_loop(
         # a new search. The reference driver alone advances the persisted
         # ledger, so this loop remains a revision loop rather than reopening
         # the same acquisition under a new model-generated alias.
-        improved = (
-            score > best_score + 0.05
-            or (
-                issue_count < best_issue_count
-                and score >= best_score - 0.25
-            )
-        )
+        signature = canonical_hash(critique.get("revision_contract") or {
+            key: critique.get(key) for key in ("critical_concerns", "major_concerns")
+        })
+        improved = issue_count < best_issue_count or signature not in seen_critique_signatures
+        seen_critique_signatures.add(signature)
         if improved:
             stagnant_rounds = 0
             best_score = score
@@ -11908,6 +11044,8 @@ async def run_preprocessing_planning_loop(
             "is_best": improved,
         })
         if reviewed.get("approved"):
+            best_plan_id = str(reviewed.get("plan_id") or "")
+            best_score = score
             if local_generation_revision and revision_request:
                 PlanningStore(state).close_generation_revision(
                     str(revision_request.get("signature") or ""), status="approved"
@@ -11918,15 +11056,15 @@ async def run_preprocessing_planning_loop(
                 "planning_approved",
                 (
                     "executable work order validated"
-                    if deterministic_validation else "quality threshold met"
+                    if deterministic_validation else "plan defects resolved"
                 ),
                 iteration=iteration,
-                **({} if deterministic_validation else {"score": best_score}),
+                **({} if critique.get("overall_score") is None else {"score": best_score}),
             )
             return {
                 "status": "success",
                 "approved": True,
-                "stop_reason": "quality_threshold_met",
+                "stop_reason": "plan_validated",
                 "iterations": iteration,
                 "best_plan_id": best_plan_id,
                 "best_score": best_score,
@@ -11934,6 +11072,10 @@ async def run_preprocessing_planning_loop(
                 "planning_status": PlanningStore(state).approval_status(),
             }
         feedback = {**critique, "rejected_plan": designed.get("plan")}
+        # A plan Critic may diagnose an unsuitable method in another step.
+        # Permit route changes only within the newly cited repair scope; the
+        # focused merge still preserves unrelated steps and caller authority.
+        preserve_execution_route = False
         if designed.get("reused") or reviewed.get("reused"):
             stagnant_rounds += 1
         if stagnant_rounds:
@@ -11944,17 +11086,19 @@ async def run_preprocessing_planning_loop(
                 str(revision_request.get("signature") or ""),
                 status="not_approved",
             )
-        issues = _generation_revision_details(execution_feedback)
-        # 保留·升 A（planner 重复修订熔断，2026-08-31，措辞照 te:402 范本）。
+        issues = [*_generation_revision_details(execution_feedback), *(
+            ((feedback or {}).get("revision_contract") or {}).get("issues") or [
+            {"code": "plan_review", "message": str(concern)}
+            for key in ("critical_concerns", "major_concerns", "recommended_changes")
+            for concern in (feedback or {}).get(key) or []
+        ])]
         return {
             "status": "needs_revision",
             "approved": False,
             "stop_reason": "targeted_revision_not_approved",
             "error": (
-                "⛔ 算力熔断：本轮定向修订预算已用完且未获通过；原样重跑整份 plan "
-                "只会复现同一结果。两个出口（任选其一即可放行）：① 按 revision_contract "
-                "只改受影响的 plan 范围后重新进入规划；② request_human_input 请人裁决。"
-                "注意：这是执行方式的限制，不是「此事不可行」的判定。"
+                "The targeted plan revision remains unapproved; inspect the latest Critic findings "
+                "and execution diagnostics in revision_contract before continuing."
             ),
             "history": history,
             "last_critique": feedback,
@@ -11965,59 +11109,15 @@ async def run_preprocessing_planning_loop(
                 "required_change": "Amend the affected plan scope while preserving locked authority.",
             }], scope="plan"),
         }
-    # Preserve the best schema-valid Designer plan when the remote Critic has
-    # spent its bounded revision budget.  Rebuilding a fresh deterministic
-    # plan here discarded useful semantic bindings and made a valid external
-    # input look like a missing generation deliverable.  Fall back to the
-    # deterministic compiler only when the best draft itself is not runnable.
-    fallback_plan = best_plan if isinstance(best_plan, dict) else _deterministic_designer_fallback_plan(
-        task_context,
-        requirement_analysis,
-    )
-    fallback_validation = validate_plan(fallback_plan)
-    if (
-        (not fallback_validation["valid"] or _deterministic_plan_critical_concerns(fallback_validation["plan"]))
-        and fallback_plan is best_plan
-    ):
-        fallback_plan = _deterministic_designer_fallback_plan(task_context, requirement_analysis)
-        fallback_validation = validate_plan(fallback_plan)
-    if fallback_validation["valid"] and not _deterministic_plan_critical_concerns(fallback_validation["plan"]):
-        recovery_store = PlanningStore(state)
-        record = recovery_store.save_plan(
-            fallback_validation["plan"],
-            source="designer:deterministic_recovery",
-        )
-        # The bounded remote Critic cycle is complete.  Use the existing
-        # deterministic schema/safety gate for the selected executable draft;
-        # package review remains the file-level semantic gate after execution.
-        recovery_critique = _deterministic_critic_fallback(
-            fallback_validation,
-            RuntimeError("bounded remote Critic revisions made no effective progress"),
-            fallback_validation["plan"],
-        )
-        recovery_store.save_critique(recovery_critique, record)
-        if recovery_critique.get("decision") == "approve":
-            emit_progress(
-                state,
-                "designer_fallback",
-                "using deterministic recovery after repeated critic revisions",
-                plan_id=record["plan_id"],
-            )
-            return {
-                "status": "success",
-                "approved": True,
-                "stop_reason": "deterministic_recovery_after_repeated_revisions",
-                "iterations": len(history),
-                "best_plan_id": record["plan_id"],
-                "best_score": float(recovery_critique.get("overall_score") or 0.0),
-                "history": history,
-                "planning_status": PlanningStore(state).approval_status(),
-            }
-    issues = [{
+    # A valid schema cannot erase known semantic defects. Keep the actual
+    # findings for the controller's existing recovery path, not an approved
+    # copy of a previously rejected plan.
+    issues = ((feedback or {}).get("revision_contract") or {}).get("issues") or [{
         "code": "planning_no_progress",
         "message": str(item),
         "required_change": str(item),
-    } for item in ((feedback or {}).get("critical_concerns") or [])[:20]]
+    } for key in ("critical_concerns", "major_concerns", "recommended_changes")
+        for item in (feedback or {}).get(key) or []]
     # 保留·升 A（planner 停滞/轮次熔断，2026-08-31，措辞照 te:402 范本）。
     return {
         "status": "needs_revision",
@@ -12025,7 +11125,7 @@ async def run_preprocessing_planning_loop(
         "stop_reason": "no_effective_progress" if stagnant_rounds else "max_iterations_reached",
         "error": (
             "⛔ 算力熔断：规划循环"
-            + ("已停滞（评分与未决问题不再改善）" if stagnant_rounds else "已用完本轮迭代预算")
+            + ("已停滞（未决问题重复且未减少）" if stagnant_rounds else "已用完本轮迭代预算")
             + "，继续原样迭代只会再烧预算。两个出口（任选其一即可放行）："
             "① 按 revision_contract/最新 Critic 意见修订受影响的 plan 内容后重新规划；"
             "② request_human_input 说明分歧点请人裁决。"
@@ -12049,9 +11149,12 @@ async def run_preprocessing_planning_loop(
 register_tool(
     ToolDefinition(
         name="run_preprocessing_planning_loop",
+        content_contract={
+            "preserve_keywords": "For an existing-file edit, supply a list of keyword names whose numerical blocks must remain unchanged in the bound baseline.",
+        },
         description=(
-            "Run the complete AI Designer/Critic self-refinement loop. It persists only distinct plans, "
-            "reuses reviews for unchanged plans, and continues while scores or unresolved issues improve."
+            "Analyze the request, design executable producers and validate their contracts. "
+            "Use actual execution and delivery diagnostics for targeted revisions; final assets undergo authority review."
         ),
         parameters_schema={
             "type": "object",

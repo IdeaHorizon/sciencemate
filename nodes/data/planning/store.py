@@ -66,7 +66,7 @@ class PlanningStore:
         plan_hash: str,
         feedback: Any,
     ) -> dict[str, Any]:
-        """Persist one immutable, targeted revision request.
+        """Track a targeted revision while refreshing its latest diagnostic evidence.
 
         Package review is a request to amend a known plan, not permission to
         restart planning. The signature makes unchanged feedback observable;
@@ -88,16 +88,16 @@ class PlanningStore:
             signature = contract["signature"] if contract else canonical_hash({"feedback": signature_feedback})
         path = self.revision_state_path()
         current = self.load_generation_revision()
-        if isinstance(current, dict) and current.get("signature") == signature:
-            return current
+        same_finding = isinstance(current, dict) and current.get("signature") == signature
         record = {
             "signature": signature,
             "base_plan_id": str(plan_id or ""),
             "base_plan_hash": str(plan_hash or ""),
             "feedback": feedback,
-            "attempts": 0,
+            "attempts": current.get("attempts", 0) if same_finding else 0,
             "status": "open",
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": current.get("created_at") if same_finding else datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         self._write(path, record)
         return record

@@ -84,33 +84,33 @@ export function roleAssignmentHint(
   }
   if (!bound) {
     if (candidateCount > 0) {
-      return withImpact(say_({ zh: "已经有连接能担这个角色 —— 选一条就行。",
-                               en: "A connection is authorized for this role — pick one to fill it." }), role);
+      return withImpact(say_({ zh: "选一个已有的连接即可。",
+                               en: "Pick one of the existing connections." }), role);
     }
     const how = canAuthorizeExisting
-      ? say_({ zh: "给这个角色授权一条连接 —— 在你自己的某条连接「编辑」里勾上它，或者新加一条。",
-               en: "Authorize a connection for this role — tick it in Edit on one of your own connections, or register a new one." })
+      ? say_({ zh: "在某个连接的「编辑」里勾选这个角色，或添加新连接。",
+               en: "Tick this role under Edit on one of your connections, or add a new one." })
       : situation.canRegister === false
-        ? say_({ zh: "还没有连接能担这个角色 —— 要这个组织的管理员来加。",
-                 en: "No connection serves this role yet — an administrator of this organisation has to add one." })
+        ? say_({ zh: "还没有可用的连接，请联系组织管理员添加。",
+                 en: "No connection is available yet. Ask an organisation administrator to add one." })
         : situation.hasAnyConnection === false
-          ? say_({ zh: "还没有任何模型连接 —— 加一条来填这个位置。",
-                   en: "There are no model connections yet — register one to fill this slot." })
-          : say_({ zh: "下面每一条都是管理员的、你只读。加一条你自己的连接（自己的地址和密钥）来填这个位置。",
-                   en: "Every connection below belongs to an administrator and is read-only for you. Register your own connection — your own endpoint and API key — to fill this slot yourself." });
+          ? say_({ zh: "还没有模型连接，请先添加一个。",
+                   en: "There are no model connections yet. Add one first." })
+          : say_({ zh: "下面的连接由管理员维护。你也可以添加自己的连接（自己的地址和密钥）。",
+                   en: "The connections below are maintained by an administrator. You can also add your own connection, with your own address and API key." });
     return withImpact(how, role);
   }
   if (role.modality === "vision" && bound.last_vision_ok === false) {
     // 结论按看的人的语言说；探针落库的那句 provider 原话跟在后面当证据。从前有原话就
     // 只给原话，而原话尾巴上拼着一句中文 —— 英文界面的识图角色下面是一行中文。
-    const verdict = say_({ zh: "这条连接拒收了一条带图的消息 —— 密钥没问题，是模型不认图。",
-                           en: "This connection rejected an image message — the credential is fine, the model is not." });
+    const verdict = say_({ zh: "这个模型不支持图片（密钥正常）。",
+                           en: "This model does not support images (the key is fine)." });
     const evidence = (bound.last_vision_detail ?? "").trim();
     return evidence ? `${verdict} (${evidence})` : verdict;
   }
   if (role.modality === "vision" && bound.last_vision_ok == null) {
-    return say_({ zh: "还没确认它认不认图 —— 点「测试」查一次。",
-                  en: "Image support has not been confirmed yet — use Test connection to check." });
+    return say_({ zh: "尚未确认是否支持图片，点「测试」检查。",
+                  en: "Image support has not been confirmed yet. Use Test to check." });
   }
   return say_({ zh: "就绪。", en: "Ready." });
 }

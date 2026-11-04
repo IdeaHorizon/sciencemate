@@ -12,14 +12,14 @@ import { formatRelativeTime } from "@/shared/format/dates";
 import { Skeleton } from "@/shared/ui";
 import { useInterfaceSettings } from "@/features/settings/InterfaceSettingsProvider";
 import { groupSessions } from "../lib/session-adapter";
-import { sessionDriverLabel, sessionRevisionLabel } from "../lib/session-presentation";
+import { sessionDriverLabel } from "../lib/session-presentation";
 import { useProjectSessions, useSessionMutations } from "../hooks/useSessions";
 import type { ResearchSession, SessionDataMode, SessionGroup } from "..";
 import { useT, useLanguage, type Phrase } from "@/shared/i18n";
 
 const GROUP_LABEL: Record<SessionGroup, Phrase> = {
-  running: { zh: "正在跑", en: "Running" },
-  needs_attention: { zh: "需要你", en: "Needs attention" },
+  running: { zh: "运行中", en: "Running" },
+  needs_attention: { zh: "需要处理", en: "Needs attention" },
   unpublished: { zh: "未发布", en: "Unpublished" },
   recent: { zh: "最近", en: "Recent" },
   archived: { zh: "已归档", en: "Archived" },
@@ -34,16 +34,22 @@ const GROUP_ORDER: SessionGroup[] = [
 ];
 
 // 纯函数收 t，不自己够 hook —— 见 shared/i18n/useT.ts 的「纯函数不许用它」。
-function changesLabel(session: ResearchSession, t: (phrase: Phrase) => string) {
-  if (session.conflictCount > 0) return t({ zh: `${session.conflictCount} 处冲突`, en: `${session.conflictCount} conflicts` });
-  if (session.unpublishedChangeCount > 0) {
-    return t({ zh: `${session.unpublishedChangeCount} 处待审`, en: `${session.unpublishedChangeCount} ready to review` });
+type Translate = (phrase: Phrase, fields?: Record<string, string | number>) => string;
+
+function changesLabel(session: ResearchSession, t: Translate) {
+  if (session.conflictCount > 0) {
+    return t({ zh: "{count} 处冲突", en: "{count} conflict{s}" },
+      { count: session.conflictCount, s: session.conflictCount === 1 ? "" : "s" });
   }
-  return t({ zh: "没有待发布的改动", en: "No changes to publish" });
+  if (session.unpublishedChangeCount > 0) {
+    return t({ zh: "{count} 处未发布改动", en: "{count} unpublished change{s}" },
+      { count: session.unpublishedChangeCount, s: session.unpublishedChangeCount === 1 ? "" : "s" });
+  }
+  return t({ zh: "没有未发布的改动", en: "No unpublished changes" });
 }
 
-function usageLabel(session: ResearchSession, t: (phrase: Phrase) => string) {
-  if (session.usage.totalTokens === 0 && session.usage.cost === null) return t({ zh: "没有花费记录", en: "Usage unavailable" });
+function usageLabel(session: ResearchSession, t: Translate) {
+  if (session.usage.totalTokens === 0 && session.usage.cost === null) return t({ zh: "暂无用量记录", en: "No usage recorded" });
   const parts = [`${session.usage.totalTokens.toLocaleString()} tokens`];
   if (session.usage.cost !== null && session.usage.currency) {
     try {
@@ -74,7 +80,8 @@ function SessionRow({
   const t = useT();
   const href = `/projects/${encodeURIComponent(session.projectId)}/sessions/${encodeURIComponent(session.id)}${mode === "fixture" ? "?mode=demo" : ""}`;
   const lang = useLanguage();
-  const driver = sessionDriverLabel(session, lang);
+  // 列表行不显示版本号（main · 短 sha）：那是排查用的信息，留在「会话信息」里。
+  const driver = sessionDriverLabel(session);
   return (
     <div className="session-index-row-wrap">
       <Link className="session-index-row" href={href}>
@@ -85,7 +92,7 @@ function SessionRow({
         </span>
         <span className="session-index-context">
           <strong>{session.execution.label}</strong>
-          <small>{driver ? `${driver} · ` : ""}{sessionRevisionLabel(session, lang)}</small>
+          {driver && <small>{driver}</small>}
         </span>
         <span className="session-index-context session-index-usage">
           <strong>{changesLabel(session, t)}</strong>
@@ -100,7 +107,7 @@ function SessionRow({
           type="button"
           className="session-index-archive"
           disabled={archiving}
-          title={t({ zh: "收起这个会话；里面什么都没发生过的会直接删掉", en: "Put this session away; one where nothing ever happened is deleted outright" })}
+          title={t({ zh: "归档会话。没有任何内容的会话会直接删除。", en: "Archive this session. Sessions with no activity are deleted instead." })}
           onClick={(event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -147,21 +154,20 @@ export function SessionIndex({ projectId, mode = "api" }: { projectId: string; m
     <main className="session-index-page">
       <header className="session-index-header">
         <div>
-          <span>{t({ zh: "项目研究", en: "Project research" })}</span>
           <h1>{t({ zh: "研究会话", en: "Research sessions" })}</h1>
-          <p>{t({ zh: "一条会话装一个研究目标：它的对话、执行过程，以及还没发布的改动。", en: "Each Session keeps one research objective, its conversation, execution history, and changes awaiting publication." })}</p>
+          <p>{t({ zh: "每个会话对应一个研究目标，包含对话、执行记录和未发布的改动。", en: "Each session covers one research goal: its conversation, run history and unpublished changes." })}</p>
         </div>
         {canCreate && (
           <button type="button" onClick={() => void createSession()} disabled={mutations.create.isPending}>
-            <Plus size={13} /> {mutations.create.isPending ? t({ zh: "新建中…", en: "Creating…" }) : t({ zh: "新建会话", en: "New session" })}
+            <Plus size={13} /> {mutations.create.isPending ? t({ zh: "正在新建…", en: "Creating…" }) : t({ zh: "新建会话", en: "New session" })}
           </button>
         )}
       </header>
 
-      {mode === "fixture" && <p className="session-fixture-provenance">{t({ zh: "界面演示数据 · 不是这个项目的真实历史", en: "UI demonstration data · not canonical project history" })}</p>}
+      {mode === "fixture" && <p className="session-fixture-provenance">{t({ zh: "演示数据，不是这个项目的真实记录", en: "Demo data · not this project's real history" })}</p>}
 
       {sessions.isLoading && !sessions.data && (
-        <div className="session-index-loading" aria-label={t({ zh: "正在载入会话", en: "Loading sessions" })}>
+        <div className="session-index-loading" aria-label={t({ zh: "正在加载会话", en: "Loading sessions" })}>
           {Array.from({ length: 5 }).map((_, index) => <Skeleton key={index} height={65} rounded="sm" />)}
         </div>
       )}
@@ -169,16 +175,15 @@ export function SessionIndex({ projectId, mode = "api" }: { projectId: string; m
       {sessions.isError && (
         <div className="session-index-message" role="alert">
           <AlertCircle size={16} />
-          <span><strong>{t({ zh: "读不到会话列表。", en: "Sessions could not be loaded." })}</strong><small>{sessions.error instanceof Error ? sessions.error.message : t({ zh: "平台没有返回一份能用的会话索引。", en: "The platform did not return a usable session index." })}</small></span>
-          <button type="button" onClick={() => void sessions.refetch()}>{t({ zh: "重试", en: "Retries" })}</button>
+          <span><strong>{t({ zh: "无法加载会话列表", en: "Could not load sessions" })}</strong><small>{sessions.error instanceof Error ? sessions.error.message : t({ zh: "请稍后重试。", en: "Please try again later." })}</small></span>
+          <button type="button" onClick={() => void sessions.refetch()}>{t({ zh: "重试", en: "Retry" })}</button>
         </div>
       )}
 
       {sessions.data && sessions.data.length === 0 && (
         <div className="session-index-empty">
-          <span>{t({ zh: "这里还是空的", en: "Nothing here yet" })}</span>
-          <h2>{t({ zh: "从一个研究目标开始", en: "Begin with one research objective" })}</h2>
-          <p>{t({ zh: "你的第一句话就会成为这个项目下的一条会话。它的产出在你审过之前不会发布。", en: "The first message becomes a durable Project Session. Its outputs remain unpublished until reviewed." })}</p>
+          <h2>{t({ zh: "还没有会话", en: "No sessions yet" })}</h2>
+          <p>{t({ zh: "新建一个会话，从一个研究目标开始。", en: "Create a session to start on a research goal." })}</p>
           {canCreate && <button type="button" onClick={() => void createSession()}><Plus size={13} />{t({ zh: "新建会话", en: "New session" })}</button>}
         </div>
       )}

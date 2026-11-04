@@ -107,20 +107,20 @@ export interface BannerModel {
 }
 
 const CODE_LABELS: Record<string, { zh: string; en: string }> = {
-  home_marker_unreadable: { zh: "数据目录里的身份标记读不到", en: "The identity marker in the data directory could not be read" },
-  home_marker_rebuilt: { zh: "重建了数据目录里的身份标记", en: "Rebuilt the identity marker in the data directory" },
-  state_marker_unreadable: { zh: "会话运行目录的身份标记读不到", en: "The session state marker could not be read" },
-  state_marker_rebuilt: { zh: "重建了会话运行目录的身份标记", en: "Rebuilt the session state marker" },
-  state_dir_unavailable: { zh: "会话运行目录建不出来", en: "The session state directory could not be created" },
-  lock_unavailable: { zh: "会话锁文件建不出来", en: "The session lock file could not be created" },
-  activity_file_unavailable: { zh: "活性文件写不进", en: "The activity file could not be written" },
-  durable_sink_unavailable: { zh: "事件没有落盘副本", en: "Events have no on-disk copy" },
-  state_unreadable: { zh: "上次的运行状态读不回来", en: "The previous run state could not be read back" },
-  conversation_unreadable: { zh: "上次的对话读不回来", en: "The previous conversation could not be read back" },
-  transcript_unwritable: { zh: "转录写不进磁盘", en: "The transcript could not be written" },
-  data_root_permissions_changed: { zh: "升级前后数据目录的权限变了", en: "The data directory's permissions changed across the upgrade" },
-  tenant_home_conflict: { zh: "这个数据目录写着别人的身份", en: "This data directory is bound to someone else" },
-  runtime_identity_conflict: { zh: "这个运行目录是别的会话的", en: "This state directory belongs to another session" },
+  home_marker_unreadable: { zh: "无法读取数据目录的身份标记", en: "Could not read the identity marker in the data directory" },
+  home_marker_rebuilt: { zh: "已重建数据目录的身份标记", en: "Rebuilt the identity marker in the data directory" },
+  state_marker_unreadable: { zh: "无法读取会话目录的身份标记", en: "Could not read the session state marker" },
+  state_marker_rebuilt: { zh: "已重建会话目录的身份标记", en: "Rebuilt the session state marker" },
+  state_dir_unavailable: { zh: "无法创建会话目录", en: "Could not create the session directory" },
+  lock_unavailable: { zh: "无法创建会话锁文件", en: "Could not create the session lock file" },
+  activity_file_unavailable: { zh: "无法写入运行状态文件", en: "Could not write the activity file" },
+  durable_sink_unavailable: { zh: "执行记录无法保存到磁盘", en: "Run records could not be saved to disk" },
+  state_unreadable: { zh: "无法读取上次的执行状态", en: "Could not read the previous run state" },
+  conversation_unreadable: { zh: "无法读取上次的对话", en: "Could not read the previous conversation" },
+  transcript_unwritable: { zh: "无法保存对话记录", en: "Could not save the conversation record" },
+  data_root_permissions_changed: { zh: "升级后数据目录的权限发生了变化", en: "The data directory's permissions changed across the upgrade" },
+  tenant_home_conflict: { zh: "数据目录属于其他用户", en: "This data directory belongs to another user" },
+  runtime_identity_conflict: { zh: "会话目录属于另一个会话", en: "This session directory belongs to another session" },
 };
 
 export function codeLabel(code: string, lang: Language): string {
@@ -146,27 +146,27 @@ function factLines(w: EnvironmentWarning, lang: Language): string[] {
   if (w.error) out.push(say({ zh: "错误：{error}", en: "Error: {error}" }, lang, { error: w.error }));
   const f = w.facts;
   if (f) {
-    if (f.error) out.push(say({ zh: "探针：{error}", en: "Probe: {error}" }, lang, { error: f.error }));
-    if (f.exists === false) out.push(say({ zh: "探针：路径不存在", en: "Probe: the path does not exist" }, lang));
+    if (f.error) out.push(say({ zh: "检查结果：{error}", en: "Check: {error}" }, lang, { error: f.error }));
+    if (f.exists === false) out.push(say({ zh: "检查结果：路径不存在", en: "Check: the path does not exist" }, lang));
     if (f.owner) out.push(say({ zh: "所有者：{owner}", en: "Owner: {owner}" }, lang, { owner: f.owner }));
     if (f.mode) out.push(say({ zh: "权限：{mode}", en: "Mode: {mode}" }, lang, { mode: f.mode }));
     if (f.acl) out.push(say({ zh: "ACL：{acl}", en: "ACL: {acl}" }, lang, { acl: f.acl }));
     if (f.reparse_tag) out.push(say({ zh: "reparse：{tag}", en: "Reparse tag: {tag}" }, lang, { tag: f.reparse_tag }));
   }
   if (w.token?.user) {
-    out.push(say({ zh: "本进程：{user}{il}", en: "This process: {user}{il}" }, lang, {
+    out.push(say({ zh: "当前进程：{user}{il}", en: "This process: {user}{il}" }, lang, {
       user: w.token.user,
       il: w.token.integrity ? ` (${w.token.integrity})` : "",
     }));
   }
   const alive = (w.holders ?? []).filter((h) => h.alive === true);
   if (alive.length > 0) {
-    out.push(say({ zh: "本应用派出的进程还握着它：pid {pids}", en: "A process this app spawned still holds it: pid {pids}" }, lang, {
+    out.push(say({ zh: "本应用启动的进程仍在占用：pid {pids}", en: "A process this app spawned still holds it: pid {pids}" }, lang, {
       pids: alive.map((h) => String(h.pid)).join(", "),
     }));
   }
-  if (w.repair_attempt) out.push(say({ zh: "自动修复没成：{why}", en: "Automatic repair failed: {why}" }, lang, { why: w.repair_attempt }));
-  if (w.backup) out.push(say({ zh: "原文件留在：{backup}", en: "The original was kept at: {backup}" }, lang, { backup: w.backup }));
+  if (w.repair_attempt) out.push(say({ zh: "自动修复失败：{why}", en: "Automatic repair failed: {why}" }, lang, { why: w.repair_attempt }));
+  if (w.backup) out.push(say({ zh: "原文件已备份到：{backup}", en: "The original was backed up to: {backup}" }, lang, { backup: w.backup }));
   if (w.repair_result) {
     out.push(say({ zh: "已执行 `{command}`，返回码 {rc}", en: "Ran `{command}`, exit code {rc}" }, lang, {
       command: w.repair_result.command ?? "",
@@ -202,19 +202,19 @@ export function bannerModel(
   let title: string;
   if (env.escalated) {
     title = say({
-      zh: "同一个问题连续出现 {n} 次，平台已自动诊断",
-      en: "The same problem has occurred {n} times in a row; the platform ran a diagnosis",
+      zh: "同一问题已连续出现 {n} 次，诊断结果见详情",
+      en: "The same problem has occurred {n} times in a row; see Details for the diagnosis",
     }, lang, { n: String(env.repeated) });
   } else if (fatal.length > 0) {
-    title = say({ zh: "这一轮没有起跑：{what}", en: "This turn did not start: {what}" }, lang, { what: codeLabel(fatal[0].code, lang) });
+    title = say({ zh: "这次执行未能启动：{what}", en: "This run could not start: {what}" }, lang, { what: codeLabel(fatal[0].code, lang) });
   } else if (degraded.length > 0) {
     title = degraded.length === 1
-      ? say({ zh: "这个会话有一项持久化前提没成立：{what}", en: "One persistence precondition of this session is not met: {what}" }, lang, { what: codeLabel(degraded[0].code, lang) })
-      : say({ zh: "这个会话有 {n} 项持久化前提没成立", en: "{n} persistence preconditions of this session are not met" }, lang, { n: String(degraded.length) });
+      ? say({ zh: "会话数据可能无法保存：{what}", en: "Session data may not be saved: {what}" }, lang, { what: codeLabel(degraded[0].code, lang) })
+      : say({ zh: "会话数据可能无法保存（{n} 个问题）", en: "Session data may not be saved ({n} issues)" }, lang, { n: String(degraded.length) });
   } else {
     title = repaired.length === 1
-      ? say({ zh: "平台修好了一处：{what}", en: "The platform repaired one thing: {what}" }, lang, { what: codeLabel(repaired[0].code, lang) })
-      : say({ zh: "平台修好了 {n} 处", en: "The platform repaired {n} things" }, lang, { n: String(repaired.length) });
+      ? say({ zh: "已自动修复：{what}", en: "Repaired automatically: {what}" }, lang, { what: codeLabel(repaired[0].code, lang) })
+      : say({ zh: "已自动修复 {n} 个问题", en: "{n} issues repaired automatically" }, lang, { n: String(repaired.length) });
   }
 
   const lines: string[] = [];
@@ -225,7 +225,7 @@ export function bannerModel(
     }
   }
   if (degraded.length > 0 && lines.length === 0) {
-    lines.push(say({ zh: "这一轮照常回答，但它记下的东西可能保不住。", en: "This turn still answers, but what it records may not persist." }, lang));
+    lines.push(say({ zh: "这次执行会继续，但记录可能无法保存。", en: "This run will continue, but its records may not be saved." }, lang));
   }
 
   const candidate = [...degraded, ...fatal].find(
@@ -247,9 +247,9 @@ export function bannerModel(
     for (const p of d.paths ?? []) {
       details.push(`  ${p.path ?? "?"}: ${p.error ?? [p.kind, p.owner, p.mode].filter(Boolean).join(" · ") ?? "?"}`);
     }
-    if (d.token?.user) details.push(`  ${say({ zh: "本进程", en: "This process" }, lang)}: ${d.token.user}${d.token.integrity ? ` (${d.token.integrity})` : ""}`);
+    if (d.token?.user) details.push(`  ${say({ zh: "当前进程", en: "This process" }, lang)}: ${d.token.user}${d.token.integrity ? ` (${d.token.integrity})` : ""}`);
     const alive = (d.holders ?? []).filter((h) => h.alive === true);
-    if (alive.length > 0) details.push(`  ${say({ zh: "本应用的进程还活着", en: "Processes of this app still alive" }, lang)}: ${alive.map((h) => h.pid).join(", ")}`);
+    if (alive.length > 0) details.push(`  ${say({ zh: "本应用仍在运行的进程", en: "Processes of this app still alive" }, lang)}: ${alive.map((h) => h.pid).join(", ")}`);
   }
 
   return { tone, title, lines, repair, signature, details, escalated: env.escalated };

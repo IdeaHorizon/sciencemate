@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { cn } from "@/shared/ui";
 import { ChatMessages } from "./ChatMessages";
 import { ChatComposer } from "./ChatComposer";
 import type { ChatMessage, ArtifactLinkContext } from "../types";
@@ -19,8 +18,8 @@ function ChatFailure({ failure }: { failure: ChatFailurePresentation }) {
 }
 
 /**
- * Full-height chat surface — empty state shows a centered greeting + composer,
- * filled state shows messages + bottom-anchored composer.
+ * Full-height chat surface: messages + bottom-anchored composer. With no
+ * messages yet, the greeting and a one-line description sit above the composer.
  */
 export function ChatPage({
   messages,
@@ -40,7 +39,6 @@ export function ChatPage({
   composerContext,
   composerDisabled,
   composerDisabledReason,
-  centerEmpty = true,
   renderMessageAccessory,
   bodyOwnedByAccessory,
   onStop,
@@ -54,9 +52,9 @@ export function ChatPage({
   onSend: () => void;
   sending?: boolean;
   onConceptClick?: (conceptId: string) => void;
-  greeting?: string;
+  greeting: string;
   emptyDescription?: string;
-  placeholder?: string;
+  placeholder: string;
   children?: React.ReactNode;
   error?: ChatFailurePresentation | null;
   /** 输入框**上方**的常驻条（交付物）。与 `composerContext`（输入框内的
@@ -66,7 +64,6 @@ export function ChatPage({
   composerContext?: React.ReactNode;
   composerDisabled?: boolean;
   composerDisabledReason?: string;
-  centerEmpty?: boolean;
   renderMessageAccessory?: (message: ChatMessage) => React.ReactNode;
   /** 这条消息的正文由它的 accessory 负责画 —— 别再画第二遍。 */
   bodyOwnedByAccessory?: (message: ChatMessage) => boolean;
@@ -84,65 +81,44 @@ export function ChatPage({
 
   const realMessages = messages.filter((m) => m.id !== "welcome");
   const isEmpty = mounted && realMessages.length === 0;
-  const centeredEmpty = isEmpty && centerEmpty;
 
   return (
-    <div className={cn("chat-area", centeredEmpty && "chat-empty")}>
-      {centeredEmpty ? (
-        <div className="chat-empty-center">
-          <h2 className="chat-greeting">{greeting ?? t({ zh: "可以开始了吗？", en: "Ready to start?" })}</h2>
-          <ChatComposer
-            draft={draft}
-            setDraft={setDraft}
-            onSend={onSend}
-            sending={sending}
-            placeholder={placeholder}
-            disabled={composerDisabled}
-            context={composerContext}
-            disabledReason={composerDisabledReason}
-            onLongPaste={onLongPaste}
-          />
-          {error && <ChatFailure failure={error} />}
-        </div>
-      ) : (
-        <>
-          <ChatMessages
-            messages={realMessages}
-            sending={sending}
-            artifacts={artifacts}
-            onArtifactClick={onArtifactClick}
-            onConceptClick={onConceptClick}
-            renderMessageAccessory={renderMessageAccessory}
-            bodyOwnedByAccessory={bodyOwnedByAccessory}
-          >
-            {isEmpty && (
-              <div className="chat-session-empty-copy">
-                <h2>{greeting ?? t({ zh: "可以开始了吗？", en: "Ready to start?" })}</h2>
-                <p>{emptyDescription ?? t({ zh: "发出第一条指令，这份研究记录就开始了。", en: "Send the first command to begin this durable research record." })}</p>
-              </div>
-            )}
-            {children}
-          </ChatMessages>
-          <div className="composer-wrapper">
-            {composerAbove}
-            {error && <ChatFailure failure={error} />}
-            <ChatComposer
-              draft={draft}
-              setDraft={setDraft}
-              onSend={onSend}
-              sending={sending}
-              placeholder={placeholder}
-              disabled={composerDisabled}
-              context={composerContext}
-              disabledReason={composerDisabledReason}
-              onStop={onStop}
-              stopping={stopping}
-              canInterject={canInterject}
-              onLongPaste={onLongPaste}
-            />
+    <div className="chat-area">
+      <ChatMessages
+        messages={realMessages}
+        sending={sending}
+        artifacts={artifacts}
+        onArtifactClick={onArtifactClick}
+        onConceptClick={onConceptClick}
+        renderMessageAccessory={renderMessageAccessory}
+        bodyOwnedByAccessory={bodyOwnedByAccessory}
+      >
+        {isEmpty && (
+          <div className="chat-session-empty-copy">
+            <h2>{greeting}</h2>
+            <p>{emptyDescription ?? t({ zh: "发送第一条消息，开始这个会话。", en: "Send your first message to start this session." })}</p>
           </div>
-        </>
-      )}
+        )}
+        {children}
+      </ChatMessages>
+      <div className="composer-wrapper">
+        {composerAbove}
+        {error && <ChatFailure failure={error} />}
+        <ChatComposer
+          draft={draft}
+          setDraft={setDraft}
+          onSend={onSend}
+          sending={sending}
+          placeholder={placeholder}
+          disabled={composerDisabled}
+          context={composerContext}
+          disabledReason={composerDisabledReason}
+          onStop={onStop}
+          stopping={stopping}
+          canInterject={canInterject}
+          onLongPaste={onLongPaste}
+        />
+      </div>
     </div>
   );
 }

@@ -16,6 +16,12 @@ from pathlib import Path
 from urllib.parse import quote
 
 
+def _publication_category(row: dict) -> str:
+    from app.services.harness_imports import harness_module
+    return harness_module("shared.contrib.publication_categories").publication_category(
+        {"pub_type":"journal-article", **row})
+
+
 def _configuration() -> tuple[Path, str, str] | None:
     raw_path = os.getenv("SCHOOL_LIBRARY_DB_PATH", "").strip()
     institution = os.getenv("SCHOOL_LIBRARY_INSTITUTION_ID", "").strip()
@@ -174,7 +180,7 @@ def _school_paper(row: dict) -> dict:
             }.items()
         },
         "metadata_provenance": {"school_library": label},
-        "publication_category": "期刊文章",
+        "publication_category": _publication_category(row),
         "exact_title_match": False,
         "local_pdf_url": None,
         "local_figure_urls": [],

@@ -104,6 +104,11 @@ def _with_always_on_tools(declared: list, node_type: str, skills: list | None = 
         tools.append("load_skill")
     if node_type.startswith("_"):
         return tools
+    # Project settings can assign a skill even when the shipped harness has no
+    # skills of its own. Both discovery and the advertised body must be usable.
+    for tool in ("list_skills", "load_skill"):
+        if tool not in tools:
+            tools.append(tool)
     for t in _ALWAYS_ON_TOOLS:
         if t not in tools:
             tools.append(t)

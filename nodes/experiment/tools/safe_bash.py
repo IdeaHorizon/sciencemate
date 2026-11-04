@@ -74,6 +74,7 @@ from shared.tools.library.python_exec import (
 try:
     from . import bash_semantics as _bash_semantics
     from . import timeout_escalation as _te
+    from .bash_paths import normalize_bash_path, shell_path_resolution
     from .build_resource_guard import (
         build_resource_plan_block, classify_resource_health,
         derive_build_limits, filesystem_free_bytes,
@@ -97,6 +98,7 @@ try:
 except ImportError:  # loaded as top-level ``tools.safe_bash`` by node runtime
     from tools import bash_semantics as _bash_semantics
     from tools import timeout_escalation as _te
+    from tools.bash_paths import normalize_bash_path, shell_path_resolution
     from tools.build_resource_guard import (
         build_resource_plan_block, classify_resource_health,
         derive_build_limits, filesystem_free_bytes,
@@ -1149,9 +1151,9 @@ def _sandbox_roots_for_payload(
         from tools.subprocess_policy import bash_sandbox_roots, python_sandbox_roots
 
     if sandbox_profile == "bash":
-        return bash_sandbox_roots(
+        writable, readonly = bash_sandbox_roots(
             state, cwd, authorized_targets=authorized_targets)
-    if sandbox_profile == "python":
+    elif sandbox_profile == "python":
         writable, readonly = python_sandbox_roots(
             state, cwd, authorized_targets=authorized_targets)
         # The trusted image intentionally contains no repository checkout.
@@ -1160,8 +1162,88 @@ def _sandbox_roots_for_payload(
         repo_root = Path(__file__).resolve().parents[3]
         if repo_root not in readonly:
             readonly.append(repo_root)
-        return writable, readonly
-    raise ValueError("sandbox_profile must be bash or python")
+    else:
+        raise ValueError("sandbox_profile must be bash or python")
+    # A semantic integrity overlay may name the same root we explicitly
+    # rebind rw. Core already approves that precise root; keeping the redundant
+    # ro entry would incorrectly exclude all of it from output capture.
+    readonly = [path for path in readonly
+                if not (path in writable
+                        and _core_grants_external_write(state, str(path), str(path)))]
+    # Core may grant an external rw resource containing a more specific ro
+    # resource. Pass those frozen exclusions to the actual OS backend too.
+    # No manifest means no query: manifest_for would otherwise mint one.
+    if isinstance(getattr(state, "sandbox_manifest", None), Mapping):
+        from core import sandbox
+        manifest = sandbox.manifest_for(state, writable_roots=[])
+        for path, mode in manifest.mounts:
+            if mode == "ro" and Path(path) not in readonly:
+                readonly.append(Path(path))
+    # A broad user resource may contain the interpreter running ScienceMate.
+    # Static command targets do not constrain arbitrary code in installers or
+    # selected environment scripts: protect that runtime in the OS boundary.
+    for value in {sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix}:
+        if not value:
+            continue
+        runtime = Path(value).expanduser().resolve(strict=False)
+        if not runtime.exists():
+            continue
+        kept = []
+        for root in writable:
+            root = Path(root).resolve(strict=False)
+            if root == runtime or root.is_relative_to(runtime):
+                if root not in readonly:
+                    readonly.append(root)
+            else:
+                kept.append(root)
+                if runtime.is_relative_to(root) and runtime not in readonly:
+                    readonly.append(runtime)
+        writable = kept
+
+    # Use Core's exact complement projection on allow-list backends. Freeze
+    # the returned narrow roots here: passing the broad root again would let
+    # a later, over-budget projection degrade the declared read-only boundary.
+    from core import isolation
+    from core.isolation._native import write_layers
+    layers = write_layers(writable, readonly, persistent_cache=False)
+    if (layers.carve_outs()
+            and isolation.Invariant.READONLY_CARVEOUT.value
+            not in isolation.enforcement_snapshot()["enforced"]):
+        allowed, honored, why = layers.allow_list()
+        if not honored:
+            raise ValueError(
+                "readonly_carveout_unavailable: " + why + "; use a more "
+                "precise existing install directory outside that protected child")
+        writable = list(allowed)
+        state.append_transcript(
+            "experiment_write_roots_projected", writable_roots=[str(p) for p in writable],
+            new_entries_unavailable=[str(p) for p in layers.chain_dirs()],
+            reason="Core allow-list complement preserves nested read-only paths")
+    return writable, readonly
+
+
+def _payload_observation_boundary(state: Any, writable: list[Path], readonly: list[Path]) -> dict[str, Any]:
+    """Observe actual Core external resources without inventing semantic roles."""
+    try:
+        from .action_boundary import observation_boundary
+    except ImportError:  # standalone node runtime
+        from tools.action_boundary import observation_boundary
+    boundary = observation_boundary(state, writable, readonly)
+    workspace = project_workspace_dir(state)
+    extra = {Path(root).resolve() for root in writable
+             if (workspace is None or not _under(str(root), str(workspace)))
+             and _core_grants_external_write(state, str(root), str(root))}
+    if not extra:
+        return boundary
+    roots = {Path(root) for root in boundary["roots"]} | extra
+    excluded = {Path(root) for root in boundary["excluded_roots"]}
+    excluded.update(Path(root).resolve() for root in readonly
+                    if any(Path(root).resolve().is_relative_to(base) for base in roots))
+    roots = {root for root in roots if not any(root.is_relative_to(hole) for hole in excluded)}
+    roots = {root for root in roots if not any(root != other and root.is_relative_to(other) for other in roots)}
+    return {**boundary, "roots": sorted(map(str, roots)),
+            "excluded_roots": sorted(map(str, excluded)),
+            "basis": "approved_business_roots_and_core_external_resources"}
 
 
 def _sandbox_roots_error(exc: Exception) -> dict[str, Any]:
@@ -1462,6 +1544,7 @@ async def _exec_and_log(
     cwd: str | None = None,
     resource_profile: str | None = None,
     *,
+    workdir_authority: str | None = None,
     sandbox_profile: str = "bash",
     sandbox_write_targets: list[str] | None = None,
     child_env: Mapping[str, str] | None = None,
@@ -1700,7 +1783,7 @@ async def _exec_and_log(
                 state, tool=tool_name, effect_class=_v3_ab.EXPERIMENT, command=cmd,
                 work_root=effective_cwd,
                 execution_params=execution_params, input_observation=input_observation,
-                observation_boundary=_v3_ab.observation_boundary(state, writable, readonly),
+                observation_boundary=_payload_observation_boundary(state, writable, readonly),
                 output_roots=None)
             if isinstance(_v3_handle, _v3_ab.BoundaryRefusal):
                 return _v3_handle.as_result(tool_name)
@@ -1799,7 +1882,7 @@ async def _exec_and_log(
         "stdout_tail": out[-_STDOUT_TAIL:],
         "stderr_tail": err[-_STDERR_TAIL:],
         "workdir": effective_cwd,
-        "workdir_authority": "cwd_param" if declared_workdir else "inherited",
+        "workdir_authority": workdir_authority or ("cwd_param" if declared_workdir else "inherited"),
         **timing,
     }
     _v3_settle(state_name=("timed_out" if status == "timeout" else
@@ -1872,11 +1955,11 @@ async def _exec_and_log(
                 f"# returncode: {returncode}\n"
                 f"# === STDOUT ({len(out)} chars) ===\n{out}\n"
                 f"# === STDERR ({len(err)} chars) ===\n{err}\n")
-            lp.write_text(content, encoding="utf-8")
+            content_bytes = content.encode("utf-8")
+            lp.write_bytes(content_bytes)
             res["log_path"] = str(lp)
             res["command_sha8"] = command_sha8
-            res["log_sha256"] = hashlib.sha256(
-                content.encode("utf-8")).hexdigest()
+            res["log_sha256"] = hashlib.sha256(content_bytes).hexdigest()
             res["truncated"] = (
                 len(out) > _STDOUT_TAIL or len(err) > _STDERR_TAIL)
     except Exception:
@@ -2091,7 +2174,10 @@ def _cleanup_requests(segment: str, base: str, *,
                 return None
             requests.append((resolved, False))
         else:
-            requests.append((_norm_path(token, base), True))
+            resolved = _norm_shell_path(token, base)
+            if resolved == UNRESOLVED:
+                return None
+            requests.append((resolved, True))
     return requests
 
 
@@ -2239,6 +2325,23 @@ def _norm_path(path: str, base: str | None = None) -> str:
     return os.path.abspath(p)
 
 
+def _norm_shell_path(path: str, base: str | None = None, *, raw: bool = False) -> str:
+    """Resolve shell syntax only; native Core paths keep using _norm_path."""
+    operand = str(path)
+    if raw:
+        try:
+            values = shlex.split(operand, posix=True)
+        except ValueError:
+            return UNRESOLVED
+        if len(values) != 1:
+            return UNRESOLVED
+        operand = values[0]
+    operand = os.path.expandvars(os.path.expanduser(operand))
+    if base == UNRESOLVED and not os.path.isabs(operand):
+        return UNRESOLVED
+    return normalize_bash_path(operand, base) or UNRESOLVED
+
+
 _CMD_VAR_ASSIGN_RE = re.compile(
     r"(?:^|[\n;&|]|\bexport\s+)\s*([A-Za-z_][A-Za-z0-9_]*)="
     r"(\"([^\"]*)\"|'([^']*)'|(\S+))",
@@ -2325,8 +2428,16 @@ def _conflict_paths(state: Any) -> list[str]:
         return []
 
 
-def _global_env_roots() -> list[str]:
+def _global_env_roots(*, remote: bool = False) -> list[str]:
     roots: list[str] = ["/opt", "/usr", "/etc"]
+    if os.name == "nt" and not remote:
+        # Keep the existing native roots and also protect the selected Bash's
+        # actual runtime trees. Resolving operands alone must not turn /usr
+        # from a protected environment into an authorizable unknown directory.
+        roots.extend(
+            resolved for root in tuple(roots)
+            if (resolved := normalize_bash_path(root)) is not None
+        )
     for env_name in ("CONDA_PREFIX", "VIRTUAL_ENV"):
         v = os.getenv(env_name)
         if v:
@@ -2410,7 +2521,9 @@ def _best_matching_root(path: str, roots: list[str]) -> str | None:
     return max(matches, key=lambda r: len(str(Path(r).expanduser())))
 
 
-def _is_git_metadata(path: str) -> bool:
+def _is_git_metadata(path: str, *, remote: bool = False) -> bool:
+    if os.name == "nt" and not remote:
+        path = path.replace("\\", "/").casefold()
     return "/.git/" in path or path.endswith("/.git")
 
 
@@ -2497,14 +2610,63 @@ def _classify_remote_visible_path(
 
 
 
+def _core_grants_external_write(state: Any, target: str, role_root: str) -> bool:
+    """Read existing Core authority; never mint a manifest from a role claim."""
+    raw = getattr(state, "sandbox_manifest", None)
+    if not isinstance(raw, Mapping) or not getattr(state, "sandbox_manifest_hash", None):
+        return False
+    try:
+        from core import sandbox
+
+        paths = [Path(value).expanduser().resolve(strict=False)
+                 for value in (target, role_root)]
+        if any(_under_framework_data(str(path)) for path in paths):
+            return False
+        protected = [Path(__file__).resolve().parents[3]]
+        if getattr(state, "root", None):
+            protected.append(Path(state.root).expanduser().resolve(strict=False))
+        # A Core state root exists for framework persistence, not installation.
+        # A broad role must not expose it or the framework checkout either.
+        if any(path == root or path.is_relative_to(root)
+               or root.is_relative_to(path)
+               for path in paths for root in protected):
+            return False
+        probes = []
+        for path in paths:
+            probe = path
+            while not probe.exists():
+                parent = probe.parent
+                if parent == probe:
+                    return False
+                probe = parent
+            probes.append(probe)
+        # With an existing manifest this API is read-only. Core validates its
+        # hash and the most specific rw/ro mount, including readonly carve-outs.
+        # Separate calls retain each precise probe: Core may otherwise fold a
+        # child into its rw parent before checking a more specific ro mount.
+        for probe in probes:
+            sandbox.manifest_for(state, writable_roots=[probe])
+        roots = sandbox.write_roots_for(state)
+        return all(any(path == root or path.is_relative_to(root) for root in roots)
+                   for path in paths)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+
+
 def _classify_write_path(path: str | Path, state: Any, *, remote: bool = False) -> tuple[str, str]:
     """Classify roles; a Core-resolved Path is literal, not shell syntax."""
     # A target the parser could not pin down is unknown, not absent.  Callers
     # must ask about it; this is the whole point of UNRESOLVED existing.
     if path == UNRESOLVED:
-        return "unresolved_target", (
+        reason = (
             "命令的写入目标无法静态证明（未展开变量 / $(...) / 循环 / xargs / "
             "source 外部脚本 / 中间层通配符）")
+        if os.name == "nt" and not remote:
+            reason += (
+                "；Windows Bash 路径转换不可用时，检查所选 Git Bash 同目录的 "
+                "cygpath.exe，或使用原生盘符路径；/tmp 等随载荷环境变化的挂载"
+                "须使用已知的实际路径；额外授权不能修复路径转换。")
+        return "unresolved_target", reason
 
     # 调度器分配的节点本地 scratch。远端作业里这是合法且常见的写入面：它不是
     # 共享盘上的项目数据，作业结束即回收，而且它**永远不可能成为输出根** ——
@@ -2531,14 +2693,22 @@ def _classify_write_path(path: str | Path, state: Any, *, remote: bool = False) 
             return "invalid_path_role_contract", (
                 f"path-role contract conflict involves {conflict}")
 
-    for root in _global_env_roots():
-        if _under(p, root):
-            return "protected_global_env", f"global environment root: {root}"
+    # The interpreter running ScienceMate is framework state, even when a
+    # caller supplies a broad installation role or an external resource grant.
+    for root in {sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix}:
+        if root and _under(p, root):
+            return "protected_global_env", f"framework Python environment: {root}"
 
-    if _is_git_metadata(p):
+    if _is_git_metadata(p, remote=remote):
         return "protected_source_tree", ".git metadata"
 
     matches = matching_path_roles(p, state)
+    for root in _global_env_roots(remote=remote):
+        if _under(p, root):
+            granted = not remote and _core_grants_external_write(state, p, p)
+            if not granted:
+                return "protected_global_env", f"global environment root: {root}"
+
     semantics = {
         (role.role, role.writable, role.container_only) for role in matches
     }
@@ -2562,15 +2732,17 @@ def _classify_write_path(path: str | Path, state: Any, *, remote: bool = False) 
                 return "remote_path_not_declared", (
                     "remote job writes require a declared run_root, build_root, "
                     f"or source_worktree_root, not {role.role}: {role.path}")
-            # Project-owned source/build/run/dependency roles must remain in
-            # the project workspace. This is a route-validity boundary, so a
-            # role declaration or bypass mode cannot redirect builds to ~.
+            # Project containment is the default; an already frozen Core
+            # grant may authorize a precise external environment. Roles alone
+            # and bypass mode never provide that authority.
             workspace_root = project_workspace_dir(state)
             if (workspace_root is not None
                     and not remote
-                    and not _under(p, str(workspace_root))):
+                    and not _under(p, str(workspace_root))
+                    and not _core_grants_external_write(state, p, role.path)):
                 return "outside_project_workspace", (
-                    f"project writes must stay under workspace: {workspace_root}")
+                    "external project writes require an existing Core write grant; "
+                    f"default workspace: {workspace_root}")
             return "safe", f"writable {role.role}: {role.path}"
         return "protected_path_role", f"read-only {role.role}: {role.path}"
 
@@ -2607,6 +2779,8 @@ def _classify_write_path(path: str | Path, state: Any, *, remote: bool = False) 
     if remote:
         return "remote_path_not_declared", (
             "remote job write target is not under a declared execution root")
+    if _core_grants_external_write(state, p, p):
+        return "safe", "existing Core-authorized external write resource"
     if os.path.isabs(path):
         return "unknown_absolute", "absolute path is not declared writable"
     return "unknown_relative", "relative path outside declared writable root"
@@ -2882,16 +3056,15 @@ def _dependency_install_hint(scope: str, target: str) -> str:
         home = str(Path.home()).rstrip("/")
     except (RuntimeError, OSError):
         return ""
-    if not target or not target.startswith("/"):
+    if not target or not os.path.isabs(target):
         return ""
-    in_home = target == home or target.startswith(home + "/")
-    if not in_home or target == home:
+    if not _under(target, home) or _norm_path(target) == _norm_path(home):
         return ""
     return (
-        "\n📦 这是用户级依赖安装路径。优先级：\n"
-        "  ① 在 run_root 或 build_root 内创建 venv / conda env / spack 环境——首选且隔离；\n"
-        "  ② 不要安装到 `~/.local` 或其他账户级目录：项目 run 会拒绝该写入，避免跨项目复用；\n"
-        "  ③ 系统级安装（sudo / apt / 写 /etc）不属于项目运行路径，应由平台管理员处理。\n"
+        "\n📦 这是用户级依赖安装路径。建议优先使用项目内独立环境以减少依赖冲突；\n"
+        "用户指定且 Core 已授予写权限的账户级目录也可使用，无须迁入项目。\n"
+        "路径角色声明不能代替 Core 授权；不会因当前 PATH 未发现软件就重装或改用别处。\n"
+        "系统目录与 ScienceMate 自身运行环境仍由框架保护，不因这条建议获得写权限。\n"
     )
 
 
@@ -3260,8 +3433,8 @@ def _restore_mv_allowed(tokens: list[str], base: str) -> bool:
     args = [t for t in tokens[1:] if not t.startswith("-")]
     if len(args) != 2:
         return False
-    src = _norm_path(args[0], base)
-    dst = _norm_path(args[1], base)
+    src = _norm_shell_path(args[0], base)
+    dst = _norm_shell_path(args[1], base)
     return any(src.endswith(suf) and dst == src[:-len(suf)] for suf in _RESTORE_SUFFIXES)
 
 
@@ -3454,8 +3627,8 @@ def _containment_target(token: str, base: str) -> str:
         if any(ch in head for ch in _GLOB_CHARS):
             # 通配符出现在中间层（build/*/CMakeCache.txt）→ 覆盖面无法证明
             return UNRESOLVED
-        return _norm_path(head, base) if head else _norm_path(".", base)
-    return _norm_path(token, base)
+        return _norm_shell_path(head, base) if head else _norm_shell_path(".", base)
+    return _norm_shell_path(token, base)
 
 
 def _remote_transfer_operand(token: str) -> bool:
@@ -4974,6 +5147,16 @@ def _strip_exec_wrappers(tokens: list[str]) -> list[str]:
 
 def collect_exec_path_targets(
     cmd: str, cwd: str | None = None,
+    *, local_shell: bool = False,
+) -> list[dict[str, str]]:
+    # Scheduler callers retain their execution-host coordinates. Only local
+    # Bash diagnostics opt into the selected Windows runtime's mount table.
+    with shell_path_resolution(use_msys=local_shell):
+        return _collect_exec_path_targets(cmd, cwd)
+
+
+def _collect_exec_path_targets(
+    cmd: str, cwd: str | None = None,
 ) -> list[dict[str, str]]:
     """收集命令中路径形态的可执行目标（argv0 与 MPI launcher 的启动程序）。
 
@@ -4989,7 +5172,7 @@ def collect_exec_path_targets(
     for segment in _split_shell_segments(expanded):
         cd_match = re.match(rf"^cd\s+({_PATH_TOKEN_RE})\s*$", segment)
         if cd_match:
-            base = _norm_path(cd_match.group(1), base)
+            base = _norm_shell_path(cd_match.group(1), base, raw=True)
             continue
         try:
             tokens = _strip_exec_wrappers(shlex.split(segment, posix=True))
@@ -5007,7 +5190,7 @@ def collect_exec_path_targets(
                 continue
             targets.append({
                 "token": token,
-                "path": _norm_path(token, base),
+                "path": _norm_shell_path(token, base),
                 "segment": segment,
                 "base": base,
             })
@@ -5277,8 +5460,15 @@ def _exec_target_diagnosis(cmd: str, cwd: str | None = None) -> dict | None:
     **已经生效**，文案如实说明。提交链（submit_job payload 预检）仍走
     `_exec_preflight_bash`：那条路上作业一旦进调度器就不可逆，事前判定成立。
     """
-    for entry in collect_exec_path_targets(cmd, cwd):
+    for entry in collect_exec_path_targets(cmd, cwd, local_shell=True):
         token, path, segment = entry["token"], entry["path"], entry["segment"]
+        if path == UNRESOLVED:
+            return {
+                "kind": "exec_path_unresolved", "target": token,
+                "cwd": entry["base"], "segment": segment[:200],
+                "hint": "无法确定此 shell 路径的实际位置，不能据此判断程序未安装；"
+                        "检查所选 Bash 路径转换工具或使用已知的原生绝对路径。",
+            }
         if not os.path.exists(path):
             return {
                 "kind": "exec_target_missing", "target": token, "resolved": path,
@@ -5666,6 +5856,7 @@ async def _runtime_abi_preflight_bash(state: Any, cmd: str,
                                 *,
                                 path_substitutions: dict[str, str] | None = None,
                                 host_verifiable_roots: Sequence[str] | None = None,
+                                local_shell: bool = False,
                                 ) -> dict | None:
     """major run / MPI 启动命令的 ABI 一致性预检。恒返回 None（不拦截）。
 
@@ -5681,11 +5872,13 @@ async def _runtime_abi_preflight_bash(state: Any, cmd: str,
     内的目标不做 ELF/ldd 判定。镜像内路径的 ABI 事实在镜像里，宿主机上同名文件
     是另一个二进制，拿它的 ldd 结果下结论既可能误报也可能漏报。"""
     expanded = _expand_cmd_vars(cmd)
-    base = _command_base_dir(expanded, cwd)
+    with shell_path_resolution(use_msys=local_shell):
+        base = _command_base_dir(expanded, cwd)
     for segment in _split_shell_segments(expanded):
         cd_match = re.match(rf"^cd\s+({_PATH_TOKEN_RE})\s*$", segment)
         if cd_match:
-            base = _norm_path(cd_match.group(1), base)
+            base = (_norm_shell_path(cd_match.group(1), base, raw=True)
+                    if local_shell else _norm_path(cd_match.group(1), base))
             continue
         try:
             tokens = _strip_exec_wrappers(shlex.split(segment, posix=True))
@@ -5703,7 +5896,8 @@ async def _runtime_abi_preflight_bash(state: Any, cmd: str,
             target_tok = argv0
         if not target_tok or "/" not in target_tok:
             continue
-        binary = _norm_path(target_tok, base)
+        binary = (_norm_shell_path(target_tok, base)
+                  if local_shell else _norm_path(target_tok, base))
         probe_binary = (path_substitutions or {}).get(binary, binary)
         if not _host_verifiable_exec_target(probe_binary, host_verifiable_roots):
             continue   # 镜像内目标：宿主机视角的 ELF/ldd 判定对它不成立
@@ -5815,6 +6009,13 @@ async def _runtime_abi_preflight_bash(state: Any, cmd: str,
 def _analyze_shell_path_effects(
     cmd: str, cwd: str | None = None, *, remote: bool = False,
 ) -> list[tuple[str, str]]:
+    with shell_path_resolution(use_msys=not remote):
+        return _project_shell_path_effects(cmd, cwd, remote=remote)
+
+
+def _project_shell_path_effects(
+    cmd: str, cwd: str | None = None, *, remote: bool = False,
+) -> list[tuple[str, str]]:
     """用既有 tree-sitter AST 投影 shell 可见写操作，不授予路径权限。
 
     AST 层负责 pipeline/subshell/function/shell-c 和 cwd 作用域；本层只保留
@@ -5833,8 +6034,9 @@ def _analyze_shell_path_effects(
     )
     effects: list[tuple[str, str]] = []
     dynamic_operand = "*/__hf_dynamic__"
-    remote_projection_root = "/__hf_remote_scratch__"
-    unknown_projection_root = "/__hf_unknown_cwd__"
+    # Internal sentinels use host coordinates, never MSYS mount syntax.
+    remote_projection_root = os.path.abspath("/__hf_remote_scratch__")
+    unknown_projection_root = os.path.abspath("/__hf_unknown_cwd__")
 
     def normalize_projected(
         target: str, projection_root: str, marker: str,
@@ -5989,6 +6191,16 @@ def _analyze_shell_path_effects(
 
 
 def _bash_path_effects_guard(
+    state: Any, cmd: str, cwd: str | None = None, *,
+    remote: bool = False, allow_authorization: bool = True,
+) -> dict | None:
+    with shell_path_resolution(use_msys=not remote):
+        return _check_bash_path_effects(
+            state, cmd, cwd, remote=remote, allow_authorization=allow_authorization,
+        )
+
+
+def _check_bash_path_effects(
     state: Any, cmd: str, cwd: str | None = None, *,
     remote: bool = False, allow_authorization: bool = True,
 ) -> dict | None:
@@ -6657,7 +6869,7 @@ def _lexical_dir(token: str, base: str) -> str | None:
         return None
     if any(ch in token for ch in _GLOB_CHARS):
         return None
-    return _norm_path(token, base)
+    return _norm_shell_path(token, base)
 
 
 def _is_harness_dir(path: str) -> bool:
@@ -7023,41 +7235,29 @@ def _source_recon_status(state: Any, source_path: str) -> str:
     )
 
 
-def _recon_fingerprint(source_path: str, env_path: str | None = None) -> str:
-    """缓存指纹：source commit + dirty + 关键工具链。变化才重新侦察。"""
+def _recon_fingerprint(
+    source_path: str, env_path: str | None = None, *, state: Any = None,
+) -> str:
+    """Cache source and toolchain facts under this run's selected environment."""
     try:
         from .repro_snapshot import _q as _rs_q
         from .repro_snapshot import _run as _rs_run
+        from .env_provision import env_info
     except ImportError:  # pragma: no cover - node runtime import style
         from tools.repro_snapshot import _q as _rs_q
         from tools.repro_snapshot import _run as _rs_run
-    if env_path:
-        old = os.environ.get("EXPERIMENT_ACTIVE_BUILD_ENV")
-        os.environ["EXPERIMENT_ACTIVE_BUILD_ENV"] = str(env_path)
-    else:
-        old = None
-    # source_path 由 _infer_source_path 从模型命令（cd / -C / -S）与声明的源码角色
-    # 推导，是模型可影响的值；而 _rs_run 是 shell=True。不加引号插进去，路径里的
-    # shell 元字符就是任意命令执行 —— 2026-09-08 实测：source_path 取
-    # "/x; touch /tmp/PWNED; echo" 时该文件被创建。repro_snapshot 自己的 15 处
-    # 路径插值一律走 _q()，这里是唯一漏掉的两行。
-    commit = _rs_run(f"git -C {_rs_q(source_path)} rev-parse HEAD 2>/dev/null")
+        from tools.env_provision import env_info
+    # source_path is model-influenced; quote it exactly as repro_snapshot does.
+    # Explicit parameters keep concurrent runs from sharing a process selector.
+    probe = {"env_path": env_path, "state": state}
+    commit = _rs_run(f"git -C {_rs_q(source_path)} rev-parse HEAD 2>/dev/null", **probe)
     dirty = ("D" if _rs_run(
-        f"git -C {_rs_q(source_path)} status --porcelain 2>/dev/null") else "C")
+        f"git -C {_rs_q(source_path)} status --porcelain 2>/dev/null", **probe) else "C")
     tc = _rs_run(
         "command -v gfortran nvfortran ifx icx icpx gcc cmake mpif90 mpifort "
-        "mpiifort mpiifx mpiicc mpiicx mpiicpc mpiicpx 2>/dev/null"
+        "mpiifort mpiifx mpiicc mpiicx mpiicpc mpiicpx 2>/dev/null", **probe
     )
-    if env_path:
-        if old is None:
-            os.environ.pop("EXPERIMENT_ACTIVE_BUILD_ENV", None)
-        else:
-            os.environ["EXPERIMENT_ACTIVE_BUILD_ENV"] = old
-    try:
-        from tools.env_provision import env_info
-        env_sha = env_info(env_path)["sha256"] if env_path else "no-env"
-    except Exception:
-        env_sha = "unknown-env"
+    env_sha = env_info(env_path)["sha256"] if env_path else "no-env"
     return hashlib.sha256(f"{source_path}|{commit}|{dirty}|{tc}|{env_sha}".encode()).hexdigest()[:16]
 
 
@@ -7129,30 +7329,19 @@ def _autogen_build_graph(state: Any, source_path: str, build_root: str | None = 
     try:
         from tools.build_graph import extract_build_dag
         from tools.build_state import initialize_from_dag, load_state_from_hook, mark_stale_on_env_change, save_state_to_hook
-        from tools.env_provision import ensure_env_script
+        try:
+            from .env_provision import existing_env_script
+        except ImportError:  # Core also loads tools directly from their file.
+            from tools.env_provision import existing_env_script
     except Exception:
         return None
-    env_path = None
-    try:
-        env_path = ensure_env_script(state).get("env_path")
-    except Exception:
-        env_path = None
+    env_path = (existing_env_script(state) or {}).get("env_path")
     recon = _latest_artifact(state, "source_recon") or {}
     recon_content = _content_obj(recon)
     if not isinstance(recon_content, dict):
         recon_content = {}
-    old_env = os.environ.get("EXPERIMENT_ACTIVE_BUILD_ENV")
-    if env_path:
-        os.environ["EXPERIMENT_ACTIVE_BUILD_ENV"] = str(env_path)
-    try:
-        graph = extract_build_dag(
-            source_path, state=state, build_root=build_root, source_recon=recon_content)
-    finally:
-        if env_path:
-            if old_env is None:
-                os.environ.pop("EXPERIMENT_ACTIVE_BUILD_ENV", None)
-            else:
-                os.environ["EXPERIMENT_ACTIVE_BUILD_ENV"] = old_env
+    graph = extract_build_dag(
+        source_path, state=state, build_root=build_root, source_recon=recon_content)
     graph = _merge_confirmed_edges(state, graph)
     try:
         state.save_artifact("build_graph", f"build_graph_{state.run_id}",
@@ -7196,22 +7385,20 @@ def _autogen_recon(
         return "failed_no_source_path"
     env_meta: dict[str, Any] = {}
     env_path = None
-    if bench_enabled("provision_first"):
-        try:
-            from tools.env_provision import ensure_env_script
-            env_meta = ensure_env_script(state)
-            env_path = env_meta.get("env_path")
-        except Exception:
-            env_meta = {}
-            env_path = None
-    fp = _recon_fingerprint(source_path, env_path=env_path)
+    try:
+        from .env_provision import existing_env_script
+    except ImportError:  # standalone node runtime
+        from tools.env_provision import existing_env_script
+    env_meta = existing_env_script(state) or {}
+    env_path = env_meta.get("env_path")
+    fp = _recon_fingerprint(source_path, env_path=env_path, state=state)
     arts = {a.get("type") for a in state.list_artifacts()}
     if (state.hook_state.get(_GATE_FP_KEY) == fp
             and "platform_profile" in arts and _has_matching_source_recon(state, source_path)):
         return "cached"   # 指纹未变且 artifact 在 → 不重扫
     from tools.repro_snapshot import collect_platform_profile
     from tools.source_recon import scan_source
-    prof = collect_platform_profile(env_path=env_path) if env_path else collect_platform_profile()
+    prof = collect_platform_profile(env_path=env_path, state=state) if env_path else collect_platform_profile()
     recon = scan_source(source_path)
     meta = {"source_path": source_path, "fingerprint": fp,
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -9568,8 +9755,35 @@ def _bash_static_validity_block(
     return None
 
 
+def _declared_workdir(cwd: str | None, workdir: str | None) -> tuple[str | None, str | None, dict | None]:
+    """Accept the observed workdir spelling without bypassing cwd validation.
+
+    This compatibility alias may be removed once callers consistently use cwd.
+    Both spellings are checked before any action or directory materialization.
+    """
+    has_cwd = cwd is not None and bool(str(cwd).strip())
+    if workdir is not None and (not isinstance(workdir, str) or not workdir.strip()):
+        return None, None, {
+            "status": "error", "reason": "invalid_workdir_argument",
+            "error": "workdir must be a non-empty directory path; use cwd or workdir.",
+            "payload_spawned": False,
+        }
+    if workdir is not None and has_cwd:
+        if os.path.normcase(os.path.normpath(str(cwd))) != os.path.normcase(os.path.normpath(workdir)):
+            return None, None, {
+                "status": "error", "reason": "conflicting_workdir_arguments",
+                "error": "cwd and workdir specify different paths; supply one path or make them match.",
+                "payload_spawned": False,
+            }
+    if has_cwd:
+        return cwd, "cwd_param", None
+    if workdir is not None:
+        return workdir, "workdir_param", None
+    return cwd, None, None
+
+
 async def _safe_run_bash(state: Any, cmd: str, timeout: int = 600,
-                         cwd: str | None = None, **kw: Any) -> dict:
+                         cwd: str | None = None, workdir: str | None = None, **kw: Any) -> dict:
     """boundary deny → scope guard → 高危门 → build gate → 自执行落盘。
 
     顺序原则：确定性节点边界检查（scope_guard）先于交互式框架门——
@@ -9589,6 +9803,9 @@ async def _safe_run_bash(state: Any, cmd: str, timeout: int = 600,
     execution_stage = str(kw.get("stage") or "diagnostic").strip().lower()
     if execution_stage not in set(EXECUTION_STAGES):
         execution_stage = "diagnostic"
+    cwd, declared_authority, workdir_argument_error = _declared_workdir(cwd, workdir)
+    if workdir_argument_error is not None:
+        return workdir_argument_error
     execution_params = kw.get("execution_params")
     bash_write_targets: list[str] = []
     bash_sandbox_roots: tuple[list[Path], list[Path]] | None = None
@@ -9817,7 +10034,8 @@ async def _safe_run_bash(state: Any, cmd: str, timeout: int = 600,
         # 系统目录二进制跳过），探查命令近零开销；裸启动 HPC 二进制也覆盖
         # （2026-07-13 混 MPI 挂死正是不带 mpirun 的裸启动）
         try:
-            abi_block = await _runtime_abi_preflight_bash(state, cmd, cwd=cwd)
+            abi_block = await _runtime_abi_preflight_bash(
+                state, cmd, cwd=cwd, local_shell=True)
         except Exception as exc:
             return _framework_guard_failure(
                 "runtime_abi_preflight", exc,
@@ -9900,22 +10118,30 @@ async def _safe_run_bash(state: Any, cmd: str, timeout: int = 600,
         else:
             return gate
 
-    if bench_enabled("provision_first") and _is_major_build_or_run(cmd):
+    try:
         try:
-            from tools.env_provision import ensure_env_script, wrap_command
-            env_meta = ensure_env_script(state)
-            wrapped = wrap_command(cmd, env_meta.get("env_path"))
-            if wrapped != cmd:
-                try:
-                    state.append_transcript("build_env_wrapped",
-                                            env_path=env_meta.get("env_path"),
-                                            env_sha256=env_meta.get("sha256"),
-                                            cmd_preview=cmd[:200])
-                except Exception:
-                    pass
-                cmd = wrapped
-        except Exception:
-            pass
+            from .env_provision import existing_env_script, wrap_command
+        except ImportError:  # standalone node runtime
+            from tools.env_provision import existing_env_script, wrap_command
+        env_meta = existing_env_script(state) or {}
+        wrapped = wrap_command(cmd, env_meta.get("env_path"))
+        if wrapped != cmd:
+            try:
+                state.append_transcript("build_env_wrapped",
+                                        env_path=env_meta.get("env_path"),
+                                        env_sha256=env_meta.get("sha256"),
+                                        cmd_preview=cmd[:200])
+            except Exception:
+                pass
+            cmd = wrapped
+    except Exception as exc:
+        return {
+            "status": "error", "reason": "selected_build_environment_unavailable",
+            "error": f"The selected build environment could not be loaded: {type(exc).__name__}: {exc}",
+            "payload_spawned": False, "retryable_after_change": True,
+            "blocker": {"kind": "selected_build_environment_unavailable",
+                        "next_step": "Repair the selected environment; the command was not run under a different environment."},
+        }
 
     try:
         if bash_sandbox_roots is None:
@@ -9936,6 +10162,7 @@ async def _safe_run_bash(state: Any, cmd: str, timeout: int = 600,
     exec_kwargs: dict[str, Any] = {
         "timeout": timeout,
         "cwd": cwd,
+        "workdir_authority": declared_authority or workdir_resolution,
         "sandbox_profile": "bash",
         "sandbox_write_targets": bash_write_targets,
         "sandbox_roots": bash_sandbox_roots,
@@ -10040,6 +10267,7 @@ if _orig_def is not None:
             "directory is rejected before the shell starts, so create it in a separate "
             "mkdir-only call first."),
     }
+    _safe_props["workdir"] = {"type": "string", "description": "Alias for cwd; both must specify the same directory if provided."}
     # 运行时仍接受旧 caller 传入的 stage，但不再向 LLM 暴露；它不能参与授权、
     # 工作目录、科学身份或资源强度判断。词表唯一真相源仍是
     # preflight.EXECUTION_STAGES（判决拆除·第三波「一题一答」），只是这里
@@ -10072,6 +10300,7 @@ else:  # pragma: no cover —— 框架未先注册时的兜底（理论不该�
                     "cmd": {"type": "string"},
                     "timeout": {"type": "integer", "default": 600},
                     "cwd": {"type": "string"},
+                    "workdir": {"type": "string", "description": "Alias for cwd; both must match if provided."},
                     "resource_profile": {
                         "type": "string",
                         "enum": ["small", "standard", "large", "xlarge"],
@@ -11146,7 +11375,7 @@ def _managed_python_workload_block() -> dict[str, Any]:
 
 
 async def _safe_execute_python(state: Any, code: str, timeout: int = 300,
-                               cwd: str | None = None, **kw: Any) -> dict:
+                               cwd: str | None = None, workdir: str | None = None, **kw: Any) -> dict:
     """scope/route/path → 高危门 → Core Docker RunAttempt。
 
     顺序与 safe_run_bash 一致：确定性边界检查先于交互式框架门。
@@ -11159,6 +11388,9 @@ async def _safe_execute_python(state: Any, code: str, timeout: int = 300,
     execution_stage = str(kw.get("stage") or "diagnostic").strip().lower()
     if execution_stage not in set(EXECUTION_STAGES):
         execution_stage = "diagnostic"
+    cwd, declared_authority, workdir_argument_error = _declared_workdir(cwd, workdir)
+    if workdir_argument_error is not None:
+        return workdir_argument_error
     execution_params = kw.get("execution_params")
     effect_projection = _project_python_effects(code)
     process_launches = list(effect_projection.process_launches)
@@ -11431,6 +11663,7 @@ async def _safe_execute_python(state: Any, code: str, timeout: int = 300,
             python_cmd,
             timeout=timeout,
             cwd=cwd,
+            workdir_authority=declared_authority or workdir_resolution,
             tool_name="safe_execute_python",
             sandbox_profile="python",
             sandbox_write_targets=python_sandbox_targets,
@@ -11494,6 +11727,7 @@ if _orig_py_def is not None:
             "implicitly; create it in a separate mkdir-only call first. Same contract as "
             "safe_run_bash."),
     }
+    _safe_py_props["workdir"] = {"type": "string", "description": "Alias for cwd; both must specify the same directory if provided."}
     _safe_py_props.pop("stage", None)
     _safe_py_props.pop("requirements", None)
     _safe_py_props.pop("resource_profile", None)
@@ -11528,6 +11762,7 @@ else:  # pragma: no cover —— 框架未先注册时的兜底
                     "code": {"type": "string"},
                     "timeout": {"type": "integer", "default": 300},
                     "cwd": {"type": "string"},
+                    "workdir": {"type": "string", "description": "Alias for cwd; both must match if provided."},
                     "resource_profile": {
                         "type": "string",
                         "enum": ["small", "standard", "large", "xlarge"],

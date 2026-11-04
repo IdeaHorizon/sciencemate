@@ -383,20 +383,26 @@ def _completed_scientific_child(
     return child, summary, manifest, records
 
 
-def _assert_parent_review_pause(
+def _assert_parent_review_returned(
     parent: State,
     result: dict,
     *,
     child_run_id: str,
     manifest: dict,
 ) -> None:
-    assert result["status"] == "pause", result
-    assert isinstance(result.get("pause_event"), dict), result
+    assert result["status"] == "success", result
+    assert result["child_status"] == "completed", result
+    assert "pause_event" not in result, result
     flow, = [
         entry
         for entry in (parent.hook_state.get("pending_post_node_flow") or [])
         if entry.get("producing_run_id") == child_run_id
     ]
+    assert flow["decision_state"] == "pending", flow
+    review = result["post_node_review"]
+    assert review["review_state"] == "failed_awaiting_human", review
+    assert review["critique"] is None, review
+    assert "callable_nodes" in review["review_failed_reason"], review
     trio_ids = {
         manifest["artifacts"][role]["id"]
         for role in ("raw_results", "clean_results", "experiment_log")
@@ -564,10 +570,9 @@ async def test_parent_selected_contract_revisions_deliver_fresh_scientific_resul
         value=7,
         output=outputs[7],
     )
-    # The Experiment delivery itself is successful.  The real parent post-node
-    # flow cannot dispatch its Reviewer in this fixture, so run_node honestly
-    # pauses rather than treating that outer boundary as Experiment failure.
-    _assert_parent_review_pause(
+    # The Experiment delivery succeeded.  This fixture cannot dispatch Reviewer;
+    # return that failure to the orchestrator so it can explain before presenting.
+    _assert_parent_review_returned(
         fixture["parent"],
         first,
         child_run_id=child_v1.run_id,
@@ -662,7 +667,7 @@ async def test_parent_selected_contract_revisions_deliver_fresh_scientific_resul
         value=8,
         output=outputs[8],
     )
-    _assert_parent_review_pause(
+    _assert_parent_review_returned(
         parent_v2,
         second,
         child_run_id=child_v2.run_id,
@@ -868,7 +873,7 @@ async def test_parent_contract_revision_requires_a_fresh_exact_dispatch(
     raises=KnownManifestOnlyCompletionGap,
     reason=(
         "a text-only Experiment run currently lets its framework run_manifest "
-        "count as delivery and advances the post-producing flow"
+        "count as completed delivery"
     ),
 )
 @pytest.mark.asyncio
@@ -976,9 +981,17 @@ async def test_text_only_manifest_cannot_complete_or_advance_downstream(
         and row.get("producing_run_id") == child_end["child_run_id"]
     ]
     assert len(skipped) == 1, skipped
-    assert len(deferred) == 1, deferred
-    assert result.get("decision_state") == "deferred_to_analysis", result
+    # Review now returns to the orchestrator before any decision/defer action.
+    # The independent manifest-only child-completion defect is still present.
+    assert not deferred, deferred
+    assert result["status"] == "success", result
+    assert result["post_node_review"]["review_state"] == "skipped", result
+    flow, = [
+        entry
+        for entry in parent.hook_state.get("pending_post_node_flow", [])
+        if entry.get("producing_run_id") == child_end["child_run_id"]
+    ]
+    assert flow["decision_state"] == "pending", flow
     raise KnownManifestOnlyCompletionGap(
-        "run_manifest alone completed a zero-action Experiment run and advanced "
-        "the post-producing decision flow"
+        "run_manifest alone completed a zero-action Experiment run"
     )

@@ -38,8 +38,8 @@ export function MissingModelBanner() {
   return (
     <div className="missing-model-banner" role="status">
       <TriangleAlert size={15} aria-hidden="true" />
-      <span>{t({ zh: "还没有可用的模型 —— 会话开不了工。", en: "No model is available yet — sessions cannot run." })}</span>
-      <Link href="/settings/models">{t({ zh: "去配置", en: "Configure" })}</Link>
+      <span>{t({ zh: "还没有可用的模型，无法开始会话。", en: "No model is available yet, so sessions cannot start." })}</span>
+      <Link href="/settings/models">{t({ zh: "配置模型", en: "Set up a model" })}</Link>
     </div>
   );
 }

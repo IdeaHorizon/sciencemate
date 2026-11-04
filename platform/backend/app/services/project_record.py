@@ -91,7 +91,9 @@ async def commit_project_record(
             "provider": item.provider,
             "endpoint": item.endpoint,
             "workspace_binding": item.workspace_binding,
-            "config": item.config or {},
+            # Hardware is an observation with an expiry, not a grant in Git.
+            "config": {key: value for key, value in (item.config or {}).items()
+                       if item.provider != "ssh" or key != "observation"},
             "secret_ref": item.secret_ref,
             "enabled": item.is_enabled,
         }
@@ -168,7 +170,7 @@ async def commit_project_record(
             status_code=409,
             detail={"code": "project_governance_commit_failed", "message": said_of(
                 exc, language_for(user), otherwise={
-                    "zh": "项目设置没能提交：{why}", "en": "The project settings could not be committed: {why}"})},
+                    "zh": "保存项目设置失败，请稍后重试。", "en": "Could not save the project settings. Try again later."})},
         ) from exc
     if commit == git_base_commit:
         # 什么都没变 —— `commit_main_files` 幂等返回同一个 sha。

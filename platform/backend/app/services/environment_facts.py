@@ -165,7 +165,7 @@ def _windows_acl_text(target: Path) -> str | None:  # pragma: no cover - 只在 
 
 def probe_token() -> dict[str, Any]:
     """本进程是谁、在什么完整性级别上跑。"""
-    token: dict[str, Any] = {"user": None, "uid": None, "integrity": None, "error": None}
+    token: dict[str, Any] = {"user": None, "uid": None, "integrity": None, "elevated": None, "error": None}
     try:
         token["user"] = getpass.getuser()
     except Exception as exc:  # noqa: BLE001
@@ -173,39 +173,59 @@ def probe_token() -> dict[str, Any]:
     if hasattr(os, "getuid"):
         token["uid"] = os.getuid()
     if sys.platform == "win32":  # pragma: no cover
-        token["integrity"] = _windows_integrity_level()
+        token["integrity"], token["elevated"] = _windows_token_level()
     return token
 
 
-def _windows_integrity_level() -> str | None:  # pragma: no cover - 只在 Windows 上跑
+def _windows_token_level() -> tuple[str | None, bool | None]:  # pragma: no cover - 只在 Windows 上跑
+    """(完整性级别, 是否提权)。提权是本应用目录权限出问题最常见的前因（以管理员身份跑过一次，
+    之后 owner 是 Administrators 的东西正常运行读不了），所以和完整性级别一起报。
+
+    每个 Win32 函数都声明 argtypes/restype：没声明时 64 位指针按 32 位 int 传，SID 地址被截断，
+    这里曾经一直静默返回 None（lujy 10-29 诊断包里 ``integrity: null``）。
+    """
     try:
         import ctypes
         from ctypes import wintypes as w
 
         advapi = ctypes.WinDLL("advapi32", use_last_error=True)
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        token = w.HANDLE()
-        TOKEN_QUERY, TokenIntegrityLevel = 0x0008, 25
         kernel.GetCurrentProcess.restype = w.HANDLE
+        kernel.CloseHandle.argtypes = [w.HANDLE]
+        advapi.OpenProcessToken.argtypes = [w.HANDLE, w.DWORD, ctypes.POINTER(w.HANDLE)]
+        advapi.OpenProcessToken.restype = w.BOOL
+        advapi.GetTokenInformation.argtypes = [w.HANDLE, ctypes.c_int, ctypes.c_void_p, w.DWORD,
+                                               ctypes.POINTER(w.DWORD)]
+        advapi.GetTokenInformation.restype = w.BOOL
+        advapi.GetSidSubAuthorityCount.argtypes = [ctypes.c_void_p]
+        advapi.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
+        advapi.GetSidSubAuthority.argtypes = [ctypes.c_void_p, w.DWORD]
+        advapi.GetSidSubAuthority.restype = ctypes.POINTER(w.DWORD)
+        token = w.HANDLE()
+        TOKEN_QUERY, TokenElevation, TokenIntegrityLevel = 0x0008, 20, 25
         if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)):
-            return None
+            return None, None
         try:
+            level = None
             needed = w.DWORD()
             advapi.GetTokenInformation(token, TokenIntegrityLevel, None, 0, ctypes.byref(needed))
             buffer = ctypes.create_string_buffer(needed.value)
-            if not advapi.GetTokenInformation(token, TokenIntegrityLevel, buffer, needed, ctypes.byref(needed)):
-                return None
-            sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
-            advapi.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
-            advapi.GetSidSubAuthority.restype = ctypes.POINTER(w.DWORD)
-            count = advapi.GetSidSubAuthorityCount(sid)[0]
-            rid = advapi.GetSidSubAuthority(sid, count - 1)[0]
-            return {0x1000: "Low", 0x2000: "Medium", 0x2100: "MediumPlus", 0x3000: "High", 0x4000: "System"}.get(
-                rid, hex(rid))
+            if advapi.GetTokenInformation(token, TokenIntegrityLevel, buffer, needed, ctypes.byref(needed)):
+                sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
+                count = advapi.GetSidSubAuthorityCount(sid)[0]
+                rid = advapi.GetSidSubAuthority(sid, count - 1)[0]
+                level = {0x1000: "Low", 0x2000: "Medium", 0x2100: "MediumPlus", 0x3000: "High",
+                         0x4000: "System"}.get(rid, hex(rid))
+            elevated = None
+            flag = w.DWORD()
+            if advapi.GetTokenInformation(token, TokenElevation, ctypes.byref(flag), ctypes.sizeof(flag),
+                                          ctypes.byref(needed)):
+                elevated = bool(flag.value)
+            return level, elevated
         finally:
             kernel.CloseHandle(token)
     except Exception:  # noqa: BLE001
-        return None
+        return None, None
 
 
 def own_holders(project_id: str, session_id: str) -> list[dict[str, Any]]:
@@ -259,9 +279,9 @@ def repair_proposal(code: str, *, error: str | None, data_root: Path | str) -> d
         return {
             "kind": "needs_administrator", "argv": None, "command": None,
             "changes": {
-                "zh": "这是部署问题：目录与身份的对应在后端日志里，要管理员判断是搬了家还是真串了人",
-                "en": "This is a deployment problem: which directory belongs to whom is in the backend log; "
-                      "an administrator has to judge whether it was moved or really got mixed up",
+                "zh": "这是部署问题，需要管理员处理，详细信息在后端日志中。",
+                "en": "This is a deployment problem that an administrator needs to handle; the details are "
+                      "in the backend log.",
             },
             "reversible": None, "needs_consent": True, "automatic": False,
         }
@@ -269,17 +289,26 @@ def repair_proposal(code: str, *, error: str | None, data_root: Path | str) -> d
         root = str(data_root)
         if sys.platform == "win32":
             argv = ["icacls", root, "/reset", "/T", "/C"]
-            changes = {"zh": "把数据根下所有对象的权限恢复成从上级目录继承；只影响本应用的数据目录",
-                       "en": "Resets everything under the data root to inherit permissions from its parent "
-                             "folder; only this app's data directory is affected"}
+            # 以管理员身份跑：读不了的那些文件多半是本应用**以管理员身份运行时**建的，属主是
+            # Administrators，DACL 只认属主（Python 的 mkdir(0o700)，见 shared.lib.private_files.
+            # mkdir_private）—— 用户本人未提权连改权限的资格都没有，照原样跑只会「处理 0 个文件」
+            # （lujy 10-29 诊断包里的 repair_attempt 就是这一句）。
+            changes = {"zh": "将本应用数据目录中所有文件的权限恢复为继承上级目录，不影响其他文件。"
+                             "会弹出一次 Windows 管理员确认：读不了的文件是以管理员身份运行本应用时建的，"
+                             "只有管理员能改回来。",
+                       "en": "Resets permissions on everything in this app's data folder to inherit from its "
+                             "parent folder. Nothing else is affected. Windows will ask for administrator "
+                             "approval once: the unreadable files were created while the app ran as "
+                             "administrator, and only an administrator can change them back."}
         else:
             argv = ["chmod", "-R", "u+rwX", root]
-            changes = {"zh": "给数据根下所有对象加回本用户的读写权限；只影响本应用的数据目录",
-                       "en": "Gives your user read and write access back on everything under the data root; "
-                             "only this app's data directory is affected"}
+            changes = {"zh": "为当前用户恢复本应用数据目录中所有文件的读写权限。不影响其他文件。",
+                       "en": "Restores your read and write access to everything in this app's data folder. "
+                             "Nothing else is affected."}
         return {
             "kind": "reset_data_root_permissions", "argv": argv, "command": _shell_text(argv),
             "changes": changes, "reversible": False, "needs_consent": True, "automatic": False,
+            "elevated": sys.platform == "win32",
         }
     return None
 
@@ -333,7 +362,7 @@ def hard_failure_warning(exc: BaseException, *, project_id: str, session_id: str
     warning = {
         "type": "environment_warning", "code": code, "capability": "identity", "severity": "fatal",
         "path": str(path) if path else None, "error": str(exc)[:2000],
-        "consequences": [{"zh": "这一轮没有起跑", "en": "This run did not start"}],
+        "consequences": [{"zh": "这次执行没有开始", "en": "This run did not start"}],
         "details": {k: v for k, v in (details or {}).items() if k != "path"} if isinstance(details, dict) else None,
     }
     return enrich_warning(warning, project_id=project_id, session_id=session_id, data_root=data_root)

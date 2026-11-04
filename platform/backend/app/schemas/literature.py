@@ -74,14 +74,27 @@ class LiteraturePaperOut(LiteratureModel):
     metadata_provenance: dict = Field(default_factory=dict)
     publication_category: str
     exact_title_match: bool = False
+    relevance_assessment: dict = Field(default_factory=dict)
     local_pdf_url: str | None = None
     local_figure_urls: list[str] = Field(default_factory=list)
     school_holdings: list[str] = Field(default_factory=list)
     school_fulltext_url: str | None = None
 
 
+class LiteratureQueryGroup(LiteratureModel):
+    label: str
+    en: str
+    zh: str
+
+
+class LiteraturePlanOut(LiteratureModel):
+    query: str
+    search_plan: list[LiteratureQueryGroup]
+
+
 class LiteratureSearchOut(LiteratureModel):
     query: str
+    search_plan: list[LiteratureQueryGroup] = Field(default_factory=list)
     decomposed_queries: list[str] = Field(default_factory=list)
     papers: list[LiteraturePaperOut] = Field(default_factory=list)
     total: int = 0

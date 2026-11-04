@@ -31,7 +31,7 @@ const SEGMENT_LABEL: Record<keyof ContextWindowBreakdown, { zh: string; en: stri
   tools: { zh: "工具定义", en: "Tool definitions" },
   toolResults: { zh: "工具结果", en: "Tool results" },
   summary: { zh: "压缩摘要", en: "Compaction summary" },
-  framework: { zh: "框架提示", en: "Framework notices" },
+  framework: { zh: "平台提示", en: "Platform notices" },
   conversation: { zh: "对话", en: "Conversation" },
 };
 
@@ -67,7 +67,7 @@ export function contextWindowChipTitle(
   );
   return state.compressAt === null
     ? head
-    : `${head} · ${t({ zh: "到 {at} 自动压缩", en: "auto-compacts at {at}" }, { at: percentLabel(state.compressAt) })}`;
+    : `${head} · ${t({ zh: "达到 {at} 时自动压缩", en: "auto-compacts at {at}" }, { at: percentLabel(state.compressAt) })}`;
 }
 
 /** 弹层正文。 */
@@ -109,7 +109,7 @@ export function ContextWindowPanel({ state }: { state: ContextWindowState }) {
           <i
             className="context-window-mark"
             style={{ left: `${state.compressAt * 100}%` }}
-            title={t({ zh: "自动压缩线 {at}", en: "Auto-compaction line at {at}" }, { at: percentLabel(state.compressAt) })}
+            title={t({ zh: "自动压缩阈值 {at}", en: "Auto-compaction threshold {at}" }, { at: percentLabel(state.compressAt) })}
           />
         )}
       </div>
@@ -133,15 +133,15 @@ export function ContextWindowPanel({ state }: { state: ContextWindowState }) {
             {state.compressAt === null
               ? t({ zh: "已关闭", en: "Off" })
               : tone === "ok"
-                ? t({ zh: "到 {at} 时", en: "at {at}" }, { at: percentLabel(state.compressAt) })
+                ? t({ zh: "达到 {at} 时", en: "at {at}" }, { at: percentLabel(state.compressAt) })
                 : tone === "near"
-                  ? t({ zh: "已过 {at} 线，下一轮开始时压", en: "past the {at} line; compacts when the next turn starts" }, { at: percentLabel(state.compressAt) })
-                  : t({ zh: "已过 {at} 紧急线，下一轮强制压", en: "past the {at} emergency line; forced at the next turn" }, { at: percentLabel(state.emergencyAt ?? 1) })}
+                  ? t({ zh: "已超过 {at}，下次请求模型前压缩", en: "Past {at}; compacts before the next model request" }, { at: percentLabel(state.compressAt) })
+                  : t({ zh: "已超过 {at} 上限，下次请求模型前强制压缩", en: "Past the {at} limit; compaction is forced before the next model request" }, { at: percentLabel(state.emergencyAt ?? 1) })}
           </dd>
         </div>
         {state.promptTokens !== null && (
           <div>
-            <dt>{t({ zh: "上次请求服务端实收", en: "Provider count, last request" })}</dt>
+            <dt>{t({ zh: "上次请求实际 token 数", en: "Actual tokens, last request" })}</dt>
             <dd>{formatTokenCount(state.promptTokens)}</dd>
           </div>
         )}
@@ -150,7 +150,7 @@ export function ContextWindowPanel({ state }: { state: ContextWindowState }) {
             <dt>{t({ zh: "上次压缩", en: "Last compaction" })}</dt>
             <dd>
               {t(
-                { zh: "第 {turn} 轮 · {before} → {after}", en: "turn {turn} · {before} → {after}" },
+                { zh: "第 {turn} 步 · {before} → {after}", en: "Step {turn} · {before} → {after}" },
                 {
                   turn: state.lastCompaction.turn,
                   before: formatTokenCount(state.lastCompaction.tokensBefore),
@@ -162,10 +162,10 @@ export function ContextWindowPanel({ state }: { state: ContextWindowState }) {
         )}
         {state.configuredWindow !== state.window && (
           <div>
-            <dt>{t({ zh: "窗口已按服务端观测收紧", en: "Window narrowed by provider observation" })}</dt>
+            <dt>{t({ zh: "实际窗口小于配置", en: "Effective window is smaller than configured" })}</dt>
             <dd>
               {t(
-                { zh: "配置 {configured}，实际按 {window}", en: "configured {configured}, using {window}" },
+                { zh: "配置为 {configured}，实际使用 {window}", en: "configured {configured}, using {window}" },
                 { configured: formatTokenCount(state.configuredWindow), window: formatTokenCount(state.window) },
               )}
             </dd>
@@ -175,12 +175,12 @@ export function ContextWindowPanel({ state }: { state: ContextWindowState }) {
 
       <p className="composer-popover-foot">
         {t({
-          zh: "百分比按框架判压缩的那把尺算（本地估算 × 校准，含工具定义），所以会比服务端实收略高。",
-          en: "The percentage uses the ruler the harness compacts by (local estimate × calibration, tool definitions included), so it runs a little above the provider count.",
+          zh: "百分比是本地估算（含工具定义），通常略高于实际 token 数。",
+          en: "The percentage is a local estimate (including tool definitions), so it usually runs slightly above the actual count.",
         })}
       </p>
       <Link className="composer-popover-link" href="/settings/models">
-        {t({ zh: "窗口大小在模型连接设置里 →", en: "Window size is set on the model connection →" })}
+        {t({ zh: "在模型连接中设置窗口大小 →", en: "Set the window size in model connections →" })}
       </Link>
     </div>
   );

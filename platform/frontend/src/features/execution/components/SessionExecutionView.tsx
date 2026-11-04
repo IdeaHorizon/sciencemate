@@ -15,6 +15,7 @@ import {
   Sparkles,
   Unplug,
 } from "lucide-react";
+import Link from "next/link";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/shared/ui";
 import { useInterfaceSettings } from "@/features/settings/InterfaceSettingsProvider";
@@ -51,7 +52,12 @@ import {
   type EventPayloadView,
 } from "../lib/payload-view";
 import { groupByChildRun, type ChildRunGroup } from "../lib/child-run-grouping";
-import { useT, useLanguage, type Phrase } from "@/shared/i18n";
+import { eventKindLabel, nodeDisplayName } from "../lib/display-names";
+import { EXECUTION_DETAIL_LEVELS } from "../lib/execution-detail-levels";
+import { useProject } from "@/features/projects/hooks/useProjects";
+import { useSession } from "@/features/sessions/hooks/useSessions";
+import { useT, useLanguage, say, type Language, type Phrase } from "@/shared/i18n";
+import { decisionChoiceText } from "@/features/chat/lib/decision-package";
 
 type SessionExecutionViewProps = {
   projectId: string;
@@ -61,15 +67,16 @@ type SessionExecutionViewProps = {
 
 type ApiViewState = "loading" | "online" | "offline" | "stale" | "error";
 
-function formatDuration(milliseconds?: number) {
+// 时长单位跟着界面语言：中文「12 秒」「1 分 5 秒」，英文「12s」「1m 5s」。
+function formatDuration(milliseconds: number | undefined, lang: Language) {
   if (milliseconds === undefined) return undefined;
   const seconds = Math.max(0, Math.round(milliseconds / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  if (seconds < 60) return say({ zh: "{s} 秒", en: "{s}s" }, lang, { s: seconds });
+  return say({ zh: "{m} 分 {s} 秒", en: "{m}m {s}s" }, lang, { m: Math.floor(seconds / 60), s: seconds % 60 });
 }
 
-function formatCost(cost: number, currency?: string) {
-  if (!currency) return `${cost.toFixed(4)} cost`;
+function formatCost(cost: number, currency: string | undefined, lang: Language) {
+  if (!currency) return say({ zh: "费用 {cost}", en: "Cost {cost}" }, lang, { cost: cost.toFixed(4) });
   try {
     return new Intl.NumberFormat(undefined, {
       style: "currency",
@@ -91,9 +98,9 @@ function ConnectionStatus({ snapshot }: { snapshot: ReconcilerSnapshot }) {
   const t = useT();
   const labels: Record<ReconcilerSnapshot["phase"], Phrase> = {
     idle: { zh: "演示数据就绪", en: "Fixture ready" },
-    live: { zh: "演示数据在跑", en: "Fixture live" },
+    live: { zh: "演示数据播放中", en: "Fixture playing" },
     offline: { zh: "离线", en: "Offline" },
-    backfilling: { zh: "正在补断档", en: "Backfilling gap" },
+    backfilling: { zh: "正在补全缺失的记录", en: "Filling in missed events" },
     reconnecting: { zh: "正在重连", en: "Reconnecting" },
     error: { zh: "连接出错", en: "Connection error" },
   };
@@ -110,10 +117,10 @@ function ApiConnectionStatus({ state }: { state: ApiViewState }) {
   const t = useT();
   const labels: Record<ApiViewState, Phrase> = {
     loading: { zh: "正在连接", en: "Connecting" },
-    online: { zh: "接口在线", en: "API online" },
+    online: { zh: "已连接", en: "Connected" },
     offline: { zh: "离线", en: "Offline" },
     stale: { zh: "状态未确认", en: "Status unconfirmed" },
-    error: { zh: "读不到记录", en: "Record unavailable" },
+    error: { zh: "无法加载记录", en: "Record unavailable" },
   };
 
   return (
@@ -126,15 +133,9 @@ function ApiConnectionStatus({ state }: { state: ApiViewState }) {
 
 function DensityControl({ value, onChange }: { value: Density; onChange: (density: Density) => void }) {
   const t = useT();
-  const items: Array<{ value: Density; label: string }> = [
-    { value: "summary", label: "Summary" },
-    { value: "standard", label: "Standard" },
-    { value: "trace", label: "Trace" },
-  ];
-
   return (
-    <div className="execution-density" aria-label={t({ zh: "执行细节密度", en: "Execution detail density" })}>
-      {items.map((item) => (
+    <div className="execution-density" aria-label={t({ zh: "详细程度", en: "Detail level" })}>
+      {EXECUTION_DETAIL_LEVELS.map((item) => (
         <button
           key={item.value}
           type="button"
@@ -142,7 +143,7 @@ function DensityControl({ value, onChange }: { value: Density; onChange: (densit
           className={value === item.value ? "is-active" : undefined}
           onClick={() => onChange(item.value)}
         >
-          {item.label}
+          {t(item.label)}
         </button>
       ))}
     </div>
@@ -176,29 +177,31 @@ function FixtureControls({
 }) {
   const t = useT();
   return (
-    <section className="fixture-player" aria-label={t({ zh: "夹具播放器", en: "Fixture player" })}>
+    <section className="fixture-player" aria-label={t({ zh: "演示播放器", en: "Demo player" })}>
       <div className="fixture-player-primary">
         <label>
-          <span>{t({ zh: "夹具", en: "Fixture" })}</span>
+          <span>{t({ zh: "演示数据", en: "Demo data" })}</span>
           <select
             value={fixtureId}
             onChange={(event) => onFixtureChange(event.target.value as FixtureId)}
           >
             {Object.values(EXECUTION_FIXTURES).map((item) => (
-              <option key={item.id} value={item.id}>{item.label}</option>
+              <option key={item.id} value={item.id}>{t(item.label)}</option>
             ))}
           </select>
         </label>
-        <span className="fixture-player-description">{fixture.description}</span>
-        <span className="fixture-player-provenance">{t({ zh: "界面演示数据 · 不是真实记录", en: "UI demo data · not canonical" })}</span>
+        <span className="fixture-player-description">{t(fixture.description)}</span>
+        <span className="fixture-player-provenance">{t({ zh: "界面演示数据 · 不是真实记录", en: "UI demo data · not a real record" })}</span>
         <span className="fixture-player-sequence">
-          sequence {snapshot.lastSequence}/{sourceCount}/{fixture.events.length}
+          {t({ zh: "序号 {last}/{source}/{total}", en: "sequence {last}/{source}/{total}" }, { last: snapshot.lastSequence, source: sourceCount, total: fixture.events.length })}
         </span>
       </div>
       <div className="fixture-player-actions">
         <button type="button" onClick={onTogglePlay}>
           {playing ? <Pause size={14} /> : <Play size={14} />}
-          {playing ? "Pause" : sourceCount >= fixture.events.length ? "Replay" : "Play"}
+          {playing
+            ? t({ zh: "暂停", en: "Pause" })
+            : sourceCount >= fixture.events.length ? t({ zh: "重新播放", en: "Replay" }) : t({ zh: "播放", en: "Play" })}
         </button>
         <button type="button" onClick={onReset}>
           <RotateCcw size={14} />{t({ zh: "重置", en: "Reset" })}</button>
@@ -231,6 +234,7 @@ function ToolRow({
   onToggle: (id: string, wasOpen: boolean) => void;
 }) {
   const t = useT();
+  const lang = useLanguage();
   const open = tool.fold !== "collapsed_auto" && tool.fold !== "manual_closed";
   const progress = tool.progress;
 
@@ -247,7 +251,7 @@ function ToolRow({
           <strong>{open ? tool.title : tool.summary ?? tool.title}</strong>
           {trace && tool.technicalName && <code>{tool.technicalName}</code>}
         </span>
-        {tool.durationMs !== undefined && <time>{formatDuration(tool.durationMs)}</time>}
+        {tool.durationMs !== undefined && <time>{formatDuration(tool.durationMs, lang)}</time>}
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
       </button>
       {open && (
@@ -255,13 +259,14 @@ function ToolRow({
           {tool.detail && <p>{tool.detail}</p>}
           {progress?.mode === "elapsed_only" && (
             <p className="execution-progress-copy">
-              {t({ zh: "已跑 {elapsed} · 总时长未报告", en: "Running for {elapsed} · total not reported" }, { elapsed: formatDuration(progress.elapsedMs) ?? "—" })}
+              {t({ zh: "已运行 {elapsed}", en: "Running for {elapsed}" }, { elapsed: formatDuration(progress.elapsedMs, lang) ?? "—" })}
             </p>
           )}
           {progress && progress.mode !== "elapsed_only" && (
             <p className="execution-progress-copy">
-              {progress.completed} of {progress.total} {progress.unit}
-              {!progress.exact && " · derived"}
+              {/* exact=false：这个数是推算出来的。 */}
+              {t({ zh: "{completed}/{total} {unit}", en: "{completed} of {total} {unit}" }, { completed: progress.completed, total: progress.total, unit: progress.unit })}
+              {!progress.exact && t({ zh: "（估算）", en: " (estimated)" })}
             </p>
           )}
           {tool.outputLines.length > 0 && (
@@ -271,10 +276,10 @@ function ToolRow({
           )}
           {tool.error && (
             <div className="execution-error" role="alert">
-              <strong>{tool.error.impact ?? t({ zh: "这个动作没做完", en: "This action did not complete" })}</strong>
+              <strong>{tool.error.impact ?? t({ zh: "操作失败", en: "This action did not complete" })}</strong>
               <p>{tool.error.message}</p>
               {tool.error.recovery && <p><b>{t({ zh: "下一步：", en: "Next:" })}</b> {tool.error.recovery}</p>}
-              {trace && <p>{t({ zh: "原始事件载荷在下面的「完整」一段里。", en: "Raw event payloads are available in the Trace section below." })}</p>}
+              {trace && <p>{t({ zh: "原始记录见下方的事件表。", en: "See the event table below for the raw record." })}</p>}
             </div>
           )}
         </div>
@@ -293,6 +298,7 @@ function StepSection({
   onToggle: (id: string, wasOpen: boolean) => void;
 }) {
   const t = useT();
+  const lang = useLanguage();
   const open = step.fold !== "collapsed_auto" && step.fold !== "manual_closed";
 
   return (
@@ -308,7 +314,7 @@ function StepSection({
           <strong>{step.title}</strong>
           {step.summary && <small>{step.summary}</small>}
         </span>
-        {step.durationMs !== undefined && <time>{formatDuration(step.durationMs)}</time>}
+        {step.durationMs !== undefined && <time>{formatDuration(step.durationMs, lang)}</time>}
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
       </button>
       {open && density !== "summary" && (
@@ -317,7 +323,7 @@ function StepSection({
             <ToolRow key={tool.id} tool={tool} trace={density === "trace"} onToggle={onToggle} />
           ))}
           {step.tools.length === 0 && (
-            <p className="execution-muted">{t({ zh: "这一步没有发出任何工具活动。", en: "No tool activity was emitted for this step." })}</p>
+            <p className="execution-muted">{t({ zh: "这一步没有调用工具。", en: "No tools were used in this step." })}</p>
           )}
         </div>
       )}
@@ -335,17 +341,22 @@ function DecisionSection({
   meta?: string;
 }) {
   const t = useT();
+  const lang = useLanguage();
   const [selected, setSelected] = useState<string | null>(null);
   const decision = payload.decision;
   if (!decision) return null;
+  // 选项按 choice id 说人话（与聊天区那张决策卡同一张表）；表里没有的照上游原文。
+  const said = (option: (typeof decision.options)[number]) =>
+    decisionChoiceText(option.id, { label: option.label, description: option.consequence }, lang);
+  const recommended = decision.options.find((option) => option.recommended);
 
   return (
     <section className="execution-decision">
-      <span className="execution-eyebrow">{t({ zh: "需要你拍板", en: "Decision required" })}</span>
-      <h2>{payload.title ?? t({ zh: "研究方向需要你定", en: "Research direction needs input" })}</h2>
+      <span className="execution-eyebrow">{t({ zh: "需要你做决定", en: "Decision required" })}</span>
+      <h2>{payload.title ?? t({ zh: "研究决策", en: "Research decision" })}</h2>
       {decision.reason && <p>{decision.reason}</p>}
       {decision.recommendation && (
-        <p><strong>{t({ zh: "推荐：", en: "Recommended:" })}</strong> {decision.recommendation}</p>
+        <p><strong>{t({ zh: "推荐：", en: "Recommended:" })}</strong> {recommended ? said(recommended).label : decision.recommendation}</p>
       )}
       <div className="execution-decision-options">
         {decision.options.map((option) => readOnly ? (
@@ -353,8 +364,8 @@ function DecisionSection({
             key={option.id}
             className={cn("execution-decision-option", option.recommended && "is-recommended")}
           >
-            <span>{option.label}{option.recommended && <small>{t({ zh: "推荐", en: "Recommended" })}</small>}</span>
-            {option.consequence && <p>{option.consequence}</p>}
+            <span>{said(option).label}{option.recommended && <small>{t({ zh: "推荐", en: "Recommended" })}</small>}</span>
+            {said(option).description && <p>{said(option).description}</p>}
           </div>
         ) : (
           <button
@@ -363,25 +374,29 @@ function DecisionSection({
             className={cn("execution-decision-option", option.recommended && "is-recommended", selected === option.id && "is-selected")}
             onClick={() => setSelected(option.id)}
           >
-            <span>{option.label}{option.recommended && <small>{t({ zh: "推荐", en: "Recommended" })}</small>}</span>
-            {option.consequence && <p>{option.consequence}</p>}
+            <span>{said(option).label}{option.recommended && <small>{t({ zh: "推荐", en: "Recommended" })}</small>}</span>
+            {said(option).description && <p>{said(option).description}</p>}
           </button>
         ))}
       </div>
       {readOnly ? (
-        meta && <p className="execution-decision-meta">{meta} · {t({ zh: "当前决定（只读）", en: "Read-only current Decision" })}</p>
+        meta && <p className="execution-decision-meta">{meta}</p>
       ) : (
         <p className="execution-fixture-note">
           {selected
-            ? t({ zh: "演示模式：选择只记在本地，没有发出任何指令。", en: "Fixture selection recorded locally; no command was sent." })
-            : t({ zh: "演示模式 · 选一项看看决策状态长什么样。", en: "Fixture mode · choose an option to preview the decision state." })}
+            ? t({ zh: "演示模式：你的选择不会提交。", en: "Demo mode: your choice is not submitted." })
+            : t({ zh: "演示模式：选择一项查看效果。", en: "Demo mode: choose an option to preview it." })}
         </p>
       )}
     </section>
   );
 }
 
-function ResultSection({ payload }: { payload: EventPayloadView }) {
+/**
+ * 一件成果的结果块。「打开结果」去成果详情页（和对话区那张成果卡同一个地址）；
+ * 事件没带成果 id 时没有地方可去，就不画按钮。
+ */
+function ResultSection({ payload, projectId }: { payload: EventPayloadView; projectId: string }) {
   const t = useT();
   const artifact = payload.artifact;
   if (!artifact) return null;
@@ -396,26 +411,30 @@ function ResultSection({ payload }: { payload: EventPayloadView }) {
         </div>
         {artifact.version !== undefined && <span>v{artifact.version}</span>}
       </div>
-      <div className="execution-result-actions">
-        <button type="button">{t({ zh: "打开结果", en: "Open result" })}</button>
-        <button type="button">{t({ zh: "看出处", en: "View provenance" })}</button>
-      </div>
+      {artifact.id && (
+        <div className="execution-result-actions">
+          <Link href={`/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifact.id)}`}>
+            {t({ zh: "打开结果", en: "Open result" })}
+          </Link>
+        </div>
+      )}
     </section>
   );
 }
 
 function TraceTable({ events }: { events: ReconcilerSnapshot["events"] }) {
   const t = useT();
+  const lang = useLanguage();
   return (
     <section className="execution-trace">
-      <div className="execution-section-label">{t({ zh: "正式事件 · schemaVersion 1", en: "Canonical events · schemaVersion 1" })}</div>
-      <div className="execution-trace-table" role="table" aria-label={t({ zh: "权威执行事件", en: "Canonical execution events" })}>
+      <div className="execution-section-label">{t({ zh: "事件记录", en: "Event log" })}</div>
+      <div className="execution-trace-table" role="table" aria-label={t({ zh: "事件记录", en: "Execution events" })}>
         {events.map((event) => (
           <details key={event.id} className="execution-trace-row">
             <summary>
               <code>#{event.sequence}</code>
-              <strong>{event.kind}</strong>
-              <span>{event.runId ?? "session"}</span>
+              <strong title={event.kind}>{eventKindLabel(event.kind, lang)}</strong>
+              <span>{event.runId ?? t({ zh: "会话", en: "Session" })}</span>
               <time>{new Date(event.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>
             </summary>
             <dl>
@@ -434,23 +453,25 @@ function TraceTable({ events }: { events: ReconcilerSnapshot["events"] }) {
 
 function ChildRunGroupSection({ group }: { group: ChildRunGroup }) {
   const t = useT();
+  const lang = useLanguage();
   return (
     <details
       className={`execution-child-run execution-child-run-${group.status}`}
       open={group.status === "running"}
     >
       <summary>
-        <span className="execution-child-node">{group.nodeType}</span>
+        <span className="execution-child-node">{nodeDisplayName(group.nodeType, lang)}</span>
         <span className="execution-child-status">
           {group.status === "running" ? t({ zh: "进行中", en: "In progress" })
             : group.status === "failed" ? t({ zh: "失败", en: "Failed" }) : t({ zh: "完成", en: "Done" })}
         </span>
-        <span className="execution-child-count">{t({ zh: "{count} 个动作", en: "{count} actions" }, { count: group.events.length })}</span>
+        <span className="execution-child-count">{t({ zh: "{count} 个操作", en: "{count} action{s}" }, { count: group.events.length, s: group.events.length === 1 ? "" : "s" })}</span>
       </summary>
       <ol className="execution-child-actions">
         {group.events.map((event) => (
           <li key={event.id}>
-            <span className="execution-child-kind">{event.kind}</span>
+            {/* 事件类型按表翻成人话（tool.started → 开始使用工具）；原值在 title 里。 */}
+            <span className="execution-child-kind" title={event.kind}>{eventKindLabel(event.kind, lang)}</span>
             {typeof (event.payload as Record<string, unknown>)?.displayName === "string" && (
               <span className="execution-child-detail">
                 {String((event.payload as Record<string, unknown>).displayName)}
@@ -476,11 +497,13 @@ function ChildRunGroupSection({ group }: { group: ChildRunGroup }) {
  * "一坨结束→调度器说话→再开新的一坨"，按 sequence 归并才是它的完整形态）。
  */
 function ExecutionEventStream({
+  projectId,
   projection,
   childRunGroups,
   density,
   onToggleFold,
 }: {
+  projectId: string;
   projection: SessionProjection;
   childRunGroups: ChildRunGroup[];
   density: Density;
@@ -503,13 +526,13 @@ function ExecutionEventStream({
           <div className="execution-agent-narration">
             <p className="execution-agent-line">
               {typeof payload.turn === "number" && payload.turn > 0 && (
-                <span className="execution-agent-turn">{t({ zh: "第 {turn} 轮", en: "Turn {turn}" }, { turn: payload.turn })}</span>
+                <span className="execution-agent-turn">{t({ zh: "第 {turn} 步", en: "Step {turn}" }, { turn: payload.turn })}</span>
               )}
               {payload.text}
               {payload.previewOnly === true && (
                 /* 老 transcript 只存了硬截 500 字的 preview，且不留截断标记 ——
                    完不完整我们不知道，就如实说"预览"，不加假省略号。 */
-                <span className="execution-agent-preview" title={t({ zh: "这条来自旧版 transcript 的截断预览，可能不完整", en: "A truncated preview from an older transcript; may be incomplete" })}>{t({ zh: "预览", en: "Preview" })}</span>
+                <span className="execution-agent-preview" title={t({ zh: "只保存了开头部分，内容可能不完整", en: "Only the beginning was saved; it may be incomplete." })}>{t({ zh: "预览", en: "Preview" })}</span>
               )}
             </p>
           </div>
@@ -552,11 +575,56 @@ function ExecutionEventStream({
     items.push({
       key: `result-${event.id}`,
       sequence: event.sequence,
-      node: <ResultSection payload={payload} />,
+      node: <ResultSection payload={payload} projectId={projectId} />,
     });
   }
   items.sort((a, b) => a.sequence - b.sequence);
   return <>{items.map(({ key, node }) => <Fragment key={key}>{node}</Fragment>)}</>;
+}
+
+/**
+ * 决策状态的显示名。执行历史页实际只会拿到 pending / partially_approved
+ * （读接口只返回还能处理的决策，见 execution-read-client），其余几种照类型补齐。
+ */
+const DECISION_STATUS_LABELS: Record<DurableDecision["status"], Phrase> = {
+  pending: { zh: "待决定", en: "Pending" },
+  partially_approved: { zh: "部分已批准", en: "Partially approved" },
+  resolved: { zh: "已决定", en: "Resolved" },
+  cancelled: { zh: "已取消", en: "Cancelled" },
+  superseded: { zh: "已被取代", en: "Superseded" },
+  expired: { zh: "已过期", en: "Expired" },
+};
+
+/**
+ * 页头的用量一栏。拿不到的数写「未知」；费用统计只在不完整时提一句；
+ * 还没有任何事件时不说重试次数（下面已经有空状态）。
+ */
+function ResourceSummary({ eventCount, resources, hasEvents }: {
+  eventCount: number;
+  resources: ReturnType<typeof summarizeSessionResources>;
+  hasEvents: boolean;
+}) {
+  const t = useT();
+  const lang = useLanguage();
+  return (
+    <>
+      <span>{t({ zh: "{n} 条事件", en: "{n} events" }, { n: eventCount })}</span>
+      <span>
+        {resources.totalTokens === null
+          ? t({ zh: "token 数未知", en: "Tokens unavailable" })
+          : `${resources.totalTokens.toLocaleString()} tokens`}
+      </span>
+      <span>
+        {resources.cost === null
+          ? t({ zh: "费用未知", en: "Cost unavailable" })
+          : formatCost(resources.cost, resources.currency, lang)}
+      </span>
+      {resources.coverage === "partial" && <span>{t({ zh: "费用统计不完整", en: "Cost data incomplete" })}</span>}
+      {hasEvents && (
+        <span>{t({ zh: "重试 {n} 次", en: "{n} retr{ies}" }, { n: resources.observedRetries, ies: resources.observedRetries === 1 ? "y" : "ies" })}</span>
+      )}
+    </>
+  );
 }
 
 function durableDecisionPayload(decision: DurableDecision): EventPayloadView {
@@ -595,20 +663,20 @@ function apiStateFromSnapshot(snapshot: ReconcilerSnapshot): ApiViewState {
 function describeApiProblem(error: unknown, t: (phrase: Phrase) => string) {
   if (error instanceof ExecutionReadApiError) {
     if (error.status === 401 || error.status === 403) {
-      return t({ zh: "当前账号读不了这条执行记录。", en: "Your current account cannot read this execution record." });
+      return t({ zh: "你没有权限查看这条执行记录。", en: "You don't have permission to view this execution record." });
     }
     if (error.status === 404) {
-      return t({ zh: "这条执行记录在当前项目里已经没有了。", en: "This execution record is no longer available in the current Project." });
+      return t({ zh: "当前项目中找不到这条执行记录。", en: "This execution record can't be found in the current Project." });
     }
-    return t({ zh: "执行服务没能给出一条确认过的记录。", en: "The execution service could not return a confirmed record." });
+    return t({ zh: "无法加载执行记录，请稍后重试。", en: "Couldn't load the execution record. Please try again later." });
   }
   if (error instanceof ExecutionStreamInterruptedError) {
-    return t({ zh: "执行服务正在重启，正从最后一条确认过的事件接上。", en: "The execution service is restarting. Reconnecting from the last confirmed event." });
+    return t({ zh: "服务器正在重启，正在重新连接…", en: "The server is restarting. Reconnecting…" });
   }
   if (error instanceof ExecutionReadContractError) {
-    return t({ zh: "执行服务给回的数据，这个版本的应用没法安全地显示。", en: "The execution service returned data that this version of the app cannot safely display." });
+    return t({ zh: "当前版本的应用无法显示这条执行记录。", en: "This version of the app can't display this execution record." });
   }
-  return t({ zh: "连不上执行服务。", en: "The execution service could not be reached." });
+  return t({ zh: "无法连接服务器。", en: "Couldn't connect to the server." });
 }
 
 function FixtureSessionExecutionView({ projectId, sessionId }: Omit<SessionExecutionViewProps, "mode">) {
@@ -757,24 +825,12 @@ function FixtureSessionExecutionView({ projectId, sessionId }: Omit<SessionExecu
       <header className="execution-session-header">
         <div>
           <span className="execution-breadcrumb">{projectId} / {t({ zh: "研究", en: "Research" })}</span>
-          <h1>{fixture.label}</h1>
+          <h1>{t(fixture.label)}</h1>
           <p>{sessionId} · {t({ zh: "本机界面演示数据 · 不接模型", en: "Local UI demo fixture · model unavailable" })}</p>
         </div>
         <div className="execution-session-status">
           <ConnectionStatus snapshot={snapshot} />
-          <span>{snapshot.lastSequence} events</span>
-          <span>
-            {resources.totalTokens === null
-              ? t({ zh: "读不到 token 数", en: "Tokens unavailable" })
-              : `${resources.totalTokens.toLocaleString()} tokens`}
-          </span>
-          <span>
-            {resources.cost === null
-              ? t({ zh: "读不到花费", en: "Cost unavailable" })
-              : formatCost(resources.cost, resources.currency)}
-          </span>
-          {resources.coverage && <span>{t({ zh: "花费覆盖 {coverage}", en: "{coverage} usage coverage" }, { coverage: resources.coverage })}</span>}
-          <span>{resources.observedRetries} observed {resources.observedRetries === 1 ? "retry" : "retries"}</span>
+          <ResourceSummary eventCount={snapshot.lastSequence} resources={resources} hasEvents />
           <DensityControl value={density} onChange={setDensity} />
         </div>
       </header>
@@ -795,6 +851,7 @@ function FixtureSessionExecutionView({ projectId, sessionId }: Omit<SessionExecu
 
       <main className="execution-document">
         <ExecutionEventStream
+          projectId={projectId}
           projection={projection}
           childRunGroups={childRunGroups}
           density={density}
@@ -812,7 +869,7 @@ function FixtureSessionExecutionView({ projectId, sessionId }: Omit<SessionExecu
         {snapshot.events.length === 0 && (
           <div className="execution-empty">
             <Search size={18} />
-            <p>{t({ zh: "重放夹具，开始这份执行记录。", en: "Replay the fixture to begin the execution record." })}</p>
+            <p>{t({ zh: "点击播放开始演示。", en: "Press Play to start the demo." })}</p>
           </div>
         )}
       </main>
@@ -844,6 +901,9 @@ function ApiSessionExecutionView({
   const [manualOpenIds, setManualOpenIds] = useState<Set<string>>(() => new Set());
   const [manualClosedIds, setManualClosedIds] = useState<Set<string>>(() => new Set());
   const hasConfirmedRead = useRef(false);
+  // 页头说「哪个项目、哪个会话」用名字，不用 UUID。拿不到就不写，只留「执行历史」标题。
+  const projectName = useProject(projectId).data?.name;
+  const sessionTitle = useSession(projectId, sessionId).data?.title;
 
   useEffect(() => setDensity(interfaceSettings.execution_detail), [interfaceSettings.execution_detail]);
 
@@ -903,59 +963,58 @@ function ApiSessionExecutionView({
     });
   }
 
+  // 中文句子之间不加空格，英文加一个。
+  const join = (...parts: (string | null)[]) => parts.filter(Boolean).join(lang === "zh" ? "" : " ");
   const notice = apiState === "loading"
-    ? t({ zh: "正在加载执行记录和当前的决策。", en: "Loading the execution record and current Decisions." })
+    ? t({ zh: "正在加载执行记录…", en: "Loading the execution record…" })
     : apiState === "offline"
-      ? `${apiProblem ?? t({ zh: "平台没有确认到任何执行数据。", en: "The platform has not confirmed any execution data." })} ${t({ zh: "先刷新再往下操作。", en: "Refresh before taking further action." })}`
+      ? join(
+        apiProblem ?? t({ zh: "无法加载执行记录。", en: "Couldn't load the execution record." }),
+        t({ zh: "请刷新页面后重试。", en: "Refresh the page and try again." }),
+      )
       : apiState === "stale"
-        ? `${t({ zh: "最新的运行状态没能确认。", en: "The latest run status could not be confirmed." })}${apiProblem ? ` ${apiProblem}` : ""} ${t({ zh: "先刷新再把请求发出去。", en: "Refresh before sending the request again." })}`
+        ? join(
+          t({ zh: "无法获取最新的执行状态。", en: "Couldn't get the latest execution status." }),
+          apiProblem,
+          t({ zh: "请刷新页面。", en: "Refresh the page." }),
+        )
         : apiState === "error"
-          ? `${apiProblem ?? t({ zh: "这条执行记录显示不出来。", en: "The execution record could not be displayed." })} ${t({ zh: "等服务恢复之后再打开 Trace。", en: "Open Trace only after the service is available again." })}`
+          ? apiProblem ?? t({ zh: "无法显示这条执行记录。", en: "The execution record could not be displayed." })
           : null;
+  // 决策的最新状态没确认：只在**有决策**的时候才值得说，而且单独成句。
+  const decisionsStale = !decisionsVerified && decisions.length > 0 && apiState !== "loading";
 
   return (
     <div className="execution-page">
       <header className="execution-session-header">
         <div>
-          <span className="execution-breadcrumb">{projectId} / {t({ zh: "研究", en: "Research" })}</span>
-          <h1>{t({ zh: "会话执行", en: "Session execution" })}</h1>
-          <p>{sessionId} · {t({ zh: "研究应用服务", en: "Research App Server" })}</p>
+          {projectName && <span className="execution-breadcrumb">{projectName}</span>}
+          <h1>{t({ zh: "执行历史", en: "Execution history" })}</h1>
+          {sessionTitle && <p>{sessionTitle}</p>}
         </div>
         <div className="execution-session-status">
           <ApiConnectionStatus state={apiState} />
-          <span>{snapshot.lastSequence} events</span>
-          <span>
-            {resources.totalTokens === null
-              ? t({ zh: "读不到 token 数", en: "Tokens unavailable" })
-              : `${resources.totalTokens.toLocaleString()} tokens`}
-          </span>
-          <span>
-            {resources.cost === null
-              ? t({ zh: "读不到花费", en: "Cost unavailable" })
-              : formatCost(resources.cost, resources.currency)}
-          </span>
-          <span>{resources.coverage
-            ? t({ zh: "花费覆盖 {coverage}", en: "{coverage} usage coverage" }, { coverage: resources.coverage })
-            : t({ zh: "读不到花费覆盖", en: "Usage coverage unavailable" })}</span>
-          <span>
-            {snapshot.events.length === 0
-              ? t({ zh: "读不到重试记录", en: "Retry history unavailable" })
-              : `${resources.observedRetries} observed ${resources.observedRetries === 1 ? "retry" : "retries"}`}
-          </span>
+          <ResourceSummary
+            eventCount={snapshot.lastSequence}
+            resources={resources}
+            hasEvents={snapshot.events.length > 0}
+          />
           <DensityControl value={density} onChange={setDensity} />
         </div>
       </header>
 
-      {(notice || !decisionsVerified) && (
+      {(notice || decisionsStale) && (
         <div
           className={cn("execution-api-notice", `execution-api-notice-${apiState}`)}
           role={apiState === "loading" ? "status" : "alert"}
         >
           <AlertCircle size={14} aria-hidden="true" />
           <span>
-            {notice}
-            {!decisionsVerified && apiState !== "loading" && (
-              <>{t({ zh: "当前决策状态没能核实，留下的决策可能已经过期。", en: "Current Decision state could not be verified; retained Decisions may be stale." })}</>
+            {join(
+              notice,
+              decisionsStale
+                ? t({ zh: "无法确认决策的最新状态，下面显示的内容可能已过期。", en: "Couldn't confirm the latest Decision state; what's shown may be out of date." })
+                : null,
             )}
           </span>
         </div>
@@ -963,6 +1022,7 @@ function ApiSessionExecutionView({
 
       <main className="execution-document">
         <ExecutionEventStream
+          projectId={projectId}
           projection={projection}
           childRunGroups={childRunGroups}
           density={density}
@@ -974,7 +1034,11 @@ function ApiSessionExecutionView({
             key={decision.id}
             payload={durableDecisionPayload(decision)}
             readOnly
-            meta={`${decision.status.replaceAll("_", " ")} · ${decision.acceptedResponseCount}/${decision.authority.requiredApprovalCount} approvals`}
+            meta={t({ zh: "{status} · 已批准 {n}/{m}", en: "{status} · {n}/{m} approved" }, {
+              status: t(DECISION_STATUS_LABELS[decision.status]),
+              n: decision.acceptedResponseCount,
+              m: decision.authority.requiredApprovalCount,
+            })}
           />
         ))}
 
@@ -985,8 +1049,8 @@ function ApiSessionExecutionView({
           <div className="execution-empty">
             <Search size={18} />
             <p>{apiState === "loading"
-              ? t({ zh: "正在连接执行接口…", en: "Connecting to the execution API…" })
-              : t({ zh: "没有确认过的执行事件。", en: "No confirmed execution events are available." })}</p>
+              ? t({ zh: "正在加载…", en: "Loading…" })
+              : t({ zh: "还没有执行记录。", en: "No execution records yet." })}</p>
           </div>
         )}
       </main>

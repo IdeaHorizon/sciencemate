@@ -10,7 +10,21 @@
 2. ``metadata.figure_hash`` 必须等于对出处绑定核心（源数据 hash ↔ 渲染代码
    hash ↔ 输出文件 hash ↔ caption/alt_text）逐字节重算的值 —— 事后改写任何
    一环都会让指纹对不上；
-3. deliverable 的字节指纹由 staging 侧（writing）逐文件重验。
+3. 记录认领的输出文件，盘上的字节必须还是铸记录时那份（``metadata.files``
+   的 content_hash）—— 在交付收集点传 ``resolve_file`` 时逐文件重验。
+
+## 谁来调（#1200，wangd 2026-10-21 裁决）
+
+writing 09-18 重建删掉了旧的 stage 图工具 —— 那是 :func:`validate_figure_record`
+唯一的生产调用方，此后伪造与指纹检查**哪儿都不发生**。裁决：挂在**交付收集点**，
+不在铸图时拦（cuikl 的约定：伪造记录照样落账、事后被抓，见
+nodes/postprocess/tests/test_render_figure.py 的防伪段）。两个收集点共用
+:func:`audit_figure_files`，判据只有一份：
+
+  · writing 读图与图题那一步（nodes/writing/tools/w_dossier.py ``build_dossier``）：
+    没过的图不进图清单、图题不采用，原因摆给模型；
+  · run 收尾（core/executor.py ``finalize_run``）：本 run 交出去的路径里有没过的图
+    → 一条结构化 blocker（哪张图、哪道检查、怎么修）。
 
 记录**形状**（源绑定数组、渲染代码锚、输出文件清单）是一份声明式 schema
 （``_FIGURE_METADATA_SCHEMA``），一次校验。判决词表（status/quality_mode/verdict）
@@ -31,8 +45,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping
-from pathlib import Path
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from shared.lib.schema_check import schema_errors
@@ -66,8 +81,24 @@ _FIGURE_METADATA_SCHEMA: dict = {
 }
 
 
+#: 能铸 figure 记录的节点（produced_by_node_type 由框架盖章，模型写不了别人的章）。
+_VISUALIZATION_OWNERS = frozenset({"postprocess", "scientific_visualization"})
+
+
 class PublicationFigureError(ValueError):
-    """A figure record cannot authorize publication use."""
+    """A figure record cannot authorize publication use.
+
+    ``check`` 是**哪一道**没过的机械代码（见 :data:`CHECK_MEANING`）。交付收集点
+    要把它和记录 id 一起交给模型 —— 「伪造」「文件事后被改」「图上的数对不上出处」
+    修法各不相同，只给一句英文原话，模型分不出该重画还是该找出处。
+    """
+
+    check: str = "record"
+
+    def __init__(self, message: str, *, check: str | None = None) -> None:
+        super().__init__(message)
+        if check:
+            self.check = check
 
 
 def sha256_file(path: Path) -> str:
@@ -119,6 +150,8 @@ def figure_binding_hash(metadata: dict[str, Any]) -> str:
 
 class FigureContradictsItsSource(PublicationFigureError):
     """图上印的数值与它自己声称的出处对不上 —— 不是充分性问题，是自相矛盾。"""
+
+    check = "contradicts_source"
 
 
 def _resolve_field_path(blob: Any, path: str) -> Any:
@@ -262,6 +295,32 @@ def _field_path_view(record: dict[str, Any]) -> Any:
         return content
 
 
+def declared_sources(
+    metadata: Any,
+    read_artifact: Callable[[str], dict[str, Any] | None],
+) -> dict[str, Any]:
+    """这张图声称的那几份出处：``source_artifact_ids`` ∪ 各条 annotated_values 的
+    ``source_artifact_id``，按 ``read_artifact`` 读当前版本、取字段路径视图。
+
+    铸造侧（:func:`value_check_at_mint`）与交付收集点（:func:`audit_figure_files`）
+    读出处只走这一条：两边各拼一份，同一张图就会在一处对得上、另一处够不到。
+    读不到的不放进来，由 :func:`annotated_value_conflicts` 记成「够不到出处」。
+    """
+    if not isinstance(metadata, dict):
+        return {}
+    declared = metadata.get("annotated_values")
+    wanted = [str(item) for item in metadata.get("source_artifact_ids") or []]
+    if isinstance(declared, list):
+        wanted += [str(item.get("source_artifact_id") or "").strip()
+                   for item in declared if isinstance(item, dict)]
+    sources: dict[str, Any] = {}
+    for artifact_id in dict.fromkeys(a for a in wanted if a):
+        record = read_artifact(artifact_id)
+        if isinstance(record, dict):
+            sources[artifact_id] = _field_path_view(record)
+    return sources
+
+
 def value_check_at_mint(
     metadata: dict[str, Any],
     read_artifact: Callable[[str], dict[str, Any] | None],
@@ -290,16 +349,7 @@ def value_check_at_mint(
     ``{"ran": True, "checked": [label…]}``；对不上抛 :class:`FigureContradictsItsSource`。
     """
     declared = metadata.get("annotated_values")
-    wanted = [str(item) for item in metadata.get("source_artifact_ids") or []]
-    if isinstance(declared, list):
-        wanted += [str(item.get("source_artifact_id") or "").strip()
-                   for item in declared if isinstance(item, dict)]
-    sources: dict[str, Any] = {}
-    for artifact_id in dict.fromkeys(a for a in wanted if a):
-        record = read_artifact(artifact_id)
-        if isinstance(record, dict):
-            sources[artifact_id] = _field_path_view(record)
-    absent = _check_annotated_values(metadata, sources)
+    absent = _check_annotated_values(metadata, declared_sources(metadata, read_artifact))
     if absent:
         return {"ran": False, "note": absent}
     return {
@@ -312,29 +362,41 @@ def value_check_at_mint(
 def validate_figure_record(
     record: dict[str, Any],
     sources: Mapping[str, Any] | None = None,
+    *,
+    resolve_file: Callable[[str], Path | None] | None = None,
 ) -> dict[str, Any]:
     """Return hash-verified figure metadata (raising on forgery), findings disclosed.
 
     返回的 dict 是记录的 metadata 加 ``_adequacy_findings``（消费端披露用）。
+    没过时抛 :class:`PublicationFigureError`，``check`` 说是哪一道。
+
+    ``resolve_file`` 把 ``metadata.files[].path`` 解析成盘上的文件；给了就逐个重算
+    字节指纹 —— 记录之后图文件被换过（重画了却没重铸、手改了 PNG）只有这里看得见：
+    绑定指纹算的是记录里写的 hash，文件换了它照样自洽。盘上找不到的文件不算伪造
+    （交不出去的东西谈不上冒充真图），缺席进 ``_adequacy_findings``。
     """
 
     if record.get("type") != "figure":
-        raise PublicationFigureError("artifact is not a figure record")
-    if record.get("produced_by_node_type") not in {"postprocess", "scientific_visualization"}:
-        raise PublicationFigureError("figure record was not produced by a visualization owner")
+        raise PublicationFigureError("artifact is not a figure record", check="not_a_figure")
+    if record.get("produced_by_node_type") not in _VISUALIZATION_OWNERS:
+        raise PublicationFigureError(
+            "figure record was not produced by a visualization owner",
+            check="not_visualization_owner")
     if "content_hash" in record:
         from core.ledger import sha256_text
 
         if record.get("content_hash") != sha256_text(str(record.get("content") or "")):
-            raise PublicationFigureError("figure record artifact content_hash is stale")
+            raise PublicationFigureError(
+                "figure record artifact content_hash is stale", check="record_content_hash")
     metadata = record.get("metadata")
     if not isinstance(metadata, dict):
-        raise PublicationFigureError("figure record has no metadata")
+        raise PublicationFigureError("figure record has no metadata", check="not_rendered_figure")
     if metadata.get("record") != "rendered_figure":
         raise PublicationFigureError(
             "figure record was not minted by render_figure (no rendered_figure marker); "
             "stage it as asset_role=figure instead — the delivery will disclose that no "
-            "mechanical audit ran on it"
+            "mechanical audit ran on it",
+            check="not_rendered_figure",
         )
 
     # ── 记录形状（C）：一份 schema、一次校验 ────────────────────────────────
@@ -342,14 +404,32 @@ def validate_figure_record(
     if len(metadata.get("source_artifact_ids") or []) != len(metadata.get("source_hashes") or []):
         shape_errors.append("metadata.source_artifact_ids 与 source_hashes 长度不等")
     if shape_errors:
-        raise PublicationFigureError("figure record shape is invalid: " + "；".join(shape_errors))
+        raise PublicationFigureError(
+            "figure record shape is invalid: " + "；".join(shape_errors), check="shape")
 
     # ── 出处绑定完整性（B）────────────────────────────────────────────────
     if metadata.get("figure_hash") != figure_binding_hash(metadata):
-        raise PublicationFigureError("figure record figure_hash is stale or forged")
+        raise PublicationFigureError(
+            "figure record figure_hash is stale or forged", check="figure_hash")
+
+    adequacy: list[str] = []
+    # ── 输出文件的字节（B，#1200）：盘上的还是不是记录里那份 ──────────────
+    if resolve_file is not None:
+        for item in metadata.get("files") or []:
+            claimed = str(item.get("path") or "")
+            target = resolve_file(claimed)
+            if target is None or not target.is_file():
+                adequacy.append(f"记录认领的文件 {claimed} 不在盘上，字节无从重验")
+                continue
+            actual = sha256_file(target)
+            if actual != item.get("content_hash"):
+                raise PublicationFigureError(
+                    f"figure file {claimed} changed after the record was minted "
+                    f"(record: {item.get('content_hash')}, disk: {actual})",
+                    check="file_bytes",
+                )
 
     # ── 充分性事实：披露，不判决 ──────────────────────────────────────────
-    adequacy: list[str] = []
     audit = metadata.get("audit")
     if not (isinstance(audit, dict) and audit.get("ran") is True):
         adequacy.append("图像级机械审计未运行（记录缺 audit 账）")
@@ -376,3 +456,207 @@ def validate_figure_record(
     payload = dict(metadata)
     payload["_adequacy_findings"] = adequacy
     return payload
+
+
+# ── 交付收集点：读图那一步 + 收尾审计（#1200）──────────────────────────────
+
+
+#: ``PublicationFigureError.check`` → 给模型看的一句话：哪里不对。
+CHECK_MEANING: dict[str, str] = {
+    "not_a_figure": "账本上这份不是 figure 记录",
+    "not_visualization_owner": "这份图记录不是图表服务（postprocess）铸的 —— 别的节点铸不了图记录",
+    "record_content_hash": "图记录正文在落账之后被改过（账本指纹对不上，常见于手改了 figure__*.md 里的图题）",
+    "not_rendered_figure": "这份图记录不是 render_figure 铸的（缺 rendered_figure 标记）",
+    "shape": "这份图记录缺出处绑定（源数据 / 渲染代码 / 输出文件清单）",
+    "figure_hash": "出处绑定指纹对不上 —— 记录是伪造的，或铸出之后改过图题、出处、文件清单",
+    "file_bytes": "图文件在铸记录之后被换过，盘上的字节不是记录里的那份",
+    "contradicts_source": "图上印的数值与它声称的出处对不上（或够不到出处）",
+    "record_unreadable": "账本上有这份图记录，盘上读不到它的正文",
+}
+
+#: 修法只有一条路：重新铸。手改文件或记录只会让指纹再对不上一次。
+REMEDY = (
+    "修法：由图表服务（postprocess）用 render_figure 重新出这张图 —— 同一 output_name "
+    "存成新版本，记录与文件一起换新；writing 侧用 request_figures 重派这张图，再 "
+    "read_dossier(part='figures', rebuild=true) 取新文件。不要手改图文件或图记录：指纹会再对不上。"
+)
+
+
+@dataclass(frozen=True)
+class FigureIntegrityFinding:
+    """一张没过的图：哪个文件、哪份记录、哪道检查、原话。"""
+
+    path: str        # 出事的那个文件（工作区相对）：记录正文或图文件
+    record_id: str
+    check: str
+    detail: str
+
+    def message(self) -> str:
+        meaning = CHECK_MEANING.get(self.check, "图记录完整性没过")
+        return (f"图 {self.record_id}（{self.path}）不能当真图用：{meaning}"
+                f"【{self.check}】。原话：{self.detail}。{REMEDY}")
+
+    def as_dict(self) -> dict[str, str]:
+        return {"path": self.path, "record_id": self.record_id, "check": self.check,
+                "detail": self.detail, "message": self.message()}
+
+
+@dataclass
+class FigureIntegrityAudit:
+    """一次收集点审计的账：核过哪些（``checked`` 空 ≠ 没核）、哪些没过。"""
+
+    checked: list[str] = field(default_factory=list)
+    findings: list[FigureIntegrityFinding] = field(default_factory=list)
+
+    @property
+    def refused(self) -> dict[str, FigureIntegrityFinding]:
+        """{工作区相对路径: 没过的原因} —— 收集点据此不把它当真图。"""
+        out: dict[str, FigureIntegrityFinding] = {}
+        for finding in self.findings:
+            out.setdefault(finding.path, finding)
+        return out
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"checked": list(self.checked),
+                "findings": [finding.as_dict() for finding in self.findings]}
+
+
+def _posix(value: str) -> str:
+    return str(value or "").strip().replace("\\", "/")
+
+
+def _workspace_file(root: Path, claimed: str) -> Path | None:
+    value = _posix(claimed)
+    if not value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else root / value
+
+
+def _version_is_bound(row: Mapping[str, Any]) -> bool:
+    """旧版记录（正文多半已不在盘上）只能验绑定那一半：属主、标记、指纹。"""
+    meta = row.get("metadata")
+    return (isinstance(meta, dict)
+            and str(row.get("produced_by_node_type") or "") in _VISUALIZATION_OWNERS
+            and meta.get("record") == "rendered_figure"
+            and meta.get("figure_hash") == figure_binding_hash(meta))
+
+
+def audit_figure_files(worktree: Path | str | None, rel_paths: Iterable[str]) -> FigureIntegrityAudit:
+    """收集点上的完整 :func:`validate_figure_record`：这些路径里哪些是图、哪些不能当真图。
+
+    ``rel_paths`` 是收集点**正要读 / 正要交**的文件（工作区相对）。只看工作区账本上的
+    figure 记录；一个路径归下面三类之一才算「图」，别的不归这里管（没有记录认领的图走
+    「未经机械审计」的披露路，那不是伪造）：
+
+      · **图记录正文**（``figures/figure__x.md``）：整份记录走完整校验 —— 属主、标记、
+        形状、绑定指纹、它认领的输出文件在盘上的字节、图上印的数对出处。没过，这份记录
+        说的图题与出处就都不作数。
+      · **记录原位认领的图文件**（当前版 ``metadata.files`` 的 path）：字节必须是记录
+        里那份，或者是另一份真记录里的那份；都不是 → ``file_bytes``（铸完被换过）。
+      · **真图的副本**（writing 拷进 ``paper/manuscript/figures/`` 的那种）：文件名被某份
+        记录认领过、**且字节等于某份记录认领的字节** —— 只有字节对得上才认得出它是副本；
+        同名不同字节的是另一个文件（experiment 自己也会画 ``demo.png``），不许误判成改过的图。
+
+    给图文件作保的记录只看**绑定**那一半（属主、标记、形状、指纹、出处），不看它别的文件
+    在盘上变没变：一份真渲染的 PNG 副本，不因为原位的 PDF 后来被换过就成了假图。当前版
+    过绑定校验才作保；旧版（正文多半已不在盘上）过属主 + 标记 + 指纹才作保 —— 上一版真
+    渲染的副本是陈旧的真图，不是假图。
+    """
+    audit = FigureIntegrityAudit()
+    if not worktree:
+        return audit
+    from core.ledger import workspace_store
+
+    root = Path(worktree)
+    store = workspace_store(root)
+    figures = {h.artifact_id: h for h in store.heads().values() if h.artifact_type == "figure"}
+    if not figures:
+        return audit
+
+    by_body = {_posix(head.path): head for head in figures.values() if head.path}
+    named: set[str] = set()
+    # 当前版原位认领：路径 → (记录 id, 记录里的字节指纹)
+    exact: dict[str, tuple[str, str]] = {}
+    # 字节 → [(记录 id, 是不是当前版, 旧版是否过绑定校验)]
+    by_hash: dict[str, list[tuple[str, bool, bool]]] = {}
+    for head in figures.values():
+        for row in head.saves:
+            meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            is_head = int(row.get("version") or 1) == head.version
+            bound = is_head or _version_is_bound(row)
+            for item in meta.get("files") or []:
+                if not isinstance(item, dict):
+                    continue
+                claimed = _posix(str(item.get("path") or ""))
+                digest = str(item.get("content_hash") or "")
+                if claimed:
+                    named.add(PurePosixPath(claimed).name)
+                if is_head and claimed:
+                    exact[claimed] = (head.artifact_id, digest)
+                if digest:
+                    by_hash.setdefault(digest, []).append((head.artifact_id, is_head, bound))
+
+    verdicts: dict[tuple[str, bool], PublicationFigureError | None] = {}
+
+    def verdict(artifact_id: str, *, files_on_disk: bool) -> PublicationFigureError | None:
+        key = (artifact_id, files_on_disk)
+        if key not in verdicts:
+            record = store.record(artifact_id)
+            error: PublicationFigureError | None = None
+            if record is None:
+                error = PublicationFigureError(
+                    "the ledger has this figure record but its body cannot be read",
+                    check="record_unreadable")
+            else:
+                try:
+                    validate_figure_record(
+                        record,
+                        declared_sources(record.get("metadata"), store.record),
+                        resolve_file=(lambda claimed: _workspace_file(root, claimed))
+                        if files_on_disk else None,
+                    )
+                except PublicationFigureError as exc:
+                    error = exc
+            verdicts[key] = error
+        return verdicts[key]
+
+    def refuse(rel: str, artifact_id: str, error: PublicationFigureError) -> None:
+        audit.findings.append(FigureIntegrityFinding(
+            path=rel, record_id=artifact_id, check=error.check, detail=str(error)[:600]))
+
+    for rel in dict.fromkeys(_posix(p) for p in rel_paths):
+        if not rel or not (root / rel).is_file():
+            continue
+        head = by_body.get(rel)
+        if head is not None:
+            audit.checked.append(rel)
+            error = verdict(head.artifact_id, files_on_disk=True)
+            if error is not None:
+                refuse(rel, head.artifact_id, error)
+            continue
+        owner = exact.get(rel)
+        if owner is None and PurePosixPath(rel).name not in named:
+            continue
+        digest = sha256_file(root / rel)
+        vouchers = by_hash.get(digest, [])
+        if owner is None and not vouchers:
+            continue   # 同名不同字节：不是任何一份记录的副本
+        audit.checked.append(rel)
+        if any((verdict(aid, files_on_disk=False) is None) if is_head else bound
+               for aid, is_head, bound in vouchers):
+            continue
+        failed = next((aid for aid, is_head, _ in vouchers if is_head), None)
+        if failed is not None:
+            refuse(rel, failed, verdict(failed, files_on_disk=False) or PublicationFigureError(
+                "figure record failed its binding check", check="figure_hash"))
+        elif vouchers:
+            refuse(rel, vouchers[0][0], PublicationFigureError(
+                f"only record versions that fail the binding check vouch for {rel}",
+                check="figure_hash"))
+        else:
+            artifact_id, claimed = owner  # type: ignore[misc]
+            refuse(rel, artifact_id, PublicationFigureError(
+                f"figure file {rel} changed after the record was minted "
+                f"(record: {claimed}, disk: {digest})", check="file_bytes"))
+    return audit

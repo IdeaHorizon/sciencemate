@@ -37,6 +37,37 @@ _REFERENCE_COMPUTATIONAL_MESH_SUFFIXES = {
 MESH_OPERATIONS = frozenset({"prepare", "resolve", "build_profile", "generate", "convert"})
 
 
+def mesh_parameter_basis(
+    result: dict[str, Any], *, analysis: dict[str, Any] | None = None,
+    caller_controls: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Keep proposed defaults distinct from the producer's execution receipt.
+
+    Legacy parameter_basis.assumptions came directly from requirement analysis;
+    they were never an observation that those controls were actually executed.
+    Preserve that history explicitly, including when rebuilding an old package.
+    """
+    prior = dict(result.get("parameter_basis") or {})
+    proposals = prior.pop("assumptions", None)
+    if proposals is None:
+        proposals = (prior.get("planning_proposals") or {}).get("items")
+    if proposals is None:
+        proposals = (analysis or {}).get("assumptions") or []
+    return {
+        **prior,
+        "schema_version": "2.0",
+        "request_controls": caller_controls if caller_controls is not None else prior.get("request_controls", {}),
+        "executed_controls": dict(result.get("grid_params") or {}),
+        "execution_scope": "Producer inputs only; achieved geometry and quality require native measurements.",
+        "planning_proposals": {
+            "status": "not_execution_evidence",
+            "items": proposals,
+            "scope": "Historical Analyst suggestions, not adopted settings. They may differ from executed_controls.",
+        },
+        "unresolved_facts": prior.get("unresolved_facts", (analysis or {}).get("unresolved_facts") or []),
+    }
+
+
 def normalize_mesh_operation(value: Any) -> str:
     """Normalize planner vocabulary to the single mesh service contract."""
     operation = str(value or "prepare").strip().lower()
@@ -271,7 +302,7 @@ def _control_receipt(
     requested: dict[str, Any],
     result: dict[str, Any],
 ) -> dict[str, Any]:
-    """Report whether observable caller controls reached the producer output."""
+    """Check parameter transport, not whether a native feature was activated."""
     observed = result.get("grid_params") if isinstance(result.get("grid_params"), dict) else {}
 
     def matches(expected: Any, actual: Any) -> bool:
@@ -281,7 +312,7 @@ def _control_receipt(
             return math.isclose(float(expected), float(actual), rel_tol=1e-9, abs_tol=1e-12)
         return expected == actual
 
-    applied = {
+    matched = {
         key: observed[key]
         for key, value in requested.items()
         if key in observed and matches(value, observed[key])
@@ -293,9 +324,10 @@ def _control_receipt(
     }
     return {
         "status": "fail" if mismatched else "pass",
+        "evidence_scope": "adapter_parameter_echo",
         "requested": requested,
         "observed": observed,
-        "applied": applied,
+        "matched": matched,
         "mismatched": mismatched,
         "unobserved": sorted(key for key in requested if key not in observed),
     }
@@ -312,6 +344,17 @@ def _resolve_unfinished_geometry_state(
     status = str(result.get("status") or "")
     if status not in {"needs_geometry_processing", "needs_reference_search"}:
         return result
+
+    scope = (params.get("requirement_analysis") or {}).get("task_scope") or {}
+    if "geometry_acquisition" in (scope.get("excluded_capabilities") or []):
+        message = "The local mesh route has no usable geometry input; external geometry acquisition is outside this task."
+        return {
+            "status": "needs_revision", "failure_category": "plan_contract_error", "error": message,
+            "revision_contract": revision_contract([{
+                "code": "missing_local_geometry_producer", "message": message,
+                "required_change": "Generate the requested geometry as a non-delivery input and bind it to the mesher, or choose a supported local producer. Preserve frozen dimensions and element requirements; do not search for substitute geometry.",
+            }], scope="plan"),
+        }
 
     queries = [
         " ".join(str(item).split())
@@ -464,16 +507,42 @@ async def prepare_scientific_mesh(
     # packaging would leave a valid-looking mesh generated from defaults.
     requirement_analysis = params.get("requirement_analysis")
     if isinstance(requirement_analysis, dict):
+        from nodes.data.pipeline_contract import merge_parameter_updates
+        from .mesh_generator import mesh_parameter_contracts
+        from .geometry_assets import canonical_mesh_controls, parameter_binding_value
+
+        scalar_controls = {
+            key for controls in mesh_parameter_contracts(discipline).values()
+            for key, contract in controls.items()
+            if contract["type"].split(" | ")[0] in {"int", "float"}
+        }
         # Requirement models may choose harmless group aliases (for example
         # ``boundary`` vs ``boundary_conditions``). Normalize once at the
         # producer boundary and pass the same locked values to every mesher.
         for required_file in requirement_analysis.get("required_files") or []:
             if not isinstance(required_file, dict):
                 continue
-            for group, values in canonical_parameter_bindings(
-                required_file.get("parameter_bindings")
-            ).items():
+            # Normalization keeps translated producer controls separately
+            # from literal caller locks. Consume both, with caller values
+            # taking precedence, instead of silently reverting to defaults.
+            bindings = merge_parameter_updates(
+                canonical_parameter_bindings(required_file.get("available_stage_parameters")),
+                canonical_parameter_bindings(required_file.get("parameter_bindings")),
+            )
+            for group, values in bindings.items():
+                values = parameter_binding_value(bindings, group)
+                if (required_file.get("parameter_binding_source") == "analyst_inference"
+                        and group in scalar_controls and isinstance(values, (list, dict))):
+                    continue
                 if isinstance(values, dict):
+                    values = canonical_mesh_controls({
+                        key: parameter_binding_value(values, key) for key in values
+                    })
+                    # Inferred constraints are not executable numeric controls.
+                    # Keep them for authority review; the producer owns defaults.
+                    if required_file.get("parameter_binding_source") == "analyst_inference":
+                        values = {key: value for key, value in values.items()
+                                  if not (key in scalar_controls and isinstance(value, (list, dict)))}
                     current = params.get(group)
                     params[group] = {
                         **values,
@@ -520,8 +589,6 @@ async def prepare_scientific_mesh(
 
     # 判决拆除三波（sm:461 → schema，2026-09-02）：合法 operation 只在注册
     # schema 的 enum 里声明一次，派发口核一次；这里只做别名归一，不再二审。
-    # 仓库内直接调用方（profile_mesh_variants / scientific_preprocessor）只传
-    # 字面量 "prepare"。
     operation = normalize_mesh_operation(operation)
 
     detected = identify_discipline(
@@ -532,9 +599,9 @@ async def prepare_scientific_mesh(
     selected = _canonical_mesh_discipline(discipline, detected, params)
     from .geometry_assets import mesh_visualization_requested
 
-    params.setdefault("write_tecplot", mesh_visualization_requested({
-        "convert_to_openfoam": selected == "cfd", **params,
-    }))
+    params["write_tecplot"] = mesh_visualization_requested({
+        "convert_to_openfoam": selected == "cfd", **params, "spec": spec,
+    }, request=state.hook_state.get("_data_current_request"))
 
     reference_mesh = _is_reference_computational_mesh(params)
     if reference_mesh:
@@ -751,11 +818,7 @@ async def prepare_scientific_mesh(
     if result.get("status") == "success":
         analysis = params.get("requirement_analysis")
         analysis = analysis if isinstance(analysis, dict) else {}
-        result.setdefault("parameter_basis", {
-            "request_controls": caller_controls,
-            "assumptions": analysis.get("assumptions") or [],
-            "unresolved_facts": analysis.get("unresolved_facts") or [],
-        })
+        result["parameter_basis"] = mesh_parameter_basis(result, analysis=analysis, caller_controls=caller_controls)
         receipt = _control_receipt(caller_controls, result)
         result["control_receipt"] = receipt
         if receipt["status"] != "pass":
@@ -784,6 +847,28 @@ async def prepare_scientific_mesh(
             result["revision_contract"] = revision_contract(
                 review.get("issues") or [], scope="asset"
             )
+    stages = params.get("calculation_stages") or (params.get("requirement_analysis") or {}).get("calculation_stages") or []
+    if result.get("status") == "success" and generate_mesh and stages and selected in _CONTINUUM_DISCIPLINES:
+        from .profile_mesh_variants import generate_cfd_profile_mesh_variants
+        from .scientific_preprocessor import _generate_mesh_convergence_variants
+
+        family_root = Path(result.get("case_dir") or Path(result["mesh_file"]).parent) / "mesh_families"
+        family_root.mkdir(parents=True, exist_ok=True)
+        result["profile_variants"] = await generate_cfd_profile_mesh_variants(
+            state=state, selected_discipline=selected, params=params, package_dir=family_root,
+            mesh_generation_result=result, calculation_stages=stages,
+        )
+        result["convergence_variants"] = await _generate_mesh_convergence_variants(
+            state=state, spec=spec, selected_discipline=selected, params=params, package_dir=family_root,
+            mesh_generation_result=result, calculation_stages=stages,
+        )
+        variants = [*result["profile_variants"],
+                    *(item for group in result["convergence_variants"].values() for item in group)]
+        failed = [item for item in variants if item.get("status") != "success" or item.get("deliverable_valid") is False]
+        if failed:
+            issues = [{"code": "mesh_family_failed", "message": str(item.get("result", {}).get("error") or item.get("id") or item.get("variant_id")),
+                       "required_change": "Repair the failed mesh-family producer while preserving geometry and the declared levels."} for item in failed]
+            result.update(status="needs_revision", issues=issues, revision_contract=revision_contract(issues, scope="asset"))
     return _normalize_public_result(_invalidate_failed_delivery(result))
 
 

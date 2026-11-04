@@ -37,17 +37,23 @@ def test_no_probe_means_unknown_not_zero(monkeypatch):
     assert "看不出来" in cap.sentence()
 
 
+def _four_cards(monkeypatch, *, backend: str | None):
+    """机器上看得见 4 张卡；后端能不能给 CUDA 开口由 ``backend`` 定。
+
+    只替换这两个事实，不替换 ``subprocess.run``：gpu_capability 还要问隔离后端，全局
+    换掉 subprocess.run 会让后端探针读到假结果并被缓存，污染同进程后面所有测试。
+    """
+    from core import gpu
+
+    monkeypatch.setattr(gpu, "visible_indices", lambda: [0, 1, 2, 3])
+    monkeypatch.setattr(sandbox, "_gpu_backend",
+                        lambda: (backend, "" if backend else "测试：这个后端不给 CUDA 开口"))
+
+
 def test_the_refusal_carries_the_same_facts_as_discovery(tmp_path, monkeypatch):
     """拒绝时说的，必须和资源画像看到的是同一份事实。"""
-    import shutil
-    import subprocess
-
-    class _Out:
-        returncode = 0
-        stdout = "0\n1\n2\n3\n"
-
-    monkeypatch.setattr(shutil, "which", lambda n: "/usr/bin/nvidia-smi")
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Out())
+    monkeypatch.setenv("HARNESS_JOBS_ROOT", str(tmp_path / "jobs"))
+    _four_cards(monkeypatch, backend=None)
 
     cap = gpu_capability()
     assert cap.visible == 4 and cap.schedulable is False
@@ -63,21 +69,37 @@ def test_the_refusal_carries_the_same_facts_as_discovery(tmp_path, monkeypatch):
         f"没说清这个答案在提交前就能确定，而这正是 #893 的代价：{text}")
 
 
+def test_schedulable_is_not_a_grant(tmp_path, monkeypatch):
+    """#893 阶段 1：卡可分配 ≠ 这个 run 可以用。没经人批准的作业照样拒，并指出怎么申请。"""
+    monkeypatch.setenv("HARNESS_JOBS_ROOT", str(tmp_path / "jobs"))
+    _four_cards(monkeypatch, backend="linux")
+
+    cap = gpu_capability()
+    assert cap.visible == 4 and cap.schedulable is True and cap.isolated is False
+    assert "submit_job" in cap.reason, "可分配时要说怎么拿到：提交 GPU 作业时框架替你问人"
+    with pytest.raises(SandboxContractError, match="gpu_runtime"):
+        sandbox.prepare_launch(["true"], cwd=tmp_path, writable_roots=[tmp_path], gpus=1)
+
+
 def test_asking_costs_nothing_irreversible(tmp_path, monkeypatch):
-    """这个答案必须在**问人之前**就拿得到 —— #893 的代价是它被推到了审批之后。"""
-    calls: list[str] = []
-    import subprocess
-    real = subprocess.run
+    """这个答案必须在**问人之前**就拿得到 —— #893 的代价是它被推到了审批之后。
 
-    def _spy(argv, *a, **k):
-        calls.append(argv[0] if isinstance(argv, (list, tuple)) else str(argv))
-        return real(argv, *a, **k)
+    回答它只许读：数卡（nvidia-smi）、问后端（和开局说明同一份快照）、读锁目录。
+    不分卡、不起作业、不写锁文件。
+    """
+    jobs = tmp_path / "jobs"
+    monkeypatch.setenv("HARNESS_JOBS_ROOT", str(jobs))
+    _four_cards(monkeypatch, backend="linux")
+    from core import gpu
 
-    monkeypatch.setattr(subprocess, "run", _spy)
+    def _forbidden(*_a, **_k):
+        pytest.fail("回答「能不能用」时分了卡 / 起了作业")
+
+    for name in ("acquire", "attach_job"):
+        monkeypatch.setattr(gpu, name, _forbidden)
     gpu_capability()
-
-    assert all(c.endswith("nvidia-smi") or "nvidia-smi" in c for c in calls), (
-        f"回答这个问题时跑了别的东西：{calls} —— 它必须是一次只读探测")
+    written = [p for p in jobs.rglob("*") if p.is_file() and p.name != ".mutex"]
+    assert written == [], f"回答这个问题时写了东西：{written}"
 
 
 def test_zero_gpus_still_goes_through(tmp_path):

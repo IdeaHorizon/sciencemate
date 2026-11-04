@@ -329,7 +329,8 @@ async def test_exactly_one_inbox_consumer_when_nested(tmp_path: Path) -> None:
     async def _fake_drain(self) -> None:
         nonlocal started
         started += 1
-        await asyncio.Event().wait()          # 活着但不做事
+        while self._inbox_consumers > 0:
+            await asyncio.sleep(0)
 
     import asyncio
 
@@ -361,4 +362,89 @@ async def test_exactly_one_inbox_consumer_when_nested(tmp_path: Path) -> None:
     # 最外层退出时必须再排空一次：只 cancel 不排空，排队的话就凭空消失
     # （2026-08-31 实测 received=5 / consumed=2 / superseded=0）。
     assert drained == 1, "最外层收尾没有排空邮箱"
+
+
+@pytest.mark.asyncio
+async def test_operation_end_does_not_cancel_and_repeat_an_inflight_tool():
+    import asyncio
+
+    import platform_runtime
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls, writes = 0, 0
+
+    async def consume(self):
+        nonlocal calls, writes
+        if entered.is_set():
+            return False
+        calls += 1
+        entered.set()
+        await release.wait()
+        writes += 1
+        return True
+
+    session = types.SimpleNamespace(
+        _inbox_consumers=0, INTERRUPT_POLL_S=0.01,
+        state=types.SimpleNamespace(append_transcript=lambda *a, **kw: None),
+    )
+    session.consume_inbox = types.MethodType(consume, session)
+    session._drain_interrupts_forever = types.MethodType(
+        platform_runtime.PlatformSession._drain_interrupts_forever, session,
+    )
+    context = types.MethodType(platform_runtime.PlatformSession._inbox_consumer, session)
+
+    async def operation():
+        async with context():
+            await entered.wait()
+
+    task = asyncio.create_task(operation())
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        await asyncio.wait_for(task, 1)
+        assert calls == writes == 1
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_background_and_wake_drains_cannot_handle_the_same_message_twice(tmp_path):
+    import asyncio
+
+    import platform_runtime
+
+    session, state, _ = _stop_probe(tmp_path)
+    session._inbox.put(_msg("写下新安排"))
+    entered, release = asyncio.Event(), asyncio.Event()
+    effects = []
+
+    async def handle(item):
+        effects.append(item.item_id)
+        entered.set()
+        await release.wait()
+
+    session._handle_drained_interrupt = handle
+    consume = types.MethodType(platform_runtime.PlatformSession.consume_inbox, session)
+    first = asyncio.create_task(consume())
+    second = None
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        second = asyncio.create_task(consume())
+        await asyncio.sleep(0)
+        assert len(effects) == 1
+        release.set()
+        assert await asyncio.wait_for(first, 1) is True
+        assert await asyncio.wait_for(second, 1) is False
+        assert len(effects) == 1 and len(session._inbox) == 0
+        assert sum(e["event"] == "inbox_item_consumed" for e in _transcript(state)) == 1
+    finally:
+        release.set()
+        tasks = [t for t in (first, second) if t is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 

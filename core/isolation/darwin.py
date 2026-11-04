@@ -144,7 +144,8 @@ class DarwinBackend:
         # 私有 scratch：seatbelt 没有 namespace，共享 /tmp 只能靠"不 allow"挡住写 ——
         # 但那样命令就没地方写临时文件了。给它一个自己的，TMPDIR 指过去（#872）。
         scratch_dir = private_scratch()
-        layers = write_layers(spec.writable_roots, spec.readonly_roots, scratch_dir=scratch_dir)
+        layers = write_layers(spec.writable_roots, spec.readonly_roots, scratch_dir=scratch_dir,
+                              persistent_cache=not spec.ephemeral)
         profile = seatbelt_profile(layers, network=spec.network_access)
         exe = shutil.which("sandbox-exec") or SANDBOX_EXEC
         # 最内层是我们的垫片：sandbox-exec 自己 execvp 载荷失败只会
@@ -153,6 +154,7 @@ class DarwinBackend:
         return NativeLaunch(
             argv=[exe, "-p", profile, *exec_shim_argv(), *spec.argv],
             cwd=spec.cwd,
-            env=payload_environment(spec.environment, scratch_dir=scratch_dir, home=spec.home),
+            env=payload_environment(spec.environment, scratch_dir=scratch_dir, home=spec.home,
+                                    persistent_cache=not spec.ephemeral),
             scratch_dir=scratch_dir,
         )

@@ -150,10 +150,10 @@ def test_natural_goal_gets_run_local_source_and_build_roots_without_hint():
     assert str(build) in msgs[0].content
     assert not (runtime / "source").exists()
     assert not build.exists()
-    assert "不得探索、复用或清理 project workspace" in msgs[0].content
+    assert "不得覆盖框架状态、他人数据或只读基线" in msgs[0].content
 
 
-def test_multiple_build_roots_are_all_shown_and_require_disambiguation():
+def test_multiple_build_roots_are_all_shown_for_the_task_to_choose():
     ctx = _ctx(project_id="proj-wd-ambiguous-build")
     explicit = Path(tempfile.mkdtemp(prefix="hf-wdconv-build-"))
     ctx.state.hook_state["node_inputs"] = {
@@ -167,7 +167,48 @@ def test_multiple_build_roots_are_all_shown_and_require_disambiguation():
     default_build = _expected_base(ctx) / "build"
     assert str(explicit) in msgs[0].content
     assert str(default_build) in msgs[0].content
-    assert "执行时必须显式消歧" in msgs[0].content
+    assert "按本次任务明确选用的目录" in msgs[0].content
+
+
+def test_path_briefing_accepts_authorized_user_locations_without_fixed_prefix():
+    """已批准的用户安装位置不能被默认 build/install 提示覆盖。"""
+    ctx = _ctx()
+    requested = tempfile.mkdtemp(prefix="hf-user-install-")
+    ctx.state.hook_state["path_roles"] = {
+        "approved_write_root": {"path": requested},
+    }
+
+    messages = _hooks._workdir_convention_on_turn_start(ctx)
+
+    text = messages[0].content
+    assert f"`approved_write_root`: `{requested}`（显式声明；可写）" in text
+    assert "用户指定且 Core 已授权的目录可用于构建、安装和输出" in text
+    assert "未指定安装目标时，建议" in text
+    assert "所有安装器均须" not in text
+    assert "必须留在 project workspace" not in text
+    assert "冻结路线" not in text
+    assert "先取进 managed_source_root" not in text
+    # 已授权原地修改与只读保护必须同时可见，不能把所有源码编辑都导向复制。
+    assert "可原地修改" in text and "只读输入" in text
+    assert "需要修改源码或构建会改写输入时" not in text
+
+
+def test_path_briefing_does_not_present_readonly_build_root_as_install_target():
+    """提示必须反映 collector 的读写属性，不能把只读位置展示成安装权限。"""
+    ctx = _ctx()
+    readonly_build = tempfile.mkdtemp(prefix="hf-readonly-build-")
+    ctx.state.hook_state["node_inputs"] = {
+        "path_roles": {
+            "build_root": {"path": readonly_build, "writable": False},
+        },
+    }
+
+    messages = _hooks._workdir_convention_on_turn_start(ctx)
+
+    text = messages[0].content
+    assert f"`build_root`: `{readonly_build}`（显式声明；只读）" in text
+    assert str(Path(readonly_build) / "install") not in text
+    assert "写入仍受 Core 当前授权约束" in text
 
 
 def test_requires_build_root_uses_same_build_path_as_runtime_contract():

@@ -19,6 +19,7 @@ from app.services.model_role_catalog import (
     ModelRoleCatalogError,
     catalog,
 )
+from app.services.user_interface import language_for, say
 
 log = logging.getLogger(__name__)
 
@@ -141,7 +142,7 @@ async def get_visible_backend(db: AsyncSession, user: User, backend_id: str) -> 
     try:
         UUID(str(backend_id))
     except (ValueError, AttributeError, TypeError):
-        raise HTTPException(status_code=404, detail="Model backend not found") from None
+        raise HTTPException(status_code=404, detail=_backend_not_found(user)) from None
     config = await db.scalar(
         select(ModelBackendConfig).where(
             ModelBackendConfig.id == backend_id,
@@ -149,8 +150,12 @@ async def get_visible_backend(db: AsyncSession, user: User, backend_id: str) -> 
         )
     )
     if not config:
-        raise HTTPException(status_code=404, detail="Model backend not found")
+        raise HTTPException(status_code=404, detail=_backend_not_found(user))
     return config
+
+
+def _backend_not_found(user: User) -> str:
+    return say({"zh": "找不到这个模型连接", "en": "Model connection not found"}, language_for(user))
 
 
 #: 端点没填时，唯一键把它折成的值。见 `ModelBackendConfig.__table_args__`：
@@ -257,11 +262,22 @@ async def effective_backend(
 ) -> ModelBackendConfig:
     selected = await select_effective_backend(db, user, role=role, require_ready=require_ready)
     if not selected:
-        raise HTTPException(status_code=503, detail=nobody_can_answer(role))
+        raise HTTPException(status_code=503, detail=nobody_can_answer(role, language_for(user)))
     return selected
 
 
-def nobody_can_answer(role: str) -> str:
+def _role_title(role: str, lang: str) -> str:
+    """角色给人看的名字（`model_roles.yaml` 的 title / title_en），不显示角色 id。目录读不到就说 id。"""
+    try:
+        spec = next((item for item in catalog() if item.id == role), None)
+    except ModelRoleCatalogError:
+        spec = None
+    if spec is None:
+        return role
+    return (spec.title_en if lang == "en" else "") or spec.title
+
+
+def nobody_can_answer(role: str, lang: str = "zh") -> str:
     """没有能用的模型时给人看的那句话 —— 说清缺什么、谁能补、去哪补。
 
     曾经是一句 `No ready model backend is available for role 'reasoning'`。在组织服务器
@@ -271,11 +287,20 @@ def nobody_can_answer(role: str) -> str:
     """
     from app import assembly
 
-    what = "主模型" if role == REASONING_ROLE else f"「{role}」这个角色的模型"
+    what = say({"zh": "主推理模型", "en": "main reasoning model"}, lang) if role == REASONING_ROLE \
+        else say({"zh": "「{title}」", "en": "“{title}”"}, lang, title=_role_title(role, lang))
     if assembly.profile_name() == "org":
-        return (f"这个组织还没有能用的{what} —— 组织项目跑在组织服务器上，用的是组织的模型。"
-                "请组织管理员在「组织 → 设置 → 模型」里加一个。")
-    return f"还没有能用的{what} —— 去「设置 → 模型与密钥」配一个。"
+        return say({
+            "zh": "这个组织还没有可用的{what}。组织项目使用组织提供的模型，请联系组织管理员在"
+                  "「组织 → 设置 → 组织提供的模型」中添加。",
+            "en": "This organisation has no {what} available yet. Organisation projects use models the "
+                  "organisation provides; ask an organisation administrator to add one under "
+                  "Organisation → Settings → Models this organisation provides.",
+        }, lang, what=what)
+    return say({
+        "zh": "还没有可用的{what}，请在「设置 → 模型与密钥」中添加。",
+        "en": "No {what} is available yet. Add one under Settings → Models & credentials.",
+    }, lang, what=what)
 
 
 async def resolve_role_bindings(
@@ -314,10 +339,13 @@ async def set_effective_default(
     if role not in (config.roles or []):
         raise HTTPException(
             status_code=409,
-            detail=f"Backend is not authorized for role {role!r}",
+            detail=say({"zh": "这个连接没有被授权承担「{title}」",
+                        "en": "This connection is not enabled for “{title}”"},
+                       language_for(user), title=_role_title(role, language_for(user))),
         )
     if backend_status(config) != "ready":
-        raise HTTPException(status_code=409, detail="Model backend is not ready")
+        raise HTTPException(status_code=409, detail=say(
+            {"zh": "这个模型连接还不可用", "en": "This model connection is not ready yet"}, language_for(user)))
     if can_edit_backend(user, config) and user.role != UserRole.RESEARCHER.value:
         # 同 scope 内该角色的默认是唯一的：先把别人的这一项摘掉，再给自己戴上。
         # 只动**这个角色**，别人的角色默认不受影响。

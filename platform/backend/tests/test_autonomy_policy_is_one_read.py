@@ -76,7 +76,7 @@ async def test_a_machine_without_a_boundary_downgrades_the_policy(monkeypatch) -
     )
     policy = await local_execution.project_autonomy_policy(_Db(), SimpleNamespace(id="p1"))
     assert policy.unattended is False, "算出来的判据必须真的改变行为"
-    assert "不会自己开下一轮" in policy.blocked_reason
+    assert "不会自动开始下一次" in policy.blocked_reason
 
 
 def test_not_autonomous_means_no_authorization() -> None:

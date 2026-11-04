@@ -11,7 +11,7 @@ test("Project settings edit only persisted metadata behind manage_settings", () 
   assert.match(page, /canManageProjectSettings\(project\)/);
   assert.match(page, /api\.updateProject\(projectId, data\)/);
   assert.match(page, /disabled=\{!canManageSettings \|\| update\.isPending\}/);
-  assert.match(page, /只有项目负责人或管理员能改这些设置/);
+  assert.match(page, /只有项目负责人或管理员可以修改这些设置/);
   assert.match(page, /ProjectMembersPanel/);
   // 「资源」「算力」两行链到的那两页在 2026-09-12 删了（登记簿 harness 零读取），
   // 所以这里反过来钉住：它们不许再回来。
@@ -23,16 +23,23 @@ test("Project settings edit only persisted metadata behind manage_settings", () 
 test("personal research settings explain scope, audience, and activation time", () => {
   const page = source("../../../app/(workspace)/settings/research/page.tsx");
   assert.match(page, /Personal/);
-  assert.match(page, /只影响新会话/);
+  assert.match(page, /只对之后新建的会话生效/);
   assert.match(page, /已有会话不变/);
-  assert.match(page, /会话建立时冻结/);
-  assert.match(page, /在别处强制执行/);
-  assert.match(page, /把个人指令应用到新会话/);
-  assert.match(page, /不会改动项目知识库，也不影响已有会话/);
+  assert.match(page, /启用分场景指令/);
+  assert.match(page, /关闭后，新会话不再使用下面的指令/);
   assert.match(page, /memory_enabled: settings\.memory_enabled/);
   assert.match(page, /memory_enabled: event\.target\.checked/);
-  assert.match(page, /不改变数据访问权限/);
-  assert.match(page, /not available in the current settings contract/);
+  assert.match(page, /请直接在对话里说明/);
+  // 「会话建立时冻结 / 在别处强制执行 / 不改变数据访问权限」那几句讲的是内部机制，
+  // 读者是科研人员，不是写这套治理层的人 —— 删掉了，不许回来。
+  assert.doesNotMatch(page, /会话建立时冻结|在别处强制执行|不改变数据访问权限|机械强制执行/);
+  // 「指令来源」每层的说明由前端按层级和页面上已有的数来写：后端那句只有英文。
+  assert.match(page, /layerSummary\(settings\.data\)/);
+  assert.doesNotMatch(page, /layer\.summary/);
+  // 助手读的指令只有个人、项目两层。「机构」「研究组」两行永远「未设置」、还说「由管理员维护」，
+  // 那两层早就没有文件、没有写入口 —— 不许回来。
+  assert.doesNotMatch(page, /zh: "机构"|zh: "研究组"|zh: "[^"]*由管理员维护/);
+  assert.match(page, /zh: "项目", en: "Project"/);
 });
 
 test("settings center has one searchable shell and dedicated personal, research, and governance routes", () => {
@@ -83,8 +90,10 @@ test("notification preferences use the canonical API and only expose real live-R
   assert.doesNotMatch(chatCode, /pushSuccess/);
   assert.doesNotMatch(page, /run_completed|执行完成/);
   assert.match(page, /预算告警/);
-  assert.match(page, /没有可用的送达方式/);
-  assert.match(page, /永远可见/);
+  // 决策和失败的记录不受开关影响 —— 这件事用开关下面一句话说，不再单列一组「永远可见」。
+  assert.match(page, /始终会显示在对应会话里，不受这些开关影响/);
+  // 「外部送达」三项（邮件 / 桌面 / 定时摘要）一项都用不了，整段删了：不许以占位的样子回来。
+  assert.doesNotMatch(page, /外部送达|邮件通知|桌面通知|定时摘要|永远可见/);
 });
 
 test("the account page and the organisation page do not dump the access machinery", () => {
@@ -196,9 +205,8 @@ test("每个角色都够得着「加一个模型」，且这一页不假装能�
   // 能建就得能删：一条填错的连接不该永远留在列表里。
   assert.match(page, /client\.remove\(backend\.id\)/);
   assert.match(shell, /remove: \(id\) => api\.deleteModelBackend\(id\)/);
-  assert.match(page, /globalThis\.confirm\(t\(\{ zh: `确定删除模型连接/);
+  assert.match(page, /globalThis\.confirm\(t\(\{ zh: `删除模型连接/);
   assert.equal(/<h2>New Session<\/h2>/.test(page + shell), false, "会话在 Project 里建，设置页不建会话");
-  assert.match(page, /这一页不会新建会话/);
 });
 
 test("应用外壳定高：左栏不被右栏的内容推走", () => {
@@ -269,12 +277,16 @@ test("算力只剩一页，探针收在一个默认关着的技术小节里", ()
   const inventory = source("../../compute/components/ComputeInventoryView.tsx");
   const page = source("../../../app/(workspace)/compute/page.tsx");
   assert.match(page, /ComputeInventoryView/);
-  for (const label of ["CPU", "内存", "存储", "GPU", "正在跑的", "计算节点", "调度器"]) {
+  for (const label of ["CPU", "内存", "存储", "GPU", "运行中", "计算节点"]) {
     assert.match(inventory, new RegExp(label));
   }
+  // 「调度器」一节并进了顶部的「运行中」：后端只报一个本机调度器，单独成节只是把同一个数再说一遍。
+  assert.doesNotMatch(inventory, /zh: "[^"]*调度器/);
+  // 「访问」一行没有任何调用方传值，永远是一句写死的默认话，个人版又根本没有登录。
+  assert.equal(inventory.includes("accessLabel"), false);
   assert.equal((inventory.match(/<details className="compute-technical">/g) ?? []).length, 1);
   assert.equal(inventory.includes("<details className=\"compute-technical\" open"), false);
-  assert.ok(inventory.indexOf("技术细节") < inventory.indexOf("健康探针"));
+  assert.ok(inventory.indexOf("技术细节") < inventory.indexOf("健康检查"));
   assert.equal(inventory.includes("Not supported"), false);
   assert.equal(inventory.includes(">Unknown<"), false);
 });
@@ -282,7 +294,7 @@ test("算力只剩一页，探针收在一个默认关着的技术小节里", ()
 test("member controls remain visible and disabled without manage_members", () => {
   const members = source("../../projects/components/ProjectMembersPanel.tsx");
   assert.match(members, /disabled=\{!canManage \|\| lastLead \|\| members\.changeRole\.isPending\}/);
-  assert.match(members, /只有项目负责人或管理员能改成员角色/);
+  assert.match(members, /只有项目负责人或管理员可以修改成员角色/);
   assert.match(members, /disabled=\{!canManage\}/);
 });
 

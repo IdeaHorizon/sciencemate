@@ -358,7 +358,7 @@ def _workspace_activity(child_state, top: int = 8) -> list[dict]:
 
 
 
-_RC_ACTIONS = ("inject", "cancel", "list_active", "progress", "jobs")
+_RC_ACTIONS = ("inject", "cancel", "list_active", "progress", "jobs", "answer")
 
 
 async def _runtime_control(
@@ -371,6 +371,8 @@ async def _runtime_control(
     source: str = "orchestrator_relay",
     n: int = 12,
     include_done: bool = False,
+    offer_id: str = "",
+    choice_id: str = "",
     **_,
 ) -> dict:
     """统一 child run 控制入口。`action` 决定操作。
@@ -404,6 +406,13 @@ async def _runtime_control(
                 "jobs": [r.as_dict() for r in recs],
                 "summary": (_jobs.render_for_orchestrator(state)
                             or "（当前没有在跑的后台作业）")}
+    if action == "answer":
+        from core.pause_dialogue import answer_from_dialogue
+
+        return answer_from_dialogue(
+            state, child_run_id=child_run_id, offer_id=offer_id,
+            choice_id=choice_id, content=content,
+        )
 
     if action == "list_active":
         return await _list_active_child_runs(state=state)
@@ -440,6 +449,9 @@ register_tool(
             "    返回里还带 `workspace_recent_files`（输出文件在不在长）。\n"
             "  - `jobs`：**看后台计算作业** —— 子 run 之外的那一层。在跑什么、\n"
             "    占什么算力、已跑多久、预计还要多久、有没有跑超预计（overrun_ratio）。\n"
+            "  - `answer`：讨论待答问题时，把用户明确的回答交给原暂停驱动器。"
+            "传当前 asking_run_id 为 child_run_id、offer_id 和 choice_id；"
+            "自由文本问题用 content 保留用户原话。追问、解释和讨论不等于批准。\n"
             "**长 tool_call 期间 child 的 transcript 是静默的**（事件要等工具返回才落）。\n"
             "编译 / 下载 / 训练 / HPC 作业跑几小时～几天都合理，这时别拿"
             "'没有新事件'当卡死。像科学家盯集群作业那样判断：先 `progress` 看\n"
@@ -456,6 +468,11 @@ register_tool(
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": list(_RC_ACTIONS)},
+                "offer_id": {"type": "string", "description": "answer：当前待答问题的 offer_id。"},
+                "choice_id": {
+                    "type": "string",
+                    "description": "answer：用户决定对应的选项 id；自由文本可省略。",
+                },
                 "include_done": {
                     "type": "boolean",
                     "description": "action=jobs 时：连已结束的作业一起列（默认只列在跑的）",

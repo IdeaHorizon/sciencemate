@@ -71,10 +71,13 @@ test("no action is rendered twice in the header", () => {
   // 曾经的 `session-mobile-action`：同一个功能在顶栏和菜单里各渲染一遍，
   // 靠 CSS 决定显示哪个。两份副本会各自演化。
   assert.doesNotMatch(header, /session-mobile-action/);
-  for (const label of ["看改动", "归档会话", "研究进程"]) {
+  for (const label of ["归档会话", "研究进程"]) {
     const occurrences = header.split(label).length - 1;
     assert.equal(occurrences, 1, `${label} 在顶栏里应该只出现一次`);
   }
+  // 「看改动」删了：它只在项目有新提交时出现，点开的却是本会话自己的改动面板，
+  // 看不到项目新提交了什么。项目有更新这件事写在「会话信息」的「项目更新」一行。
+  assert.equal(header.includes("看改动"), false);
 });
 
 test("the project-level KB action left the session menu", () => {
@@ -90,9 +93,9 @@ test("the project-level KB action left the session menu", () => {
   );
 });
 
-test("「停止这一轮」只在真停得掉的时候出现", () => {
+test("「停止执行」只在真停得掉的时候出现", () => {
   // 终态 run 上出现一个停不掉的按钮，比没有按钮更糟。
-  const stopAt = menu.indexOf("停止这一轮");
+  const stopAt = menu.indexOf("停止执行");
   assert.ok(stopAt > 0);
   assert.match(menu.slice(Math.max(0, stopAt - 500), stopAt), /stoppableRunId/);
 });

@@ -15,9 +15,14 @@ import asyncio
 import json
 import time
 
+import pytest
+
 import chat as chat_mod
 from core import run_history
 from core.bootstrap import bootstrap
+
+# 讲的是续轮行为，前提是研究已经开始（见 conftest.research_under_way）。
+pytestmark = pytest.mark.usefixtures("research_under_way")
 
 bootstrap()
 

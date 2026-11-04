@@ -1,0 +1,31 @@
+suite: literaturebench_v1_esi22_search
+version: 0.3.0
+status: primary_public_taskset
+source_framework: "Essential Science Indicators (ESI) 22 research fields"
+purpose: |
+  公开主基准的题库。ESI 的粒度来自文献计量而非本平台内部分类，适合比较 AI4S
+  平台与通用 AI 的学术检索能力。每题的中文课题描述是主输入；queries 仅用于
+  建立候选池、人工 gold 标注和诊断，不得在共同主榜中替被测系统改写输入。
+tasks:
+  - {id: ESI01, pilot: false, esi_field: Agricultural Sciences, prompt_zh: 作物根系对缺磷胁迫的感知与信号转导, diagnostic_queries: [phosphate starvation response, phosphate starvation root, phosphorus deficiency plant root]}
+  - {id: ESI02, pilot: false, esi_field: Biology & Biochemistry, prompt_zh: 液-液相分离在转录调控中的功能, diagnostic_queries: [liquid liquid phase separation, phase separation transcription regulation]}
+  - {id: ESI03, pilot: true, esi_field: Chemistry, prompt_zh: 钙钛矿太阳能电池的缺陷钝化与长期稳定性, diagnostic_queries: [perovskite solar cell, perovskite passivation, perovskite solar cell stability]}
+  - {id: ESI04, pilot: true, esi_field: Clinical Medicine, prompt_zh: CAR-T 疗法在实体瘤中的递送与浸润瓶颈, diagnostic_queries: [chimeric antigen receptor T cell, CAR T cell solid tumor, CAR T cell therapy]}
+  - {id: ESI05, pilot: false, esi_field: Computer Science, prompt_zh: 扩散概率模型的采样加速与可控生成, diagnostic_queries: [denoising diffusion probabilistic model, diffusion model sampling acceleration, diffusion model controllable generation]}
+  - {id: ESI06, pilot: true, esi_field: Economics & Business, prompt_zh: 合成控制法在因果推断中的适用条件, diagnostic_queries: [synthetic control method, synthetic control causal inference]}
+  - {id: ESI07, pilot: false, esi_field: Engineering, prompt_zh: 相变材料在电子器件热管理中的应用, diagnostic_queries: [phase change material thermal management, phase change material electronic cooling]}
+  - {id: ESI08, pilot: false, esi_field: Environment/Ecology, prompt_zh: 全氟和多氟烷基物质的环境归趋与健康危害, diagnostic_queries: [perfluoroalkyl polyfluoroalkyl substances, PFAS health effects, PFAS environmental fate]}
+  - {id: ESI09, pilot: false, esi_field: Geosciences, prompt_zh: 俯冲带板内深震的物理机制, diagnostic_queries: [deep focus earthquake, intermediate depth seismicity subduction]}
+  - {id: ESI10, pilot: true, esi_field: Immunology, prompt_zh: 肿瘤微环境中髓系抑制细胞的机制, diagnostic_queries: [myeloid derived suppressor cell, myeloid derived suppressor cell tumor microenvironment]}
+  - {id: ESI11, pilot: false, esi_field: Materials Science, prompt_zh: 高熵合金强韧化的协同机制, diagnostic_queries: [high entropy alloy, high entropy alloy strength ductility]}
+  - {id: ESI12, pilot: true, esi_field: Mathematics, prompt_zh: 随机矩阵理论对深度神经网络泛化的刻画, diagnostic_queries: [random matrix theory, random matrix neural network, random matrix deep learning]}
+  - {id: ESI13, pilot: true, esi_field: Microbiology, prompt_zh: 肠道菌群代谢物在肠-脑轴中的作用, diagnostic_queries: [gut microbiota brain axis, gut microbiome metabolite brain]}
+  - {id: ESI14, pilot: true, esi_field: Molecular Biology & Genetics, prompt_zh: 腺嘌呤碱基编辑器的脱靶谱, diagnostic_queries: [adenine base editor, base editing genome wide specificity]}
+  - {id: ESI15, pilot: false, esi_field: Multidisciplinary, prompt_zh: 单细胞多组学数据的整合与批次校正, diagnostic_queries: [single cell multiomics integration, single cell sequencing batch correction]}
+  - {id: ESI16, pilot: true, esi_field: Neuroscience & Behavior, prompt_zh: tau 蛋白在阿尔茨海默病中的跨神经元传播, diagnostic_queries: [tau propagation Alzheimer, tau protein spreading, tau protein propagation]}
+  - {id: ESI17, pilot: true, esi_field: Pharmacology & Toxicology, prompt_zh: GLP-1 受体激动剂心血管获益的机制, diagnostic_queries: [glucagon like peptide 1 receptor, GLP-1 receptor agonist cardiovascular]}
+  - {id: ESI18, pilot: false, esi_field: Physics, prompt_zh: 高温超导体的配对对称性, diagnostic_queries: [high temperature superconductor pairing symmetry, cuprate superconductor d wave symmetry]}
+  - {id: ESI19, pilot: true, esi_field: Plant & Animal Science, prompt_zh: C4 光合作用的多次独立起源与趋同演化, diagnostic_queries: [C4 photosynthesis evolution, C4 photosynthetic pathway evolution]}
+  - {id: ESI20, pilot: true, esi_field: Psychiatry/Psychology, prompt_zh: 工作记忆训练向远迁移效应的争议, diagnostic_queries: [working memory training transfer, cognitive training far transfer]}
+  - {id: ESI21, pilot: false, esi_field: Social Sciences, prompt_zh: 数字平台零工经济中的算法劳动控制, diagnostic_queries: [gig economy algorithmic management, platform labor algorithmic control, algorithmic management labor]}
+  - {id: ESI22, pilot: true, esi_field: Space Science, prompt_zh: 快速射电暴的宿主星系与起源模型, diagnostic_queries: [fast radio burst host galaxy, fast radio burst origin]}

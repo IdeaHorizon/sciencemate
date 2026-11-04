@@ -13,6 +13,9 @@ import pytest
 from core import pause as pause_registry
 from core.session_driver import SessionAction, next_action
 
+# 讲的是续轮行为，前提是研究已经开始（见 conftest.research_under_way）。
+pytestmark = pytest.mark.usefixtures("research_under_way")
+
 
 class _State:
     def __init__(self):

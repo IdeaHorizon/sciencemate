@@ -238,11 +238,15 @@ def write_layers(
     readonly_roots: Sequence[Path | str],
     *,
     scratch_dir: Path | None = None,
+    persistent_cache: bool = True,
 ) -> WriteLayers:
     """把调用方的两组根整理成一份可发射、也可判定的可写面。
 
     ``scratch_dir`` 是**本条命令的私有 tmp**（:func:`private_scratch`）。每个后端都要
     给一个 —— 共享 ``/tmp`` 不再进可写面（#872）。
+
+    ``persistent_cache=False``（``CommandSpec.ephemeral``）：不放行 harness 的持久缓存
+    子目录 —— 可写面只剩私有 scratch，命令写下的东西随它一起删掉（#1187）。
     """
     readonly: list[Path] = []
     for raw in readonly_roots:
@@ -255,7 +259,7 @@ def write_layers(
         if resolved is not None and resolved not in own:
             own.append(resolved)
     scratch: list[Path] = []
-    for candidate in (scratch_dir, cache_scratch()):
+    for candidate in (scratch_dir, cache_scratch() if persistent_cache else None):
         resolved = canonical(candidate) if candidate is not None else None
         if resolved is None or resolved in own or resolved in scratch:
             continue
@@ -397,7 +401,7 @@ def _link_dir(link: Path, target: Path | None) -> None:
     link.mkdir(exist_ok=True)
 
 
-def payload_home(scratch_dir: Path) -> dict[str, str]:
+def payload_home(scratch_dir: Path, *, persistent_cache: bool = True) -> dict[str, str]:
     """墙给这条命令的家 —— 按本平台的原生词汇整套给出，返回要设的环境变量。
 
     布局（都在私有 scratch 里，命令结束一起删）::
@@ -417,12 +421,15 @@ def payload_home(scratch_dir: Path) -> dict[str, str]:
 
     只给 ``CommandSpec.home == "own"`` 的程序（平台自带、自成一体的工具）。用户的程序
     （``host``）要看见用户真实的家：elan 按 ``~/.elan`` 找 Lean，换了家它就找不到工具链。
+
+    ``persistent_cache=False``（``CommandSpec.ephemeral``）：缓存区也只是 scratch 里的
+    普通目录，随命令删掉（#1187）。
     """
     home = scratch_dir / "home"
     tmp = scratch_dir / "tmp"
     home.mkdir(parents=True, exist_ok=True)
     tmp.mkdir(parents=True, exist_ok=True)
-    cache = cache_scratch()
+    cache = cache_scratch() if persistent_cache else None
     env: dict[str, Path | str] = {"HOME": home, "TMPDIR": tmp, "TMP": tmp, "TEMP": tmp}
     if sys.platform == "win32":
         for relative in _windows_profile_folders():
@@ -503,6 +510,7 @@ def payload_environment(
     scratch_dir: Path,
     home: str = "host",
     msys_bin: str | None = None,
+    persistent_cache: bool = True,
 ) -> dict[str, str]:
     """宿主环境减去凭据，再按 ``home``（``CommandSpec.home``）安排程序住哪，最后叠调用方显式给的。
 
@@ -511,6 +519,9 @@ def payload_environment(
 
     ``msys_bin``：载荷是 MSYS 程序时它的 ``/usr/bin``（``shared.lib.shell.msys_runtime_bin``，
     只有 win32 后端会给）。排在解释器目录之后、继承来的 PATH 之前（#1203）。
+
+    ``persistent_cache=False``（``CommandSpec.ephemeral``）：``XDG_CACHE_HOME`` 指进私有
+    scratch —— 科学库照样有缓存可写（不刷 "cache unwritable" 噪音），命令结束一起删（#1187）。
 
     凭据判据与 core.secrets 同源。调用方（``CommandSpec.environment``）显式设的变量
     最后叠上去、它说了算 —— 那是它自己的决定和后果。
@@ -558,7 +569,7 @@ def payload_environment(
             [*front, *(p for p in env.get("PATH", "").split(os.pathsep) if p)]
         )
     if home == "own":
-        env.update(payload_home(scratch_dir))
+        env.update(payload_home(scratch_dir, persistent_cache=persistent_cache))
     else:
         tmp = scratch_dir / "tmp"
         tmp.mkdir(parents=True, exist_ok=True)
@@ -566,7 +577,11 @@ def payload_environment(
             env[name] = str(tmp)
         # 缓存收窄到 harness 自己的子目录之后，得把工具指过去 —— 否则 uv/pip 仍去写
         # ``~/.cache/uv``（只读）并把 "cache unwritable" 刷成噪音（#872）。
-        cache = cache_scratch()
+        if persistent_cache:
+            cache = cache_scratch()
+        else:
+            cache = scratch_dir / "cache"
+            cache.mkdir(parents=True, exist_ok=True)
         if cache is not None:
             env["XDG_CACHE_HOME"] = str(cache)
     for name, value in (extra or {}).items():

@@ -24,7 +24,6 @@
 .chat-inline-error strong { color: var(--color-fg); font-weight: 570; }
 .chat-inline-error span { color: var(--color-fg-muted); }
 .chat-inline-error small { color: var(--color-danger); font-size: var(--font-size-caption); }
-.chat-empty-center .chat-inline-error { text-align: center; }
 
 .message .message-body .message-rich-text {
   padding: 12px 14px;

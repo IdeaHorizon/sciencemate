@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
+from shared.lib.external_content import WITNESS_FIELD
+
 # 单次工具结果的默认 token 预算。~12k tokens ≈ 48k 字符：足够放几十条摘要行，
 # 又远低于任何合理 context 窗口的一小格，保证单条 tool result 不会独吞上下文。
 DEFAULT_RESULT_TOKEN_BUDGET = 12_000
@@ -72,6 +74,10 @@ def summarize_kb_record(entity_type: str, r: dict) -> dict:
             "text": _clip(r.get("text"), 160),
             "n_authors": len(r.get("author_concept_ids") or []),
         })
+    # 入库见证（#730）跟着摘要行走：摘录截掉了注入那句，见证不能也跟着丢。
+    # 读工具的数据框把它换成读时视图，不会原样给模型。
+    if r.get(WITNESS_FIELD):
+        base[WITNESS_FIELD] = r[WITNESS_FIELD]
     return base
 
 

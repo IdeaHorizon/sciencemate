@@ -1,0 +1,6 @@
+# Native SBML syntax, identifier and unit consistency validation.
+python-libsbml>=5.20,<6
+# Parse Fortran namelists before checking the target application's Registry.
+f90nml>=1.4,<2
+# Native metadata/read-back checks for delivered NetCDF files.
+netCDF4>=1.7,<2

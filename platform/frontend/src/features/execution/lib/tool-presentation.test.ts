@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   isVisibleResearchTool,
-  researchActivityAcceptance as acceptanceIn,
+  researchActivityRecovery as recoveryIn,
   researchActivityKindForTool,
   researchToolFailurePresentation as failureIn,
   researchToolInputPreview as inputPreviewIn,
@@ -13,7 +13,7 @@ import {
 // 下面的判据断言的是**英文**那一份文案，所以这里显式说英文 —— 界面默认语言
 // 是中文。不写就等于把「这些句子长什么样」交给默认值，判据会跟着默认值漂。
 // 中文那一份由本文件末尾「两种语言各说一遍」那条判据守。
-const researchActivityAcceptance = (kind: Parameters<typeof acceptanceIn>[0]) => acceptanceIn(kind, "en");
+const researchActivityRecovery = (kind: Parameters<typeof recoveryIn>[0]) => recoveryIn(kind, "en");
 const researchToolFailurePresentation = (
   name: Parameters<typeof failureIn>[0],
   error?: Parameters<typeof failureIn>[1],
@@ -55,20 +55,20 @@ test("visible tools use a human action and attributable object", () => {
   );
 });
 
-test("question, research, figure, PDF, experiment, compute, and deployment have acceptance copy", () => {
-  assert.equal(researchActivityAcceptance("question").running, "Formulating an answer");
+// 原来每类还有一份 running / completed 文案（以及一个 question 类），全仓只读
+// recovery —— 那两份是死文案，删了；这里只守还在用的「下一步」。
+test("research, figure, PDF, experiment, compute, and deployment have recovery copy", () => {
   const cases = [
-    ["search_papers", "research", "Research report or source set"],
-    ["render_figure", "figure", "Figure or chart"],
-    ["compile_latex", "pdf", "PDF document"],
-    ["run_experiment", "experiment", "Experiment results and log"],
-    ["execute_python", "compute", "Computed result or analysis"],
-    ["deploy_site", "deployment", "Deployment record or application link"],
+    ["search_papers", "research"],
+    ["render_figure", "figure"],
+    ["compile_latex", "pdf"],
+    ["run_experiment", "experiment"],
+    ["execute_python", "compute"],
+    ["deploy_site", "deployment"],
   ] as const;
-  for (const [tool, kind, completed] of cases) {
+  for (const [tool, kind] of cases) {
     assert.equal(researchActivityKindForTool(tool), kind);
-    assert.equal(researchActivityAcceptance(kind).completed, completed);
-    assert.match(researchActivityAcceptance(kind).recovery, /then|before/);
+    assert.match(researchActivityRecovery(kind), /then|before/);
   }
 });
 
@@ -108,7 +108,7 @@ test("驳回和真失败分开：判据是 harness 盖的章，不是字符串�
     message: "claim_type='methodological' 必须 independent_source_count ≥ 2（当前 1）。",
   });
   assert.equal(declined.loopLevel, true);
-  assert.match(declined.title, /declined by the framework/);
+  assert.match(declined.title, /was not run/);
 
   const crashed = researchToolFailurePresentation("run_node", {
     code: "tool_exception",
@@ -200,7 +200,7 @@ test("参数形状不对 = 模型自己调错了，归循环", () => {
     message: "调用 'score_hypothesis_innovation' 的参数形状不对：assessments 声明是 object 的数组，但第 0 个元素是 string。",
   });
   assert.equal(p.loopLevel, true);
-  assert.match(p.title, /declined by the framework/);
+  assert.match(p.title, /was not run/);
   assert.ok(p.message.includes("第 0 个元素是 string"));
 });
 
@@ -251,7 +251,7 @@ test("命令失败 / 返回值不合规范各有自己的说法，不落兜底",
     message: "tool 'x' returned non-dict (str)",
   });
   assert.match(bad.title, /malformed result/);
-  assert.match(bad.recovery, /defect in the tool/);
+  assert.match(bad.recovery, /problem with the tool itself/);
 });
 
 test("两种语言各说一遍：工具动作、验收文案、失败标题都不许只有英文", () => {
@@ -259,14 +259,14 @@ test("两种语言各说一遍：工具动作、验收文案、失败标题都�
   // 整片删掉判据仍然全绿 —— 那正是这次返工前的状态：一个声称能切语言的开关，
   // 切过去半屏还是英文。
   assert.equal(titleIn("semantic_scholar_search", { query: "固态电解质" }, undefined, "zh"),
-    "查文献 — 固态电解质");
+    "检索文献 — 固态电解质");
   assert.equal(runningStatusIn("read_artifact", { name: "survey-report" }, undefined, "zh"),
-    "正在读原始材料 — survey-report");
-  assert.equal(acceptanceIn("pdf", "zh").completed, "PDF 文档");
+    "正在读取资料 — survey-report");
+  assert.equal(recoveryIn("pdf", "zh"), "检查文档源文件后，让助手重新生成 PDF。");
 
   const zh = failureIn("compile_latex", { code: "toolchain_missing", message: "缺 latexmk" }, "zh");
-  assert.match(zh.title, /这台机器缺了/);
-  assert.match(zh.recovery, /装上缺的程序/);
+  assert.match(zh.title, /缺少这一步需要的程序/);
+  assert.match(zh.recovery, /安装缺少的程序/);
 
   // 每一个动作在两种语言里都得有话说，不能有哪一条落回另一种语言。
   for (const tool of [
@@ -280,4 +280,49 @@ test("两种语言各说一遍：工具动作、验收文案、失败标题都�
     assert.notEqual(chinese, english, tool);
     assert.match(chinese, /[一-鿿]/, tool);
   }
+});
+
+test("常用工具都有自己的说法，web_search 不再被说成「检索研究记录」", () => {
+  const cases = [
+    ["web_search", "搜索网页"],
+    ["data_web_search", "搜索网页"],
+    ["web_fetch", "读取网页"],
+    ["read_file", "读取文件"],
+    ["write_file", "写入文件"],
+    ["safe_write_file", "写入文件"],
+    ["edit_file", "修改文件"],
+    ["run_bash", "运行命令"],
+    ["list_files", "查看文件列表"],
+    ["search_files", "搜索文件"],
+    ["freeze_artifact", "定稿成果"],
+    ["memory_note", "更新项目记忆"],
+    ["memory_write", "更新项目记忆"],
+    ["report_blocker", "报告阻碍"],
+    ["draft_section", "撰写章节"],
+    ["revise_section", "修改章节"],
+  ] as const;
+  for (const [tool, action] of cases) {
+    assert.equal(titleIn(tool, undefined, undefined, "zh"), action, tool);
+  }
+});
+
+test("没对上条目的工具：中文界面不露英文工具名", () => {
+  const title = titleIn("consult_other_model", undefined, undefined, "zh");
+  const running = runningStatusIn("consult_other_model", undefined, undefined, "zh");
+  assert.equal(title, "使用工具");
+  assert.equal(running, "正在使用工具");
+  assert.doesNotMatch(running, /[A-Za-z]/);
+  // 英文界面照旧用工具名本身。
+  assert.equal(titleIn("consult_other_model", undefined, undefined, "en"), "Consult other model");
+});
+
+test("中文界面的工具输入预览：常用参数名翻成人话，其余只显示值", () => {
+  assert.equal(inputPreviewIn({ query: "固态电解质", max_results: 10 }, "zh"), "检索词：固态电解质 · 10");
+  assert.doesNotMatch(inputPreviewIn({ path: "a.txt", temperature: 0.2 }, "zh") ?? "", /Temperature|Path/);
+});
+
+test("驳回的失败：没有上游下一步时说明助手会自己调整", () => {
+  const declined = failureIn("create_claim", { code: "rejected", message: "缺参数" }, "zh");
+  assert.equal(declined.title, "整理研究证据：未执行");
+  assert.equal(declined.recovery, "助手会自动调整，无需处理。");
 });

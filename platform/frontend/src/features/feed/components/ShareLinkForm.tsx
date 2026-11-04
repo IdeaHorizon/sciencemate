@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Link2 } from "lucide-react";
 import { Button } from "@/shared/ui";
-import { pushError, pushSuccess } from "@/stores/notification";
+import { pushSuccess } from "@/stores/notification";
 import { useLanguage } from "@/shared/i18n";
 import { fc } from "../lib/feed-copy";
 import { useShareLink } from "../hooks/useFeed";
@@ -27,20 +27,19 @@ export function ShareLinkForm({ onShared }: { onShared?: () => void }) {
   const share = useShareLink();
   const lang = useLanguage();
 
-  const submit = async (event: React.FormEvent) => {
+  const submit = (event: React.FormEvent) => {
     event.preventDefault();
     if (!url.trim()) return;
-    try {
-      const item = await share.mutateAsync({ url: url.trim(), comment: comment.trim(), visibility });
-      setUrl("");
-      setComment("");
-      pushSuccess(fc("share.done", lang, { title: item.title.slice(0, 40) }));
-      onShared?.();
-    } catch (caught) {
-      // 后端的拒收原因是**说人话**写的（内网地址、打不开、没标题），
-      // 原样给用户 —— 他要能分辨是链接的问题还是平台的问题。
-      pushError(caught instanceof Error ? caught.message : fc("share.failed", lang));
-    }
+    // 失败由 useShareLink 的 onError 说一次（后端的拒收原因原样给用户）。这里再弹一条，
+    // 同一个错误就是两条措辞不同的 toast。
+    share.mutate({ url: url.trim(), comment: comment.trim(), visibility }, {
+      onSuccess: (item) => {
+        setUrl("");
+        setComment("");
+        pushSuccess(fc("share.done", lang, { title: item.title.slice(0, 40) }));
+        onShared?.();
+      },
+    });
   };
 
   return (

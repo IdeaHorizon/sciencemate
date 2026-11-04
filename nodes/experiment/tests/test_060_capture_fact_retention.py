@@ -163,7 +163,11 @@ def _large_observation(state):
     return rows, stored, directory, old, targets
 
 
-@pytest.mark.parametrize("damage", ["missing", "changed", "symlink", "escaped-reference"])
+@pytest.mark.parametrize("damage", [
+    "missing", "changed",
+    pytest.param("symlink", marks=pytest.mark.requires_symlink),
+    "escaped-reference",
+])
 def test_missing_or_invalid_detail_is_unknown_not_partial_summary_success(state, damage, monkeypatch):
     rows, stored, directory, old, targets = _large_observation(state)
     ref = stored["observation_ref"]

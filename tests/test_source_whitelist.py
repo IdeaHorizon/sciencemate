@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import pickle
 
+import httpx
 import pytest
 
 from nodes.literature.tools.search_engines import (
@@ -36,15 +37,57 @@ from nodes.literature.tools.search_engines import (
 # 测试替身
 # ─────────────────────────────────────────────────────────────────────────────
 
-def make_paper(source: str, title: str, doi: str = "") -> Paper:
-    """造一篇论文。
+@pytest.fixture(autouse=True)
+def _no_real_requests(monkeypatch):
+    """把模块 docstring 里那句「不发一个真实请求」变成判据。
 
-    venue / abstract **必须给全**：search_all 对「有 DOI 但缺 venue/abstract」的论文
-    会去 api.crossref.org 回填 —— 测试要保持离线，就不能留这个坑。
+    2026-11-04 实测（PR #1296 的 CI）：`test_none_whitelist_means_all_sources`
+    跑了 15.17s、撞上慢测闸。`_search_remote` 早就是替身，慢的是它**后面**的
+    `_enrich_metadata_cross_source` —— 下面 `make_paper` 造的论文缺 authors/url，
+    回填真的去问了 Crossref / OpenAlex / PubMed / S2，而 runner 上 PubMed 一次
+    要 8~13s。回填把每个请求的异常都吞了，测试照样绿，只有墙钟知道。
+
+    所以这里：每个请求当场拒掉（不等网络 —— 漏了也不会慢），并在 teardown
+    把漏出去的请求逐条点名。红在这里时修的是替身（把数据给全，或打桩那一步），
+    不是放宽这道闸。
+    """
+    attempted: list[str] = []
+
+    def _refuse(request: httpx.Request) -> httpx.ConnectError:
+        attempted.append(f"{request.method} {request.url}")
+        return httpx.ConnectError(
+            "tests/test_source_whitelist.py 全程离线，不许发真实请求", request=request,
+        )
+
+    async def _async_send(self, request, *args, **kwargs):
+        raise _refuse(request)
+
+    def _sync_send(self, request, *args, **kwargs):
+        raise _refuse(request)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", _async_send)
+    monkeypatch.setattr(httpx.Client, "send", _sync_send)
+    yield
+    assert not attempted, (
+        "这条测试发出了真实网络请求（已当场拒掉，但被测路径把异常吞了）：\n  "
+        + "\n  ".join(attempted)
+        + "\n多半是 search_all 某一步的触发条件变了、替身没跟上 —— 例如回填按"
+        "「缺哪些字段」挑论文，make_paper 就得把那些字段给全。"
+    )
+
+
+def make_paper(source: str, title: str, doi: str = "") -> Paper:
+    """造一篇元数据齐全的论文。
+
+    「齐全」以 search_all 的元数据回填不挑中它为准：有 DOI 且缺 abstract /
+    authors / venue / year / url 任何一项，`_enrich_metadata_cross_source`
+    就会按 DOI 去各家 API 补。这张字段单在回填侧变过一次（只看 venue/abstract
+    → 五项），这里没跟上，于是有了上面那道闸 —— 以后再变，闸会先红。
     """
     return Paper(
         title=title, doi=doi, source=source,
-        venue="Some Journal", abstract="x" * 100, year=2024,
+        authors=["A. Author"], venue="Some Journal", abstract="x" * 100,
+        year=2024, url="https://example.org/paper",
     )
 
 

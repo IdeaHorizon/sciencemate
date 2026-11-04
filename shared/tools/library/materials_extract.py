@@ -21,23 +21,105 @@
 """
 from __future__ import annotations
 
+import json
 import shutil
 import stat
 import tarfile
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from core import materials
 from core.state import State
 from core.tool_registry import ToolDefinition, register_tool
+from shared.lib.external_content import PATTERN_TABLE_VERSION, witness_at_ingest
 
 #: 解开的目录挂在材料名后面，与材料同目录（因此同一条 gitignore 兜着）。
 EXTRACTED_SUFFIX = ".extracted"
 
+#: 解开的目录的见证清单（#730），挂在目录旁边：`<名字>.extracted.witness.json`。
+#: 不放进目录里 —— 那里是归档的原样内容，多出一个文件就是在冒充归档成员。
+WITNESS_SUFFIX = ".witness.json"
+#: 每个文件只扫开头这么多（与 read_file 单次输出同一量级：模型一次也只读到这么多）。
+_WITNESS_FILE_BYTES = 256_000
+#: 一个归档总共扫这么多字节。4492 个日志、897MB 的那种归档（2026-09-09 node20）
+#: 不该让解包变成一次全量扫盘；超出的文件如实记成「没扫」，读的时候照样现扫。
+_WITNESS_TOTAL_BYTES = 64 * 1024 * 1024
+
 
 def extracted_dir(worktree: Path | str, name: str) -> Path:
     return materials.materials_dir(worktree) / f"{materials.safe_name(name)}{EXTRACTED_SUFFIX}"
+
+
+def witness_manifest_path(target: Path) -> Path:
+    return target.with_name(target.name + WITNESS_SUFFIX)
+
+
+def _witness_extracted(target: Path, *, material: str) -> dict:
+    """解开的文件逐个过一遍模式表与控制标签，记成一份见证清单。
+
+    **不改字节**（`neutralise=False`）：用户的数据就是证据，改写它等于伪造材料。
+    那里的控制标签由读时的数据框（read_file 读 sources/ 下的文件时）转义。
+    清单只记看到了东西的文件；扫不了的（二进制、超预算）只计数 —— 没扫 ≠ 干净。
+    """
+    files: dict[str, dict] = {}
+    scanned = binary = unscanned = 0
+    budget = _WITNESS_TOTAL_BYTES
+    for path in sorted(target.rglob("*")):
+        if not path.is_file():
+            continue
+        if budget <= 0:
+            unscanned += 1
+            continue
+        with path.open("rb") as fh:
+            head = fh.read(min(_WITNESS_FILE_BYTES, budget))
+        budget -= len(head)
+        if b"\0" in head[:8192]:
+            binary += 1
+            continue
+        _, witness = witness_at_ingest(head.decode("utf-8", errors="replace"),
+                                       via="resources.extract_material", neutralise=False)
+        scanned += 1
+        if witness:
+            files[path.relative_to(target).as_posix()] = witness
+    return {
+        "v": PATTERN_TABLE_VERSION,
+        "material": material,
+        "at": datetime.now(timezone.utc).isoformat(),
+        "scanned_files": scanned,
+        "binary_files": binary,
+        "unscanned_files": unscanned,
+        "files": files,
+    }
+
+
+def _write_witness_manifest(target: Path, *, material: str) -> None:
+    """尽力而为：见证写不下来不该让解包失败 —— 读时的数据框照样现扫、照样转义。"""
+    manifest = witness_manifest_path(target)
+    try:
+        body = json.dumps(_witness_extracted(target, material=material),
+                          ensure_ascii=False, indent=1)
+        tmp = manifest.with_name(manifest.name + ".tmp")
+        tmp.write_text(body, encoding="utf-8")
+        tmp.replace(manifest)
+    except OSError:
+        pass
+
+
+def witness_for(path: Path | str) -> dict | None:
+    """`sources/<名字>.extracted/` 下某个文件在解包时落的见证；不在那里或没见证返回 None。"""
+    p = Path(path)
+    for parent in p.parents:
+        if parent.name.endswith(EXTRACTED_SUFFIX):
+            manifest = witness_manifest_path(parent)
+            try:
+                document = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+            entry = (document.get("files") or {}).get(p.relative_to(parent).as_posix())
+            return entry if isinstance(entry, dict) else None
+    return None
 
 
 def _member_target(root: Path, member_name: str) -> Path | None:
@@ -137,6 +219,9 @@ async def extract_material(*, state: State, name: str, **_: Any) -> dict:
     target = extracted_dir(root, safe)
     relative = str(target.relative_to(root))
     if target.is_dir():
+        if not witness_manifest_path(target).is_file():
+            # #730 之前解开的：补一份见证（字节不动）。
+            _write_witness_manifest(target, material=safe)
         files, total = _summary(target)
         return {
             "status": "success", "path": relative, "files": files, "bytes": total,
@@ -163,6 +248,8 @@ async def extract_material(*, state: State, name: str, **_: Any) -> dict:
     except (tarfile.TarError, zipfile.BadZipFile, OSError) as exc:
         shutil.rmtree(partial, ignore_errors=True)
         return {"status": "error", "error": f"解开 {safe} 失败：{type(exc).__name__}: {exc}"}
+    # 外来内容的入库咽喉（#730）：不拦、不改字节，落一份见证给读的那一刻用。
+    _write_witness_manifest(target, material=safe)
     return {
         "status": "success",
         "path": relative,

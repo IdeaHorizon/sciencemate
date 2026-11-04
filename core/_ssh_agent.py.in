@@ -1,0 +1,356 @@
+"""Uploaded stdlib-only remote account runner. Works with Python 3.6+ on Linux.
+
+Job records on the remote host are authoritative; an SSH disconnect never means
+job failure. Submission keys are immutable and are safe to replay after a lost
+response. This runner does not provide filesystem or memory isolation.
+"""
+
+# Keep the uploaded helper compatible with Python 3.6.
+# ruff: noqa: UP021, UP022
+import sys
+
+if sys.platform == "win32":
+    raise SystemExit("This supervisor runs on the remote Linux/POSIX server, not the client")
+
+import base64
+import fcntl
+import hashlib
+import json
+import os
+import re
+import selectors
+import shutil
+import signal
+import subprocess
+import time
+from pathlib import Path
+
+LOG_LIMIT = 2 * 1024 * 1024
+TRANSFER_LIMIT = 8 * 1024 * 1024
+
+
+def write_json(path, value):
+    temporary = path.with_name(path.name + f".{os.getpid()}.tmp")
+    with temporary.open("w") as stream:
+        json.dump(value, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(path)
+
+
+def identity(pid):
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        if stat[0] == "Z":
+            return None
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip() + ":" + stat[19]
+    except (OSError, IndexError):
+        return None
+
+
+def tail(path, size=32768):
+    try:
+        with path.open("rb") as stream:
+            stream.seek(max(0, path.stat().st_size - size))
+            return stream.read(size).decode(errors="replace")
+    except OSError:
+        return ""
+
+
+def stop_group(pid):
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+
+
+def supervise(directory):
+    os.umask(0o077)
+    request = json.loads((directory / "request.json").read_text())
+    record_path = directory / "record.json"
+    record = json.loads(record_path.read_text())
+    record.update(supervisor_pid=os.getpid(), supervisor_identity=identity(os.getpid()))
+    write_json(record_path, record)
+    payload = None
+    try:
+        env = os.environ.copy()
+        env.update(request.get("environment") or {})
+        payload = subprocess.Popen(
+            ["/bin/bash", "-lc", request["command"]],
+            cwd=request["cwd"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        record.update(
+            state="running",
+            started_at=time.time(),
+            pid=payload.pid,
+            process_identity=identity(payload.pid),
+        )
+        write_json(record_path, record)
+        selector = selectors.DefaultSelector()
+        selector.register(payload.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(payload.stderr, selectors.EVENT_READ, "stderr")
+        deadline = time.monotonic() + request.get("timeout", 86400)
+        stopping_at = None
+        reason = None
+        while selector.get_map() or payload.poll() is None:
+            if reason is None:
+                if (directory / "cancel").exists():
+                    reason = "cancelled"
+                elif time.monotonic() >= deadline:
+                    reason = "timed_out"
+                elif payload.poll() is not None:
+                    # Descendants retaining the pipes belong to this job too.
+                    reason = "finished"
+                if reason:
+                    stop_group(payload.pid)
+                    stopping_at = time.monotonic()
+            if stopping_at is not None and time.monotonic() - stopping_at > 2:
+                try:
+                    os.killpg(payload.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            for key, _ in selector.select(0.1):
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                log = directory / (key.data + ".log")
+                with log.open("ab") as stream:
+                    stream.write(chunk)
+                if log.stat().st_size > LOG_LIMIT:
+                    retained = log.read_bytes()[-LOG_LIMIT:]
+                    log.write_bytes(retained)
+                    record["logs_truncated"] = True
+        rc = payload.wait()
+        record.update(
+            state=reason
+            if reason in ("cancelled", "timed_out")
+            else ("succeeded" if rc == 0 else "failed"),
+            exit_code=rc,
+        )
+    except BaseException as exc:
+        if payload is not None:
+            stop_group(payload.pid)
+            try:
+                payload.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                os.killpg(payload.pid, signal.SIGKILL)
+                payload.wait()
+        record.update(state="failed", error=str(exc), exit_code=None)
+    finally:
+        record["finished_at"] = time.time()
+        write_json(record_path, record)
+
+
+def read_job(directory):
+    record = json.loads((directory / "record.json").read_text())
+    if record["state"] in ("launching", "running"):
+        pid = record.get("supervisor_pid")
+        if pid and identity(pid) != record.get("supervisor_identity"):
+            record.update(
+                state="lost", error="Supervisor is no longer alive; completion is unknown"
+            )
+        elif not pid and time.time() - record["created_at"] > 30:
+            record.update(
+                state="unknown", error="Launch outcome is unknown; do not automatically resubmit"
+            )
+    record["stdout"] = tail(directory / "stdout.log")
+    record["stderr"] = tail(directory / "stderr.log")
+    return record
+
+
+def probe():
+    gpu = (
+        subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,memory.total,memory.free,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            timeout=10,
+        )
+        if shutil.which("nvidia-smi")
+        else None
+    )
+    mem = {}
+    try:
+        mem = dict(
+            (line.split(":")[0], int(line.split()[1]) * 1024)
+            for line in Path("/proc/meminfo").read_text().splitlines()
+        )
+    except (OSError, ValueError):
+        pass
+    return dict(
+        hostname=os.uname().nodename,
+        user=__import__("getpass").getuser(),
+        home=str(Path.home()),
+        cpu_count=os.cpu_count(),
+        memory_total_bytes=mem.get("MemTotal"),
+        memory_available_bytes=mem.get("MemAvailable"),
+        disk_free_bytes=shutil.disk_usage(str(Path.home())).free,
+        gpu_csv=gpu.stdout.strip() if gpu and gpu.returncode == 0 else None,
+        observed_at=time.time(),
+        execution_boundary="remote_account",
+        isolation=dict(filesystem=False, memory=False, process_group=True, walltime=True),
+        schedulers=[name for name in ("sbatch", "qsub") if shutil.which(name)],
+    )
+
+
+def main(request):
+    os.umask(0o077)
+    action = request["action"]
+    if action == "probe":
+        return probe()
+    project = request["project_id"]
+    scope = hashlib.sha256(project.encode()).hexdigest()[:24]
+    root = Path.home() / ".harness" / "remote-jobs" / scope
+    default_cwd = Path.home() / "harness-workspaces" / scope
+    if action == "jobs":
+        records = sorted(root.glob("*/record.json"), key=lambda p: p.stat().st_mtime, reverse=True)[
+            :200
+        ]
+        jobs = []
+        for path in records:
+            record = read_job(path.parent)
+            record.pop("stdout", None)
+            record.pop("stderr", None)
+            record["command"] = record.get("command", "")[:2000]
+            jobs.append(record)
+        return {"jobs": jobs}
+    if action in ("status", "cancel"):
+        job_id = request["job_id"]
+        if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+            raise ValueError("Invalid job ID")
+        directory = root / job_id
+        record = read_job(directory)
+        if action == "cancel" and record["state"] in ("launching", "running"):
+            (directory / "cancel").touch()
+            until = time.monotonic() + 5
+            while time.monotonic() < until:
+                record = read_job(directory)
+                if record["state"] not in ("launching", "running"):
+                    break
+                time.sleep(0.1)
+        return record
+    cwd = Path(request.get("cwd") or default_cwd).expanduser()
+    if not cwd.is_absolute():
+        cwd = default_cwd / cwd
+    if action in ("put", "get"):
+        target = Path(request["path"]).expanduser()
+        if not target.is_absolute():
+            target = cwd / target
+        if action == "put":
+            content = base64.b64decode(request["content_base64"], validate=True)
+            if len(content) > TRANSFER_LIMIT:
+                raise ValueError("File exceeds 8 MiB transfer limit")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(target.name + f".hf-{os.getpid()}")
+            temporary.write_bytes(content)
+            temporary.replace(target)
+        else:
+            with target.open("rb") as stream:
+                content = stream.read(TRANSFER_LIMIT + 1)
+            if len(content) > TRANSFER_LIMIT:
+                raise ValueError("File exceeds 8 MiB transfer limit")
+        result = dict(
+            path=str(target), bytes=len(content), sha256=hashlib.sha256(content).hexdigest()
+        )
+        if action == "get":
+            result["content_base64"] = base64.b64encode(content).decode()
+        return result
+    if action not in ("exec", "submit"):
+        raise ValueError("Unknown remote action")
+    command = request["command"]
+    if not isinstance(command, str) or not command.strip() or len(command) > 100000:
+        raise ValueError("A nonempty command of at most 100000 characters is required")
+    timeout = request.get("timeout", 86400 if action == "submit" else 60)
+    if not isinstance(timeout, (int, float)) or not 0 < timeout <= 604800:
+        raise ValueError("Timeout must be between 0 and 604800 seconds")
+    environment = request.get("environment") or {}
+    if any(
+        not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or not isinstance(value, str)
+        for key, value in environment.items()
+    ):
+        raise ValueError("Invalid environment")
+    job_id = request["job_id"]
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise ValueError("Invalid job ID")
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory = root / job_id
+    digest = hashlib.sha256(
+        json.dumps(
+            dict(command=command, cwd=str(cwd), timeout=timeout, environment=environment),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    with (root / (job_id + ".lock")).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if directory.exists():
+            existing = read_job(directory)
+            if existing["request_digest"] != digest:
+                raise ValueError("Submission key already belongs to a different command")
+            return existing
+        directory.mkdir(mode=0o700)
+        cwd.mkdir(mode=0o700, parents=True, exist_ok=True)
+        request.update(cwd=str(cwd), timeout=timeout)
+        write_json(
+            directory / "request.json", {k: v for k, v in request.items() if k != "agent_source"}
+        )
+        record = dict(
+            job_id=job_id,
+            project_id=project,
+            resource_id=request["resource_id"],
+            state="launching",
+            command=command,
+            cwd=str(cwd),
+            request_digest=digest,
+            created_at=time.time(),
+            analysis_eligible=False,
+            execution_boundary="remote_account",
+            stdout_path=str(directory / "stdout.log"),
+            stderr_path=str(directory / "stderr.log"),
+        )
+        write_json(directory / "record.json", record)
+        if action == "submit":
+            agent = directory / "agent.py"
+            agent.write_text(request["agent_source"])
+            with open(os.devnull, "rb") as stdin, open(os.devnull, "ab") as output:
+                subprocess.Popen(
+                    [sys.executable, "-I", str(agent), "supervise", str(directory)],
+                    stdin=stdin,
+                    stdout=output,
+                    stderr=output,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+            # Persist launch identity before acknowledging, even if the child
+            # has not yet entered Python. Never overwrite its newer record.
+            until = time.monotonic() + 5
+            while time.monotonic() < until:
+                observed = read_job(directory)
+                if observed.get("supervisor_pid"):
+                    return observed
+                time.sleep(0.02)
+            return read_job(directory)
+        supervise(directory)
+        return read_job(directory)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "supervise":
+        supervise(Path(sys.argv[2]))
+    else:
+        try:
+            response = main(json.load(sys.stdin))
+        except Exception as error:
+            response = {"error": str(error)}
+        print(json.dumps(response))

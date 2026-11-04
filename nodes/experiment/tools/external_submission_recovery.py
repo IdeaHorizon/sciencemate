@@ -117,6 +117,34 @@ def _terminal_intent_validation_error(intent: dict[str, Any]) -> str | None:
     return "submission intent 状态不受支持"
 
 
+def _attempt_key(item: dict[str, Any]) -> str:
+    """A remote v3 submission uses its existing nonce without a legacy route."""
+    return str(item.get("route_attempt_id") or (
+        item.get("submission_nonce") if item.get("slurm_target") is not None else "") or "")
+
+
+def _v3_remote_intent(state: Any, intent: dict[str, Any]):
+    """Require the owner and target from B before using a route-less intent."""
+    try:
+        from . import ledger
+    except ImportError:  # standalone node bootstrap
+        from tools import ledger
+    if not ledger.v3_active(state):
+        raise SubmissionRecoveryError("route-less Slurm intent requires the active run ledger")
+    book = ledger.open_ledger(state, write=True)
+    if book.read_only:
+        raise SubmissionRecoveryError(book.reason)
+    rows = book.records()
+    nonce = str(intent.get("submission_nonce") or "")
+    originals = [row for row in rows if row.get("kind") == "intent" and row.get("nonce") == nonce]
+    if len(originals) != 1 or any(
+        originals[0].get(key) != intent.get(key)
+        for key in ("scheduler", "slurm_target", "remote_user", "scheduler_cluster", "launch_host")
+    ):
+        raise SubmissionRecoveryError("Slurm recovery intent differs from the authoritative ledger")
+    return book, ledger.project_jobs(rows).get(nonce, {})
+
+
 def _own_attempt_payloads(
     state: Any, artifact_type: str, route_attempt_id: str,
 ) -> list[dict[str, Any]]:
@@ -132,7 +160,7 @@ def _own_attempt_payloads(
     run_id = str(getattr(state, "run_id", None) or "")
     matches: list[dict[str, Any]] = []
     for item in _all_payloads(state, artifact_type, require_same_run=False):
-        if str(item.get("route_attempt_id") or "") != route_attempt_id:
+        if _attempt_key(item) != route_attempt_id:
             continue
         if str(item.get("_produced_by_run_id") or "") != run_id:
             raise SubmissionRecoveryError(
@@ -162,6 +190,11 @@ def _intent_for_attempt(state: Any, route_attempt_id: str) -> dict[str, Any]:
         raise SubmissionRecoveryError("submission intent scheduler 不受支持")
     if not isinstance(intent.get("script_sha256"), str):
         raise SubmissionRecoveryError("submission intent 缺少 script_sha256")
+    if not intent.get("route_attempt_id"):
+        try:
+            _v3_remote_intent(state, intent)
+        except Exception as exc:
+            raise SubmissionRecoveryError(str(exc)) from exc
     return intent
 
 
@@ -186,6 +219,32 @@ def _normalized_known_receipt(
     item: dict[str, Any], route_attempt_id: str, intent: dict[str, Any],
 ) -> dict[str, Any]:
     normalized = dict(item)
+    if intent.get("slurm_target") is not None:
+        # The immutable intent supplies missing optional receipt metadata. An
+        # explicit conflict is not a compatible old receipt: accepting it would
+        # redirect later status/cancel operations to another host or account.
+        try:
+            try:
+                from .slurm_ssh import normalize_target
+            except ImportError:  # standalone node bootstrap
+                from tools.slurm_ssh import normalize_target
+            target = normalize_target(intent["slurm_target"])
+            if item.get("slurm_target") is not None and normalize_target(item["slurm_target"]) != target:
+                raise ValueError("remote target differs from intent")
+        except (ValueError, TypeError) as exc:
+            raise SubmissionRecoveryError("Slurm receipt 与 intent 的 SSH target 不一致") from exc
+        if (str(item.get("scheduler") or "").strip().lower() != "slurm"
+                or str(item.get("submission_nonce") or "") != route_attempt_id
+                or not _SLURM_ID_RE.fullmatch(str(item.get("job_id") or ""))):
+            raise SubmissionRecoveryError("Slurm receipt 未与远端 submission intent 精确绑定")
+        normalized["slurm_target"] = target
+        for key in ("remote_user", "launch_host", "scheduler_cluster", "namespace"):
+            expected, observed = intent.get(key), item.get(key)
+            if expected is not None and observed is not None and expected != observed:
+                raise SubmissionRecoveryError(f"Slurm receipt 的 {key} 与 submission intent 不一致")
+            if observed is None and expected is not None:
+                normalized[key] = expected
+        return normalized
     if str(intent.get("scheduler") or "").strip().lower() != "local":
         # Remote receipts retain their existing legacy compatibility: optional
         # scope fields may be absent and are reconciled by the remote scheduler
@@ -392,32 +451,81 @@ def _parse_slurm_rows(text: str, nonce: str, *, cluster: str) -> list[dict[str, 
 
 
 def _query_slurm(intent: dict[str, Any], runner: QueryRunner) -> dict[str, Any]:
+    remote = intent.get("slurm_target") is not None
+    results: list[dict[str, Any]] = []
+    remote_user: str | None = None
+    bound_identity: dict[str, str] | None = None
+    if remote:
+        try:
+            try:
+                from .slurm_ssh import normalize_target, run as ssh_run
+            except ImportError:  # standalone node bootstrap
+                from tools.slurm_ssh import normalize_target, run as ssh_run
+            target = normalize_target(intent["slurm_target"])
+        except (ValueError, TypeError):
+            return _result("query_error", reason="slurm_target_invalid")
+
+        def remote_runner(argv: list[str], *, timeout: int = 20) -> dict[str, Any]:
+            return ssh_run(target, argv, timeout=timeout, expected_identity=bound_identity)
+
+        # Recovery consumes the original durable target. A caller-supplied
+        # query runner or the worker's PATH must never turn it into a local job.
+        runner = remote_runner
+        user_query = _invoke(runner, ["id", "-un"])
+        results.append(user_query)
+        remote_user = str(user_query.get("stdout") or "").strip()
+        if (not user_query.get("ok") or not remote_user
+                or any(char.isspace() or ord(char) < 32 for char in remote_user)):
+            return _result("query_error", results=results, reason="slurm_remote_user_unavailable")
+        expected_user = intent.get("remote_user")
+        if expected_user is not None and remote_user != expected_user:
+            return _result("query_error", results=results, reason="slurm_remote_user_mismatch")
+
     config = _invoke(runner, ["scontrol", "show", "config"])
-    queue = _invoke(runner, ["squeue", "-h", "-o", "%i|%k"])
-    accounting = _invoke(runner, [
-        "sacct", "-X", "-n", "-P", "-S", _slurm_since(intent.get("submitted_at")),
-        "-o", "JobIDRaw,Comment%256,Cluster",
-    ])
-    results = [config, queue, accounting]
-    if not all(item.get("ok") for item in results):
-        return _result("query_error", results=results,
-                       reason="slurm_authoritative_query_failed")
+    results.append(config)
+    if not config.get("ok"):
+        return _result("query_error", results=results, reason="slurm_authoritative_query_failed")
     match = re.search(r"(?m)^\s*ClusterName\s*=\s*([^\s#]+)",
                       str(config.get("stdout") or ""))
     if not match:
-        return _result("query_error", results=results,
-                       reason="slurm_cluster_identity_unavailable")
+        return _result("query_error", results=results, reason="slurm_cluster_identity_unavailable")
     cluster = match.group(1)
+    expected_cluster = intent.get("scheduler_cluster")
+    if remote and expected_cluster is not None and cluster != expected_cluster:
+        return _result("query_error", results=results, reason="slurm_cluster_identity_mismatch")
+    if remote:
+        if not intent.get("remote_user") or not expected_cluster:
+            return _result("query_error", results=results, reason="slurm_remote_identity_missing")
+        # Bind each subsequent query inside its own connection. The preceding
+        # read-only probes alone cannot prevent an SSH alias changing hosts.
+        bound_identity = {"user": intent["remote_user"], "cluster": expected_cluster}
+    scope = [f"--user={remote_user}", f"--clusters={cluster}"] if remote else []
+    queue = _invoke(runner, ["squeue", *scope, "-h", "-o", "%i|%k"])
+    accounting = _invoke(runner, [
+        "sacct", *scope, "-X", "-n", "-P", "-S", _slurm_since(intent.get("submitted_at")),
+        "-o", "JobIDRaw,Comment%256,Cluster",
+    ])
+    results.extend([queue, accounting])
+    if not all(item.get("ok") for item in results):
+        return _result("query_error", results=results, reason="slurm_authoritative_query_failed")
     nonce = str(intent["submission_nonce"])
     identities = (
         _parse_slurm_rows(str(queue.get("stdout") or ""), nonce, cluster=cluster)
         + _parse_slurm_rows(str(accounting.get("stdout") or ""), nonce, cluster=cluster)
     )
+    if remote:
+        if any(item["scheduler_cluster"] != cluster for item in identities):
+            return _result("query_error", results=results, reason="slurm_candidate_cluster_mismatch")
+        for item in identities:
+            item.update(launch_host=intent.get("launch_host"), namespace=intent.get("namespace"),
+                        slurm_target=target, remote_user=remote_user)
     unique = {(
         item["scheduler_cluster"], item["job_id"]): item for item in identities
     }
     rows = list(unique.values())
     if not rows:
+        # Zero candidates is an observation, not an absence certificate.
+        # reconcile_external_submission keeps this intent non-resubmittable.
         return _result("zero", results=results, reason="slurm_nonce_not_found")
     if len(rows) > 1:
         return _result("multiple", identities=rows, results=results,
@@ -643,7 +751,7 @@ def _save_reconciliation(
     query: dict[str, Any],
 ) -> dict[str, Any]:
     previous = _latest_recovery_for_attempt(
-        state, str(intent["route_attempt_id"]))
+        state, _attempt_key(intent))
     previous_query = (
         previous.get("reconciliation")
         if isinstance(previous, dict) else None
@@ -795,6 +903,23 @@ def _project_route_identity(
     intent: dict[str, Any],
     receipt: dict[str, Any],
 ) -> dict[str, Any]:
+    if not intent.get("route_attempt_id"):
+        try:
+            book, job = _v3_remote_intent(state, intent)
+            known = job.get("external_id")
+            if known and str(known) != str(receipt["job_id"]):
+                raise SubmissionRecoveryError("recovery cannot replace an already bound job")
+            if not known:
+                book.append("job_reconciled", nonce=intent["submission_nonce"],
+                            scheduler="slurm", external_id=str(receipt["job_id"]),
+                            state="submitted", slurm_target=intent["slurm_target"],
+                            remote_user=intent["remote_user"],
+                            scheduler_cluster=intent["scheduler_cluster"],
+                            recovery_artifact_id=receipt["_artifact_id"])
+            return {"status": "success", "authority": "run_ledger", "already_bound": bool(known)}
+        except Exception as exc:
+            return {"status": "integration_pending", "reason": "run_ledger_identity_projection_failed",
+                    "error": str(exc)}
     try:
         try:
             from .execution_route import record_external_route_identity_resolution
@@ -972,6 +1097,12 @@ def reconcile_external_submission(
     else:
         receipt = known
 
+    projection = None
+    if not intent.get("route_attempt_id"):
+        projection = _project_route_identity(state, intent=intent, receipt=receipt)
+        if projection.get("status") != "success":
+            return {"status": "integration_pending", "do_not_resubmit": True,
+                    "route_projection": projection, "submission_nonce": attempt}
     handoff = _ensure_normal_external_workflow(state, receipt)
     if handoff.get("status") != "success":
         return {
@@ -982,7 +1113,7 @@ def reconcile_external_submission(
             "recovery_artifact_id": receipt.get("_artifact_id"),
             "normal_workflow": handoff,
         }
-    projection = _project_route_identity(state, intent=intent, receipt=receipt)
+    projection = projection or _project_route_identity(state, intent=intent, receipt=receipt)
     if projection.get("status") != "success":
         return {
             "status": "integration_pending",
@@ -1128,7 +1259,7 @@ def dangling_external_submission_intents(state: Any) -> list[dict[str, Any]]:
         # 出口同时锁死。这里如实读出并把归属交给下方逐条分类。
         intents = _all_payloads(state, _INTENT_TYPE, require_same_run=False)
         known_attempts = {
-            str(item.get("route_attempt_id") or "")
+            _attempt_key(item)
             for artifact_type in ("job_submission", _RECOVERY_TYPE)
             for item in _all_payloads(state, artifact_type, require_same_run=False)
             if item.get("status") == "success" and str(item.get("job_id") or "")
@@ -1142,7 +1273,7 @@ def dangling_external_submission_intents(state: Any) -> list[dict[str, Any]]:
     rows = []
     run_id = str(getattr(state, "run_id", None) or "")
     for intent in intents:
-        attempt = str(intent.get("route_attempt_id") or "")
+        attempt = _attempt_key(intent)
         if not attempt or attempt in known_attempts or intent.get("dry_run") is not False:
             continue
         intent_status = intent.get("intent_status")
@@ -1173,6 +1304,8 @@ def dangling_external_submission_intents(state: Any) -> list[dict[str, Any]]:
                 "workdir": intent.get("workdir"),
                 "output_roots": list(intent.get("output_roots") or []),
                 "intent_artifact_id": intent.get("_artifact_id"),
+                **{key: intent[key] for key in ("slurm_target", "remote_user", "launch_host", "scheduler_cluster")
+                   if key in intent},
             })
             continue
         if terminal_error is not None:
@@ -1182,6 +1315,8 @@ def dangling_external_submission_intents(state: Any) -> list[dict[str, Any]]:
                 "do_not_resubmit": True,
                 "output_roots": list(intent.get("output_roots") or []),
                 "intent_artifact_id": intent.get("_artifact_id"),
+                **{key: intent[key] for key in ("slurm_target", "remote_user", "launch_host", "scheduler_cluster")
+                   if key in intent},
             })
             continue
         rows.append({
@@ -1198,6 +1333,8 @@ def dangling_external_submission_intents(state: Any) -> list[dict[str, Any]]:
             "job_name": intent.get("job_name"),
             "script_path": intent.get("script_path"),
             "do_not_resubmit": True,
+            **{key: intent[key] for key in ("slurm_target", "remote_user", "launch_host", "scheduler_cluster")
+               if key in intent},
         })
     return rows
 
@@ -1224,7 +1361,7 @@ register_tool(
         name="reconcile_external_submission",
         description=(
             "恢复 submit_job 在 intent 落盘后、job identity 收据落盘前中断的提交。"
-            "只接受框架 route_attempt_id，并按 submission nonce 机械查询 local/SLURM/"
+            "只接受框架恢复键（旧 route_attempt_id；无旧路线的 SSH Slurm 提交用原 submission_nonce），机械查询 local/SLURM/"
             "PBS/Kubernetes；不接受调用方 job_id。查无、多个或查询失败都会保持禁重提。"
         ),
         parameters_schema={
@@ -1232,7 +1369,7 @@ register_tool(
             "properties": {
                 "route_attempt_id": {
                     "type": "string",
-                    "description": "submit_job 返回或路线事件中的 route attempt ID。",
+                    "description": "submit_job 返回或路线事件中的 route attempt ID；无旧路线的 SSH Slurm 提交填写原 submission_nonce。",
                 },
             },
             "required": ["route_attempt_id"],

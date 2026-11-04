@@ -112,7 +112,7 @@ def test_a_declared_code_wins_over_the_type() -> None:
     exc.code = "request_too_large"        # type: ignore[attr-defined]
     assert describe(exc).code == "request_too_large"
     assert "too large" in describe(exc, lang="en").title.lower()
-    assert "太大" in describe(exc).title
+    assert "过大" in describe(exc).title
 
 
 def test_an_unknown_declared_code_is_kept_but_gets_generic_copy() -> None:
@@ -234,7 +234,7 @@ def test_a_restart_is_not_the_same_as_a_failure() -> None:
     assert interrupted.code == "app_server_restarted", "code 和文案要指向同一件事"
     assert normal.title != interrupted.title
     assert "重启" in interrupted.title
-    assert "研究本身没有失败" in interrupted.body, "得明说研究本身没问题"
+    assert "都还在" in interrupted.body, "得明说重启前的记录都在"
     assert "revise" not in interrupted.recovery.lower(), "别让用户去改一件没错的东西"
 
 
@@ -438,8 +438,8 @@ def test_an_unknown_declared_code_with_no_content_signal_still_falls_back() -> N
         code = "some_new_thing"
 
     failure = describe(DeclaredUnknown("something went sideways"), reference="run_y")
-    # 「研究停止了」这个说法 2026-08-18 撤掉了：停的是这一轮，不是研究。
-    assert failure.title == "这一轮没能完成"
+    # 「研究停止了」这个说法 2026-08-18 撤掉了：停的是这次执行，不是研究。
+    assert failure.title == "这次执行未完成"
     assert failure.code == "some_new_thing"
 
 
@@ -460,7 +460,7 @@ def test_provider_failure_names_the_model_service() -> None:
     failure = describe(_HarnessErr("ReadTimeout after retry budget", "upstream_unavailable"))
     assert failure.code == "upstream_unavailable"
     assert "模型服务" in failure.title
-    assert "不是平台" in failure.body
+    assert "模型服务商" in failure.body
     assert failure.retryable is True
 
     # harness 侧对同一类事实的类别名（executor failure_category 词表，兼容性
@@ -559,7 +559,7 @@ def test_a_clean_exit_says_it_stood_down_and_can_be_resumed():
     # 读到的话**上，那才是这次要修的东西。
     assert failure.code == "harness_process_exited"
     assert failure.retryable is True, "可续的那一种却标着不可重试 —— 和文案互相拆台"
-    assert "按设计" in failure.body, "它没崩 —— 要说清这是设计行为，不是故障"
+    assert "会自动退出" in failure.body, "它没崩 —— 要说清这是正常行为，不是故障"
 
 
 def test_being_asked_to_stop_is_not_the_same_as_being_force_killed():
@@ -570,7 +570,7 @@ def test_being_asked_to_stop_is_not_the_same_as_being_force_killed():
 
     assert failure.retryable is True
     assert "SIGTERM" in failure.body
-    assert "要求停止" in failure.title
+    assert "被终止" in failure.title and "强制" not in failure.title
 
 
 def test_a_force_kill_does_not_promise_that_sending_again_helps():

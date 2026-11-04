@@ -19,7 +19,7 @@ test("Session changes render the live Git workspace instead of Artifact rows onl
     source("./session-change-projection.ts"),
     /changeSet\?\.filesChanged/,
   );
-  assert.match(panel, /live workspace diff/);
+  assert.match(panel, /Live changes/);
   assert.match(panel, /GitDiffViewer patch=\{changeSet\.patch\}/);
   assert.match(panel, /Publish changes/);
   assert.match(workspace, /changeSet\.filesChanged > 0/);

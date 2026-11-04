@@ -24,6 +24,11 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+try:
+    from . import persistence as _persistence
+except ImportError:  # pragma: no cover - standalone node bootstrap
+    from tools import persistence as _persistence  # type: ignore
+
 _CAPTURE_DIRNAME = "capture"
 SMALL_FILE_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_FILES = 20000
@@ -53,7 +58,8 @@ def persist_observation(state: Any, action_id: str, observation: dict[str, Any])
     """Keep already captured B facts; only their ledger/UI summary is bounded.
 
     The file is an immutable part of the observation, not a new state owner.
-    It is durable before its relative, digest-bound reference enters B. No
+    It is flushed under persistence.py's host platform contract before its
+    relative, digest-bound reference enters B. No
     filesystem snapshot or output identity is collected at read/finish time.
     Small observations keep the existing inline representation.
     """
@@ -79,17 +85,9 @@ def persist_observation(state: Any, action_id: str, observation: dict[str, Any])
                                                "size_bytes": len(payload)}, action_id)
         if existing != observation:
             raise OSError("capture observation identity conflict")
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        _persistence.fsync_file(path, nofollow=True)
     for parent in (directory, directory.parent, directory.parent.parent):
-        fd = os.open(parent, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        _persistence.fsync_directory(parent)
     summary = dict(observation)
     for key in sequences:
         summary[key] = list(observation.get(key) or [])[:limit]

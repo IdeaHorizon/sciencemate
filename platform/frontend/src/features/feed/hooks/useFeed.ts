@@ -47,7 +47,7 @@ export function useRefreshFeedToday() {
       // Reset clears all loaded pages; the next request starts at offset 0.
       await qc.resetQueries({ queryKey }, { throwOnError: true });
     },
-    onSuccess: () => pushSuccess(t({ zh: "已按最新规则刷新推荐", en: "Recommendations refreshed with the latest rules" })),
+    onSuccess: () => pushSuccess(t({ zh: "推荐已刷新", en: "Recommendations refreshed" })),
     onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "刷新失败，请重试", en: "Refresh failed. Please try again." })),
   });
 }
@@ -109,7 +109,7 @@ export function useSaveFeedSubscriptions() {
       if (context?.previous !== undefined && qc.getQueryData(qk.feedSubscriptions()) === next) {
         qc.setQueryData(qk.feedSubscriptions(), context.previous);
       }
-      pushError(t({ zh: "关注保存失败，请重试", en: "Could not save subscriptions. Please try again." }));
+      pushError(t({ zh: "保存订阅失败，请重试", en: "Could not save subscriptions. Please try again." }));
     },
     onSuccess: (saved) => {
       if (qc.isMutating({ mutationKey }) === 1) {
@@ -215,7 +215,8 @@ export function useSaveInterests() {
   return useMutation({
     mutationKey: ["feed", "save-interests"],
     mutationFn: (domains: string[]) => api.saveFeedInterests(domains),
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "研究方向没能保存", en: "This research direction could not be saved" })),
+    // 失败只在这里说一次，InterestPicker 不再另弹。
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "保存学科失败", en: "Could not save your fields" })),
     onSuccess: () => {
       // 兴趣变了，今天的选摘在后端已经被作废重算，前端也得跟着重取 ——
       // 不然用户刚选完方向，日报还是老三条，看起来像设置没生效。
@@ -230,26 +231,10 @@ export function useShareLink() {
   return useMutation({
     mutationFn: (data: { url: string; comment?: string; visibility?: "platform" | "organization" }) =>
       api.shareFeedLink(data),
-    // 分享失败最不能静默：用户会以为已经分享出去了。
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "这条链接没能分享出去", en: "This link could not be shared" })),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: ["feed"] });
-    },
-  });
-}
-
-/**
- * 删掉一条推断出来的方向。
- *
- * 后端会**记住**这条被拒过，下次挖掘不再推 —— 否则用户每天删同一个，
- * 而系统看起来像没听见。
- */
-export function useRejectInferred() {
-  const t = useT();
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (domain: string) => api.rejectInferredDomain(domain),
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "这个方向没能删掉", en: "This direction could not be removed" })),
+    // 分享失败最不能静默：用户会以为已经分享出去了。后端的拒收原因是说人话写的（内网地址、
+    // 打不开、没标题），原样给用户 —— 他要能分辨是链接的问题还是平台的问题。只在这里说一次，
+    // ShareLinkForm 不再另弹。
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "分享失败", en: "This link could not be shared" })),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["feed"] });
     },

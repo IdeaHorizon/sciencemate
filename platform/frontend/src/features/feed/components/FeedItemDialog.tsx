@@ -5,6 +5,7 @@ import { Bookmark, BookmarkCheck, ExternalLink, X } from "lucide-react";
 import { Badge } from "@/shared/ui";
 import { api, literatureAssetUrl, type FeedItem } from "@/lib/api";
 import { say, useLanguage } from "@/shared/i18n";
+import { pushError } from "@/stores/notification";
 import { fc } from "../lib/feed-copy";
 import {
   KIND_BADGE,
@@ -101,7 +102,12 @@ export function FeedItemDialog({
 
         {imageSrc && (
           // eslint-disable-next-line @next/next/no-img-element -- 见 FeedItemCard
-          <img className="feed-dialog-image" src={imageSrc} alt="" decoding="async" />
+          <img
+            className={`feed-dialog-image${imageAsset?.kind === "journal_cover" ? " feed-journal-cover" : ""}`}
+            src={imageSrc}
+            alt={imageAsset?.kind === "journal_cover" ? say({ zh: "期刊封面", en: "Journal cover" }, lang) : ""}
+            decoding="async"
+          />
         )}
 
         <div className="feed-dialog-body">
@@ -136,7 +142,7 @@ export function FeedItemDialog({
           {reason && <p className="feed-card-reason">{reason}</p>}
 
           <p className="feed-dialog-attribution">{attribution(item, lang)}</p>
-          {Boolean(item.extra.school_library) && <p className="feed-dialog-attribution">{say({ zh: "学校馆藏", en: "School library" }, lang)}：{String(item.extra.school_library)}</p>}
+          {Boolean(item.extra.school_library) && <p className="feed-dialog-attribution">{say({ zh: "学校馆藏：{name}", en: "School library: {name}" }, lang, { name: String(item.extra.school_library) })}</p>}
 
           {/* 摘要**不截断** —— 这正是打开详情要看的东西。 */}
           {(summaryZh || item.summary) && <p className="feed-dialog-summary">{summaryZh || item.summary}</p>}
@@ -156,7 +162,7 @@ export function FeedItemDialog({
                   })
                   .catch(() => {
                     popup?.close();
-                    window.alert(say({ zh: "学校馆藏全文打开失败", en: "Could not open school full text" }, lang));
+                    pushError(say({ zh: "打开全文失败", en: "Could not open the full text" }, lang));
                   });
               }}>
                 <ExternalLink size={15} /> <span>{say({ zh: "查看学校馆藏全文", en: "Open school full text" }, lang)}</span>

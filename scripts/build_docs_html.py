@@ -426,6 +426,8 @@ ARCHIVE_STATUS: dict[str, tuple[str, str]] = {
     "RFC_MEMORY_REBUILD_20260821": ("已实施", "PR#572"),
     "RFC_RUNTIME_RESILIENCE_20260818": ("部分实施", "第 0 步 PR#571；D10/D12 PR#573；Track 1 已否决"),
     "RFC_RUNTIME_PIPELINE_20260819": ("待拍板", ""),
+    "RFC_WINDOWS_EXECUTION_TARGETS_20261030":
+        ("部分实施", "P0、§6 验证、P2 wsl 目标已落地；P1 余项、P3、P4 未做"),
     "RFC_ARTIFACT_COMMITMENT_LAYER_20260820": ("部分实施", "PR#567：承诺归预注册"),
     "PROPOSAL_RETIRE_QC_AS_A_VERDICT_LAYER_20260810": ("已实施", "PR#381：QC 降级成检测"),
     "ORCHESTRATOR_SITUATION_ROUTER_20260817": ("已实施", "PR#456 / #529"),

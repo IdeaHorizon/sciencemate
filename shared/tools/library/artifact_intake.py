@@ -36,6 +36,7 @@ from core.state import State
 
 from core.artifact_capabilities import _FREEZE_OWNED_METADATA
 from core.tool_registry import ToolDefinition, register_tool
+from shared.lib.external_content import WITNESS_FIELD, witness_at_ingest
 
 #: 与 read_file 同一个上限 —— 导入不该成为绕过有界读的后门
 _MAX_IMPORT_BYTES = 256_000
@@ -169,11 +170,20 @@ async def _import_artifact(state: State, artifact_type: str, name: str,
     for k in stripped:
         inherited_meta.pop(k, None)
 
+    # 内容层的闸（#730）：外来材料的正文会被 read_artifact 原样递给下游节点的模型。
+    # 不拦 —— 只把 harness 控制标签就地中和，模式表看到的东西落成见证挂在 metadata 上，
+    # 读的时候由数据框呈现。源文件的字节不动（sha256 记的是源文件）。
+    # 自带的见证不认：见证是本次入库看到的东西，不是材料自己声明的。
+    inherited_meta.pop(WITNESS_FIELD, None)
+    raw, witness = witness_at_ingest(raw, via="resources.import_artifact")
+
     metadata = dict(inherited_meta)
     metadata["imported_from"] = str(p)
     metadata["imported_content_truncated"] = content_truncated
     if note:
         metadata["import_note"] = note
+    if witness:
+        metadata[WITNESS_FIELD] = witness
 
     saved = state.save_artifact(
         artifact_type=artifact_type,

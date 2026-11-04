@@ -84,7 +84,7 @@ export function SessionDeliverables({
               ) : (
                 <span
                   className="session-deliverable is-static"
-                  title={t({ zh: "这份产物没有可在右栏打开的文件", en: "This output has no file the side panel can open" })}
+                  title={t({ zh: "这项成果没有可预览的文件", en: "This output has no file to preview" })}
                 >
                   {label(item, lang)}
                 </span>

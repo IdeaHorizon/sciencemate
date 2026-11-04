@@ -15,9 +15,9 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
-import tempfile
 import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -31,8 +31,13 @@ import yaml
 
 from app.config import data_root, settings
 from app.services import frozen_register
-from app.services.harness_contract import HarnessContractUnavailable, materials_module
+from app.services.harness_contract import (
+    HarnessContractUnavailable,
+    ledger_module,
+    materials_module,
+)
 from app.services.say import SaidToAPerson
+from app.services.session_runtime_paths import session_runs_root
 
 
 log = logging.getLogger(__name__)
@@ -109,6 +114,48 @@ def _refuse_the_event_loop_thread(operation: str) -> None:
 async def run_in_repository_thread(fn, /, *args, **kwargs):
     """在工作线程里跑一个仓库方法 —— async 调用方唯一的入口。"""
     return await asyncio.to_thread(fn, *args, **kwargs)
+
+
+#: git 子进程的 locale：消息钉在 C，于是 git 的提示/警告全是 ASCII 英文。
+#:
+#: 2026-10-29 lujy 的会话诊断包（中文 Windows 11，ScienceMate 0.5.8）：git 把本地化消息
+#: 按控制台代码页（CP936）写出来，`subprocess.run(text=True)` 按本机 locale 解码，
+#: Windows 上读管道的线程在 0xb0 上 UnicodeDecodeError 死掉、那条流还成 None，`_git`
+#: 在 `.strip()` 上 AttributeError —— GET …/sessions/<id>/changes 连续 500 了 36 次。
+#: git 写的**路径**永远是 UTF-8 字节、与 locale 无关；会随 locale 变的只有消息。
+#: 调用方按次传的 env 叠在这上面，所以一条调用要别的 locale 仍然可以自己说。
+_GIT_LOCALE: dict[str, str] = {"LC_ALL": "C", "LANG": "C"}
+
+
+def _run_git(
+    argv: Sequence[str], *, cwd: Path, env: dict[str, str] | None, timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """跑一条 git：输出**按 UTF-8 解码**，解不出的字节换 U+FFFD，两条流永不为 None。
+
+    不用 `text=True` —— 那是按本机 locale 解码；同一条教训打包器那边踩过一次
+    （`scripts/package/git_tracked.py`：cp1252 构建机把中文路径解成不存在的文件）。
+    `errors="replace"` 是第二道：locale 已钉成 C，但 hook、凭据助手、别的 git 子命令
+    仍可能按别的代码页写字节 —— 一个替换字符比一个 500 好。调用方拿到的 stdout /
+    stderr 一定是 str：CPython（Windows）的读管道线程死掉时会把那条流还成 None，
+    这里补成空串，`.strip()` 不再有机会炸。OSError / TimeoutExpired 原样抛给调用方。
+    """
+    result = subprocess.run(
+        list(argv),
+        cwd=cwd,
+        env={**os.environ, **_GIT_LOCALE, **(env or {})},
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=timeout,
+    )
+    if result.stdout is None:
+        result.stdout = ""
+    if result.stderr is None:
+        result.stderr = ""
+    return result
+
+
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 #: 这台机器上一条路径能有多长。**Windows 是硬预算**：文件 260、目录 260−12=248
@@ -389,11 +436,50 @@ def _the_file_lock():
     return filelock
 
 
+def _project_md(name: str, description: str | None, lang: str) -> str:
+    """新项目的 PROJECT.md 骨架，用建项目那一屏的语言写。"""
+    if lang == "en":
+        return (f"# {name}\n\n{description or 'A Git-based research project.'}\n\n"
+                "## Research objective\n\nDefine the falsifiable objective for this project.\n\n"
+                "## Scope and constraints\n\nRecord scientific, ethical, budget, and time constraints.\n\n"
+                "## Acceptance criteria\n\nDescribe the evidence required to consider the project complete.\n")
+    return (f"# {name}\n\n{description or '一个基于 Git 的科研项目。'}\n\n"
+            "## 研究目标\n\n写下这个项目可以被检验的研究目标。\n\n"
+            "## 范围与约束\n\n记录科学、伦理、预算和时间方面的约束。\n\n"
+            "## 完成标准\n\n说明有了哪些证据，这个项目就算完成。\n")
+
+
+#: 新项目的 MEMORY.md 骨架。记忆按节读写靠的是 `<!-- section:… -->` 标记（`core.memory`），
+#: 不认这些标题，所以标题和说明按建项目那一屏的语言写。
+_MEMORY_MD = {
+    "en": (
+        "# Project memory\n\n"
+        "This is the project's single, curated memory. Keep entries concise and linked to "
+        "evidence; merge entries that have been superseded instead of starting a second memory.\n\n"
+        "## Goals\n\n- Set the project's measurable research goals.\n\n"
+        "## Decisions\n\n<!-- YYYY-MM-DD | decision | rationale | evidence/commit -->\n\n"
+        "## Findings\n\n<!-- YYYY-MM-DD | finding | confidence | evidence path -->\n\n"
+        "## Constraints\n\n<!-- stable constraints that affect research execution -->\n\n"
+        "## Open questions\n\n<!-- unresolved questions and the next evidence needed -->\n"
+    ),
+    "zh": (
+        "# 项目记忆\n\n"
+        "这是这个项目唯一的记忆，由整理后的条目组成。每条写得简短，并附上证据；"
+        "过时的条目合并掉，不要另起一份记忆。\n\n"
+        "## 目标\n\n- 确定这个项目可以衡量的研究目标。\n\n"
+        "## 决定\n\n<!-- 日期 | 决定 | 理由 | 证据或提交 -->\n\n"
+        "## 发现\n\n<!-- 日期 | 发现 | 把握程度 | 证据路径 -->\n\n"
+        "## 约束\n\n<!-- 影响研究执行的长期约束 -->\n\n"
+        "## 待解决的问题\n\n<!-- 还没解决的问题，以及下一步需要的证据 -->\n"
+    ),
+}
+
+
 class ProjectRepositoryError(RuntimeError):
     """A repository invariant or Git operation failed.
 
-    消息是**技术原话**（英文：Git 输出、不变量名）。端点把它当证据 `{why}` 填进一句
-    两种语言的话里（`said_of`）；子类里说给人听的那几种（`SaidToAPerson`）照它自己的说。
+    消息是**技术原话**（英文：Git 输出、不变量名）。端点用 `said_of` 说一句两种语言的人话、
+    原话进日志；子类里说给人听的那几种（`SaidToAPerson`）照它自己的说。
     """
 
 
@@ -460,6 +546,23 @@ class SessionWorkspace:
     ahead_by: int
     behind_by: int
     clean: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRecovery:
+    """一次会话恢复的结果：新会话的工作区 + 这次恢复的事实记录（#1186）。
+
+    `record` 原样写进新会话的 manifest（`recovery:`）和事件流（`session.recovered`），
+    恢复提交的 trailer 是它的摘要 —— 同一份事实：从哪儿接着跑、为什么、原会话冻结的
+    每一件落到了哪里。
+    """
+
+    workspace: SessionWorkspace
+    record: dict
+
+
+class RecoveryBaselineMissing(ProjectRepositoryError):
+    """要退回原会话的 base 开分支，而那个 base 在仓库里不存在 —— 无从接起。"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1005,15 +1108,7 @@ class GitProjectRepository:
     ) -> str:
         _refuse_the_event_loop_thread(args[0] if args else "git")
         try:
-            result = subprocess.run(
-                [self.git, *args],
-                cwd=cwd,
-                env={**os.environ, **(env or {})},
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=30,
-            )
+            result = _run_git([self.git, *args], cwd=cwd, env=env, timeout=30)
         except (OSError, subprocess.TimeoutExpired) as exc:
             operation = args[0] if args else "git"
             raise ProjectRepositoryError(f"Git operation failed: {operation}") from exc
@@ -1070,8 +1165,13 @@ class GitProjectRepository:
         description: str | None,
         research_domain: str | None,
         owner_id: str,
+        lang: str = "zh",
     ) -> RepositoryStatus:
-        """Create the fixed Project schema and its genesis commit, idempotently."""
+        """Create the fixed Project schema and its genesis commit, idempotently.
+
+        `lang` 是建项目那一屏的语言：PROJECT.md / MEMORY.md 的骨架用它写 —— 打开新项目
+        第一眼看到的就是这两份文件。没说（补建旧项目的仓库）就按界面的默认语言。
+        """
         project_id = self._safe_id(project_id, "project id")
         destination = self.project_path(project_id)
         with self._project_lock(project_id):
@@ -1083,9 +1183,13 @@ class GitProjectRepository:
                     f"Project repository path is non-empty but is not Git: {destination}"
                 )
             self.repository_root.mkdir(parents=True, exist_ok=True)
-            temporary = Path(
-                tempfile.mkdtemp(prefix=f".{project_id}.init-", dir=self.repository_root)
-            )
+            # 不用 tempfile.mkdtemp：它按 0o700 建，Windows 上是只认 owner 的受保护 DACL，改名成正式
+            # 仓库之后照样留着 —— 提权跑过一次的项目，之后正常运行就打不开（#1263 诊断包）。
+            ensure_harness_importable()
+            from shared.lib.private_files import mkdir_private
+
+            temporary = self.repository_root / f".{project_id}.init-{secrets.token_hex(6)}"
+            mkdir_private(temporary, exist_ok=False)
             try:
                 self._git(temporary, "init", "-b", DEFAULT_BRANCH)
                 self._configure_identity(temporary)
@@ -1105,35 +1209,8 @@ class GitProjectRepository:
                         }
                     ),
                 )
-                self._write(
-                    temporary,
-                    "PROJECT.md",
-                    f"# {name}\n\n"
-                    f"{description or 'Git-native scientific research project.'}\n\n"
-                    "## Research objective\n\n"
-                    "Define the falsifiable objective for this Project.\n\n"
-                    "## Scope and constraints\n\n"
-                    "Record scientific, ethical, budget, and time constraints.\n\n"
-                    "## Acceptance criteria\n\n"
-                    "Describe the evidence required to consider the Project complete.\n",
-                )
-                self._write(
-                    temporary,
-                    "MEMORY.md",
-                    "# Project memory\n\n"
-                    "This is the canonical, curated memory for the research Project. "
-                    "Keep entries concise and evidence-linked; compact superseded entries "
-                    "instead of creating a second memory authority.\n\n"
-                    "## Goals\n\n- Establish the Project's measurable research goals.\n\n"
-                    "## Decisions\n\n"
-                    "<!-- YYYY-MM-DD | decision | rationale | evidence/commit -->\n\n"
-                    "## Findings\n\n"
-                    "<!-- YYYY-MM-DD | finding | confidence | evidence path -->\n\n"
-                    "## Constraints\n\n"
-                    "<!-- stable constraints that affect research execution -->\n\n"
-                    "## Open questions\n\n"
-                    "<!-- unresolved questions and the next evidence needed -->\n",
-                )
+                self._write(temporary, "PROJECT.md", _project_md(name, description, lang))
+                self._write(temporary, "MEMORY.md", _MEMORY_MD.get(lang) or _MEMORY_MD["zh"])
                 self._write(
                     temporary,
                     "CODEOWNERS",
@@ -1517,8 +1594,8 @@ class GitProjectRepository:
         size = candidate.stat().st_size
         if size > max_bytes:
             raise ProjectFileTooLargeError(
-                f"文件太大，预览不了：{safe}（{size} 字节）",
-                en=f"Project file is too large to preview: {safe} ({size} bytes)",
+                f"文件太大，无法预览：{safe}（{size} 字节）",
+                en=f"File is too large to preview: {safe} ({size} bytes)",
                 size_bytes=size,
                 max_bytes=max_bytes,
             )
@@ -1535,72 +1612,95 @@ class GitProjectRepository:
     ) -> SessionWorkspace:
         project_id = self._safe_id(project_id, "project id")
         session_id = self._safe_id(session_id, "session id")
+        with self._project_lock(project_id):
+            return self._ensure_session_workspace_locked(
+                project_id=project_id,
+                session_id=session_id,
+                base_commit=base_commit,
+                title=title,
+                created_by=created_by,
+            )
+
+    def _ensure_session_workspace_locked(
+        self,
+        *,
+        project_id: str,
+        session_id: str,
+        base_commit: str | None,
+        title: str,
+        created_by: str,
+    ) -> SessionWorkspace:
+        """`ensure_session_workspace` 的本体 —— 调用方**已经**持有项目锁。
+
+        拆出来是给会话恢复用的：它要在同一把锁里先核账、再开分支、再把冻结件带过来。
+        锁是 `flock`，同一进程里再开一个 handle 去拿会自己等自己，所以不能嵌套调用
+        公开的那个入口。
+        """
         repo = self.project_path(project_id)
         path = self.session_path(project_id, session_id)
         branch = self.session_branch(session_id)
-        with self._project_lock(project_id):
-            if not (repo / ".git").is_dir():
-                raise ProjectRepositoryError(f"Project repository is not initialized: {project_id}")
-            base = base_commit or self._git(repo, "rev-parse", DEFAULT_BRANCH)
-            self._git(repo, "cat-file", "-e", f"{base}^{{commit}}")
-            if path.exists():
-                # 目录名是身份的**短名**（见 `_worktree_dir_name`）。短名会撞是
-                # 天文数字级的小概率，但撞了必须**当场说出来**：这里已经是别人的
-                # 工作树，接着用就是两个会话共写一棵树，而两边都不会报错。
-                # 判据取分支（身份的真正载体），不新造记号文件。
-                here = self._git(path, "rev-parse", "--abbrev-ref", "HEAD", check=False).strip()
-                if here and here != branch:
-                    raise ProjectRepositoryError(
-                        f"Session worktree directory {path} already belongs to "
-                        f"branch {here!r}, not {branch!r} — refusing to share it."
-                    )
-            if not path.exists():
-                path.parent.mkdir(parents=True, exist_ok=True)
-                branch_exists = bool(
-                    self._git(repo, "show-ref", "--verify", f"refs/heads/{branch}", check=False)
+        if not (repo / ".git").is_dir():
+            raise ProjectRepositoryError(f"Project repository is not initialized: {project_id}")
+        base = base_commit or self._git(repo, "rev-parse", DEFAULT_BRANCH)
+        self._git(repo, "cat-file", "-e", f"{base}^{{commit}}")
+        if path.exists():
+            # 目录名是身份的**短名**（见 `_worktree_dir_name`）。短名会撞是
+            # 天文数字级的小概率，但撞了必须**当场说出来**：这里已经是别人的
+            # 工作树，接着用就是两个会话共写一棵树，而两边都不会报错。
+            # 判据取分支（身份的真正载体），不新造记号文件。
+            here = self._git(path, "rev-parse", "--abbrev-ref", "HEAD", check=False).strip()
+            if here and here != branch:
+                raise ProjectRepositoryError(
+                    f"Session worktree directory {path} already belongs to "
+                    f"branch {here!r}, not {branch!r} — refusing to share it."
                 )
-                args = (
-                    ("worktree", "add", str(path), branch)
-                    if branch_exists
-                    else ("worktree", "add", "-b", branch, str(path), base)
-                )
-                self._git(repo, *args)
-                self._configure_identity(path)
-                self._write(
-                    path,
-                    f".research/orchestration/sessions/{session_id}.yaml",
-                    _yaml_mapping(
-                        {
-                            "schema_version": 2,
-                            "session_id": session_id,
-                            "title": title,
-                            "created_by": created_by,
-                            "base_commit": base,
-                            "branch": branch,
-                        }
-                    ),
-                )
-                self._git(
-                    path,
-                    "add",
-                    f".research/orchestration/sessions/{session_id}.yaml",
-                )
-                self._git(
-                    path,
-                    "commit",
-                    "-m",
-                    f"session: initialize {session_id}",
-                    "-m",
-                    f"Session-ID: {session_id}\nBase-Commit: {base}",
-                )
-            # 用户交来的文件：`.ref` 指针随 Git 分支过来，字节不会（它们在池里
-            # 按内容寻址，不进版本）。这一步把字节接回来 —— 少了它，新会话的
-            # agent 看到的是一个指针文件旁边缺了实体，也就是"传过的文件读不到"。
-            # 幂等：实体已在就什么都不做。
-            _materials = _materials_if_available()
-            if _materials is not None:
-                _materials.materialize(path)
-            return self.session_status(project_id, session_id, base_commit=base)
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            branch_exists = bool(
+                self._git(repo, "show-ref", "--verify", f"refs/heads/{branch}", check=False)
+            )
+            args = (
+                ("worktree", "add", str(path), branch)
+                if branch_exists
+                else ("worktree", "add", "-b", branch, str(path), base)
+            )
+            self._git(repo, *args)
+            self._configure_identity(path)
+            self._write(
+                path,
+                f".research/orchestration/sessions/{session_id}.yaml",
+                _yaml_mapping(
+                    {
+                        "schema_version": 2,
+                        "session_id": session_id,
+                        "title": title,
+                        "created_by": created_by,
+                        "base_commit": base,
+                        "branch": branch,
+                    }
+                ),
+            )
+            self._git(
+                path,
+                "add",
+                f".research/orchestration/sessions/{session_id}.yaml",
+            )
+            self._git(
+                path,
+                "commit",
+                "-m",
+                f"session: initialize {session_id}",
+                "-m",
+                f"Session-ID: {session_id}\nBase-Commit: {base}",
+            )
+        # 用户交来的文件：`.ref` 指针随 Git 分支过来，字节不会（它们在池里
+        # 按内容寻址，不进版本）。这一步把字节接回来 —— 少了它，新会话的
+        # agent 看到的是一个指针文件旁边缺了实体，也就是"传过的文件读不到"。
+        # 幂等：实体已在就什么都不做。
+        _materials = _materials_if_available()
+        if _materials is not None:
+            _materials.materialize(path)
+        return self.session_status(project_id, session_id, base_commit=base)
 
     def session_status(
         self, project_id: str, session_id: str, *, base_commit: str | None = None
@@ -1626,6 +1726,291 @@ class GitProjectRepository:
             behind_by=behind,
             clean=not bool(self._git(path, "status", "--porcelain")),
         )
+
+    # ── 会话恢复：从哪儿接着跑，原会话冻结的东西跟不跟过来（#1186）──────────────
+    #
+    # wangd 2026-10-21 裁决：从**原会话分支头**续接；续接前核一遍分支头与账本是否
+    # 一致（worker 被杀后可能半截），不一致就退回「从原会话的 base 新开，并把原会话
+    # 已冻结的产物显式带过来」。
+    #
+    # ## 账本不在分支上 —— 光从分支头开出来，新会话一条记录都看不到
+    #
+    # 冻结的事实只记在工作区账本 `.research/ledger/records.jsonl`（core/ledger）。
+    # 这本账**从不进会话分支**：checkpoint 只提交节点自己目录下的路径，账本一直是
+    # 原会话 worktree 里的未跟踪文件（2026-11-04 用真 git 核过：冻结 + checkpoint 之后
+    # `git status` 里它是 `??`）。新会话的 State 只读自己 worktree 的账
+    # （`State._stores()`），所以 08-10 起「从死会话的 head 开分支」只把正文带了过来：
+    # 新会话看得到 `plan/pre_registration__Q1.md` 这个文件，却不知道它是谁产的、
+    # 冻没冻 —— 可以被当成一份新稿随手覆盖。账本必须由恢复这一步显式搬过来。
+    #
+    # ## 「一致」的机械定义
+    #
+    # 账本 = 原会话 worktree 盘上那本（只追加，worker 被杀前写下的每一行都在）。
+    # 冻结 = 账本钉死的 head（`RecordStore.pinned_heads`，与 commit 闸同一判据：
+    # 冻结且尚未修订；修订过的冻结版已解除钉死，冻结的字节留在 git 历史里）。
+    # 一致 ⇔ 每一件冻结件在分支头的提交里**存在**，且字节的 sha256 等于账本钉的那个。
+    # 典型的不一致：冻结落了账、还没等到 checkpoint 就被杀 —— 分支头上没有这份正文。
+
+    def recover_session_workspace(
+        self,
+        *,
+        project_id: str,
+        source_session_id: str,
+        source_base_commit: str | None,
+        source_head_commit: str | None,
+        session_id: str,
+        title: str,
+        created_by: str,
+    ) -> SessionRecovery:
+        """为丢了运行时的会话开一个接续工作区，并把原会话冻结的产物交到它手上。
+
+        - 分支头与账本一致 → 从分支头开，账本原样接过来（链不断：这就是同一份工作的账）。
+        - 没有分支头，或分支头与账本不一致 → 从原会话的 **base** 开（不是项目当前的
+          main —— 那是别人后来的工作），冻结件逐件按账本钉的哈希找回字节：原会话
+          worktree 盘上 → 分支头 → run 内快照 → 仓库任一引用的历史；找到就写回原路径、
+          连同它的账（save / freeze 行，出处不改）一起接进新账本。
+        - 哪儿都找不回的冻结件**照样记账**（承诺还在，新会话改它得走公开修订），并在
+          记录里写成 `unrecoverable` —— 不许悄悄少一件。
+
+        事实记录写进新会话的 manifest（`recovery:`），随一条平台提交入库；源分支一个
+        字节不动（它是证据）。
+        """
+        project_id = self._safe_id(project_id, "project id")
+        source_session_id = self._safe_id(source_session_id, "session id")
+        session_id = self._safe_id(session_id, "session id")
+        repo = self.project_path(project_id)
+        source_root = self.session_path(project_id, source_session_id)
+        try:
+            ledger = ledger_module()
+        except HarnessContractUnavailable as exc:
+            raise ProjectRepositoryError(
+                "Session recovery needs the harness record ledger (HARNESS_ROOT)"
+            ) from exc
+        with self._project_lock(project_id):
+            if not (repo / ".git").is_dir():
+                raise ProjectRepositoryError(f"Project repository is not initialized: {project_id}")
+            # 分支头以 Git 里的分支为准；DB 里那条 git_head_commit_sha 只是提示 ——
+            # 平台的提交落地之后 DB 可能没记住（见 `_commits_not_made_by_platform`）。
+            head = self._commit_or_none(
+                repo, f"refs/heads/{self.session_branch(source_session_id)}"
+            ) or self._commit_or_none(repo, source_head_commit)
+            source_ledger = source_root / ledger.LEDGER_RELATIVE
+            source_store = ledger.RecordStore(source_root, source_ledger)
+            try:
+                source_rows = source_store.rows()
+                frozen = source_store.pinned_heads()
+            except OSError as exc:
+                # 账本**读不了**不是"没有冻结件"：当成空账就是在猜。
+                raise ProjectRepositoryError(
+                    "The source Session's record ledger is unreadable"
+                ) from exc
+
+            disagreements: list[dict] = []
+            if head:
+                for item in frozen:
+                    blob = self._git_blob_bytes(repo, f"{head}:{item.path}")
+                    if blob is None or hashlib.sha256(blob).hexdigest() != item.sha256:
+                        disagreements.append({
+                            **self._frozen_identity(item),
+                            "onHead": "missing" if blob is None else "differs",
+                        })
+            if head and not disagreements:
+                start, started_from, why = head, "source_head", "head_matches_ledger"
+            else:
+                start = self._commit_or_none(repo, source_base_commit)
+                if start is None:
+                    raise RecoveryBaselineMissing(
+                        f"The source Session's base commit is not in the repository: "
+                        f"{source_base_commit or '<none>'}"
+                    )
+                started_from = "source_base"
+                why = "head_disagrees_with_ledger" if head else "no_source_head"
+
+            workspace = self._ensure_session_workspace_locked(
+                project_id=project_id,
+                session_id=session_id,
+                base_commit=start,
+                title=title,
+                created_by=created_by,
+            )
+            root = Path(workspace.path)
+            target_ledger = root / ledger.LEDGER_RELATIVE
+            commit_paths: list[str] = []
+            outcomes: list[dict] = []
+            if started_from == "source_head":
+                if source_ledger.is_file():
+                    target_ledger.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source_ledger, target_ledger)
+                outcomes = [{**self._frozen_identity(item), "outcome": "on_head"} for item in frozen]
+            else:
+                for item in frozen:
+                    outcome = self._restore_frozen_bytes(
+                        repo=repo, root=root, source_root=source_root, head=head,
+                        item=item, ledger=ledger,
+                    )
+                    outcomes.append(outcome)
+                    if outcome.get("committed"):
+                        commit_paths.append(item.path)
+                carried = {item.artifact_id for item in frozen}
+                ledger.workspace_store(root).carry(
+                    [row for row in source_rows if str(row.get("id") or "").strip() in carried],
+                    recovered_from_session=source_session_id,
+                )
+            # 账本平时是未跟踪文件；万一起点的提交里跟踪着它，改了就得一起提交，
+            # 否则新工作区一开张就带着一处脏的跟踪文件。
+            if target_ledger.is_file() and self._git(
+                root, "ls-files", "--", ledger.LEDGER_RELATIVE
+            ):
+                commit_paths.append(ledger.LEDGER_RELATIVE)
+
+            record = {
+                "sourceSessionId": source_session_id,
+                "startedFrom": started_from,
+                "why": why,
+                "startCommit": start,
+                "sourceHead": head,
+                "sourceBase": source_base_commit or None,
+                "ledger": "source_worktree" if source_ledger.is_file() else "missing",
+                "disagreements": disagreements,
+                "frozen": outcomes,
+            }
+            manifest = f".research/orchestration/sessions/{session_id}.yaml"
+            manifest_path = root / manifest
+            kept = (
+                [line for line in manifest_path.read_text(encoding="utf-8").splitlines()
+                 if not line.startswith("recovery:")]
+                if manifest_path.is_file() else []
+            )
+            manifest_path.write_text(
+                "".join(f"{line}\n" for line in kept) + _yaml_mapping({"recovery": record}),
+                encoding="utf-8",
+            )
+            trailers = [
+                f"Recovered-From-Session: {source_session_id}",
+                f"Recovery-Start: {started_from} {start}",
+                f"Recovery-Reason: {why}",
+            ]
+            for outcome in outcomes:
+                if outcome["outcome"] == "carried_over":
+                    trailers.append(
+                        f"Frozen-Carried-Over: {outcome['id']}@v{outcome['version']} "
+                        f"from {outcome['from']}"
+                    )
+                elif outcome["outcome"] == "unrecoverable":
+                    trailers.append(
+                        f"Frozen-Unrecoverable: {outcome['id']}@v{outcome['version']} "
+                        f"{outcome['sha256']}"
+                    )
+            self._commit_platform_write(
+                root,
+                session_id=session_id,
+                actor_id=created_by,
+                paths=[manifest, *commit_paths],
+                subject=f"session: recover from {source_session_id}",
+                trailers=trailers,
+            )
+            return SessionRecovery(
+                workspace=self.session_status(project_id, session_id, base_commit=start),
+                record=record,
+            )
+
+    def _commit_or_none(self, repo: Path, spec: str | None) -> str | None:
+        """`spec` 指向仓库里的一个提交就给出它的 sha，否则 None（不抛）。"""
+        spec = (spec or "").strip()
+        if not spec:
+            return None
+        found = self._git(
+            repo, "rev-parse", "--verify", "--quiet", f"{spec}^{{commit}}", check=False
+        )
+        return found or None
+
+    @staticmethod
+    def _frozen_identity(item) -> dict:
+        """账本钉住一件冻结件用的身份：id、版本、路径、正文 sha256。"""
+        return {
+            "id": item.artifact_id,
+            "version": item.version,
+            "path": item.path,
+            "sha256": item.sha256,
+        }
+
+    def _restore_frozen_bytes(
+        self, *, repo: Path, root: Path, source_root: Path, head: str | None, item, ledger
+    ) -> dict:
+        """把一件冻结件的正文按账本钉的哈希找回来、写到新工作区的原路径上。
+
+        每个来源都按 sha256 核过才用 —— 来源只决定先问谁，不决定信谁。超过 Git 单文件
+        上限的照写不提交（checkpoint 本来也不收它，原会话里它同样只在盘上）。
+        """
+        identity = self._frozen_identity(item)
+        try:
+            relative = self._safe_relative_path(item.path)
+        except ProjectRepositoryError:
+            return {**identity, "outcome": "unrecoverable"}
+        target = root / relative
+
+        def pinned(data: bytes | None) -> bool:
+            return data is not None and hashlib.sha256(data).hexdigest() == item.sha256
+
+        try:
+            if target.is_file() and not target.is_symlink() and pinned(target.read_bytes()):
+                # 起点的提交里本来就有这一版（例如它早先发布进了 main）。
+                return {**identity, "outcome": "carried_over", "from": "source_base",
+                        "committed": True}
+        except OSError:
+            pass
+        for origin, data in self._frozen_byte_sources(
+            repo=repo, source_root=source_root, head=head, relative=relative,
+            item=item, ledger=ledger,
+        ):
+            if not pinned(data):
+                continue
+            assert data is not None
+            if target.is_symlink():
+                target.unlink()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            return {
+                **identity,
+                "outcome": "carried_over",
+                "from": origin,
+                "committed": len(data) <= settings.project_git_max_blob_bytes,
+            }
+        return {**identity, "outcome": "unrecoverable"}
+
+    def _frozen_byte_sources(
+        self, *, repo: Path, source_root: Path, head: str | None, relative: str, item, ledger
+    ) -> Iterator[tuple[str, bytes | None]]:
+        """一件冻结件的正文可能还在的地方，按"最可能在"排序、按需取（不先扫全历史）。"""
+        # 1) 原会话 worktree 盘上 —— 最常见：冻结落了账，还没等到 checkpoint 就被杀。
+        candidate = source_root / relative
+        try:
+            resolved = candidate.resolve(strict=True)
+            if (not candidate.is_symlink() and resolved.is_file()
+                    and source_root.resolve() in resolved.parents):
+                yield "source_worktree", resolved.read_bytes()
+        except OSError:
+            pass
+        # 2) 原会话分支头（不一致的可能只是别的件）。
+        if head:
+            yield "source_head", self._git_blob_bytes(repo, f"{head}:{relative}")
+        # 3) run 内撤销快照：账本自己存旧版的地方，命名由 RecordStore.snapshot_path 定。
+        runs = session_runs_root(source_root)
+        if runs.is_dir():
+            for versions in sorted(runs.glob("*/versions")):
+                snapshot = ledger.RecordStore(
+                    source_root, source_root / ledger.LEDGER_RELATIVE, snapshot_dir=versions
+                ).snapshot_path(item)
+                try:
+                    if snapshot is not None and snapshot.is_file() and not snapshot.is_symlink():
+                        yield "run_snapshot", snapshot.read_bytes()
+                except OSError:
+                    continue
+        # 4) 仓库里任一引用的历史 —— 账本找旧版正文走的也是这条路（`_git_content`）。
+        for commit in self._git(
+            repo, "log", "--all", "--format=%H", "--", relative, check=False
+        ).split():
+            yield "git_history", self._git_blob_bytes(repo, f"{commit}:{relative}")
 
     @staticmethod
     def artifact_paths(artifact_id: str, artifact_type: str, mime_type: str) -> tuple[str, str]:
@@ -2279,12 +2664,12 @@ class GitProjectRepository:
             head = self._git(root, "rev-parse", "HEAD").strip()
             base = (workspace.base_commit or "").strip()
             if not head or head == base:
-                raise UndoRefused("这个 Session 还没有可撤销的提交",
-                                  en="This Session has no commit to undo yet")
+                raise UndoRefused("这个会话还没有可撤销的改动",
+                                  en="This Session has no changes to undo yet")
             parents = self._git(root, "rev-list", "--parents", "-n", "1", head).split()
             if len(parents) < 2:
-                raise UndoRefused("最近一次提交没有父提交，无法撤销",
-                                  en="The latest commit has no parent, so it cannot be undone")
+                raise UndoRefused("这是最早的一次改动，无法撤销",
+                                  en="This is the first change, so it cannot be undone")
             changed = [
                 path
                 for path in self._git(
@@ -2296,10 +2681,9 @@ class GitProjectRepository:
             blocked = sorted(path for path in changed if path in frozen)
             if blocked:
                 raise UndoRefused(
-                    "这次提交动了已冻结的产物，不能撤销（预注册防篡改语义）："
+                    "这次改动涉及已定稿的成果，无法撤销："
                     + "、".join(blocked[:5]),
-                    en="This commit touched frozen artifacts, so it cannot be undone (pre-registration "
-                       "is tamper-proof): " + ", ".join(blocked[:5]),
+                    en="This change touches finalized outputs, so it cannot be undone: " + ", ".join(blocked[:5]),
                 )
             # 工作区脏就不能 revert（git 自己会拒，但它抛的是 128 + 一段英文）。
             # 提前检查，把它变成一句能照做的话 —— 报错不给下一步，等于只告诉
@@ -2314,13 +2698,13 @@ class GitProjectRepository:
             ]
             if dirty:
                 raise UndoRefused(
-                    "工作区还有未提交的改动，撤销会覆盖它们。先等这一轮跑完"
-                    "（它结束时会自动 checkpoint），或手动处理这些文件："
+                    "工作区还有未保存的改动，撤销会覆盖它们。请等这次执行结束（结束时会自动保存），"
+                    "或先处理这些文件："
                     + "、".join(dirty[:5])
                     + ("…" if len(dirty) > 5 else ""),
-                    en="The workspace has uncommitted changes that an undo would overwrite. Wait for "
-                       "this turn to finish (it checkpoints automatically when it ends), or deal with "
-                       "these files by hand: " + ", ".join(dirty[:5]) + ("…" if len(dirty) > 5 else ""),
+                    en="The workspace has unsaved changes that undo would overwrite. Wait for this run "
+                       "to finish (it saves automatically when it ends), or deal with these files first: "
+                       + ", ".join(dirty[:5]) + ("…" if len(dirty) > 5 else ""),
                 )
             subject = self._git(root, "log", "-1", "--format=%s", head).strip()
             self._configure_identity(root)
@@ -2410,15 +2794,7 @@ class GitProjectRepository:
         """
         _refuse_the_event_loop_thread(args[0] if args else "git")
         try:
-            result = subprocess.run(
-                [self.git, *args],
-                cwd=cwd,
-                env={**os.environ},
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=30,
-            )
+            result = _run_git([self.git, *args], cwd=cwd, env=None, timeout=30)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ProjectRepositoryError("Git operation failed: merge-base") from exc
         return result.returncode, result.stdout
@@ -2673,26 +3049,6 @@ class GitProjectRepository:
         except (OSError, subprocess.TimeoutExpired):
             return None
         return result.stdout if result.returncode == 0 else None
-
-    def _git_env(self, cwd: Path, env: dict[str, str], *args: str, check: bool = True) -> str:
-        try:
-            result = subprocess.run(
-                [self.git, *args],
-                cwd=cwd,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ProjectRepositoryError(f"Git operation failed: {args[0]}") from exc
-        if check and result.returncode != 0:
-            detail = (result.stderr or result.stdout).strip()[-1500:]
-            raise ProjectRepositoryError(
-                f"git {' '.join(args)} failed ({result.returncode}): {detail}"
-            )
-        return result.stdout.strip()
 
     def commit_main_files(
         self,

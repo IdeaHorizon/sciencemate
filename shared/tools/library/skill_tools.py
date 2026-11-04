@@ -98,6 +98,7 @@ def _skill_brief(s: Skill) -> dict:
         "description": s.description,
         "status": s.status,
         "origin": s.origin,
+        "revision": s.revision,
         "applies_when": s.applies_when,
         "tools_used": s.tools_used,
         "relevant_concepts": s.relevant_concepts,
@@ -128,11 +129,13 @@ async def _list_skills(
     """
     if include_other_nodes:
         skills = all_skills()
+        skills.extend(s for s in visible_skills_for(state.node_type, state=state)
+                      if s.origin == "library")
         if status_filter is None:
             skills = [s for s in skills if s.status != "deprecated"]
     else:
         node_type = for_node or state.node_type
-        skills = visible_skills_for(node_type)
+        skills = visible_skills_for(node_type, state=state)
 
     if status_filter:
         skills = [s for s in skills if s.status == status_filter]
@@ -215,13 +218,13 @@ register_tool(
 _ASSET_DEFAULT_LINES = 800
 
 
-def _visible_or_error(node_type: str, name: str) -> tuple[Skill | None, dict | None]:
+def _visible_or_error(node_type: str, name: str, state: State | None = None) -> tuple[Skill | None, dict | None]:
     """取一个对 `node_type` **可见**的 skill；取不到就返回带合法取值的报错。
 
     报错必须列出合法值：运行时才说"不存在"而不说"有哪些"，模型唯一能做的
     就是猜名字（契约必须送到调用方）。
     """
-    visible = visible_skills_for(node_type)
+    visible = visible_skills_for(node_type, state=state)
     for s in visible:
         if s.name == name:
             return s, None
@@ -254,7 +257,7 @@ async def _load_skill(
     **_: Any,
 ) -> dict:
     """取 skill 正文（默认）或它的某个 asset。"""
-    skill, err = _visible_or_error(for_node or state.node_type, name)
+    skill, err = _visible_or_error(for_node or state.node_type, name, state)
     if err is not None:
         return err
     assert skill is not None
@@ -265,6 +268,7 @@ async def _load_skill(
             "name": skill.name,
             "description": skill.description,
             "origin": skill.origin,
+            "revision": skill.revision,
             "skill_status": skill.status,
             "applies_when": skill.applies_when,
             "tools_used": skill.tools_used,

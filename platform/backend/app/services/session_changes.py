@@ -41,7 +41,8 @@ from app.models.project import Project
 from app.models.user import User
 from app.policies import has_project_capability
 from app.services.say import SaidToAPerson
-from app.services.user_interface import language_for, said_of
+from app.services import refusals
+from app.services.user_interface import language_for, said_of, say
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +222,8 @@ async def publish_session(
     )
 
     if not await has_project_capability(db, user, project, "publish_changes"):
-        raise HTTPException(status_code=403, detail="Missing project capability: publish_changes")
+        raise HTTPException(status_code=403, detail=say(refusals.missing_capability("publish_changes"),
+                                                        language_for(user)))
 
     repository = get_project_repository()
     changes = await read_session_changes(str(project.id), session)
@@ -236,7 +238,9 @@ async def publish_session(
     main_head = (await run_in_repository_thread(repository.status, str(project.id))).head_commit
     if expected_main_commit and expected_main_commit != main_head:
         raise HTTPException(
-            status_code=409, detail="Project head changed; refresh before publishing"
+            status_code=409, detail=say({"zh": "项目已有新的改动，请刷新后再发布",
+                                         "en": "Project head changed; refresh before publishing"},
+                                        language_for(user))
         )
     try:
         commit = await run_in_repository_thread(
@@ -251,7 +255,7 @@ async def publish_session(
         )
     except ProjectRepositoryError as exc:
         raise HTTPException(status_code=409, detail=said_of(exc, language_for(user), otherwise={
-            "zh": "改动没能发布到项目：{why}", "en": "The changes could not be published to the project: {why}"},
+            "zh": "发布到项目失败，请稍后重试。", "en": "Could not publish the changes to the project. Try again later."},
         )) from exc
 
     # 这个会话暂存的产物随这次发布转正。从前这一步是「把 ChangeItem 指到的
@@ -293,13 +297,16 @@ async def resolve_conflict(
     )
 
     if not await has_project_capability(db, user, project, "publish_changes"):
-        raise HTTPException(status_code=403, detail="Missing project capability: publish_changes")
+        raise HTTPException(status_code=403, detail=say(refusals.missing_capability("publish_changes"),
+                                                        language_for(user)))
     if choice not in {"use_project", "use_proposed"}:
-        raise HTTPException(status_code=422, detail="choice must be use_project or use_proposed")
+        raise HTTPException(status_code=422, detail=say(
+            refusals.invalid_request("choice must be use_project or use_proposed"), language_for(user)))
 
     changes = await read_session_changes(str(project.id), session)
     if path not in changes.conflicting_paths:
-        raise HTTPException(status_code=404, detail="This path is not in conflict")
+        raise HTTPException(status_code=404, detail=say(
+            {"zh": "这个文件没有冲突", "en": "This path is not in conflict"}, language_for(user)))
 
     if choice == "use_proposed":
         return {"path": path, "choice": choice, "headCommitSha": changes.head_commit}
@@ -311,7 +318,7 @@ async def resolve_conflict(
         )
     except ProjectRepositoryError as exc:
         raise HTTPException(status_code=409, detail=said_of(exc, language_for(user), otherwise={
-            "zh": "没能取回项目那一版：{why}", "en": "The project's version could not be taken: {why}"},
+            "zh": "无法改用项目中的版本，请稍后重试。", "en": "Could not switch to the project's version. Try again later."},
         )) from exc
     session.git_head_commit_sha = head
     await db.flush()
@@ -344,11 +351,14 @@ async def stage_artifact_candidate(
     owner_node: str | None = None,
 ) -> ArtifactVersion:
     if not await has_project_capability(db, user, project, "drive_session"):
-        raise HTTPException(status_code=403, detail="Missing project capability: drive_session")
+        raise HTTPException(status_code=403, detail=say(refusals.missing_capability("drive_session"),
+                                                        language_for(user)))
     if resource_type not in {"artifact", "project_doc", "project_config"}:
         raise HTTPException(
             status_code=422,
-            detail="resourceType must be artifact, project_doc, or project_config; KB is excluded",
+            detail=say(refusals.invalid_request(
+                "resourceType must be artifact, project_doc, or project_config; KB is excluded"),
+                language_for(user)),
         )
     artifact = (
         await db.scalar(select(Artifact).where(Artifact.id == artifact_id).with_for_update())
@@ -356,17 +366,19 @@ async def stage_artifact_candidate(
         else None
     )
     if artifact_id and (not artifact or str(artifact.project_id) != str(project.id)):
-        raise HTTPException(status_code=404, detail="Artifact not found")
+        raise HTTPException(status_code=404, detail=say(refusals.ARTIFACT_NOT_FOUND, language_for(user)))
     if resource_type == "artifact":
         try:
             parsed_type = ArtifactType(artifact_type)
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail="Unsupported artifactType") from exc
+            raise HTTPException(status_code=422, detail=say(
+                refusals.invalid_request("Unsupported artifactType"), language_for(user))) from exc
     else:
         parsed_type = ArtifactType.OTHER
     key = (resource_key or (f"artifact:{artifact.id}" if artifact else "")).strip()
     if not key and resource_type != "artifact":
-        raise HTTPException(status_code=422, detail="resourceKey is required")
+        raise HTTPException(status_code=422, detail=say(
+            refusals.invalid_request("resourceKey is required"), language_for(user)))
     encoded = content.encode()
     checksum = hashlib.sha256(encoded).hexdigest()
     # 这个 resource_key 在这个会话里上一次暂存的版本。从前要经 ChangeItem 转一手
@@ -392,7 +404,8 @@ async def stage_artifact_candidate(
     if previous and artifact and previous.artifact_id != artifact.id:
         raise HTTPException(
             status_code=409,
-            detail="resourceKey is already staged for another artifact",
+            detail=say(refusals.invalid_request("resourceKey is already staged for another artifact"),
+                       language_for(user)),
         )
     if previous and not artifact:
         artifact = await db.scalar(
@@ -424,7 +437,8 @@ async def stage_artifact_candidate(
         await db.flush()
     key = key or f"artifact:{artifact.id}"
     if not key:
-        raise HTTPException(status_code=422, detail="resourceKey cannot be empty")
+        raise HTTPException(status_code=422, detail=say(
+            refusals.invalid_request("resourceKey cannot be empty"), language_for(user)))
     max_version = await db.scalar(
         select(func.max(ArtifactVersion.version)).where(ArtifactVersion.artifact_id == artifact.id)
     )
@@ -498,7 +512,7 @@ async def stage_artifact_candidate(
             status_code=503,
             detail={"code": "project_repository_write_failed", "message": said_of(
                 exc, language_for(user), otherwise={
-                    "zh": "项目仓库没能写进去：{why}", "en": "The project repository could not be written: {why}"})},
+                    "zh": "保存到项目失败，请稍后重试。", "en": "Could not save to the project. Try again later."})},
         ) from exc
     version.git_commit_sha = git_revision.commit_sha
     version.repository_path = git_revision.repository_path

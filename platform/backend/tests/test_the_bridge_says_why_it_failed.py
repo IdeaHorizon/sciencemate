@@ -85,6 +85,19 @@ async def test_no_result_at_all_reports_the_exit_code_and_the_stderr(bridge_env)
 
 
 @pytest.mark.asyncio
+async def test_the_stderr_is_evidence_not_what_a_person_is_told(bridge_env) -> None:
+    """stderr 跟着异常走（日志查得到），但界面上那一句只说发生了什么 —— 不贴 traceback。"""
+    from app.services import harness_kb
+
+    _fake_harness(bridge_env, _child(says=WHAT_THE_CHILD_SAID, then_prints="") + "raise SystemExit(7)\n")
+    with pytest.raises(harness_kb.HarnessKBError) as caught:
+        await harness_kb._ask({"op": "kb_query"}, expect="kb_query_result")
+    assert WHAT_THE_CHILD_SAID in str(caught.value)
+    assert caught.value.said_in("zh") == "后台任务异常退出（退出码 7）"
+    assert caught.value.said_in("en") == "The background task exited unexpectedly (exit code 7)"
+
+
+@pytest.mark.asyncio
 async def test_the_naming_path_surfaces_it_too(bridge_env) -> None:
     """判据要落在**真调用方**上：helper 做对了但没接线，等于没做。
 

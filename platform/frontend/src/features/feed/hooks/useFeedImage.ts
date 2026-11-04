@@ -26,8 +26,14 @@ import { api } from "@/lib/api";
  * 代理响应带 `Cache-Control: private, max-age=86400`，所以第二次 `fetch`
  * 命中浏览器缓存，不会再打后端、更不会再打出版商。
  */
-export function useFeedImageAsset(itemId: string, enabled = true): { src: string; generated: boolean } | null {
-  const [asset, setAsset] = useState<{ src: string; generated: boolean } | null>(null);
+type FeedImageAsset = {
+  src: string;
+  generated: boolean;
+  kind: "paper_figure" | "journal_cover" | "generated_cover";
+};
+
+export function useFeedImageAsset(itemId: string, enabled = true): FeedImageAsset | null {
+  const [asset, setAsset] = useState<FeedImageAsset | null>(null);
 
   useEffect(() => {
     if (!enabled) {
@@ -39,26 +45,41 @@ export function useFeedImageAsset(itemId: string, enabled = true): { src: string
       return;
     }
     let revoked = false;
-    let created: string | null = null;
+    const created: string[] = [];
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let retries = 0;
+    setAsset(null);
 
-    void (async () => {
+    const load = async () => {
       try {
         const response = await api.fetchWithAuth(`${api.feedImageUrl(itemId)}?presentation=journal-name-20260929`);
         if (!response.ok) return;
         const blob = await response.blob();
         if (revoked) return;
-        created = URL.createObjectURL(blob);
-        setAsset({ src: created, generated: response.headers.get("content-type")?.startsWith("image/svg+xml") ?? false });
+        const generated = response.headers.get("content-type")?.startsWith("image/svg+xml") ?? false;
+        const kind = response.headers.get("X-Feed-Image-Kind") === "journal_cover"
+          ? "journal_cover" : generated ? "generated_cover" : "paper_figure";
+        if (created.length === 0 || !generated) {
+          const src = URL.createObjectURL(blob);
+          created.push(src);
+          setAsset({ src, generated, kind });
+        }
+        // Show the text cover immediately; replace it when the shared cover is ready.
+        if (response.headers.get("X-Feed-Image-Pending") === "journal_cover" && retries++ < 10) {
+          timer = setTimeout(() => { void load(); }, 3000);
+        }
       } catch {
         // 取不回来就当没有图。**不显示碎图标** —— 大多数条目本来就没有配图，
         // 一个碎图会让用户以为是平台坏了。
       }
-    })();
+    };
+    void load();
 
     return () => {
       revoked = true;
+      if (timer) clearTimeout(timer);
       // 组件卸下时释放，否则翻几页就攒下几十个 blob 不回收。
-      if (created) URL.revokeObjectURL(created);
+      created.forEach((url) => URL.revokeObjectURL(url));
     };
   }, [itemId, enabled]);
 

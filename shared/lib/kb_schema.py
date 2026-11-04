@@ -17,6 +17,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
+from shared.lib.external_content import WITNESS_FIELD
 from shared.lib.schema_check import schema_errors
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -471,6 +472,9 @@ _COMMON_DERIVED = {
     "embedding_hash", "embedding_model",
     "last_referenced_at", "merge_count", "updated_at",
     "reverted_by_curator_run_id", "usage_count",
+    # #730：入库时模式表看到了什么（证据，不是判决）。由 State.write_kb 机械写，
+    # 形状归 shared/lib/external_content。不随晋升继承 —— 晋升显式带过去。
+    WITNESS_FIELD,
 }
 _COMMON_LIFECYCLE = {"status", "last_reviewed_at", "review_history"}
 

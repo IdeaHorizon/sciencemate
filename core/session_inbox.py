@@ -55,10 +55,33 @@ PR#553 的教训：熔断器挂在账本上，而失败那条路绕过了账本�
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+
+
+@asynccontextmanager
+async def interjection_turn(state):
+    """Let a returning child hand control back after the current reply settles.
+
+    This is an in-process handoff, not a persisted task or another work queue.
+    """
+    settled = state.hook_state.setdefault("_interjection_settled", asyncio.Event())
+    settled.clear()
+    try:
+        yield
+    finally:
+        settled.set()
+
+
+async def wait_for_interjection(state):
+    settled = state.hook_state.get("_interjection_settled")
+    if settled is not None:
+        await settled.wait()
+
 
 #: 人对 agent 说的话，语义开放，由待命轮带着完整语境回答。
 #:

@@ -18,7 +18,7 @@ test("global rail is Project-level only: no Session entry point, no Session list
   // 2026-09-12 核查后砍掉三个：Inbox（唯一写入方零调用 → 永远空）、学术搜索
   // （孤岛，那套端点只有它在用）、Artifacts（与项目级「研究产出」同问题不同
   // 数据源，且分叉不报错）。理由逐条写在 navigation-state.ts 的表上面。
-  assert.deepEqual(GLOBAL_NAVIGATION.primary.map((item) => item.label.zh), ["资讯", "项目"]);
+  assert.deepEqual(GLOBAL_NAVIGATION.primary.map((item) => item.label.zh), ["科研资讯", "项目"]);
   assert.deepEqual(GLOBAL_NAVIGATION.primary.map((item) => item.label.en), ["Feed", "Projects"]);
   // 专业版只多**一个**侧栏入口（导航盘点 RFC 09-12）：「组织」。09-17 之前它散在
   // 三处（设置里一页、侧栏的组织知识、算力页一段），现在收成一个。

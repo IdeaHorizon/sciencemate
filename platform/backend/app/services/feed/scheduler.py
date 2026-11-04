@@ -55,6 +55,8 @@ class FeedCollector:
         self._school_task: asyncio.Task[None] | None = None
         self._project_asset_task: asyncio.Task[None] | None = None
         self._translation_task: asyncio.Task[None] | None = None
+        self._journal_cover_task: asyncio.Task[None] | None = None
+        self._journal_browser_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         #: 当前这一轮的 HTTP client（补图那一步要用，见 run_once）。
         self._client: httpx.AsyncClient | None = None
@@ -80,6 +82,14 @@ class FeedCollector:
         self._translation_task = asyncio.create_task(
             self._run_translations(), name="feed-translation-worker"
         )
+        from app.services.feed.journal_cover_inventory import run_forever
+        self._journal_cover_task = asyncio.create_task(
+            run_forever(), name="feed-journal-cover-inventory"
+        )
+        from app.services.feed.journal_cover_browser import run_forever as browser_covers
+        self._journal_browser_task = asyncio.create_task(
+            browser_covers(), name="feed-journal-cover-browser"
+        )
         logger.info("Feed collector started (tick=%ss)", TICK_SECONDS)
 
     async def stop(self) -> None:
@@ -94,7 +104,9 @@ class FeedCollector:
         school, self._school_task = self._school_task, None
         project_assets, self._project_asset_task = self._project_asset_task, None
         translations, self._translation_task = self._translation_task, None
-        for worker in (subscriptions, school, project_assets, translations):
+        journal_covers, self._journal_cover_task = self._journal_cover_task, None
+        journal_browser, self._journal_browser_task = self._journal_browser_task, None
+        for worker in (subscriptions, school, project_assets, translations, journal_covers, journal_browser):
             if worker is not None:
                 worker.cancel()
                 await asyncio.gather(worker, return_exceptions=True)

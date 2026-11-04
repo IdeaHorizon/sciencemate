@@ -11,6 +11,11 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 try:
+    from .bash_paths import normalize_bash_path, shell_path_resolution
+except ImportError:  # pragma: no cover - node runtime import style
+    from tools.bash_paths import normalize_bash_path, shell_path_resolution
+
+try:
     import tree_sitter_bash
     from tree_sitter import Language, Node, Parser
 except ImportError as exc:
@@ -160,6 +165,12 @@ def _literal(node: Node, source: bytes) -> str | None:
     """Return the shell value only when the AST proves it is static."""
     if _contains_expansion(node):
         return None
+    if node.type == "concatenation":
+        # Adjacent quoted pieces form one word; shell quotes are not filename characters.
+        parts = [_literal(child, source) for child in node.named_children]
+        if not parts or any(part is None for part in parts):
+            return None
+        return "".join(parts)
     text = _source(node, source)
     if node.type in {"string", "raw_string"} and len(text) >= 2:
         quote = text[:1]
@@ -1394,7 +1405,9 @@ def _cwd_success_after_cd(incoming: CwdDomain,
     if operand.startswith("<"):
         return _cwd_domain((operand,))
     if os.path.isabs(operand):
-        return _cwd_domain((os.path.abspath(operand),))
+        resolved = normalize_bash_path(operand)
+        return (_cwd_domain((resolved,)) if resolved is not None
+                else CwdDomain(unknown=True))
     values = [
         base if base.startswith("<")
         else os.path.abspath(os.path.join(base, operand))
@@ -1764,7 +1777,20 @@ def _walk_path(
     incoming: CwdDomain, functions: Functions, bindings: Bindings,
     external_bindings: Bindings, depth: int,
     call_stack: frozenset[str], context: tuple[str, ...],
+    trailing_redirects: tuple[Node, ...] = (),
 ) -> _CwdOutcome:
+    # tree-sitter attaches `a && b > out` to a redirected list, although
+    # Bash opens `out` only for b, after a's cwd/binding effects. Carry that
+    # redirect to the final command's entry, not the list's initial cwd.
+    if trailing_redirects and node.type != "list":
+        for redirect in trailing_redirects:
+            _record_path_redirect(redirect, source, result, incoming, bindings, context)
+            _path_substitutions(
+                redirect, source, result, incoming, functions, bindings,
+                external_bindings, depth, call_stack,
+                context + ("redirect-substitution",),
+            )
+
     if node.type == "ERROR":
         result.parse_error = True
         unknown = _cwd_unknown(incoming)
@@ -1789,6 +1815,15 @@ def _walk_path(
         return _cwd_unchanged(incoming)
 
     if node.type == "redirected_statement":
+        body = node.child_by_field_name("body")
+        if body is not None and body.type == "list":
+            return _walk_path(
+                body, source, result, incoming, functions, bindings,
+                external_bindings, depth, call_stack, context,
+                trailing_redirects=tuple(
+                    child for child in node.named_children if child.type == "file_redirect"
+                ),
+            )
         for child in node.named_children:
             if child.type == "file_redirect":
                 _record_path_redirect(
@@ -1828,8 +1863,10 @@ def _walk_path(
         return _cwd_unchanged(incoming)
 
     if node.type == "list":
-        children = list(node.named_children)
+        children = [child for child in node.named_children if child.type != "comment"]
         if len(children) != 2:
+            if trailing_redirects:
+                result.path_unverifiable = True
             unknown = _cwd_unknown(incoming)
             _path_sequence(
                 children, source, result, unknown, functions, bindings,
@@ -1861,6 +1898,7 @@ def _walk_path(
             children[1], source, result, right_incoming, right_functions,
             right_bindings, external_bindings, depth, call_stack,
             context + (f"list-right:{operator_label}",),
+            trailing_redirects=trailing_redirects,
         )
         _merge_bindings(bindings, [left_bindings, right_bindings])
         _merge_functions(functions, [left_functions, right_functions])
@@ -1976,6 +2014,7 @@ def analyzer_unavailable_reason() -> str | None:
     return _ANALYZER_UNAVAILABLE
 
 
+@shell_path_resolution()
 def analyze_bash(
     command: str, *, _depth: int = 0,
     initial_cwd: str | None = None,

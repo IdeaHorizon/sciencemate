@@ -130,6 +130,7 @@ async def _freeze_attempt_sandbox_manifest(
     context: IngestContext,
     operation_id: str,
     authorized_risk_classes: tuple[str, ...] = (),
+    execution_target: str = "local",
 ) -> tuple[IngestContext, RunAttempt]:
     """Commit the attempt and its immutable capability before worker dispatch."""
     from app.services.harness_contract import sandbox_module
@@ -209,7 +210,9 @@ async def _freeze_attempt_sandbox_manifest(
     # （seatbelt / Landlock+bwrap）冻后端名。Docker 镜像身份随 PR C 一起没了。
     from app.services.harness_contract import isolation_module
 
-    capability = isolation_module().attempt_capability()
+    # 执行目标（本机 / wsl:<发行版>）也是「谁来守」的一部分：平台进程里没有 worker 收到的
+    # 那份声明，所以显式传项目配置里的值（RFC_WINDOWS_EXECUTION_TARGETS D1）。
+    capability = isolation_module().attempt_capability(target=execution_target)
 
     def build(attempt_id: str):
         manifest = sandbox.SandboxManifest(
@@ -536,9 +539,14 @@ class AutonomyPolicy:
     blocked_reason: str = ""
     #: 放行但要标注：资源墙弱，跑飞没有自动刹车。
     resource_wall_note: str = ""
+    #: 模型命令在哪里跑（``project_configs.execution_target``）。与档位无关，但与档位一样是
+    #: **每次派发**读一次、随每条请求送到 worker 的会话属性，所以放在同一份投影里。
+    execution_target: str = "local"
 
 
-async def project_autonomy_policy(db: AsyncSession, project: Project | None) -> AutonomyPolicy:
+async def project_autonomy_policy(
+    db: AsyncSession, project: Project | None, *, lang: str = "zh"
+) -> AutonomyPolicy:
     """UI 上选的档位要给 harness 什么授权。**这个问题只有这一个答案。**
 
     此前这个模式只被用来决定"跑完要不要自动 publish 版本"；harness 那边的
@@ -560,8 +568,9 @@ async def project_autonomy_policy(db: AsyncSession, project: Project | None) -> 
         # `failure["code"]` 直接消失（test_failed_formal_turn_survives_reload
         # 立刻变红）。读不到 = 不是 autonomous，就这么简单。
         return AutonomyPolicy()
+    target = str(getattr(config, "execution_target", None) or "local") if config else "local"
     if not (config and config.operation_mode == OperationMode.AUTONOMOUS):
-        return AutonomyPolicy()
+        return AutonomyPolicy(execution_target=target)
     raw = config.autonomous_authorized_risk_classes or []
     classes = tuple(str(c).strip() for c in raw if isinstance(c, str) and str(c).strip())
     mode = "continuous" if "*" in classes else "autonomous"
@@ -576,16 +585,17 @@ async def project_autonomy_policy(db: AsyncSession, project: Project | None) -> 
     verdict = judge_unattended(
         _machine_missing_for_unattended(),
         weak_resource_walls_are_acceptable=assembly.weak_resource_walls_are_acceptable(),
+        lang=lang,
     )
     if not verdict.allowed:
         # 降的是"无人值守续轮"，不是档位：决策卡仍按自主 / 连续自动放行。
         return AutonomyPolicy(
             unattended=False, authorized_risk_classes=classes, blocked_reason=verdict.reason,
-            mode=mode,
+            mode=mode, execution_target=target,
         )
     return AutonomyPolicy(
         unattended=True, authorized_risk_classes=classes, resource_wall_note=verdict.note,
-        mode=mode,
+        mode=mode, execution_target=target,
     )
 
 
@@ -920,22 +930,28 @@ def _sanitized_platform_failure(exc: Exception, *, run_id: str = "", lang: str =
     return failure
 
 
-def _demo_reply(message: str, project: Project | None) -> str:
+def _demo_reply(message: str, project: Project | None, lang: str = "zh") -> str:
+    """选了「本地演示」模型时的固定回复。演示路径只把这段话写进工作区，不做研究。"""
     cleaned = " ".join(message.split())
     if project is None:
-        return (
-            f"我已收到这项研究请求：“{cleaned[:160]}”。\n\n"
-            "当前使用的是本机 deterministic demo 模型后端；本次对话已经真实创建 "
-            "Session、Run、Attempt 和持久化事件。你可以先创建或打开一个 Project，再让我把"
-            "任务推进为项目内的研究产物。"
-        )
-    return (
-        f"已在项目「{project.name}」中推进任务：“{cleaned[:180]}”。\n\n"
-        "本次执行已完成需求规范化、项目上下文对齐和第一版研究备忘录生成。"
-        "备忘录已作为真实 Artifact 写入数据库，同时记录了完整的 Run/Event 执行轨迹。\n\n"
-        "建议下一步：明确交付物类型、时间范围、必须使用的数据/文献，以及可验收的"
-        "成功标准。"
-    )
+        return say({
+            "zh": "已收到你的请求：“{msg}”。\n\n"
+                  "当前使用的是本地演示模型，这是固定的示例回复。请先创建或打开一个项目；"
+                  "如需真正开展研究，请在「设置 → 模型与密钥」中配置模型。",
+            "en": "Received your request: “{msg}”.\n\n"
+                  "You are using the local demonstration model, so this is a fixed sample reply. "
+                  "Create or open a project first; to do real research, set up a model under "
+                  "Settings → Models & credentials.",
+        }, lang, msg=cleaned[:160])
+    return say({
+        "zh": "已在项目「{name}」中收到你的请求：“{msg}”。\n\n"
+              "当前使用的是本地演示模型，这是固定的示例回复，已保存到这个会话的工作区。"
+              "如需真正开展研究，请在「设置 → 模型与密钥」中配置模型。",
+        "en": "Received your request in project “{name}”: “{msg}”.\n\n"
+              "You are using the local demonstration model, so this is a fixed sample reply; it has "
+              "been saved to this Session's workspace. To do real research, set up a model under "
+              "Settings → Models & credentials.",
+    }, lang, name=project.name, msg=cleaned[:180])
 
 
 async def _model_reply(
@@ -955,6 +971,7 @@ async def _model_reply(
     autonomy: "AutonomyPolicy | None" = None,
     choice: dict | None = None,
     rejoin: "RejoinTarget | None" = None,
+    language: str = "zh",
 ):
     if rejoin is not None:
         # 接回在飞那一轮（#785）：请求不由本进程发出，只接它的终止 result。
@@ -992,7 +1009,7 @@ async def _model_reply(
     else:
         backend = reasoning_backend(role_bindings)
         if backend.provider == "demo":
-            reply = _demo_reply(message, project)
+            reply = _demo_reply(message, project, language)
             return (
                 reply,
                 {
@@ -1030,7 +1047,7 @@ async def _model_reply(
         raise RuntimeError(f"Harness returned unsupported terminal status '{status or 'missing'}'")
     pause = result.get("pause_event") if isinstance(result.get("pause_event"), dict) else {}
     reply = str(result.get("final_text") or "")
-    if status == "paused":
+    if status == "paused" and not result.get("dialogue_only"):
         reply = str(pause.get("question") or "Harness execution is waiting for human input.")
     elif not reply and status == "cancelled":
         reply = "Harness execution was cancelled."
@@ -1435,13 +1452,12 @@ async def execute_local_turn(
                     {
                         "event": "workspace.checkpoint_failed",
                         "tool": "git_checkpoint",
+                        # 原因（Git 的原话）上面已经记进日志；这里只说发生了什么、接下来会怎样。
                         "detail": say({
-                            "zh": "这次工作区入库被拒绝：{why}。工作本身都在磁盘上，"
-                                  "没有丢失；下一次 checkpoint 会连同这次的改动一起重试。",
-                            "en": "This workspace checkpoint was refused: {why}. The work itself is on "
-                                  "disk and nothing is lost; the next checkpoint retries these changes "
-                                  "together with its own.",
-                        }, language, why=exc),
+                            "zh": "这次未能保存工作区的改动。文件仍在工作区中，下次保存时会一并重试。",
+                            "en": "Could not save this workspace's changes. The files are still "
+                                  "in the workspace and will be saved together next time.",
+                        }, language),
                         "iteration": 1,
                     }
                 )
@@ -1470,12 +1486,14 @@ async def execute_local_turn(
                     {
                         "event": "workspace.frozen_paths_protected",
                         "tool": "git_checkpoint",
-                        "detail": (
-                            "冻结路径的改动被拒绝入库："
-                            + "; ".join(
-                                f"{p}（{action}）" for p, action in checkpoint.frozen_violations
-                            )
-                        ),
+                        "detail": say({
+                            "zh": "以下已定稿的文件被改动，改动未保存：{items}",
+                            "en": "Changes to these finalized files were not saved: {items}",
+                        }, language, items="; ".join(
+                            say({"zh": "{path}（{action}）", "en": "{path} ({action})"},
+                                language, path=p, action=action)
+                            for p, action in checkpoint.frozen_violations
+                        )),
                         "iteration": 1,
                     }
                 )
@@ -1483,21 +1501,25 @@ async def execute_local_turn(
                 # 排除不是失败，但必须有人听见：此前 `oversized_excluded` 算出来
                 # 没有任何读者，一个被剔掉的文件和一个入库的文件在界面上看不出区别。
                 lines = [
-                    f"{path}（{size} 字节，超过单文件上限）"
+                    say({"zh": "{path}（{size} 字节，超过单个文件上限）",
+                         "en": "{path} ({size} bytes, over the per-file limit)"},
+                        language, path=path, size=size)
                     for path, size in checkpoint.oversized_excluded
                 ] + [
-                    f"{directory}/（{count} 个文件，{size} 字节，整目录超过 checkpoint 预算）"
+                    say({"zh": "{dir}/（{count} 个文件，{size} 字节，超过文件夹大小上限）",
+                         "en": "{dir}/ ({count} files, {size} bytes, over the folder size limit)"},
+                        language, dir=directory, count=count, size=size)
                     for directory, size, count in checkpoint.bulk_excluded
                 ]
                 await on_progress(
                     {
                         "event": "workspace.checkpoint_excluded",
                         "tool": "git_checkpoint",
-                        "detail": (
-                            "这些内容留在工作区、没有入库："
-                            + "; ".join(lines)
-                            + "。数据集请用 extract_material 解到材料池，大文件登记外部存储。"
-                        ),
+                        "detail": say({
+                            "zh": "以下内容太大，只保留在工作区，没有存入项目：{items}",
+                            "en": "These items are too large; they stay in the workspace and were not "
+                                  "saved to the project: {items}",
+                        }, language, items="; ".join(lines)),
                         "iteration": 1,
                     }
                 )
@@ -1519,7 +1541,7 @@ async def execute_local_turn(
     # 与失败路径交织。第一版放在 try 里面，查询一抛异常就污染了事务，随后
     # 记录失败的写入跟着变形，`failure["code"]` 直接消失
     # （test_failed_formal_turn_survives_reload_and_can_retry 立刻变红）。
-    autonomy = await project_autonomy_policy(db, project)
+    autonomy = await project_autonomy_policy(db, project, lang=language)
     if autonomy.blocked_reason or autonomy.resource_wall_note:
         # 说出来。一个只写进日志的判决，对用户等于没发生 —— 他会一直以为
         # 自主档开着，然后奇怪为什么每个决策点都停下来问他。
@@ -1590,6 +1612,7 @@ async def execute_local_turn(
                     context=context,
                     operation_id=operation_id,
                     authorized_risk_classes=autonomy.authorized_risk_classes,
+                    execution_target=autonomy.execution_target,
                 )
                 await db.commit()
         if rejoin is None:
@@ -1662,6 +1685,7 @@ async def execute_local_turn(
             autonomy=autonomy,
             choice=choice,
             rejoin=rejoin,
+            language=language,
         )
         # 终止事件到达 ≠ reader 读完了。`_read_forever` 每读一行是"先摄取、再
         # 把事件放进等它的那个队列"，所以主协程被唤醒时，队列后面还排着几行 ——
@@ -1952,7 +1976,10 @@ async def execute_local_turn(
             # 停下来问人时，这条消息**就是**那一次呈递的持久形态。带上它的身份，
             # 页面才能把可点的那张卡片画在这条消息的位置上，而不是靠比对文案去
             # 猜"这两句是不是同一句"。
-            offer_id=_offer_id(pause) if harness_paused else None,
+            offer_id=(
+                _offer_id(pause)
+                if harness_paused and not (harness_result or {}).get("dialogue_only") else None
+            ),
         )
         # Persist the user-facing Session identity in the same transaction as
         # the terminal execution state.  Streaming response cleanup must not

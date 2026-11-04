@@ -107,12 +107,12 @@ export function useSessionMutations(projectId: string) {
   const create = useMutation({
     mutationFn: (title: string) => createProjectSession(projectId, title),
     onSuccess: () => { void invalidate(); },
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "会话没能建成", en: "Could not create session" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "新建会话失败", en: "Could not create session" })),
   });
   const rename = useMutation({
     mutationFn: ({ sessionId, title }: { sessionId: string; title: string }) => renameProjectSession(projectId, sessionId, title),
     onSuccess: () => { void invalidate(); },
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "会话没能改名", en: "Could not rename session" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "重命名失败", en: "Could not rename session" })),
   });
   const archive = useMutation({
     mutationFn: (sessionId: string) => archiveProjectSession(projectId, sessionId),
@@ -120,21 +120,23 @@ export function useSessionMutations(projectId: string) {
     // 这里照着讲。两种结果讲同一句话，人会以为它还躺在归档里。
     onSuccess: (result) => {
       void invalidate();
-
+      pushSuccess(result.outcome === "deleted"
+        ? t({ zh: "空会话已删除", en: "Empty session deleted" })
+        : t({ zh: "会话已归档", en: "Session archived" }));
     },
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "会话没能归档", en: "Could not archive session" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "归档失败", en: "Could not archive session" })),
   });
   const cancelActiveRun = useMutation({
     mutationFn: ({ runId, reason }: { runId: string; reason: string }) => cancelRun(runId, reason),
     onSuccess: () => { void invalidate(); },
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "没能停下这一轮", en: "Could not stop this run" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "停止失败", en: "Could not stop the run" })),
   });
   const publish = useMutation({
     mutationFn: ({ sessionId, message }: { sessionId: string; message?: string }) =>
       publishSessionChanges(projectId, sessionId, message),
     onSuccess: (published) =>
-      pushSuccess(t({ zh: "改动已发布为 {sha}", en: "Changes published as {sha}" }, { sha: published.commitSha.slice(0, 8) })),
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "改动没能发布", en: "Could not publish changes" })),
+      pushSuccess(t({ zh: "改动已发布（版本 {sha}）", en: "Changes published (revision {sha})" }, { sha: published.commitSha.slice(0, 8) })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "发布失败", en: "Could not publish changes" })),
     onSettled: () => invalidateRevisionState(),
   });
   const resolveConflict = useMutation({
@@ -151,7 +153,7 @@ export function useSessionMutations(projectId: string) {
       clearStaleSessionPublishError(() => publish.reset());
 
     },
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "发布冲突没能解决", en: "Could not resolve publication conflict" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "解决冲突失败", en: "Could not resolve the conflict" })),
     onSettled: () => invalidateRevisionState(),
   });
   return { create, rename, archive, publish, resolveConflict, cancelActiveRun };

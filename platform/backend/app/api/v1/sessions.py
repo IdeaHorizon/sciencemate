@@ -19,7 +19,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 
-from app.services.user_interface import Language, language_on_screen, said_of, say
+from app.services import refusals
+from app.services.user_interface import Language, language_on_screen, readable_size, said_of, say
 from app.auth import get_current_user
 from app.config import settings
 from app.database import get_db
@@ -64,13 +65,12 @@ def _too_large_detail(size_bytes: int, max_bytes: int, lang: Language) -> dict:
     return {
         "code": "material_too_large",
         "message": say({
-            "zh": "文件 {size} 字节，超过本部署的单份材料上限 {limit} 字节。"
-                  "更大的数据集别走上传：让 data 节点在计算侧就地取用，"
-                  "或在部署上给这个项目挂一个数据集绑定（sandbox_mount_bindings）。",
-            "en": "The file is {size} bytes, over this deployment's limit of {limit} bytes per material. "
-                  "Do not upload larger datasets: let the data node read them in place on the compute "
-                  "side, or bind a dataset to this project on the deployment (sandbox_mount_bindings).",
-        }, lang, size=size_bytes, limit=max_bytes),
+            "zh": "文件太大（{size}），单个文件不能超过 {limit}。"
+                  "更大的数据集无需上传，请联系管理员把数据集挂载到这个项目。",
+            "en": "The file is too large ({size}); a single file can be at most {limit}. "
+                  "Larger datasets do not need uploading: ask your administrator to mount the "
+                  "dataset for this project.",
+        }, lang, size=readable_size(size_bytes), limit=readable_size(max_bytes)),
         "sizeBytes": size_bytes,
         "maxBytes": max_bytes,
     }
@@ -226,13 +226,15 @@ async def delete_empty_session(
     session_id: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> Response:
     await require_capability(db, user, project_id, "drive_session")
     _, session = await get_session(db, user, project_id, session_id)
     if not await session_is_empty(db, session_id):
         raise HTTPException(
             status_code=409,
-            detail="Only an empty Session may be deleted; archive it instead",
+            detail=say({"zh": "只能删除空会话，其他会话请归档",
+                        "en": "Only an empty Session may be deleted; archive it instead"}, lang),
         )
     await db.delete(session)
     await db.flush()
@@ -313,7 +315,7 @@ async def session_diagnostics(
     if not _DIAGNOSTICS_SLOT.acquire(blocking=False):
         raise HTTPException(
             status_code=429,
-            detail=say({"zh": "另一个诊断包正在生成，等它完成后再下载。",
+            detail=say({"zh": "正在生成另一个诊断包，请稍后再试。",
                         "en": "Another diagnostics bundle is being prepared; download again once it finishes."},
                        lang),
             headers={"Retry-After": "30"},
@@ -398,7 +400,8 @@ async def interrupt_session(
 
     text = (data.text or "").strip()
     if not text:
-        raise HTTPException(status_code=422, detail="interrupt text must not be empty")
+        raise HTTPException(status_code=422, detail=say(
+            refusals.invalid_request("interrupt text must not be empty"), lang))
     # 与 chat 入口的忙时分流走**同一个**落地函数：先落 user 消息行（插话是
     # 对话的一部分，2026-08-17 前只投收件箱，被取走后没有任何痕迹），再投
     # 收件箱。两个门面一份逻辑，别让它们各自演化。
@@ -413,10 +416,10 @@ async def interrupt_session(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=said_of(exc, lang, otherwise={
-            "zh": "这句话没送到：{why}", "en": "This message was not delivered: {why}"})) from exc
+            "zh": "消息发送失败，请稍后重试。", "en": "Could not send the message. Try again later."})) from exc
     except OSError as exc:
-        raise HTTPException(status_code=409, detail=say(
-            {"zh": "没送到：{why}", "en": "could not deliver: {why}"}, lang, why=exc)) from exc
+        raise HTTPException(status_code=409, detail=said_of(exc, lang, otherwise={
+            "zh": "消息发送失败，请稍后重试。", "en": "Could not send the message. Try again later."})) from exc
     # 两个门面一份逻辑 —— 回执留痕也是（RFC P1）。只在 chat 那条路留痕的话，
     # 走 /interrupt 进来的插话事后就没有回音，而它们是同一件事。
     await record_app_event(
@@ -474,7 +477,9 @@ async def stop_session_turn(
     if not has_live_runtime(project_id, session_id):
         raise HTTPException(
             status_code=409,
-            detail="Nothing is running in this Session right now — there is no current turn to stop.",
+            detail=say({"zh": "当前没有正在运行的执行",
+                        "en": "Nothing is running in this Session."},
+                       lang),
         )
     try:
         receipt = await harness_session_manager.deliver(
@@ -486,10 +491,10 @@ async def stop_session_turn(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=said_of(exc, lang, otherwise={
-            "zh": "停止信号没送到：{why}", "en": "The stop signal was not delivered: {why}"})) from exc
+            "zh": "停止失败，请稍后重试。", "en": "Could not stop. Try again later."})) from exc
     except HarnessSessionError as exc:
         raise HTTPException(status_code=409, detail=said_of(exc, lang, otherwise={
-            "zh": "没送到：{why}", "en": "could not deliver: {why}"})) from exc
+            "zh": "停止失败，请稍后重试。", "en": "Could not stop. Try again later."})) from exc
     # 如实回执：**已送达 worker**（不再是"已写进一个它待会儿会来看的文件"）。
     # 正在进行的生成被立即切断（≤0.5s），正在跑的那一步会跑完，之后停。
     return {"status": "delivered", "itemId": receipt.get("item_id", "")}
@@ -527,10 +532,11 @@ async def add_file_to_session(
 
     if not file.filename:
         raise HTTPException(status_code=422, detail=say(
-            {"zh": "这份文件没有名字，浏览器没把文件名传上来",
-             "en": "This file has no name; the browser did not send a file name"}, lang))
+            {"zh": "文件缺少文件名，请重新选择文件。",
+             "en": "The file has no name. Choose the file again."}, lang))
     if not session.git_worktree_path:
-        raise HTTPException(status_code=409, detail="This Session has no Git worktree")
+        raise HTTPException(status_code=409, detail=say(
+            {"zh": "这个会话还没有工作区，无法上传文件", "en": "This Session has no Git worktree"}, lang))
 
     # 粗筛在 `RequestBodyCapMiddleware`（读 body 之前，按 Content-Length）；
     # 这里是**精确**判据：流式计数，一个字节都不含 multipart 边界。
@@ -572,8 +578,8 @@ async def add_file_to_session(
         raise HTTPException(status_code=422, detail=exc.said_in(lang)) from exc
     except ProjectRepositoryError as exc:
         raise HTTPException(status_code=409, detail=said_of(exc, lang, otherwise={
-            "zh": "文件没能放进会话的工作区：{why}",
-            "en": "The file could not be placed in the session workspace: {why}"})) from exc
+            "zh": "文件上传失败，请稍后重试。",
+            "en": "Could not upload the file. Try again later."})) from exc
 
     if commit is not None:
         session.git_head_commit_sha = commit
@@ -634,7 +640,7 @@ async def undo_last_session_write(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=said_of(exc, lang, otherwise={
-            "zh": "撤销没成：{why}", "en": "The undo did not go through: {why}"})) from exc
+            "zh": "撤销失败，请稍后重试。", "en": "Could not undo. Try again later."})) from exc
 
 
 @router.post("/{project_id}/projects-dreaming/skip", response_model=dict)
@@ -657,10 +663,10 @@ async def skip_project_dreaming(
     try:
         dreaming_scheduler().clear_pending(project_id)
     except HarnessContractUnavailable as exc:
-        raise HTTPException(status_code=503, detail=say(
-            {"zh": "跳过这次整理需要 harness checkout（HARNESS_ROOT）：{why}",
-             "en": "Skipping this knowledge consolidation needs a harness checkout (HARNESS_ROOT): {why}"},
-            lang, why=exc)) from exc
+        raise HTTPException(status_code=503, detail=said_of(exc, lang, otherwise={
+            "zh": "无法跳过本次知识库整理：执行环境不可用。",
+            "en": "Could not skip this knowledge base tidy-up: the execution environment is unavailable."},
+        )) from exc
     return {"status": "skipped"}
 
 
@@ -691,7 +697,7 @@ async def reset_session_conversation(
         return await harness_session_manager.reset_conversation(project_id, session_id)
     except HarnessSessionError as exc:
         raise HTTPException(status_code=409, detail=said_of(exc, lang, otherwise={
-            "zh": "对话没能重置：{why}", "en": "The conversation could not be reset: {why}"})) from exc
+            "zh": "清空上下文失败，请稍后重试。", "en": "Could not clear the context. Try again later."})) from exc
 
 
 

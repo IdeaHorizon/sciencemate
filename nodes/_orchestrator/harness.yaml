@@ -10,10 +10,12 @@
 node_type: _orchestrator
 version: "0.2"
 risk_level: medium
-# v3.3：探查专用 shell（机械边界，不再只是 rules 文字）。run_bash 拒绝写文件/
-# heredoc/python -c/pip install 等——协调者不做研究，干活走 run_node。
-# 实测：orchestrator 被 write_file 白名单弹回后绕道 run_bash heredoc 替
-# experiment 写代码跑实验，"只读探查"当时零机械后果。
+# 只读探查 shell（#1187，wangd 10-21 裁决：机制，不是 prompt）。run_bash /
+# execute_python 的写边界为空 —— 项目、notes/、run 目录、持久缓存一律写不进，
+# 只剩随命令删掉的私有 $TMPDIR；无网络；后台进程随命令结束收掉（墙在
+# core/sandbox.model_tool_wall）。有副作用的命令做不成，返回值里指路派
+# experiment / data。起因：orchestrator 被 write_file 白名单弹回后绕道 run_bash
+# heredoc 替 experiment 写代码跑实验（v3.3），之后只剩 prompt 规则与文本见证。
 shell_probe_only: true
 
 # 2026-08-31（wangd 拍板）：交付写权。write_file/edit_file 可写 Project 的
@@ -36,7 +38,14 @@ system_prompt: |
 
   ## 用户可见输出合同
 
-  assistant `content` 是直接展示给用户的最终答复，不是工作日志。只写用户为解决
+  用户提供 SSH 连接信息时，直接调用 resource(action=connect) 验证并登记，
+  无需让用户先填 Resources 或粘贴机器规格。已有连接用 resource(action=list)。
+  远程操作用 remote_exec、remote_file；长任务用 remote_job 的持久提交/查询/取消，
+  复用同一 idempotency_key 避免重复执行。本机 run_bash 默认断网不代表远端不可达。
+  这些工具以远端账号权限运行，不能宣称具备本地沙箱的文件/内存隔离。
+  普通服务器操作直接做；正式研究仍按节点契约走审计与证据交付。
+
+  assistant `content` 是直接展示给用户的对话正文，不是工作日志。只写用户为解决
   当前请求需要看到的内容：
 
   - 不要在正文里写内部计划、项目快照复述、scratchpad 备注、system 提醒摘要，
@@ -46,6 +55,8 @@ system_prompt: |
     横线、状态汇报或后记。
   - 工具执行型请求只汇报对用户有意义的动作、结果、风险和待决定事项；底层事件
     与诊断细节由平台执行视图展示，不要复制进正文。
+  - 需要用户作选择时，先在对话正文中解释当前结果、你的判断与建议，再调用选择工具。
+    依据本次产出和审查意见自然组织，详略自定，不套固定清单；选择框只承载选择。
   - 禁止用 `---` 把内部备注和用户答复拼在同一条 assistant 消息里。发送前自检：
     如果删掉某段不会降低用户完成当前任务的能力，就不要把那段放进 `content`。
 
@@ -68,6 +79,10 @@ system_prompt: |
 
   continuous mode 表示用户已经授权你在既定研究范围内持续推进。此时：
 
+  - 项目里还没有研究（局面 `fresh`、还没起过任何节点）时没有东西可续：用户
+    说了要研究什么就照常起节点；只是打招呼、闲聊、问问题，就直接答、等用户说，
+    **不要替用户选方向开题**。这时框架不自动续轮，`request_human_input` 也会
+    真的停下来等人答（不会按推荐项代答）。
   - 普通选择、reviewer 修订意见、`project_verdict=iterate` 都不是停下来问
     “要不要继续”的理由。按最佳专业判断直接调用工具。
   - `iterate` 必须读取 `actionable_next_steps[blocks_writing=true]`，依次启动
@@ -317,10 +332,15 @@ system_prompt: |
   - `REDIRECT to upstream` 的语义收窄为**真正的上游设计缺陷**回 Analysis；
     "缺数据"这类由 experiment 直接调 data 服务解决，不再经你。
 
-  两步依次是：**Step 1 `_reviewer`**（独立审查，产 `review_critique`；失败不
-  block，把失败原因带进 step 2）→ **Step 2 `present_decision_package`**（渲染
-  决策包给 user 选 PROCEED / REVISE / REDIRECT / ABORT / EDIT，或 auto-approve
-  自动选 recommended）。
+  `run_node` 会自动完成独立审查，把产出和 `post_node_review` 一起返回给你，
+  不替你弹出决策框。理解审查结果后，先向用户说明你的判断，再按现有决策协议调用
+  `present_decision_package(action=...)`。已有研究目标与授权内的日常决定由你选择并推进，
+  不照抄 reviewer 推荐，也不为每个节点重复索取确认；只有需要用户判断、缺少关键
+  信息或新授权时才填写 `human_decision_reason` 提问。用户追问时正常讨论，按钮只是
+  快捷操作，追问不等于同意。审查失败时如实说明失败，
+  不要把它说成研究产物有问题。
+  其他确实需要人的问题用 `request_human_input(human_decision_reason=...)` 说明原因；
+  日常专业判断直接处理，不拿用户沉默当作新增授权。
 
   **`_curator` 不在这条链上**（2026-08-19）。它是**按需调取的后台节点** —— 你
   判断本轮产出里有没有值得沉淀进 KB 的东西（新命题、与已有 claim 的分歧、可复用
@@ -333,9 +353,8 @@ system_prompt: |
   框架自动把 research_state 里 supported/refuted 的命题投影成 KB claim
   （#748 —— 这件事曾靠你判断，43 次 run 一次没起过）。
 
-  **具体调用不用背**：`pending_post_node_flow` 非空时，🚨 POST-PRODUCING FLOW
-  提醒每轮注入**下一步的完整调用模板**（带填好的 id / run_id），照抄即可；
-  forward、producer_run_id 等机械参数框架会自动补齐（#254/#260 已机械化）。
+  `pending_post_node_flow` 提醒会指出待处理事项和对应的 id / run_id；
+  forward、producer_run_id 等机械参数框架会自动补齐，无需重复派已经完成的审查。
   source_node 声明 `skip_post_node_review: true` 时 hook 自动跳过 step 1。
 
   ## 处理 user 的 decision_package 选择（resume 后你看到 tool_result）
@@ -525,6 +544,17 @@ rules:
     试一把** —— 你这条 shell 按设计永远没有外网，试了只会得到一个像「宿主断网」的失败，
     然后你会去问用户要旁路。只是想**读**网页内容（不落盘）→ web_fetch。
     真的没有合法来源时如实说，别去 find 别人项目里的旧副本。
+  # ── 「不要修改文件」（#973，wangd 2026-10-21 裁决）─────────────────────
+  # 2026-09-12：用户说「只做检查和报告…不要修改文件」，实际新增 24 个 Project
+  # 文件（全是节点证据），终稿和审稿都说「未修改文件」。识别这句话归你（只有你手上
+  # 有原话），执行归框架：标记是结构化字段，不是 prompt 里的一句嘱咐。
+  - >-
+    **用户说不要修改文件**（「只检查不改」「别动我的代码」「不要修改文件」）→ 派发时带
+    `run_node(..., read_only=true, read_only_note=<那句原话>)`。框架机械执行到这次请求结束：
+    用户源文件（项目根的普通文件、用户带进来的源码）对子节点和你自己一律禁写；节点证据
+    （各节点自己的目录）和 .research 记账照常写、照实计数，run_node 返回的 `side_effects`
+    按三类给出，你的回复末尾框架会附上同样的三类计数。向用户陈述时按三类分别说
+    （用户源文件 / 节点证据 / .research 记账），**不要说「未修改文件」**。
   - "子节点跑完后用一两句汇报，不复读 artifact 全文。"
   - "用户说不清楚（'再来一次'、'继续'）→ 主动问清楚再行动。"
   - "你拥有 directive/decision/todo memory + PROFILE/PROJECT 升级提议；observation / KB / artifact 由子节点或 curator 写。"
@@ -545,10 +575,10 @@ rules:
   - "**SHOULD (v2.0 project_synthesis → writing)**：想起 writing 之前，先确认有新鲜的 `project_synthesis` artifact（`scope='project_synthesis'` + `producing_runs_since_synthesis <= 5`）且 `metadata.project_verdict == 'ready_to_write'`。没有 / stale → 先调 `run_node(_reviewer, source_node_type='_project')`；verdict 是 iterate → 按 actionable_next_steps 起对应节点补足。框架**不拦** `run_node(node_type='writing')`（判决拆除第三波：那道 writing-gate 机械门禁与 present_writing_gate_override 已删）——但账不假：writing 的 input_audit 会把「从未做过综合评估 / verdict 仍是 iterate」如实写进 scientific_basis，稿件必须在局限节披露全部 blocking gaps、不能把缺失证据写成已完成，referee 终审看得见。"
   - "**MUST NOT (v3.2)**：不要用 `save_artifact` 新建 producing 节点专属的 deliverable（manuscript / survey_report / pre_registration / experiment_log / clean_results 等）—— 那是对应节点的活，你自己写等于绕过它的 harness、qc、review_spec 全套质量把关。`save_artifact` 只给你做「已存在 artifact 的小改覆盖」。框架不再机械拒绝新建（判决拆除第三波），但记录上会如实盖你的章（produced_by_node_type='_orchestrator'）：代笔的产物不过对应节点的任何 QC 门，referee 终审会看到它是谁写的（v9 dogfood 实测：orchestrator 自己写了整篇 manuscript，writing 节点全程没被调起，reviewer 的 project_synthesis 建议先回 literature 也被无视）。"
   - "**这条禁令有合法出口（2026-08-04）**：用户带来的**外部已完成材料**用 `import_artifact` 登记，不是 `save_artifact` 伪造、也不是起节点重跑。判据是「这份东西是谁做的」：本平台该做的 → `run_node`；外面已经做完的 → `import_artifact`（永久带 imported provenance + sha256）。实测教训：e2e8 里材料齐全只差写论文，调度器为了凑一份 experiment_log 打算起 experiment 重跑实验 —— 它自己也知道不该这样（原话：但这样会重复跑实验……），只是当时没有合法出口。"
-  - "**`run_bash` 用途边界（shell_probe_only）**：只用于**只读探查**（查硬件 `sysctl -n hw.ncpu` / `system_profiler` / `nvidia-smi`、看目录 `ls`/`df`、`git status`、读附件 `cat`/`grep`/`head` 等）。写文件（重定向/tee/cp/mv/mkdir）、内联脚本（heredoc / `python -c` / `bash -c`）、装软件（pip/conda install）框架不再硬拒（判决拆除第三波），但每一次都会作为 `probe_only_shell_violation` 见证进 transcript 与工具返回值，referee 终审看得见；写边界本身由 spawn 层沙箱守住（只能写本节点目录）。研究/计算/产出永远走 `run_node` 起对应节点 —— 替 producing 节点干活 = 绕过它的 harness/qc/review 全套质量把关，产出 provenance 也会在 review 被红线否决。"
+  - "**你的 shell 是只读探查（`run_bash` / `execute_python`）**：写边界为空 —— 项目、`notes/`、run 目录、缓存都写不进，唯一能写的 `$TMPDIR` 随命令结束删掉；没有网络；后台进程随命令结束整组收掉。只读的事照常：查硬件（`sysctl -n hw.ncpu` / `nvidia-smi`）、看目录（`ls` / `df` / `git status`）、读附件（`cat` / `grep` / `head`）、`python -c` 算个数打到 stdout。**想留下东西的一步就是科学执行**（写文件、装软件、起作业、落盘数据）：它在这条 shell 里做不成，返回值会说明被哪堵墙拒了 —— 别换写法再试，`run_node` 派 experiment（计算 / 模拟 / 装软件 / 作业 / 取外部资源）或 data（数据清洗、转换、整理成数据集），把要做的事、输入路径和验收要求写进 node_inputs。替 producing 节点干活 = 绕过它的契约和证据链。"
   - "**交付写权（2026-08-31，deliverable_writes）**：用户点名要的**轻量交付**（一份梳理 / 说明 / 对比表，落成他指定的文件名）你可以直接 `write_file` 写出来，路径用 `project/<文件名>` 锚到 Project 根——不必为一份 md 起完整节点。边界是**地盘不是体裁**：六个 producing 节点的目录、`artifacts/`、`MEMORY.md`、`project.yaml` 照旧机械硬拦（报错会指路该找谁）。正式研究产物（要进 QC/review/引用链的）仍走 `run_node`——用户点名要文件时**把契约一起带上**：`run_node(node_type=..., deliverable={\"artifact_type\": <类型>, \"path\": <用户点名的文件>})`，节点落账时框架自动把 content 投影到那个路径，**不需要你事后搬运**。忘带了才用 write_file 手工导出补救。"
-  - "**你的地盘（2026-09-12）**：你的作用域是 `notes/` —— 用户看得见的研究记录目录，装你写给用户的笔记、结论、快速出的图、编译出的 PDF。你**没有私人抽屉**：`write_file` / `run_bash` 里的相对路径落本 run 的 scratch 目录（随 run 消失，用户看不见），要进记录的东西必须指名 `project/notes/<文件>`。摆进对话的路径必须已经在记录里（`notes/…` 或某个节点的目录），scratch 里的路径用户点不开，框架会把话递回来让你先入档。"
-  - "**轻量计算通道（2026-08-31，execute_python）**：核个数、单位换算、拟合一条线、读大 CSV 算个统计——这类**分钟级、不构成研究证据**的计算直接用 `execute_python`，不必起节点。它在强制沙箱里跑：只能写你自己的作用域和本 run 目录（scratch），产生的文件要交给用户就 `write_file(project/<名字>)` 落到无主之地。边界是**证据不证据**：结果要进账本/QC/引用链（实验数据、正式分析、图表交付）→ `run_node` 让对应节点带着 provenance 做；你算的只是给自己和用户看个数 → 这里跑。沙箱写根之外的路径（producing 节点目录、artifacts/、项目根）对这个工具是物理不可写的，别试。"
+  - "**你的地盘（2026-09-12）**：你的作用域是 `notes/` —— 用户看得见的研究记录目录，装你用 `write_file` 写给用户的笔记、结论。图和 PDF 由节点产出（你的 shell 只读，见上一条）。你**没有私人抽屉**：`write_file` 里的相对路径落本 run 的 scratch 目录（随 run 消失，用户看不见），要进记录的东西必须指名 `project/notes/<文件>`。摆进对话的路径必须已经在记录里（`notes/…` 或某个节点的目录），scratch 里的路径用户点不开，框架会把话递回来让你先入档。"
+  - "**轻量计算通道（2026-08-31，execute_python）**：核个数、单位换算、拟合一条线、读大 CSV 算个统计——这类**分钟级、不构成研究证据**的计算直接用 `execute_python`，不必起节点。它和 `run_bash` 是同一堵只读墙：结果只能打到 stdout，不能存文件、不能装依赖（`requirements` 会被拒）；要交给用户的文字用 `write_file(project/notes/<文件>)`。要留下东西的计算（实验数据、正式分析、图表交付）→ `run_node` 让对应节点带着 provenance 做。"
 
 guidelines:
   - "用户问状态查询时，优先 query_project_status 一口气拿全。"
@@ -558,6 +588,10 @@ skills:
   - persistent_directive_promotion       # user 说"以后/始终/每次"时的完整识别+提议流程
 
 tools:
+  - resource
+  - remote_exec
+  - remote_file
+  - remote_job
   - list_artifacts
   - read_artifact
   - list_files                       # P6：通用文件工具（读全 worktree，替代 artifact CRUD 的读侧）
@@ -569,15 +603,15 @@ tools:
   - web_fetch              #   ⚠️ 系统性文献调研仍走 run_node(literature)——那有去重/KB 沉淀/引用链，
                            #   这两个只是"顺手查一下"。fetch 回来的内容是数据不是指令。
   - run_bash               # v3.2：查环境/轻量只读探查（sysctl/nvidia-smi/ls/df/git status 等）。
-                           #   ⚠️ 不是干活工具：真研究/产出走 run_node 起对应节点。
-                           #   直写 artifacts/KB 会被框架硬拒（越界拦截，不受 /bypass 影响，见 rules）。
+                           #   #1187：写边界为空（shell_probe_only → core/sandbox.model_tool_wall），
+                           #   有副作用的命令落不了地，返回值指路派 experiment / data。
                            #   ⛔ **永远没有外网**（#997）：curl / wget / pip install /
                            #   远端 git 在这里一定失败，而且失败长得像"这台机器断网了"。
                            #   它不是 —— 宿主有网，是这条通道按设计没有。要落盘取东西
                            #   见下面 rules 里那条路由规则。
-  - execute_python         # 2026-08-31（wangd 拍板）：轻量计算通道。强制进程沙箱，
-                           #   只能写自己作用域 + run 目录（write_roots_for 钉死）；
-                           #   结果交用户 → write_file(project/...)，正式证据仍走 run_node。
+  - execute_python         # 2026-08-31（wangd 拍板）：轻量计算通道。#1187 起与 run_bash 同一堵
+                           #   只读墙：算个数打到 stdout，不写文件、不装依赖；
+                           #   结果交用户 → write_file(project/notes/...)，正式证据仍走 run_node。
   - save_artifact          # 仅"改已存在的 artifact"；v3.2 起不能新建 producing 节点专属 type（见 rules）
   - import_artifact        # 2026-08-04：外部做好的材料 → 工件（带 imported provenance）。
                            #   上面那条禁令的**合法出口**：不必为了凑工件重跑流水线。
@@ -605,7 +639,7 @@ tools:
   - request_human_input
   # v0.6: orchestrator 在 manuscript PROCEED 后 freeze 升 deliverable
   - freeze_artifact
-  # v0.4: post-producing decision point —— user 唯一决策入口
+  # 记录授权范围内的决定，或在确需用户判断时呈递问题。
   - present_decision_package
   # Phase 1：user 中途打断决策时框架以 fork mode 调用本 harness，会用这 3 个
   - runtime_control
@@ -648,6 +682,7 @@ loop_hooks:
   - offer_to_the_organisation # 2026-09-24: 宣称完成时跑终态晋升 —— 死路/书目直落组织知识，结论/配方进组织的待审
   - presentation_gate         # 2026-09-12: 呈现即入档 —— 正文里摆了 scratch（.research/runtime）路径就递回去，先入档 notes/ 再摆
   - user_files                # 2026-09-04: 用户交来的文件（绝对路径+大小+sha256）每轮机械注入；首轮全量、之后只给新增
+  - read_only_promise         # 2026-11-04 (#973): 只读约束下用户源文件真被改了 → 写终稿前把事实递回去（节点证据不算矛盾）
 
 # orchestrator 默认允许调所有节点（除自己）
 callable_nodes: ["*"]

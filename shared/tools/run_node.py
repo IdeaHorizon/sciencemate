@@ -1538,6 +1538,8 @@ async def _run_node_tool(
     deliverable: dict | None = None,
     planned_stop_authorized: bool = False,
     planned_stop_note: str = "",
+    read_only: bool = False,
+    read_only_note: str = "",
     task_instance_uuid: str | None = None,
     task_contract_digest: str | None = None,
     **_: Any,
@@ -1609,6 +1611,17 @@ async def _run_node_tool(
     # 里，真实路径没走到，守卫照旧把子节点写自己目录的产出回滚。
     # 这里是所有路径的必经点，且早于任何子节点写入。
     note_delegated_workspace(state, node_type)
+
+    # ── 「不要修改文件」是派发方的结构化声明（#973，wangd 2026-10-21）─────────
+    # 用户的原话只在调度器手上，所以由它在派发时声明；框架不去猜那句话的意思。
+    # 调度器自己也受这份承诺约束（它有交付写权，能写项目根的文件），承诺从此刻
+    # 起到这次请求结束（下一条真实用户消息，见 core.session_driver.run_turn）。
+    # 子 run 的那份由 executor 在开工前冻住（父有就继承，见 dispatch_promise）。
+    if read_only and str(getattr(state, "node_type", "")) == "_orchestrator":
+        from core.side_effect_contract import declare_read_only
+
+        declare_read_only(state, quote=read_only_note, said_by="user",
+                          declared_by_run_id=state.run_id)
 
     authorized_flow_entry: dict | None = None
 
@@ -2316,6 +2329,15 @@ async def _run_node_tool(
         if _root is not None:
             try:
                 _dl_path = validate_deliverable_projection(_root, node_type, _dl_path)
+                # 只读约束下，交付投影落到用户源文件上同样不许（#973）—— 在派发时
+                # 说出来，好过子节点跑完才发现投影写不进去。
+                from core.side_effect_contract import (
+                    dispatch_promise,
+                    refuse_user_source_write,
+                )
+
+                refuse_user_source_write(
+                    dispatch_promise(state, bool(read_only)), _dl_path)
             except ProjectWorkspaceError as exc:
                 return {"status": "error", "error": str(exc)}
         deliverable = {"artifact_type": _dl_type, "path": _dl_path}
@@ -2336,6 +2358,8 @@ async def _run_node_tool(
         # 「这个任务允许中途停下作业吗」只能由派发方回答（#1084 第二节）。
         planned_stop_authorized=bool(planned_stop_authorized),
         planned_stop_note=str(planned_stop_note or ""),
+        # 「不要修改文件」（#973）：只能由派发方给出；executor 开工前冻住。
+        read_only=bool(read_only),
         # 任务与派发身份进 child State 与 run_start（#1080 第 4 条）。
         task_instance_uuid=(_identity or {}).get("task_instance_uuid"),
         task_contract_revision=(_identity or {}).get("task_contract_revision"),
@@ -2432,17 +2456,7 @@ async def _run_node_tool(
         dispatch_id=_dispatch_id,
     )
 
-    # ── post-producing flow 归运行时（Move 1d，2026-08-19）────────────────
-    #
-    # 此前这条链由调度器**逐步照抄提醒执行**：hook 每轮把下一步调用连参数打印
-    # 出来，模型抄一遍，框架再用一排墙防它抄错。铁证就是那份提醒本身 ——
-    # **框架已经能把答案连参数一起打印出来**，能被打印出来的东西不是判断，是手续。
-    # 代价：调度器烧掉一个 session 32M tokens 里的 16.2M（50.5%），大头在这条走廊
-    # 上抄参数、撞墙、读错误、换个姿势再抄。
-    #
-    # 现在：一次 `run_node(<producing>)` 调用内部把 review → decision 走完，
-    # 返回的要么是决策 pause（等人），要么是这一步的结果。调度器一轮都不花在
-    # 手续上，只在真正要判断的地方被叫醒。
+    # 独立审查由运行时执行；把结果交回调度器，让它先解释判断再呈递选择。
     flow_out = await _run_post_producing_flow(state, node_type, out)
     result = flow_out if flow_out is not None else out
     if _dispatch_deviations and isinstance(result, dict):
@@ -2540,7 +2554,9 @@ def _report_background_done(parent_state: State, node_type: str, summary: dict, 
         f"turns={summary.get('turns')}，回填 artifact={imported_ids or '无'}。"
         f"若它是 producing 节点且 completed：post-producing 3-step flow 已登记，"
         f"按流程推进（_reviewer → _curator → present_decision_package）。"
-        f"向用户汇报结果时引用真实产出，不要凭记忆编。",
+        f"向用户汇报结果时引用真实产出，不要凭记忆编。"
+        # 只读派发的三类改动（#973）—— 后台跑完也要交到调度器手上，与前台同一句。
+        + (f"\n{out['side_effect_note']}" if out.get("side_effect_note") else ""),
         "background_child",
     )
     _notify_child_event(
@@ -2691,18 +2707,10 @@ def _curator_integration_verdict(summary: dict, ni: dict) -> tuple[bool, str, di
 async def _run_post_producing_flow(
     state: State, node_type: str, finished: dict
 ) -> dict | None:
-    """producing 节点交付之后，由**运行时**把 review → decision 走完。
+    """自动完成独立审查，返回产出与审查原文，让调度器解释后自行呈递选择。
 
-    返回决策 pause（要人答复）或 None（这条链不适用 / 无需呈递，照常返回原结果）。
-
-    为什么放在派发工具里而不是新起一个组件：这条链的两端本来就在这里 ——
-    "子节点跑完了"和"要起新节点了"都从 `run_node` 过。把它做成一次调用内部的
-    顺序执行，比新增一个需要被调用的编排器更少接缝（`调它，别再实现一遍`）。
-
-    不适用的情况一律返回 None，让调用方拿到原本的结果：
-      - 这个节点不欠 flow（服务节点 / 系统节点 / 未交付）
-      - 本轮没有为它登记 flow entry（例如 status != completed）
-      - entry 已经不在 pending list（被别的路径关掉了）
+    不适用或动作已授权时返回 None，调用方继续使用原结果。
+    不在这里创建决策 pause：否则调度器拿到审查意见前就被暂停了。
     """
     if not node_owes_post_node_flow(node_type):
         return None
@@ -2714,6 +2722,8 @@ async def _run_post_producing_flow(
         None,
     )
     if entry is None:
+        return None
+    if entry.get("decision_state") not in (None, "pending", "awaiting_human"):
         return None
 
     # ── Step 1：独立审查 ────────────────────────────────────────────────
@@ -2744,9 +2754,10 @@ async def _run_post_producing_flow(
                     "producer_run_id": entry.get("producing_run_id"),
                 },
                 forward_artifact_ids=artifact_ids,
-                user_note=(f"{node_type} 交付完成，我先请独立审查看一遍"
-                           f"（{_review_target(node_type, artifact_ids)}），再把结果连同审查意见一起交给你裁决。"),
+                user_note=f"{node_type} 已交付，正在对其产物做独立审查。",
             )
+            if isinstance(_rv, dict) and _rv.get("status") == "pause":
+                return _rv
             # **派发失败要说出来。**
             #
             # 第一版这里不看返回值：派发一旦失败（artifact 转发不到、节点自己
@@ -2757,28 +2768,23 @@ async def _run_post_producing_flow(
             # 2026-08-19 本地 e2e 抓到。这是「fail-open 十有八九是防线边界划错」
             # 的另一种形态：不是没防，是防了却把手上的事实丢了。
             if isinstance(_rv, dict) and _rv.get("status") == "error":
+                entry["review_state"] = "failed_awaiting_human"
                 entry["review_failed_reason"] = str(_rv.get("error") or "")[:600]
                 state.append_transcript(
                     "runtime_reviewer_dispatch_failed",
                     producing_run_id=entry.get("producing_run_id"),
                     error=entry["review_failed_reason"])
 
-    # ── Step 2：呈递决策包 ──────────────────────────────────────────────
-    if entry.get("decision_state") not in (None, "pending", "awaiting_human"):
-        return None
-    from shared.tools.library.decision_package import _present_decision_package
-
-    return await _present_decision_package(
-        state,
-        source_node_type=node_type,
-        producing_run_id=str(entry.get("producing_run_id") or ""),
-        producing_summary=str((finished or {}).get("final_text_preview") or "")[:800],
-        # 自由文本只展示，机械事实另走一路（#1097 第 4 条）。
-        child_obligation_effect=(finished or {}).get("child_obligation_effect"),
-        artifact_ids_produced=list(entry.get("artifact_ids") or []),
-        review_critique_artifact_id=entry.get("review_critique_artifact_id"),
-        review_failed_reason=entry.get("review_failed_reason"),
-    )
+    critique_id = entry.get("review_critique_artifact_id")
+    return {
+        **finished,
+        "post_node_review": {
+            "review_state": entry.get("review_state"),
+            "review_critique_artifact_id": critique_id,
+            "critique": state.read_artifact(critique_id) if critique_id else None,
+            "review_failed_reason": entry.get("review_failed_reason"),
+        },
+    }
 
 
 def _finish_child(
@@ -2891,6 +2897,8 @@ def _finish_child(
             # decision_package.blocking_decision_for_task）。
             "task_id": task_id,
             "artifact_ids": artifact_ids,
+            "producing_summary": summary.get("final_text_preview") or "",
+            "child_obligation_effect": summary.get("child_obligation_effect"),
             "at": summary.get("started_at") or summary.get("run_id"),
             "review_state": ("skipped" if skip_review else "pending"),
             "review_critique_artifact_id": None,
@@ -3048,6 +3056,10 @@ def _finish_child(
             f"child {node_type}[{summary.get('run_id')}] status={child_status}",
         )
 
+    # 子 run 写了什么，汇总进父 transcript（#973）—— 父的收尾核对与终稿陈述读的
+    # 是父自己的 transcript，此前子 run 的写入只躺在这次返回值里，父对不上账。
+    side_effects = _roll_up_child_writes(state, node_type, summary)
+
     # #143 gap 2/3：把"能否进标准 review"显式暴露给 orchestrator，
     # 别只给模糊的 status=incomplete。
     project_files = (summary.get("project_workspace") or {}).get("paths") or []
@@ -3119,11 +3131,57 @@ def _finish_child(
             f"（{_resume.get('reason')}），这一轮是**新开**的 "
             f"{summary.get('run_id')} —— 上一轮的上下文和进度都不在里面。"
         )
+    if side_effects is not None and side_effects.promised_read_only:
+        # 只读派发：三类改动当场交到调度器手上 —— 它下一句就要跟用户说结果，
+        # 而那次事故里的「未修改文件」正是在这一刻写出来的。
+        out["side_effects"] = side_effects.as_dict(limit=20)
+        out["side_effect_note"] = (
+            ("⚠️ 只读约束下改动了用户源文件 —— 必须如实告诉用户改了哪些、要不要撤回。"
+             if side_effects.contradiction else "本次派发带只读约束（不修改用户文件）。")
+            + f"实际改动：{side_effects.counts_text()}。"
+            "向用户陈述时按这三类分别说，不要说「未修改文件」。"
+        )
     if task_id:
         out["task_id"] = task_id
     if autoresolved_note:
         out["framework_autoresolved_inputs"] = autoresolved_note
     return out
+
+
+def _roll_up_child_writes(parent_state: State, node_type: str, summary: dict):
+    """把子 run 自开工（或自它的只读承诺）以来写过的 Project 路径汇总进父 transcript。
+
+    读子 run 自己的 transcript（`core.side_effect_contract.reconcile_run`），所以
+    子 run 汇总上来的孙辈改动也在里面 —— 一层层往上就是整棵派发树。返回那份对账
+    （没有 run 目录可读时 None）；记账失败只留痕，不影响子 run 的结果交付。
+    """
+    root = summary.get("state_dir")
+    if not root:
+        return None
+    try:
+        from core.side_effect_contract import ROLLUP_PATH_LIMIT, reconcile_run
+
+        rec = reconcile_run(root)
+        paths = [*rec.user_source, *rec.node_evidence, *rec.bookkeeping]
+        if paths:
+            parent_state.append_transcript(
+                "child_workspace_changed",
+                child_run_id=summary.get("run_id"),
+                child_node_type=node_type,
+                paths=paths[:ROLLUP_PATH_LIMIT],
+                truncated=len(paths) > ROLLUP_PATH_LIMIT,
+                counts=rec.as_dict(limit=0)["counts"],
+                child_read_only=rec.promised_read_only,
+                contradiction=rec.contradiction,
+            )
+        return rec
+    except Exception as exc:  # noqa: BLE001 —— 记账不能吞掉子 run 的交付
+        parent_state.append_transcript(
+            "child_workspace_rollup_failed",
+            child_run_id=summary.get("run_id"),
+            error=f"{type(exc).__name__}: {exc}"[:300],
+        )
+        return None
 
 
 def _translate_run_relative_paths(rec: dict, child_root: Path) -> tuple[dict, list[str]]:
@@ -3512,6 +3570,23 @@ register_tool(
                     "type": "string",
                     "description": "授权的依据：用户原话里授权停止的那一句。",
                 },
+                "read_only": {
+                    "type": "boolean",
+                    "description": (
+                        "用户要求**不修改文件**吗（默认 false）。\n"
+                        "用户说「只检查不改」「不要修改文件」「别动我的代码」这类话时填 true，"
+                        "并在 read_only_note 里抄下那句原话。\n"
+                        "框架机械执行：用户源文件（项目根的普通文件、用户带进来的源码）"
+                        "对这个子节点、它再派的节点、以及你自己在这次请求剩下的时间里一律禁写；"
+                        "节点证据（各节点自己的目录）和 .research 记账照常写，但会照实计数，"
+                        "返回值的 side_effects 按三类给出。向用户陈述时按这三类分别说，"
+                        "不要说「未修改文件」。"
+                    ),
+                },
+                "read_only_note": {
+                    "type": "string",
+                    "description": "只读约束的依据：用户原话里不许改文件的那一句。",
+                },
                 "node_inputs": {
                     "type": "object",
                     "description": (
@@ -3620,6 +3695,9 @@ async def _run_nodes_parallel(
                             # 必须一致（#1097 验收 1）。
                             task_instance_uuid=job.get("task_instance_uuid"),
                             task_contract_digest=job.get("task_contract_digest"),
+                            # 只读约束同理（#973）：并行与串行同一语义。
+                            read_only=bool(job.get("read_only")),
+                            read_only_note=str(job.get("read_only_note") or ""),
                         )
                     ),
                 }
@@ -3723,6 +3801,14 @@ register_tool(
                             "task_contract_digest": {
                                 "type": "string",
                                 "description": "按哪一版合同执行（同串行）。",
+                            },
+                            "read_only": {
+                                "type": "boolean",
+                                "description": "用户要求不修改文件（同串行 run_node 的 read_only）。",
+                            },
+                            "read_only_note": {
+                                "type": "string",
+                                "description": "用户原话里不许改文件的那一句（同串行）。",
                             },
                         },
                         "required": ["node_type", "user_note"],

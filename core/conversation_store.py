@@ -92,6 +92,8 @@ def save_conversation(state: State, messages: list[LLMMessage]) -> None:
     # 原子替换（2026-07-09）：进程在写一半时被杀（Ctrl-C / 崩溃）不能留下截断的
     # JSON —— 那会让下次续连 load_conversation 判损坏、静默丢整段对话历史。
     tmp = path.with_suffix(path.suffix + ".tmp")
+    from core.secrets import redact
+    payload = redact(payload)
     tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str),
                    encoding="utf-8")
     tmp.replace(path)
@@ -117,8 +119,11 @@ def _load_checkpoint_messages(state: State) -> list[LLMMessage] | None:
     return [jsonable_to_msg(m) for m in msgs if isinstance(m, dict)]
 
 
-def load_conversation(state: State) -> list[LLMMessage] | None:
+def load_conversation(state: State, *, restore_state: bool = True) -> list[LLMMessage] | None:
     """读对话 + 恢复 state 元数据。两份都没有 / 都损坏 → None。
+
+    `restore_state=False` 只取消息：供常驻 worker 的待命轮查看，不覆盖内存中的
+    新插话、运行计数与白板。
 
     兼容两种历史格式：
       - dict（标准）：恢复 tokens_used / tool_calls_made / scratchpad / hook_state
@@ -154,7 +159,8 @@ def load_conversation(state: State) -> list[LLMMessage] | None:
     if cp_mtime > conv_mtime:
         msgs = _load_checkpoint_messages(state)
         if msgs:
-            state.hook_state["_resumed_from_turn_checkpoint"] = True
+            if restore_state:
+                state.hook_state["_resumed_from_turn_checkpoint"] = True
             return msgs
         # checkpoint 读不出来就退回 conversation.json，不是直接放弃
 
@@ -166,7 +172,7 @@ def load_conversation(state: State) -> list[LLMMessage] | None:
         # conversation.json 损坏时 checkpoint 是唯一活路 —— 别让一个坏文件
         # 把好的那份也一起埋了
         msgs = _load_checkpoint_messages(state)
-        if msgs:
+        if msgs and restore_state:
             state.hook_state["_resumed_from_turn_checkpoint"] = True
         return msgs
 
@@ -176,6 +182,11 @@ def load_conversation(state: State) -> list[LLMMessage] | None:
 
     if not isinstance(data, dict):
         return None
+
+    # Standby reads must not restore an older hook_state over a live worker's
+    # pending interjections, counters or scratchpad.
+    if not restore_state:
+        return [jsonable_to_msg(m) for m in data.get("messages", [])]
 
     state.tokens_used = int(data.get("tokens_used", 0) or 0)
     state.tool_calls_made = int(data.get("tool_calls_made", 0) or 0)

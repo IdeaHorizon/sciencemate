@@ -6,7 +6,7 @@ status / health / wait / cancel 任何一个入口第一次读到**可信**终�
 ``finish`` 只消费这条事实；物理终态**不**替模型选择任务级 outcome。
 
 "可信"的定义按调度器：Slurm 要 sacct 的 allocation 行全部终态；PBS 要 job_state C/E/F；
-Kubernetes 要 Complete/Failed 条件；local 要原生 supervisor 写出的退出码。squeue 里不见了
+Kubernetes 要 Complete/Failed 条件；local 要原生 supervisor 写出的退出码，或精确身份绑定且确认已停止的本地取消收据。squeue 里不见了
 不算——那只说明调度器不再持有它，交 reconcile。
 """
 from __future__ import annotations
@@ -42,6 +42,8 @@ def _derive(scheduler: str, evidence: dict[str, Any] | None) -> tuple[str | None
         return (str(state).upper() if state else None), exit_code
     if kind == "local":
         status = str(evidence.get("sandbox_status") or "").lower()
+        if evidence.get("source") == "confirmed_local_cancellation" and status == "cancelled":
+            return "CANCELLED", None  # confirmed stop is not a fabricated successful exit
         if exit_code is None:
             return (status.upper() or None), None
         return ("COMPLETED" if exit_code == 0 else "FAILED"), exit_code
@@ -79,6 +81,17 @@ def capture_submission_outputs(state: Any, nonce: str) -> dict[str, Any]:
         if len(intents) != 1:
             raise ValueError("no unique submission intent")
         intent = intents[0]
+        if intent.get("slurm_target"):
+            try:
+                from . import slurm_files
+            except ImportError:  # standalone node bootstrap
+                from tools import slurm_files
+            roots = slurm_files._roots(intent)
+            return {"roots": roots, "candidates": [], "coordinate_space": "slurm_remote",
+                    "slurm_target": intent["slurm_target"],
+                    "expected_identity": slurm_files._expected(intent),
+                    "snapshot": slurm_files.snapshot(intent["slurm_target"], roots,
+                                                      expected_identity=slurm_files._expected(intent))}
         roots = list(dict.fromkeys([*intent.get("output_roots", []), intent["output_root"]]))
         candidates = [p for p in _boundary._obligation_candidates(state)
                       if any(p.is_relative_to(Path(r)) for r in roots)]
@@ -101,6 +114,17 @@ def _output_diff(state: Any, nonce: str) -> dict[str, Any]:
                 "reason": "pre-launch output baseline unavailable"}
     before = baseline.get("snapshot") or {"entries": {}, "truncated": True}
     try:
+        if baseline.get("coordinate_space") == "slurm_remote":
+            try:
+                from . import slurm_files
+            except ImportError:  # standalone node bootstrap
+                from tools import slurm_files
+            after = slurm_files.snapshot(baseline["slurm_target"], baseline.get("roots", []),
+                                        expected_identity=baseline.get("expected_identity"))
+            return {**slurm_files.remote_diff(before, after),
+                    "baseline_seq": markers[0].get("seq"),
+                    "basis": "submission_to_terminal_observation_window",
+                    "observation_boundary": {"roots": baseline.get("roots", []), "excluded_roots": []}}
         after = _capture.snapshot([Path(p) for p in baseline.get("candidates", [])],
                                   [Path(r) for r in baseline.get("roots", [])],
                                   max_files=_MAX_OBSERVED_FILES)
@@ -160,6 +184,29 @@ def settle_terminal(state: Any, record: dict[str, Any], *, evidence: dict[str, A
             return {"settled": False, "reason": "not_a_v3_run", "nonce": nonce}
     except Exception:
         return {"settled": False, "reason": "ledger_unavailable", "nonce": nonce}
+    if isinstance(evidence, dict) and evidence.get("source") == "confirmed_local_cancellation":
+        identity = evidence.get("identity") or {}
+        physical = evidence.get("cancel_result") or {}
+        keys = ("scheduler", "job_id", "submission_nonce", "container_runtime_id")
+        bound = _ledger.project_jobs(_ledger.open_ledger(state).records()).get(nonce) or {}
+        binding_matches = (
+            str(bound.get("scheduler") or "").lower() == "local"
+            and not bound.get("runtime_identity_conflict")
+            and (bound.get("container_runtime_id") in (None, "")
+                 or bound["container_runtime_id"] == record.get("container_runtime_id"))
+            and str(bound.get("external_id") or "") in {
+                job_id, str(record.get("container_runtime_id") or ""),
+            }
+        )
+        if (scheduler != "local" or not record.get("container_runtime_id") or not binding_matches
+                or not isinstance(identity, dict) or not isinstance(physical, dict)
+                or any(str(identity.get(key) or "") != str(record.get(key) or "") for key in keys)
+                or physical.get("ok") is not True or physical.get("action") != "sandbox_stop"
+                or physical.get("already_absent") is not False
+                or str(physical.get("container_id") or "") != job_id
+                or not evidence.get("cancellation_intent_artifact_id")
+                or not evidence.get("cancellation_outcome_artifact_id")):
+            return {"settled": False, "reason": "untrusted_cancellation_evidence", "nonce": nonce}
     prior = existing_terminal(state, nonce)
     if prior is not None:
         if prior.get("idempotency_key"):
@@ -186,11 +233,23 @@ def settle_terminal(state: Any, record: dict[str, Any], *, evidence: dict[str, A
             derived_state=derived_state, exit_code=exit_code, observed_by=observed_by or None,
             raw={"evidence": _trim(evidence), "scheduler_result": _trim((scheduler_result or {}).get("raw") if isinstance(scheduler_result, dict) else None)},
             output_files=files[:50], output_observation=f"job-{nonce}",
+            **({"slurm_target": record["slurm_target"], "remote_user": record.get("remote_user"),
+                "scheduler_cluster": record.get("scheduler_cluster")}
+               if record.get("slurm_target") else {}),
             capture_record=str(_capture.allocate_record_dir(state, f"job-{nonce}")),
             output_diff=stored_observation, observation_status=observation.get("status"))
     except Exception as exc:
         return {"settled": False, "reason": "ledger_write_failed", "nonce": nonce,
                 "derived_state": derived_state, "exit_code": exit_code,
                 "error": f"{type(exc).__name__}: {exc}"}
-    return {"settled": True, "already": False, "nonce": nonce, "derived_state": derived_state,
-            "exit_code": exit_code, "record": row, "observation": stored_observation}
+    result = {"settled": True, "already": False, "nonce": nonce, "derived_state": derived_state,
+              "exit_code": exit_code, "record": row, "observation": stored_observation}
+    if record.get("slurm_target"):
+        try:
+            from . import slurm_files
+        except ImportError:  # standalone node bootstrap
+            from tools import slurm_files
+        # Transfer has its own factual receipt. A dropped connection never
+        # rewrites the first terminal observation or resubmits the computation.
+        result["output_transfer"] = slurm_files.collect_outputs(state, record)
+    return result

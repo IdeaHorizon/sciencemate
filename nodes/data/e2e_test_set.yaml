@@ -23,6 +23,21 @@ execution_contract:
     requested_assets_take_priority: true
     optional_logs_and_reproduction_files: only_when_requested_or_justified
 
+code_change_regression_policy:
+  required_before_handoff: true
+  case_source: cases
+  selection: impact_scoped
+  small_isolated_changes: targeted_checks_of_affected_contracts_and_failure_paths
+  broad_or_shared_scientific_logic_changes: all_previously_passed_cases_current_fix_and_new_cases
+  new_case_policy: include_when_added_and_keep_in_future_regressions
+  changing_a_case_does_not_remove_its_regression_obligation: true
+  full_regression_requires_current_code_and_fresh_artifacts: true
+  distinguish_pipeline_verification_from_orchestrator_e2e: true
+  report_each_case_status_and_unverified_stage: true
+  failed_or_unexecuted_case_is_not_a_pass: true
+  fix_confirmed_framework_defects_before_handoff: true
+  retain_temporary_test_code: false
+
 platform_instruction: |-
   这是一次 Data 节点真实 E2E 验证。请读取
   nodes/data/e2e_test_set.yaml，并只执行 case_id=<CASE_ID>。
@@ -33,9 +48,11 @@ platform_instruction: |-
   复审，不得通过重新派发另一个 Data 运行掩盖问题。Experiment 仅在 case 明确
   要求 consumer_check 时进行只读消费验证。
 
-  调用 Data 时必须保留当前 turn 的原文，并把 case.expected_assets 映射为
+  调用 Data 时必须将当前 turn 原文放入 preprocessing_request.request，并把 case.expected_assets 映射为
   preprocessing_request.requested_assets，把 case.acceptance_focus 映射为
-  acceptance_criteria；authority.kind=user_request、authority.locked=true，且
+  acceptance_criteria。request_bound 使用 authority.kind=user_request；plan_bound 使用
+  authority.kind=research_plan，并将原文放入 authority_snapshot.user_request 作为冻结内容。
+  两者均设置 authority.locked=true，且
   non_goals 必须包含“不得用脚本或配置文件替代 requested_assets”。不要让需求
   分析模型把测试集声明的最终产物改写成辅助脚本清单。
 
@@ -221,16 +238,27 @@ cases:
   - id: weather_cf_regrid
     domain: weather_simulation
     mode: request_bound
-    expected_outcome: needs_input
+    expected_outcome: completed
     consumer_check: false
+    network_policy: allowed
     turns:
       - |-
-        请把我的区域降水 NetCDF 重网格到 0.1°×0.1°并转换为 CF-compliant 文件。
-        必须保持原始时间范围和降水累计含义，但我还没有提供源文件。
-    expected_assets: []
+        请使用 data 节点，联网获取 NOAA CPC 2025-07-01 至 07-03（含首尾日期）
+        的日累计降水，将北京附近 39–41°N/115–117°E 区域保守重网格到 0.1°×0.1°
+        （上述范围为单元外边界，共 20×20 个单元）。保留原始时间、累计含义、mm 单位
+        和缺测语义，交付同目录下的 CF-compliant precip_0p1.nc 与 manifest.json。
+        审核格式、坐标和降水守恒，记录来源、处理方法及哈希。数据入口：
+        https://psl.noaa.gov/thredds/catalog/Datasets/cpc_global_precip/catalog.html?dataset=Datasets/cpc_global_precip/precip.2025.nc
+    expected_assets:
+      - precip_0p1.nc
+      - manifest.json
     acceptance_focus:
-      - requests the source NetCDF rather than inventing data
-      - identifies any required convention or variable information discoverable only from the file
+      - source precipitation and coordinate grid are acquired from the declared NOAA dataset
+      - output has three unchanged source time records and a 20 by 20 cell-centered grid with explicit bounds
+      - daily accumulation meaning, mm units, and missing-data semantics are preserved
+      - conservative remapping is verified by per-time area-weighted integrals on identical valid coverage
+      - CF metadata and NetCDF parsing are validated rather than only declaring a Conventions attribute
+      - manifest records source retrieval, subset, remapping method, conservation errors, and file hashes
 
   - id: weather_mpas_streams
     domain: weather_simulation

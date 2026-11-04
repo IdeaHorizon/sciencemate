@@ -22,7 +22,7 @@ from app.services.session_changes import (
 )
 from app.services.session_changes import resolve_conflict as _resolve_conflict
 from app.services.sessions import get_session, require_capability
-from app.services.user_interface import Language, language_on_screen
+from app.services.user_interface import Language, language_on_screen, say
 
 router = APIRouter()
 
@@ -88,7 +88,8 @@ async def publish_session_changes(
     except PublishConflictsFoundError as exc:
         raise HTTPException(status_code=409, detail=exc.said_in(lang)) from exc
     if commit is None:
-        raise HTTPException(status_code=409, detail="Session has no Project changes")
+        raise HTTPException(status_code=409, detail=say(
+            {"zh": "这个会话没有要发布的改动", "en": "Session has no Project changes"}, lang))
     return {"commitSha": commit, "projectId": str(project.id), "sessionId": session_id}
 
 

@@ -318,6 +318,14 @@ async def _save_artifact(state: State, artifact_type: str, name: str,
 
                 _rel = validate_deliverable_projection(
                     _root, str(state.node_type), str(proj.get("path") or ""))
+                # 只读约束下投影到用户源文件不许（#973）。账照落（节点证据），
+                # 投影失败照下面的老规矩吵出来。
+                from core.side_effect_contract import (
+                    promised_read_only,
+                    refuse_user_source_write,
+                )
+
+                refuse_user_source_write(promised_read_only(state), _rel)
                 _target = Path(_root) / _rel
                 _target.parent.mkdir(parents=True, exist_ok=True)
                 _target.write_text(content, encoding="utf-8")
@@ -465,7 +473,21 @@ async def _read_artifact(
     rec = state.read_artifact(artifact_id)
     if rec is None:
         return {"status": "error", "error": f"找不到 artifact {artifact_id!r}"}
+    out = _read_artifact_window(state, rec, artifact_id, offset)
+    # #730：导入的材料（provenance=imported，转发多少次都还是）是外部内容 —— 读进对话
+    # 只许走数据框：控制标签转义、带出处、导入时落在 metadata 上的见证一并呈现。
+    # 挂在读这一侧，理由同上面的 evidence_use：谁读它，谁就同时拿到这层框。
+    from core.artifact_provenance import is_imported
 
+    if out.get("status") == "success" and is_imported(rec):
+        from shared.lib.external_content import frame_payload
+
+        source = str((rec.get("provenance") or {}).get("source_path") or "") or None
+        out = frame_payload(out, via="resources", source=source)
+    return out
+
+
+def _read_artifact_window(state: State, rec: dict, artifact_id: str, offset: int) -> dict:
     # 这行原来是内联的抄件，另外五处读 content 的地方都没有它 —— 现在同一个实现。
     # 这份产物能不能当确证证据用（#1097 第 5 条）。
     #
@@ -641,12 +663,11 @@ async def _run_bash(state: State, cmd: str, timeout: int = 600,
         return {"status": "error",
                 "error": _dc.BOUNDARY_DENY_MESSAGE.format(category=boundary)}
 
-    # ── 第 0.5 道：探查专用模式（harness.shell_probe_only，v3.3）= 见证 ─────
-    # 判决拆除（builtin:645 降格）：这里曾硬拒协调类节点的写文件/内联脚本/装软件。
-    # 「协调者只许只读探查」是角色/资格判决（S3）；写边界真正的守卫在 spawn 层
-    # 沙箱（core/sandbox：只可写本节点目录，OS 层面写不进别处），剩下的只是
-    # 「不许替 producing 节点干活」的流程规则 —— 放行，如实见证
-    # `probe_only_shell_violation` 进 transcript，由 referee 终审。
+    # ── 第 0.5 道：只读探查 shell（harness.shell_probe_only）的文本见证 ─────────
+    # 只记账、不拦。拦截在 spawn 层的墙上：调度器的写边界为空（core/sandbox.
+    # model_tool_wall，#1187），有副作用的命令落不了地，命令文本猜得对不对都一样。
+    # 这笔账留下的是「调度器起过这个念头」—— `probe_only_shell_violation` 进
+    # transcript 与返回值。
     _probe_witness: str | None = None
     if state.hook_state.get("_shell_probe_only"):
         _probe_witness = _dc.match_probe_only_violation(cmd)
@@ -683,15 +704,17 @@ async def _run_bash(state: State, cmd: str, timeout: int = 600,
         return {"status": "error", "error": str(exc)}
     # 模型的 shell 关进写沙箱：只有本节点目录 + run-local + scratch 可写，
     # 别的节点目录在操作系统层面写不进去（core/sandbox.py，写时失败而非事后取证）。
-    from core.sandbox import limits_for_profile, model_tool_roots
+    # 调度器（只读探查）一个可写根都没有，只剩随命令删掉的私有 scratch（#1187）。
+    from core.sandbox import limits_for_profile, model_tool_wall
 
-    _writable, _readonly = model_tool_roots(state)
+    wall = model_tool_wall(state)
     # 大输出不再只读尾部然后删文件 —— 完整输出本来就在临时文件里，超限时把它
     # 保留到 run 目录并把路径带回来（开头那段报错才拿得回）。
     _spill_paths: dict = {}
     status, rc, out_b, err_b = await spawn_and_wait(
         cmd, state=state, timeout=timeout, cwd=effective_cwd, shell=True,
-        writable_roots=_writable, readonly_roots=_readonly,
+        writable_roots=wall.writable_roots, readonly_roots=wall.readonly_roots,
+        sandbox_ephemeral=wall.ephemeral,
         spill_dir=_spill.spill_root(state), spill=_spill_paths,
         sandbox_limits=limits_for_profile(
             options.get("resource_profile"), walltime_seconds=timeout
@@ -769,22 +792,53 @@ async def _run_bash(state: State, cmd: str, timeout: int = 600,
     #
     # 只给 `http_code=000` 或一个非零退出码，模型只能靠猜，而猜错的方向恰好是
     # 「让人去旁路」。把能力事实和合法下一步结构化地放回去。
-    if rc != 0:
-        _egress = _network_refusal_hint(cmd, out, err)
-        if _egress:
-            result.update(_egress)
+    _egress = _network_refusal_hint(cmd, out, err) if rc != 0 else None
+    if _egress:
+        result.update(_egress)
+        state.append_transcript(
+            "model_shell_network_refusal", cmd_preview=cmd[:200])
+
+    # ── 调度器的只读探查 shell 撞了写墙：说清是哪堵墙、该派谁（#1187）──────
+    # 墙已经把那一步拒了（操作系统说的「不」就在输出里）；这里只是不让模型对着
+    # 一句裸 "Operation not permitted" 去试第二种写法。取外部资源撞的是网络那堵，
+    # 上面那条说明更具体，不叠两份。
+    if wall.ephemeral and not _egress:
+        _refusal = _dc.read_only_shell_refusal(
+            out, err, rc, shown=wall.readonly_roots)
+        if _refusal:
+            result.update(_refusal)
+            if rc != 0:
+                from core import tool_errors as _errs
+
+                # 框架按设计说不，是循环里正常的一步，不是命令坏了（core/tool_errors）。
+                result["error_code"] = _errs.REJECTED
+                result["error"] = _refusal["read_only_shell_note"]
             state.append_transcript(
-                "model_shell_network_refusal", cmd_preview=cmd[:200])
+                "read_only_shell_refused", tool="run_bash",
+                cmd_preview=cmd[:200], os_refusal=_refusal["os_refusal"])
 
     # 起了后台进程却没登记作业 -> 提醒进**工具返回值**（模型下一轮必然看到）。
     # 只提醒不拦截：起临时 http server / tail -f 这类合法用途很多，一刀切会误伤。
     # 但提醒必须走这条路 —— 只写在 harness 里没人读的规则，今天已经数出七次了。
+    #
+    # 只读探查 shell 不起作业：后台进程随这条命令结束整组收掉了（咽喉的 GROUP_KILL +
+    # 启动标记清扫），「去登记」是句错话 —— 照实说它已经没了、作业该派给谁（#1187）。
     try:
         from core import jobs as _jobs
-        hint = _jobs.undeclared_launch_hint(state, cmd)
-        if hint:
-            result["job_registry_reminder"] = hint
-            state.append_transcript("undeclared_background_launch", cmd=cmd[:200])
+        if wall.ephemeral:
+            if _jobs.looks_like_background_launch(cmd):
+                result.update(_dc.read_only_shell_facts())
+                result["job_registry_reminder"] = (
+                    "⛔ 你起的后台进程已随这条命令结束被整组收掉 —— 这条 shell 不起作业。\n"
+                    + _dc.READ_ONLY_SHELL_MESSAGE)
+                state.append_transcript(
+                    "read_only_shell_refused", tool="run_bash",
+                    cmd_preview=cmd[:200], os_refusal="background_launch_reaped")
+        else:
+            hint = _jobs.undeclared_launch_hint(state, cmd)
+            if hint:
+                result["job_registry_reminder"] = hint
+                state.append_transcript("undeclared_background_launch", cmd=cmd[:200])
     except Exception:      # 登记表出任何问题都不该影响命令本身
         pass
     return result
@@ -939,11 +993,33 @@ def _normalize_options(options: Any) -> tuple[list[dict], str]:
     return out, ""
 
 
+def _only_the_user_can_answer(state: State) -> str | None:
+    """这一问是不是连续档也不能代答的；是则返回给人看的理由。
+
+    只有一种：**调度器**在项目里还没有任何研究的时候提问 —— 那时它能问的只有
+    「研究什么」，而这件事只有用户能定。代答一次就是替用户开了题：2026-10-30
+    node20，新项目、`--continuous`、一句「你好」，调度器问「从哪个方向开题」、
+    推荐了组织知识库里存量最多的那个，框架照推荐项代答，三个小时的硬碳储钠课题
+    就这么开了（reviewer 第一轮就指出用户原话只有「你好」）。
+
+    判据只看谁在问、盘上有没有研究（`research_under_way`），不读问题的措辞。
+    节点在跑自己的活时提的问不在此列 —— 那时研究已经开始了，连续档照旧代答。
+    """
+    if state.node_type != "_orchestrator":
+        return None
+    from core.research_situation import research_under_way
+
+    if research_under_way(state):
+        return None
+    return ("项目里还没有研究，研究什么只有你能定 —— 连续档不替你开题。")
+
+
 async def _request_human_input(state: State, question: str,
                                context: str = "",
                                options: Any = None,
                                header: str = "",
                                recommended_option_index: int | None = None,
+                               human_decision_reason: str = "",
                                **_: Any) -> dict:
     """生成 pause 事件，让 agent_loop 检测到后 unwind 给上层（chat.py）。
 
@@ -961,6 +1037,9 @@ async def _request_human_input(state: State, question: str,
     的 run 照样会卡住等人（issue #111）。bypass 时直接给出 best-judgment 默认
     答案（有 options 选第一个），status=success 放行，同时写审计事件，事后
     可追溯 agent 在哪些问题上是"被代答"的，而非真人拍板。
+
+    例外：项目里还没有研究时调度器的提问（`_only_the_user_can_answer`）照常
+    pause，并标上 `needs_a_person` —— 研究什么不归无人值守定。
     """
     # 判决拆除（builtin:957 降格）：这里曾在「有正式 decision package 等人」时拒绝
     # 通用提问。提问本身不改 package 的状态（它仍是 awaiting_human，REVISE→PROCEED
@@ -1011,7 +1090,8 @@ async def _request_human_input(state: State, question: str,
         # 「wait for job then analyze」会误伤；推荐什么是判断，判断归模型。
 
     from shared.lib import dangerous_commands as _dc
-    if _dc.bypass_enabled():
+    only_the_user = human_decision_reason.strip() or _only_the_user_can_answer(state)
+    if _dc.bypass_enabled() and not only_the_user:
         idx = int(recommended_option_index) if normalized else None
         default_answer = normalized[idx]["label"] if normalized else (
             "bypass mode: no human response available; proceed with best judgment.")
@@ -1043,7 +1123,12 @@ async def _request_human_input(state: State, question: str,
 
     state.append_transcript("human_input_requested", question=question,
                               n_options=len(normalized),
-                              recommended_option_index=recommended_option_index)
+                              recommended_option_index=recommended_option_index,
+                              **({"needs_a_person": only_the_user} if only_the_user else {}))
+    # 「只能由人本人答」随这一问走 —— 自动作答的各条路只读它，不再各判一次。
+    from core.pause_driver import NEEDS_A_PERSON_KEY
+
+    person_only = {NEEDS_A_PERSON_KEY: only_the_user} if only_the_user else {}
 
     # 有选项 = 一次呈递。走 Offer，而不是在这里第二次构造选项集 —— 这条路此前
     # 产出无 id 的 {label, description}，于是同一个平台上存在两种 pause：一种
@@ -1077,6 +1162,7 @@ async def _request_human_input(state: State, question: str,
             "metadata": {
                 "type": "structured_question",
                 "header": (header or "")[:12],
+                **person_only,
             },
         }
     else:
@@ -1087,7 +1173,8 @@ async def _request_human_input(state: State, question: str,
             "header": (header or "")[:12],
             "asking_node_type": state.node_type,
             "asking_run_id": state.run_id,
-            "metadata": {"type": "structured_question", "header": (header or "")[:12]},
+            "metadata": {"type": "structured_question", "header": (header or "")[:12],
+                         **person_only},
         }
     if pending_decisions:
         pause_event["pending_decisions"] = pending_decisions
@@ -1101,6 +1188,8 @@ register_tool(
             "在节点执行中暂停，向人类用户提问并等待回答。"
             "适合：研究方向决策、超出节点权限的判断、需要领域专家确认。"
             "不适合：日常进度更新、能自己决定的事 —— 那些应该自己做。"
+            "确实缺少用户信息、判断或新授权时，填写 human_decision_reason；"
+            "这类问题会保留给用户回答，已有授权不代表这些信息可以凭空补出。"
             "给 options 时**必须**同时给 recommended_option_index —— 无人值守模式"
             "按它自动作答；给不出推荐说明问题本身没想清楚。"
             "选项必须都是能推进的动作，不要放「等待/先不动」——那会让无人值守停摆。"
@@ -1143,6 +1232,12 @@ register_tool(
                         "**给了 options 就必须给**：你推荐第几个（0 起）。"
                         "无人值守模式按它自动作答 —— 给不出推荐，说明这个问题你"
                         "自己也没想清楚，先想清楚再问。"
+                    ),
+                },
+                "human_decision_reason": {
+                    "type": "string",
+                    "description": (
+                        "为何必须由用户提供信息、作出判断或新授权；普通专业判断由你处理。"
                     ),
                 },
             },
@@ -1423,7 +1518,34 @@ async def _read_file(state: State, path: str, offset: int = 0,
                 f"输出到达单次上限 {_MAX_READ_BYTES} bytes，只返回了 {len(selected)} 行。"
                 f"用 offset={end} 接着读。"
             )
+    # #730：sources/ 下是用户交来的外部材料（含解开的归档）。读进对话只许走数据框：
+    # 控制标签转义（文件字节不改，这一层转义）、带出处、解包时落的见证一并呈现。
+    material = _material_relpath(state, abs_path)
+    if material:
+        from shared.lib.external_content import frame_payload
+        from shared.tools.library.materials_extract import witness_for
+
+        result = frame_payload(result, via="resources", source=material,
+                               witness=witness_for(abs_path))
     return result
+
+
+def _material_relpath(state: State, abs_path: Path) -> str | None:
+    """在本项目的材料目录（`sources/`）下就返回相对 worktree 的路径，否则 None。"""
+    worktree = getattr(state, "project_worktree", None)
+    if not worktree:
+        return None
+    from core.materials import materials_dir
+
+    try:
+        root = Path(worktree).resolve()
+        resolved = abs_path.resolve()
+        base = materials_dir(root).resolve()
+    except OSError:
+        return None
+    if base not in resolved.parents:
+        return None
+    return resolved.relative_to(root).as_posix()
 
 
 register_tool(

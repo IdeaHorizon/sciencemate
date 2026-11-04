@@ -31,7 +31,7 @@ from app.models.execution import Run, SessionMessage, SessionProjection
 from app.models.project import Project
 from app.models.user import User
 from app.policies import can_access_project, has_project_capability
-from app.services import run_failures
+from app.services import refusals, run_failures
 from app.services.app_events import record_app_event
 from app.services.sessions import (
     create_session,
@@ -283,10 +283,13 @@ def _local_execution_stream(
                     {
                         "type": "progress",
                         "event": "pause.abandoned",
-                        "detail": (
-                            "之前那个待回答的问题随运行时一起丢了，已作废。"
-                            "对话记录完好，这条消息按新一轮处理。"
-                        ),
+                        "detail": _say({
+                            "zh": "之前等你回答的问题已失效，这条消息会开始一次新的执行。对话记录不受影响。",
+                            "en": (
+                                "The earlier question waiting for your answer has expired, so this "
+                                "message starts a new run. The conversation history is unaffected."
+                            ),
+                        }, failure_language),
                         "runId": abandoned_pause,
                         "iteration": 1,
                     }
@@ -397,7 +400,8 @@ async def global_chat_stream(
     """Global execution-only chat is retired; a durable Project Session is required."""
     raise HTTPException(
         status_code=409,
-        detail="Choose or create a Project before starting a Research Session",
+        detail=_say({"zh": "请先选择或创建一个项目",
+                     "en": "Choose or create a Project before starting a Research Session"}, language_for(user)),
     )
 
 
@@ -415,13 +419,12 @@ async def project_chat_stream(
     individual tokens. Instead, we stream progress events (tool calls, thinking)
     and then the final response as token chunks.
     """
+    lang = language_for(user)
     project = await db.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail=_say(refusals.PROJECT_NOT_FOUND, lang))
     if not await can_access_project(db, user, project):
-        raise HTTPException(status_code=403, detail="Not authorized for this project")
-
-    lang = language_for(user)
+        raise HTTPException(status_code=403, detail=_say(refusals.NOT_AUTHORIZED_FOR_PROJECT, lang))
     conversation: SessionProjection | None = None
     if data.conversation_id:
         _, conversation = await get_session(db, user, project_id, data.conversation_id)
@@ -467,10 +470,10 @@ async def project_chat_stream(
                         **run_failures.copy_for("no_pause_to_answer", lang),
                         "message": _say(
                             {
-                                "zh": "这个决策已经不在等回答了。刷新一下会话看它现在的样子。",
+                                "zh": "这个问题已无需回答，请刷新会话查看最新状态。",
                                 "en": (
-                                    "This decision is no longer waiting for an answer. "
-                                    "Refresh the Session to see its current state."
+                                    "This question no longer needs an answer. "
+                                    "Refresh the Session to see its latest state."
                                 ),
                             },
                             lang,
@@ -490,14 +493,10 @@ async def project_chat_stream(
                         **run_failures.copy_for("offer_superseded", lang),
                         "message": _say(
                             {
-                                "zh": (
-                                    "这个回答指向的是上一次呈递；运行已经走到新的一次了。"
-                                    "刷新会话，回答当前那张卡。"
-                                ),
+                                "zh": "这张卡片已过期，有新的问题在等你回答。请刷新会话后回答最新的卡片。",
                                 "en": (
-                                    "This answer addresses an earlier presentation; the run has "
-                                    "moved on to a new one. Refresh the Session and answer the "
-                                    "current card."
+                                    "This card is out of date; a newer question is waiting. "
+                                    "Refresh the Session and answer the latest card."
                                 ),
                             },
                             lang,
@@ -622,7 +621,7 @@ async def project_chat_stream(
                 detail={
                     "code": "interject_undeliverable",
                     "message": said_of(exc, lang, otherwise={
-                        "zh": "这句插话没送到：{why}", "en": "This interjection was not delivered: {why}"}),
+                        "zh": "消息发送失败，请稍后重试。", "en": "Could not send the message. Try again later."}),
                     "runId": active_run_id,
                 },
             ) from exc
@@ -650,11 +649,15 @@ async def project_chat_stream(
             dedupe_key=interjected_message_id,
         )
         await db.commit()
+        interjected_message = await db.get(SessionMessage, interjected_message_id)
         interject_frames = (
             {
                 "type": "progress",
                 "event": "interject.delivered",
-                "detail": "已送达给正在跑的调度器 —— 它会在下一个边界处理这句话",
+                "detail": _say({
+                    "zh": "已发送给助手，它会在当前步骤完成后处理。",
+                    "en": "Sent to the assistant. It will handle this after the current step.",
+                }, lang),
             },
             {
                 # 收下 ≠ 马上被处理。ack 必须**同时**说这两句 ——「永远收下」
@@ -662,11 +665,13 @@ async def project_chat_stream(
                 # （409 至少是响的）。RFC D10 可寻址那一维的配套。
                 "type": "progress",
                 "event": "interject.occupancy",
-                "detail": (
-                    "上一轮还占着这个会话 —— 它会在下一个边界读到你这句话"
-                    if occupancy == "working"
-                    else "它此刻空闲 —— 这句话会被立即处理"
-                ),
+                "detail": _say({
+                    "zh": "当前执行仍在进行，助手会在当前步骤完成后读到这条消息。",
+                    "en": "A run is still in progress. The assistant will read this after the current step.",
+                } if occupancy == "working" else {
+                    "zh": "助手当前空闲，会立即处理这条消息。",
+                    "en": "The assistant is idle and will handle this right away.",
+                }, lang),
             },
             {
                 # 如实回执：**已投递**，不是"已处理"。回应会以时间线事件的
@@ -677,6 +682,8 @@ async def project_chat_stream(
                 "status": "delivered",
                 "occupancy": occupancy,
                 "runId": active_run_id,
+                "messageId": interjected_message_id,
+                "messageSequence": interjected_message.sequence if interjected_message else None,
                 "deliveredAt": delivered,
                 "reply": "",
                 "created_project": None,

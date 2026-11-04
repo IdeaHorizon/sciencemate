@@ -1,5 +1,5 @@
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,6 +8,7 @@ import pytest
 from app.models.feed import FeedItem
 from app.services.feed import discovery, literature_projection, profile as profiles
 from nodes.literature.tools import archive_papers, literature_catalog
+from tests._clock import just_now
 
 
 def test_images_complete_in_parallel_and_skip_publication_metadata(monkeypatch, tmp_path):
@@ -53,7 +54,7 @@ async def test_all_current_subscriptions_are_enrolled_and_receive_fair_turns(db_
         key=f'10.1/{index}'
         extra={'catalog_key':key,'literature_catalog':True,'literature_eligible':True,'literature_preparation':'pending'}
         if author: extra['author_identities']=[{'author_id':'A123'}]
-        db_session.add(FeedItem(canonical_key=key,title=title,kind='paper',published_at=datetime.now(UTC),
+        db_session.add(FeedItem(canonical_key=key,title=title,kind='paper',published_at=just_now(),
             domains=domains,venue=venue,authors=[],extra=extra))
         records.append({'doi':key,'title':title,'article_dir':str(tmp_path/str(index)),
             'index_path':str(tmp_path/str(index)/'index.json'), 'literature_preparation':'ready' if index==2 else 'pending'})
@@ -117,7 +118,20 @@ def test_journal_keys_agree_across_subscription_and_domain_mapping(raw, plain):
 
 
 @pytest.mark.asyncio
-async def test_subscription_asset_keys_skip_ready_and_cooling_records(db_session, monkeypatch, tmp_path):
+@pytest.mark.parametrize('clock_step_back', [timedelta(0), timedelta(seconds=2)],
+                         ids=['steady-clock', 'clock-stepped-back'])
+async def test_subscription_asset_keys_skip_ready_and_cooling_records(db_session, monkeypatch, tmp_path,
+                                                                      clock_step_back):
+    """第二组参数是 CI runner 曾经的真实钟：每 ~32 秒往回跳 ~1 秒（见 `tests/_clock.py`）。
+
+    条目若戳成 `datetime.now(UTC)`，被测代码随后取的 `now` 一旦落在跳变之后，四条都成了
+    未来条目、整批被时间窗滤掉 —— 那就是 PR#1276 上那次 `assert set() == {...}`。
+    """
+    class _SteppedBack(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) - clock_step_back
+    monkeypatch.setattr(discovery, 'datetime', _SteppedBack)
     selected = profiles.Profile(user_id='u', journals=frozenset({'waterresearch'}))
     monkeypatch.setattr(profiles, 'build_profile', AsyncMock(return_value=selected))
     monkeypatch.setattr(literature_projection, 'literature_papers_root', lambda: tmp_path)
@@ -131,7 +145,7 @@ async def test_subscription_asset_keys_skip_ready_and_cooling_records(db_session
     for name, preparation, lookup_done, retry_at in rows:
         key = f'10.1/{name}'
         db_session.add(FeedItem(canonical_key=key, title=f'{name} study', kind='paper',
-            published_at=datetime.now(UTC), venue='Water Research',
+            published_at=just_now(), venue='Water Research',
             extra={'catalog_key':key,'literature_eligible':True,'literature_preparation':preparation}))
         catalog.append({'doi':key,'title':f'{name} study','venue':'Water Research',
             'article_dir':str(tmp_path/name),'profile_user_ids':['u'],
@@ -183,7 +197,7 @@ async def test_ready_project_catalog_repairs_pending_feed_projection(db_session,
     monkeypatch.setattr(literature_projection, 'project_literature_catalog', projected)
     key = 'url:project-ready'
     db_session.add(FeedItem(canonical_key=key, title='Fluid particle simulation', kind='paper',
-        published_at=datetime.now(UTC), venue='Example Journal',
+        published_at=just_now(), venue='Example Journal',
         extra={'catalog_key':key,'literature_eligible':True,'literature_preparation':'pending',
                'feed_acquisition_routes':['project_profile'],'profile_user_ids':['u'],
                'discovery_query':'fluid particle'}))

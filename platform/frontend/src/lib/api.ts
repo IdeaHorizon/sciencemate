@@ -324,13 +324,6 @@ export class ApiClient {
     return this.request<RunListResponse>(`/runs?${query.toString()}`);
   }
 
-  /** 节点报告的阻塞（项目级；见 features/execution/lib/blockers）。 */
-  async listProjectBlockers(projectId: string, limit = 50) {
-    return this.request<unknown>(
-      `/projects/${encodeURIComponent(projectId)}/blockers?limit=${limit}`,
-    );
-  }
-
   async getRun(runId: string) {
     return this.request<RunDetailResponse>(`/runs/${encodeURIComponent(runId)}`);
   }
@@ -345,6 +338,8 @@ export class ApiClient {
     data: {
       operation_mode?: "assisted" | "autonomous";
       autonomous_authorized_risk_classes?: string[];
+      /** 模型命令在哪里跑：`local` / `wsl:<发行版>`。服务器先核再存（422 = 这台机器上没有）。 */
+      execution_target?: string;
     },
   ) {
     return this.request<{ status: string }>(`/projects/${id}/config`, {
@@ -430,6 +425,17 @@ export class ApiClient {
   }
 
   // ── Project resources ────────────────────────────────────────
+  async connectSSHResource(projectId: string, data: SSHConnectInput) {
+    return this.request<{ resource: ProjectResource }>(`/projects/${encodeURIComponent(projectId)}/resources/ssh/connect`, {
+      method: "POST", body: JSON.stringify(data),
+    });
+  }
+
+  async operateSSHResource(projectId: string, resourceId: string, data: Record<string, unknown>) {
+    return this.request<SSHOperationResult>(`/projects/${encodeURIComponent(projectId)}/resources/${encodeURIComponent(resourceId)}/ssh`, {
+      method: "POST", body: JSON.stringify(data),
+    });
+  }
   async listProjectResources(
     projectId: string,
     options: { resourceType?: ProjectResourceType; includeDisabled?: boolean } = {},
@@ -875,6 +881,17 @@ export class ApiClient {
     return this.request<FeedItem | null>(`/feed/digests/${encodeURIComponent(domain)}`);
   }
 
+  /**
+   * 文献检索里的一篇收进资讯的「收藏」：后端按 DOI / 链接找到（或建出）那一条论文，再记一次
+   * save。取消收藏走 `undoFeedEngagement(id, "save")`。
+   */
+  async savePaperToFeed(data: SavedPaperRequest) {
+    return this.request<FeedItem>("/feed/saved-papers", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
   async shareFeedLink(data: {
     url: string;
     comment?: string;
@@ -903,14 +920,6 @@ export class ApiClient {
     });
   }
 
-  /** 删掉一条推断出来的方向，并记住别再推。 */
-  async rejectInferredDomain(domain: string) {
-    return this.request<FeedInterests>(
-      `/feed/interests/inferred/${encodeURIComponent(domain)}`,
-      { method: "DELETE" },
-    );
-  }
-
   /**
    * 条目配图的地址。**指向我们自己的后端**，不是出版商。
    *
@@ -918,7 +927,7 @@ export class ApiClient {
    * （IP + Referer）。所以后端代取，前端连外链都拿不到。
    */
   feedImageUrl(itemId: string) {
-    return `${API_BASE}/feed/items/${encodeURIComponent(itemId)}/image?v=2`;
+    return `${API_BASE}/feed/items/${encodeURIComponent(itemId)}/image?v=4`;
   }
 
   async getFeedStatus() {
@@ -959,6 +968,11 @@ export class ApiClient {
       method: "PUT",
       body: JSON.stringify(data),
     });
+  }
+
+  /** 这台机器上命令可以在哪里跑。只在 Windows 上会多出 WSL 发行版。 */
+  async listExecutionTargets() {
+    return this.request<ExecutionTargetChoices>("/execution-targets");
   }
 
   async listModelBackends() {
@@ -1015,8 +1029,8 @@ export class ApiClient {
       if (!(error instanceof ApiError) || error.status !== 404) throw error;
       if (!data.api_key) {
         throw new Error(this.said({
-          zh: "要存下这条连接，得填一个新的 API key。",
-          en: "Enter a new API key to save this backend.",
+          zh: "请填写新的 API 密钥后再保存。",
+          en: "Enter a new API key to save this connection.",
         }));
       }
       await this.addCustomProvider({
@@ -1263,6 +1277,17 @@ export interface RunDetailResponse {
   eventCount: number;
 }
 
+export interface ExecutionTargetChoice {
+  value: string;
+  kind: "local" | "wsl" | "ssh";
+  name: string;
+}
+
+export interface ExecutionTargetChoices {
+  host: string;
+  targets: ExecutionTargetChoice[];
+}
+
 export interface RunListResponse {
   items: ResearchRun[];
   nextCursor: string | null;
@@ -1274,7 +1299,6 @@ export interface CreateProjectRequest {
   research_domain?: string;
   entry_type?: string;
   operation_mode?: string;
-  reporting_level?: string;
   preferred_model?: string;
   /**
    * 放在哪：不给（或空串）= 本机，否则是一条连接的 id。
@@ -1877,6 +1901,32 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 export type ResourceHealth = "online" | "offline" | "unknown";
 export type ProjectResourceType = "storage" | "dataset" | "database" | "compute";
 
+export interface SSHConnectInput {
+  host: string;
+  user_name?: string;
+  port?: number;
+  password?: string;
+  jump?: string;
+  name?: string;
+}
+
+export interface SSHJobRecord {
+  job_id: string;
+  state: string;
+  command: string;
+  cwd: string;
+  stdout?: string;
+  stderr?: string;
+  exit_code?: number | null;
+}
+
+export interface SSHOperationResult extends Partial<SSHJobRecord> {
+  status: string;
+  jobs?: SSHJobRecord[];
+  cpu_count?: number;
+  gpu_csv?: string;
+}
+
 export interface ProjectResource {
   id: string;
   project_id: string;
@@ -2166,6 +2216,11 @@ export interface LiteraturePaper {
   metadata_provenance: Record<string, unknown>;
   publication_category: PublicationCategory;
   exact_title_match: boolean;
+  relevance_assessment?: {
+    tier: "direct" | "background" | "excluded";
+    detail: string; matched_concepts: string[]; missing_concepts: string[];
+    matched_aspects?: string[];
+  };
   local_pdf_url: string | null;
   local_figure_urls: string[];
   school_holdings: string[];
@@ -2196,8 +2251,11 @@ export interface LiteratureTranslateResponse {
   diagnostics: Record<string, unknown>;
 }
 
+export interface LiteratureQueryGroup { label: string; en: string; zh: string }
+
 export interface LiteratureSearchResponse {
   query: string;
+  search_plan?: LiteratureQueryGroup[];
   decomposed_queries: string[];
   papers: LiteraturePaper[];
   total: number;
@@ -2212,6 +2270,15 @@ export interface LiteratureSearchResponse {
   warnings: Array<Record<string, unknown>>;
   from_cache: boolean;
   timings: Record<string, number>;
+  strategy_diagnostics?: {
+    admission?: {
+      candidate_count: number; eligible_count: number; returned_count: number;
+      direct_count?: number; background_count?: number;
+      excluded_by_reason: Record<string, number>;
+      excluded_samples?: Record<string, {title: string; doi?: string; abstract?: string}[]>;
+    };
+    selection_rules?: {mandatory_facets?: string[][]; core_concepts_zh?: string[][]; research_aspects?: string[]; minimum_relevance?: number};
+  };
 }
 
 export type FeedItemKind = "paper" | "release" | "deadline" | "news" | "digest" | "post";
@@ -2239,6 +2306,19 @@ export interface FeedItem {
   extra: Record<string, unknown>;
 }
 
+/** `POST /feed/saved-papers`：文献检索里一篇论文的书目信息。 */
+export interface SavedPaperRequest {
+  title: string;
+  doi: string | null;
+  url: string | null;
+  authors: string[];
+  venue: string | null;
+  /** 检索结果给的发表日期（`2024-05-01`、`2024-5`、`2024` 都行）。 */
+  published: string | null;
+  year: number | null;
+  abstract: string | null;
+}
+
 export interface FeedCard {
   item: FeedItem;
   /** 为什么推给你 —— 点名了重叠的术语，用户扫一眼就能验证真假。 */
@@ -2247,7 +2327,8 @@ export interface FeedCard {
   project_name: string | null;
   /** 今日必读：每天替你挑的少数几条，排在流最前、挂角标。 */
   is_today_pick: boolean;
-  recommendation_sources?: ("domain" | "journal" | "scholar" | "project")[];
+  /** 属于哪几路推荐，至少一路。来源筛选只认它，不从理由的措辞里猜。 */
+  recommendation_sources: ("domain" | "journal" | "scholar" | "project")[];
 }
 
 export interface FeedDomainProgress {
@@ -2503,7 +2584,8 @@ export interface ResearchInstruction {
 }
 
 export interface EffectiveResearchLayer {
-  kind: "institution" | "group" | "personal";
+  /** 只有个人层（机构 / 研究组两层在 RFC X2 就没了）；项目层在项目设置里，不在这份回答里。 */
+  kind: "personal";
   name: string;
   editable: boolean;
   instruction_count: number;

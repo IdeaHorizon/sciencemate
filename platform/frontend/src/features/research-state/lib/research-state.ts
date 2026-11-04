@@ -9,6 +9,7 @@
  */
 
 import type { RecordHead } from "@/lib/api";
+import { say, type Language, type Phrase } from "../../../shared/i18n/language.ts";
 
 /** Analysis 职责所在的节点类型（与后端 ANALYSIS_NODES 一致，hypothesis 优先）。 */
 const ANALYSIS_NODES = ["hypothesis", "analysis"] as const;
@@ -133,4 +134,33 @@ const VERDICT_TONE: Record<string, BadgeTone> = {
 
 export function verdictTone(verdict: string): BadgeTone {
   return VERDICT_TONE[verdict] ?? "muted";
+}
+
+/**
+ * verdict / 假设状态是 Analysis 写进账本的枚举值，界面上换成人话。含义取自
+ * `nodes/hypothesis/harness.yaml` 的「verdict 决定下一步」那一段。表里没有的照原样显示。
+ */
+const VERDICT_LABEL: Record<string, Phrase> = {
+  continue: { zh: "按计划继续", en: "Continue" },
+  pivot: { zh: "调整方向", en: "Pivot" },
+  ready_candidate: { zh: "可以开始写作", en: "Ready to write" },
+  abort: { zh: "终止", en: "Abort" },
+};
+
+export function verdictLabel(verdict: string, lang: Language): string {
+  const label = VERDICT_LABEL[verdict];
+  return label ? say(label, lang) : verdict;
+}
+
+const STATUS_LABEL: Record<string, Phrase> = {
+  active: { zh: "待判定", en: "Open" },
+  supported: { zh: "已支持", en: "Supported" },
+  refuted: { zh: "已推翻", en: "Refuted" },
+  inconclusive: { zh: "无定论", en: "Inconclusive" },
+  withdrawn: { zh: "已撤回", en: "Withdrawn" },
+};
+
+export function hypothesisStatusLabel(status: string, lang: Language): string {
+  const label = STATUS_LABEL[status];
+  return label ? say(label, lang) : status;
 }

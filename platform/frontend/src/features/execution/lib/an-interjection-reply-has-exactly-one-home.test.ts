@@ -16,6 +16,7 @@ import {
   withoutReplyEcho,
 } from "./run-activity-timeline.ts";
 import type { ExecutionEvent } from "./execution-event.ts";
+import { reconcileInterjection, messageRunSegments } from "../../chat/lib/message-run.ts";
 
 /**
  * 插话的答复必须恰好有一个家（#766）。
@@ -55,8 +56,8 @@ test("真数据：锚到插话的答复被窗口让位，且被槽位接住 —�
   );
   // 接住：槽位里有它，而且是那句真答复
   const { replies, receipt } = saidsAnchoredTo(activity.said, INTERJECT_MESSAGE);
-  // 真数据里锚到这条插话的非回执 said 有两条：1692 平台的"已收下"旁注、1694 答复
-  assert.deepEqual(replies.map((item) => item.sequence), [1692, 1694]);
+  // 平台投递回执保留为状态；只有模型的真实答复进入正文。
+  assert.deepEqual(replies.map((item) => item.sequence), [1694]);
   assert.ok(replies.every((item) => item.repliesToMessageId === INTERJECT_MESSAGE));
   assert.match(replies.at(-1)!.text, /收到，这条插得对/);
   // 已经有人开口 → 回执（1693）让位，不再显示"正在处理"
@@ -80,6 +81,20 @@ test("不相干的消息 id 一无所获 —— 判据是精确匹配，不是�
   const { replies, receipt } = saidsAnchoredTo(activity.said, "turn-does-not-exist");
   assert.deepEqual(replies, []);
   assert.equal(receipt, undefined);
+});
+
+test("a live receipt connects the optimistic bubble to its already persisted answer", () => {
+  const activity = projectRunActivity(realEvents());
+  const messages = reconcileInterjection([
+    { id: "start", role: "assistant", text: "Running", runId: ROOT, sequence: 1400 },
+    { id: "temporary-browser-id", role: "user", text: "插一句" },
+    { id: "empty", role: "assistant", text: "" },
+  ], "temporary-browser-id", "empty", {
+    runId: ROOT, messageId: INTERJECT_MESSAGE, messageSequence: 1691,
+  });
+  const mounts = messageRunSegments(messages).filter((segment) => segment.interjection);
+  const answers = mounts.flatMap((mount) => saidsAnchoredTo(activity.said, mount.messageId).replies);
+  assert.deepEqual(answers.map((answer) => answer.sequence), [1694]);
 });
 
 test("接线：插话的窗口实例带 interjectionMessageId，旧的死槽位分支已删", () => {

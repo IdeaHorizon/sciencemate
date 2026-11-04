@@ -155,9 +155,14 @@ def test_real_build_cannot_write_readonly_dependency_or_sibling_node(project_sta
     state.hook_state["path_roles"] = {
         "dependency_root": {"path": str(dependency), "writable": False},
     }
+    # On an allow-list backend the parent containing the read-only hole cannot
+    # create entries. Use a real build child outside that hole, as the tool's
+    # boundary diagnostic requires, and still attempt both forbidden writes.
+    active_build = build / "active-build"
+    active_build.mkdir()
     # Payload-originated writes are intentionally not visible in command text:
     # the real sandbox, not just the shell parser, must refuse them.
-    (build / "Makefile").write_text(
+    (active_build / "Makefile").write_text(
         "all:\n\tif printf BAD > " + shlex.quote(str(dependency / "kept.txt"))
         + "; then exit 31; fi\n\tif printf BAD > " + shlex.quote(str(other_node / "kept.txt"))
         + "; then exit 32; fi\n\tprintf 'BOUNDARY_OK\\n' > built.txt\n"
@@ -165,10 +170,10 @@ def test_real_build_cannot_write_readonly_dependency_or_sibling_node(project_sta
     # Core's allow-list backend preserves a readonly hole by carving the root;
     # existing child files can be written, but parent-level creation can be
     # unavailable. This negative probe does not claim stronger capabilities.
-    (build / "built.txt").write_text("before\n")
-    result = _run(safe_bash._safe_run_bash(state, cmd="make -j1", cwd=str(build), timeout=30))
+    (active_build / "built.txt").write_text("before\n")
+    result = _run(safe_bash._safe_run_bash(state, cmd="make -j1", cwd=str(active_build), timeout=30))
     assert result.get("returncode") == 0, result
-    assert (build / "built.txt").read_text() == "BOUNDARY_OK\n"
+    assert (active_build / "built.txt").read_text() == "BOUNDARY_OK\n"
     assert (dependency / "kept.txt").read_text() == "unchanged\n"
     assert (other_node / "kept.txt").read_text() == "unchanged\n"
 

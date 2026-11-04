@@ -48,7 +48,7 @@ export function SessionEnvironmentBanner({
     mutationFn: (input: { code: string; path: string | null }) => repairSessionEnvironment(projectId, sessionId, input),
     // 没执行成（409 没有这条提案 / 没权限 / 网络）要出声；执行了但返回码非零不是这里的失败，
     // 它是正常结果，回填在条幅里。
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "修复没能执行", en: "The repair could not be run" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "修复失败", en: "Repair failed" })),
     onSettled: () => queryClient.invalidateQueries({ queryKey: qk.sessionEnvironment(projectId, sessionId) }),
   });
 
@@ -86,8 +86,8 @@ export function SessionEnvironmentBanner({
           {repair.data && (
             <span className="session-environment-result">
               {repair.data.returncode === 0
-                ? t({ zh: "已执行，返回码 0。下一轮起跑时会重新核一遍。", en: "Done, exit code 0. It will be re-checked when the next turn starts." })
-                : t({ zh: "执行了，但返回码是 {rc}：{err}", en: "Ran, but the exit code was {rc}: {err}" }, {
+                ? t({ zh: "修复完成。下次执行开始时会重新检查。", en: "Repaired. It will be checked again when the next run starts." })
+                : t({ zh: "修复未成功（返回码 {rc}）：{err}", en: "Repair did not succeed (exit code {rc}): {err}" }, {
                   rc: String(repair.data.returncode ?? "?"), err: repair.data.stderr || repair.data.stdout || "",
                 })}
             </span>
@@ -106,7 +106,7 @@ export function SessionEnvironmentBanner({
             {open ? <ChevronUp size={13} /> : <ChevronDown size={13} />}{t({ zh: "详情", en: "Details" })}
           </button>
           {!model.escalated && (
-            <button type="button" onClick={dismiss} aria-label={t({ zh: "这轮先这样跑", en: "Carry on for now" })} title={t({ zh: "这轮先这样跑；问题变了会再提醒", en: "Carry on for now; you'll be told again if the problem changes" })}>
+            <button type="button" onClick={dismiss} aria-label={t({ zh: "暂时忽略", en: "Dismiss for now" })} title={t({ zh: "暂时忽略，问题有变化时会再次提醒", en: "Dismiss for now; you'll be notified again if the problem changes" })}>
               <X size={13} />
             </button>
           )}

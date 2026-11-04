@@ -2,7 +2,8 @@
 
 import { CircleHelp, ShieldAlert } from "lucide-react";
 import type { ChatPause } from "../types";
-import { useT } from "@/shared/i18n";
+import { decisionChoiceText, decisionQuestion } from "../lib/decision-package";
+import { useLanguage, useT } from "@/shared/i18n";
 
 /**
  * 「这条 run 当时停在这个问题上」—— **记录**，不是入口。
@@ -22,23 +23,24 @@ import { useT } from "@/shared/i18n";
  */
 export function PausedRecord({ pause }: { pause: ChatPause }) {
   const t = useT();
+  const lang = useLanguage();
   const Icon = pause.kind === "permission" ? ShieldAlert : CircleHelp;
   return (
     <section className="human-input-prompt is-readonly kind-record" aria-label={t({ zh: "已记录的问题", en: "Recorded question" })}>
       <header>
         <Icon size={15} aria-hidden="true" />
-        <strong>{t({ zh: "这一轮当时问过", en: "Asked during this turn" })}</strong>
+        <strong>{t({ zh: "执行中提出的问题", en: "Asked during this run" })}</strong>
       </header>
-      <p className="human-input-question">{pause.question}</p>
+      <p className="human-input-question">{decisionQuestion(pause, lang)}</p>
       {pause.options.length > 0 && (
         <ul className="human-input-record-options">
           {pause.options.map((option) => (
-            <li key={option.id}>{option.label}</li>
+            <li key={option.id}>{decisionChoiceText(option.choiceId, option, lang, pause.facts).label}</li>
           ))}
         </ul>
       )}
       <footer>
-        <small>{t({ zh: "问它的那个进程已经不在了，这个问题答不上了 —— 发下一条消息就从断点接着跑。", en: "The process that asked is gone, so this question cannot be answered — send the next message and it resumes." })}</small>
+        <small>{t({ zh: "这次执行已中断，无法再回答这个问题。发送新消息即可从中断处继续。", en: "This run was interrupted, so the question can no longer be answered. Send a new message to continue from where it stopped." })}</small>
       </footer>
     </section>
   );

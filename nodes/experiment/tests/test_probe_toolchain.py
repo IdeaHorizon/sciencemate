@@ -14,8 +14,8 @@ def test_probe_refreshes_canonical_platform_profile_under_build_env(tmp_path, mo
     calls: list[str] = []
     profile = {"schema_version": "1.0", "toolchain": {"gcc": {"path": "/opt/gcc"}}}
 
-    monkeypatch.setattr(pt, "ensure_env_script", lambda got_state: env if got_state is state else None)
-    monkeypatch.setattr(pt, "collect_platform_profile", lambda *, env_path: calls.append(env_path) or profile)
+    monkeypatch.setattr(pt, "existing_env_script", lambda got_state: env if got_state is state else None)
+    monkeypatch.setattr(pt, "collect_platform_profile", lambda *, env_path, state: calls.append(env_path) or profile)
 
     result = asyncio.run(pt._probe_toolchain(state))
 
@@ -32,7 +32,7 @@ def test_probe_refreshes_canonical_platform_profile_under_build_env(tmp_path, mo
 
 def test_probe_rejects_unknown_user_input_without_touching_environment(tmp_path, monkeypatch):
     state = State.new("experiment", tmp_path)
-    monkeypatch.setattr(pt, "ensure_env_script", lambda _state: (_ for _ in ()).throw(AssertionError("must not prepare env")))
+    monkeypatch.setattr(pt, "existing_env_script", lambda _state: (_ for _ in ()).throw(AssertionError("must not prepare env")))
 
     result = asyncio.run(pt._probe_toolchain(state, command="command -v gcc"))
 

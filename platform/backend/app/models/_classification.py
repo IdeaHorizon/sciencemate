@@ -51,6 +51,21 @@ COMMON: dict[str, str] = {
 
 #: 逐表登记。键是列名，值是四类之一。
 BY_TABLE: dict[str, dict[str, str]] = {
+    "cnki_devices": {
+        "name": DECISION, "pair_hash": IDENTITY, "token_hash": IDENTITY,
+        "pair_expires_at": DECISION, "credential_fingerprint": PAST,
+        "claimed_at": PAST, "revoked_at": DECISION,
+        "last_seen_at": PAST, "last_report": PAST,
+    },
+    "cnki_jobs": {
+        "query": DECISION, "field": DECISION, "category": DECISION,
+        "recurring": DECISION, "enabled": DECISION, "result_limit": DECISION,
+        "last_completed_at": PAST, "checkpoint": PAST,
+        "lease_device_id": PAST, "lease_hash": PAST, "lease_until": PAST,
+        "last_report_at": PAST, "last_report": PAST,
+    },
+    "cnki_papers": {"identity": IDENTITY, "metadata_json": PAST, "observed_at": PAST},
+    "cnki_job_papers": {"job_id": IDENTITY, "paper_id": IDENTITY},
     "users": {
         "email": IDENTITY, "hashed_password": DECISION, "display_name": DECISION,
         "role": DECISION, "institution_name": DECISION, "is_active": DECISION, "preferences": DECISION,
@@ -89,6 +104,7 @@ BY_TABLE: dict[str, dict[str, str]] = {
         "harness_overrides": DECISION, "reflection_mode": DECISION,
         "research_intent": DECISION, "notification_channels": DECISION,
         "autonomous_authorized_risk_classes": DECISION,
+        "execution_target": DECISION,
         "max_concurrent_branches": DECISION,
         "cycle_soft_limit": DECISION,
         "cycle_hard_limit": DECISION,

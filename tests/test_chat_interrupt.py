@@ -43,9 +43,11 @@ class _MockLLM:
         self.responses = list(responses)
         self.call_count = 0
         self.seen_systems: list[str] = []
+        self.seen_messages: list[str] = []
 
     async def chat(self, messages, **kw):
         self.call_count += 1
+        self.seen_messages.extend(m.content or "" for m in messages)
         # 收集 system prompt 内容方便 assert
         for m in messages:
             if m.role == "system":
@@ -155,9 +157,8 @@ async def test_handle_interrupt_calls_inject_tool(tmp_path: Path):
     queue = child.hook_state.get("injected_messages") or []
     assert len(queue) == 1
     assert "BAOAB" in queue[0]["content"]
-    # 待命轮的 system prompt：明说自己在待命 + 带 active child 信息
-    assert any("待命" in s for s in llm.seen_systems)
-    assert any(child.run_id in s for s in llm.seen_systems)
+    assert any("独立运行" in s for s in llm.seen_systems)
+    assert any(child.run_id in s for s in llm.seen_messages)
     # 交流记录回主对话，主循环才不会把答过的再答一遍
     parent_injected = parent.hook_state.get("injected_messages") or []
     assert parent_injected and "BAOAB" in parent_injected[0]["content"]
@@ -388,12 +389,8 @@ async def test_handle_interrupt_deferred_note_reaches_transcript(tmp_path: Path,
 # ── 待命轮：子节点跑着时也能顺畅对话（wangd 2026-08-18）────────────────────
 
 @pytest.mark.asyncio
-async def test_standby_turn_gets_read_tools_but_never_write_tools(tmp_path: Path):
-    """子节点持有工作区写入权 → 待命轮**只**拿只读工具 + runtime_control。
-
-    判据是 `replayable_read` 这个声明属性（机械扫盘），不是工具名单 ——
-    名单对新加的工具默认漏过，而漏过的方向是"给了写权限"。
-    """
+async def test_interjection_has_the_normal_authorized_orchestrator_tools(tmp_path: Path):
+    """A running child doesn't remove the scheduler's own scoped tools."""
     from core.bootstrap import bootstrap
     from core.loader import load_harness
     bootstrap()
@@ -422,10 +419,11 @@ async def test_standby_turn_gets_read_tools_but_never_write_tools(tmp_path: Path
     offered = set(seen_tools[0])
     assert "read_artifact" in offered and "search_kb" in offered, offered
     assert "runtime_control" in offered
-    # 写工具一个都不许出现（子节点正持有 Git mutation lane）
-    for forbidden in ("save_artifact", "run_node", "freeze_artifact",
-                       "write_scratchpad", "task"):
-        assert forbidden not in offered, f"{forbidden} 不该出现在待命轮"
+    from core.tool_registry import list_tools_for_node
+    assert offered == {td.name for td in list_tools_for_node(
+        harness.node_type, harness.tools, state=parent,
+    )}
+    assert {"run_bash", "execute_python", "write_file", "task", "run_node"} <= offered
 
 
 @pytest.mark.asyncio
@@ -505,3 +503,194 @@ async def test_standby_turn_carries_the_conversation_context(tmp_path: Path):
     joined = " ".join(seen_user_texts[0])
     assert "已冻结预注册" in joined, "待命轮没带上之前的对话"
     assert "刚才冻结的那几个研究问题" in joined
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("proposal_tail", "approval"), [
+    ("现在补下载并精读关键论文吗？", "可以"),
+    ("选择一：只补下载；选择二：补下载并精读关键论文。用哪种？", "第二种"),
+])
+async def test_consecutive_interjections_keep_the_proposal_and_refresh_progress(
+    tmp_path: Path, proposal_tail: str, approval: str,
+):
+    """A short selection must see the question just displayed, while the main
+    checkpoint remains blocked on its long-running child (RSI incident)."""
+    from core.conversation_store import save_conversation
+    from core.llm import LLMMessage
+
+    chat = _load_chat_module()
+    parent = State.new("_orchestrator", tmp_path / "parent")
+    child = State.new("literature", tmp_path / "child")
+    register_active(ActiveRunInfo(child.run_id, "literature", child))
+    save_conversation(parent, [LLMMessage(role="assistant", content="旧报告：全文仅 3 篇。")])
+    parent.tokens_used = 12345
+    parent.scratchpad = "live notes"
+    parent.hook_state["pending_post_node_flow"] = [{
+        "producing_node": "hypothesis", "decision_state": "action_authorized",
+        "authorized_action": "revise",
+    }]
+    proposal = "核验背景。" * 250 + proposal_tail
+    seen = []
+
+    class Spy:
+        async def chat(self, messages, **kwargs):
+            seen.append([(m.role, m.content or "") for m in messages])
+            return LLMResponse(content=proposal if len(seen) == 1 else "好，按刚才的方案继续。",
+                               tool_calls=[], finish_reason="stop", usage={})
+
+    harness = NodeHarness(node_type="_orchestrator", system_prompt="o", tools=[])
+    child.append_transcript("experiment_progress", stage="补录中", detail="downloaded=3")
+    await chat._handle_interrupt(parent, harness, Spy(), "怎么样了？")
+    child.append_transcript("experiment_progress", stage="补录完成", detail="downloaded=33")
+    await chat._handle_interrupt(parent, harness, Spy(), approval)
+
+    second = "\n".join(text for _, text in seen[1])
+    assert proposal in second  # the choice at the END must survive, past 800 chars
+    assert "怎么样了？" in second and approval in second
+    assert "downloaded=33" in second and child.run_id in second
+    assert "action_authorized" in second and "revise" in second
+    assert parent.tokens_used == 12345 and parent.scratchpad == "live notes"
+    pending = parent.hook_state["injected_messages"]
+    assert len(pending) == 2 and proposal in pending[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_failed_control_is_audit_data_and_never_a_success_reply(tmp_path: Path):
+    chat = _load_chat_module()
+    parent = State.new("_orchestrator", tmp_path / "parent")
+    child = State.new("literature", tmp_path / "child")
+    register_active(ActiveRunInfo(child.run_id, "literature", child))
+    call = {"id": "missing-child", "type": "function", "function": {
+        "name": "runtime_control", "arguments": json.dumps({
+            "action": "inject", "child_run_id": "does-not-exist", "content": "精读正文",
+        }),
+    }}
+    llm = _MockLLM([
+        LLMResponse(content=None, tool_calls=[call], finish_reason="tool_calls", usage={}),
+        LLMResponse(content="这次调整未送达，我会核对任务状态。", tool_calls=[],
+                    finish_reason="stop", usage={}),
+    ])
+    harness = NodeHarness(node_type="_orchestrator", system_prompt="o", tools=["runtime_control"])
+    await chat._handle_interrupt(parent, harness, llm, "可以", reply_to_message_id="user-2")
+    events = [json.loads(line) for line in parent.transcript_path.read_text().splitlines()]
+    replies = [e["text"] for e in events if e["event"] == "interrupt_reply"]
+    assert replies == ["这次调整未送达，我会核对任务状态。"]
+    control = next(e for e in events if e["event"] == "interrupt_control")
+    assert control["status"] == "error" and control["replies_to_message_id"] == "user-2"
+    assert "请求失败" in parent.hook_state["injected_messages"][-1]["content"]
+
+
+def test_reading_standby_history_does_not_restore_old_live_state(tmp_path: Path):
+    from core.conversation_store import load_conversation, save_conversation
+    from core.llm import LLMMessage
+
+    parent = State.new("_orchestrator", tmp_path)
+    parent.hook_state["injected_messages"] = []
+    save_conversation(parent, [LLMMessage(role="user", content="研究 RSI")])
+    pending = [{"source": "user_interject", "content": "刚才已同意方案二"}]
+    parent.hook_state["injected_messages"] = pending
+    parent.tokens_used = 12345
+    history = load_conversation(parent, restore_state=False)
+    assert history[0].content == "研究 RSI"
+    assert parent.hook_state["injected_messages"] is pending
+    assert parent.tokens_used == 12345
+
+
+@pytest.mark.asyncio
+async def test_interjection_can_do_its_own_work_while_child_keeps_running(tmp_path):
+    chat = _load_chat_module()
+    parent = State.new("_orchestrator", tmp_path / "parent")
+    child = State.new("literature", tmp_path / "child")
+    register_active(ActiveRunInfo(child.run_id, "literature", child))
+    call = {"id": "notes", "type": "function", "function": {
+        "name": "write_scratchpad",
+        "arguments": json.dumps({"content": "先检查执行环境，再定规模"}),
+    }}
+    llm = _MockLLM([
+        LLMResponse(content="我先记下新的安排。",
+                    tool_calls=[call], finish_reason="tool_calls", usage={}),
+        LLMResponse(content="安排已记录，文献任务继续执行。",
+                    tool_calls=[], finish_reason="stop", usage={}),
+    ])
+    harness = NodeHarness(node_type="_orchestrator", system_prompt="保持用户指定的研究方向",
+                          tools=["write_scratchpad"], max_turns=3)
+    await chat._handle_interrupt(parent, harness, llm, "先检查环境", reply_to_message_id="user-env")
+    assert parent.scratchpad == "先检查执行环境，再定规模"
+    assert find_child_state(child.run_id) is child
+    assert not child.hook_state.get("kill_signal")
+    assert any("保持用户指定的研究方向" in prompt for prompt in llm.seen_systems)
+    notice = parent.hook_state["injected_messages"][-1]
+    assert notice["tool_results"][0]["result"]["status"] == "success"
+    assert "这件事已经处理过" not in notice["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["run_node", "request_human_input", "present_decision_package"])
+async def test_serial_requests_keep_arguments_for_the_main_loop_without_running_twice(
+    tmp_path, monkeypatch, tool,
+):
+    chat = _load_chat_module()
+    parent = State.new("_orchestrator", tmp_path / "parent")
+    child = State.new("hypothesis", tmp_path / "child")
+    register_active(ActiveRunInfo(child.run_id, "hypothesis", child))
+    args = {"node_type": "experiment", "node_inputs": {"task": "核对服务器可达性"}}
+    call = {"id": "later", "type": "function", "function": {
+        "name": tool, "arguments": json.dumps(args),
+    }}
+    executed = []
+
+    async def spy_execute(*a, **kw):
+        executed.append((a, kw))
+        return {"status": "success"}
+
+    monkeypatch.setattr("core.tool_registry.execute", spy_execute)
+    llm = _MockLLM([
+        LLMResponse(content=None, tool_calls=[call], finish_reason="tool_calls", usage={}),
+        LLMResponse(content="已安排，当前子任务返回后执行。",
+                    tool_calls=[], finish_reason="stop", usage={}),
+    ])
+    harness = NodeHarness(node_type="_orchestrator", system_prompt="o", tools=[tool], max_turns=3)
+    await chat._handle_interrupt(parent, harness, llm, "核对一下服务器")
+    assert executed == []
+    notice = parent.hook_state["injected_messages"][-1]
+    assert notice["tool_results"] == [{"tool": tool, "arguments": args, "result": {
+        "status": "deferred", "note": "请求已交回主循环，当前子节点返回后继续处理；尚未执行。",
+    }}]
+    assert "deferred/error/pause 都不算完成" in notice["content"]
+
+    class NextReply:
+        async def chat(self, messages, **kwargs):
+            context = "\n".join(m.content or "" for m in messages)
+            assert "核对服务器可达性" in context and "deferred" in context
+            return LLMResponse(content="检查尚未执行。",
+                               tool_calls=[], finish_reason="stop", usage={})
+
+    await chat._handle_interrupt(parent, harness, NextReply(), "刚才检查好了么？")
+
+
+@pytest.mark.asyncio
+async def test_failed_work_remains_visible_to_the_main_loop(tmp_path, monkeypatch):
+    chat = _load_chat_module()
+    parent = State.new("_orchestrator", tmp_path / "parent")
+    child = State.new("literature", tmp_path / "child")
+    register_active(ActiveRunInfo(child.run_id, "literature", child))
+    call = {"id": "probe", "type": "function", "function": {
+        "name": "run_bash", "arguments": json.dumps({"cmd": "probe-test-host"}),
+    }}
+
+    async def failed(*args, **kwargs):
+        return {"status": "error", "error": "network_access=False", "host_network_inferred": False}
+
+    monkeypatch.setattr("core.tool_registry.execute", failed)
+    llm = _MockLLM([
+        LLMResponse(content=None, tool_calls=[call], finish_reason="tool_calls", usage={}),
+        LLMResponse(content="当前通道没有网络权限，检查尚未完成。",
+                    tool_calls=[], finish_reason="stop", usage={}),
+    ])
+    harness = NodeHarness(node_type="_orchestrator", system_prompt="o",
+                          tools=["run_bash"], max_turns=3)
+    await chat._handle_interrupt(parent, harness, llm, "检查主机")
+    notice = parent.hook_state["injected_messages"][-1]
+    assert notice["tool_results"][0]["result"]["status"] == "error"
+    assert "network_access=False" in notice["content"]
+    assert "这件事已经处理过" not in notice["content"]

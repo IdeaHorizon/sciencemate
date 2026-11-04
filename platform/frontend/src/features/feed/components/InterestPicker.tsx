@@ -3,12 +3,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, ChevronRight, Search, X } from "lucide-react";
 import { Button, Skeleton } from "@/shared/ui";
-import { pushError } from "@/stores/notification";
 import { say, useLanguage } from "@/shared/i18n";
 import { fc } from "../lib/feed-copy";
 import { useFeedDomains, useFeedInterests, useSaveInterests } from "../hooks/useFeed";
 
-/** 手动选择订阅学科，独立于课题自动挖掘。 */
+/** 手动选择订阅学科，独立于「根据项目自动推荐」。 */
 export function InterestPicker({
   onDone,
   onChange,
@@ -74,14 +73,8 @@ export function InterestPicker({
     });
   };
 
-  const submit = async () => {
-    try {
-      await save.mutateAsync(selected);
-      onDone?.();
-    } catch (caught) {
-      pushError(caught instanceof Error ? caught.message : fc("picker.save_failed", lang));
-    }
-  };
+  // 失败由 useSaveInterests 的 onError 说一次；这里再弹一条，同一个错误就是两条 toast。
+  const submit = () => save.mutate(selected, { onSuccess: () => onDone?.() });
 
   const dialogGroup = groups.find((group) => group.archive === activeGroup);
 
@@ -99,8 +92,8 @@ export function InterestPicker({
       </div>
 
       {selected.length > 0 && (
-        <section className="feed-selected-domains" aria-label={say({ zh: "已选方向", en: "Selected areas" }, lang)}>
-          <header><Check size={14} aria-hidden /><span>{say({ zh: "已选方向", en: "Selected areas" }, lang)}</span></header>
+        <section className="feed-selected-domains" aria-label={say({ zh: "已选学科", en: "Selected fields" }, lang)}>
+          <header><Check size={14} aria-hidden /><span>{say({ zh: "已选学科", en: "Selected fields" }, lang)}</span></header>
           <div className="feed-chip-row">
             {selected.map((domain) => {
               const index = interests.data?.domains.indexOf(domain) ?? -1;
@@ -121,7 +114,7 @@ export function InterestPicker({
           return <button key={group.archive} type="button" className="feed-group-toggle"
             aria-haspopup="dialog" onClick={() => setActiveGroup(group.archive)}>
             <span className="feed-group-label">{group.label}</span>
-            {(hits > 0 || selected.includes(group.archive)) && <span className="feed-group-hit">{selected.includes(group.archive) ? say({ zh: "整个大类", en: "Entire field" }, lang) : say({ zh: "已选 {count}", en: "{count} selected" }, lang, { count: hits })}</span>}
+            {(hits > 0 || selected.includes(group.archive)) && <span className="feed-group-hit">{selected.includes(group.archive) ? say({ zh: "全部", en: "All" }, lang) : say({ zh: "已选 {count}", en: "{count} selected" }, lang, { count: hits })}</span>}
             <ChevronRight size={15} aria-hidden />
           </button>;
         })}
@@ -147,7 +140,6 @@ export function InterestPicker({
           {selected.length > 0 && (
             <Button
               variant="ghost"
-              title={fc("picker.clear_hint", lang)}
               onClick={() => { onChange?.(); setSelected([]); }}
             >
               {fc("picker.clear", lang)}
@@ -158,7 +150,7 @@ export function InterestPicker({
           {showSkip && (
             // "什么都不订，只看全站" 也是一个明确的选择。存空列表照样算
             // onboarded —— 否则每次进来都会再弹一次问卷。
-            <Button variant="ghost" onClick={() => { onChange?.(); setSelected([]); void save.mutateAsync([]).then(() => onDone?.()); }}>
+            <Button variant="ghost" onClick={() => { onChange?.(); setSelected([]); save.mutate([], { onSuccess: () => onDone?.() }); }}>
               {fc("picker.skip", lang)}
             </Button>
           )}

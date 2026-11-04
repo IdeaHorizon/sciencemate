@@ -797,6 +797,8 @@ class State:
         # run 目录此前由 artifacts_dir 属性顺手建出来；现在没有那个副作用，
         # 记录事件的一方自己保证目录在。
         self.transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        from core.secrets import redact
+        record = redact(record)
         with self.transcript_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
@@ -896,7 +898,8 @@ class State:
 
     def write_kb(self, entity: str, record: dict,
                      *, curator_run_id: str | None = None,
-                     skip_semantic_dedup: bool = False) -> tuple[dict, bool]:
+                     skip_semantic_dedup: bool = False,
+                     ingest_point: str = "kb.write") -> tuple[dict, bool]:
         """v3 KB 写入：按 record.scope 路由，自动校验 + 填默认 + merge upsert。
 
         record 必须含 scope（或调用前用 smart_default_scope 填）。
@@ -909,7 +912,13 @@ class State:
           - cosine < 0.80 → 当成真新
 
         `skip_semantic_dedup=True` 跳过（curator revert / 内部 helper 用）。
+
+        `ingest_point`：谁在往 KB 里写（见证上记的入库点）。晋升 / 采纳传
+        `kb.promote` / `kb.adopt`，其余都是 `kb.write`。
         """
+        from shared.lib.external_content import (
+            WITNESS_FIELD, merge_witnesses, witness_at_ingest,
+        )
         from shared.lib.kb_schema import (
             compute_kb_id, fill_defaults, merge_kb_record, validate_record,
             smart_default_scope,
@@ -928,6 +937,18 @@ class State:
         # scope 智能默认
         if "scope" not in record:
             record["scope"] = smart_default_scope(entity, record)
+
+        # #730：外部内容进 KB 的咽喉（论文切片、网页、别的项目晋升上来的结论都从这里
+        # 进）。不拦 —— 只有 harness 控制标签在这里就地中和（存储里从此没有活的
+        # `</framework-notice>`），模式表看到的东西落成见证跟着记录走；读的时候由数据框
+        # 呈现、判决现算。必须在算 id 之前：内容寻址算的是真正落盘的那份文字。
+        # 调用方带进来的见证（晋升时从 project 记录带过来的）并进去，不会被洗掉。
+        _carried = record.get(WITNESS_FIELD)
+        record, _witness = witness_at_ingest(
+            {k: v for k, v in record.items() if k != WITNESS_FIELD},
+            via=ingest_point, prior=[_carried])
+        if _witness:
+            record[WITNESS_FIELD] = _witness
 
         # 算 id（内容寻址）
         kb_id = compute_kb_id(entity, record)
@@ -985,6 +1006,10 @@ class State:
             if kb_id in existing_by_id:
                 idx, old = existing_by_id[kb_id]
                 merged = merge_kb_record(entity, old, record, now=now)
+                # 见证只累积：同一条再写一遍不能把上次看到的东西洗掉。
+                _w = merge_witnesses(old.get(WITNESS_FIELD), record.get(WITNESS_FIELD))
+                if _w:
+                    merged[WITNESS_FIELD] = _w
                 existing[idx] = merged
                 self._write_kb_records(target_path, existing)
                 final = merged

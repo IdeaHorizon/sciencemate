@@ -220,6 +220,19 @@ async def _compose_review_critique(
         return {"status": "success", "draft": _summarize(d)}
 
     if action == "set_verdict":
+        if verdict in ("approve", "approve_with_revisions"):
+            # 副作用检查（#973）：用户要求不修改文件，被审 run 却改了用户源文件 ——
+            # 这是框架算出来的事实（core.side_effect_contract），不是审稿的判断。
+            # 2026-09-12 那次审稿正是在这种局面下写了「全程只读」并以 0.92 approve。
+            from core.side_effect_contract import producer_side_effect_check
+
+            _check = producer_side_effect_check(state)
+            if _check and _check.get("contradiction"):
+                return {"status": "error", "error": (
+                    "这份审查不能 approve：用户要求不修改文件，被审 run 却改动了用户源文件"
+                    f"（{'、'.join(_check.get('user_source') or [])}）。"
+                    f"实际改动：{_check.get('counts_text')}。"
+                    "verdict 改用 major_concerns 或 block，并把这条记成 critical concern。")}
         if verdict is not None:
             d["verdict"] = verdict
         if confidence is not None:
@@ -416,6 +429,11 @@ async def _compose_review_critique(
     }
     recommended = d.get("recommended_action") or {}
     review_incomplete = not d.get("verdict") or not recommended.get("action")
+    # 副作用检查盖章（#973）：用户的副作用约束 + 被审 run 实际改了什么，框架算、
+    # 框架盖，与 rubric_source 同一条理由 —— 让模型手写的字段会成为废纸。
+    from core.side_effect_contract import producer_side_effect_check
+
+    side_effect_check = producer_side_effect_check(state)
     content_obj = {
         "verdict": d.get("verdict"),
         "confidence": d.get("confidence"),
@@ -429,6 +447,8 @@ async def _compose_review_critique(
         "advisories": advisories,
         "_composed_by": "compose_review_critique",   # 审计：框架拼装，非模型单发
     }
+    if side_effect_check is not None:
+        content_obj["side_effect_check"] = side_effect_check
     if d.get("per_dimension_scores"):
         content_obj["per_dimension_scores"] = d["per_dimension_scores"]
 
@@ -459,6 +479,12 @@ async def _compose_review_critique(
         "review_subject": review_subject,
         "advisories": advisories,
     }
+    if side_effect_check is not None:
+        metadata["side_effect_check"] = {
+            "promised_read_only": side_effect_check.get("promised_read_only"),
+            "counts": side_effect_check.get("counts"),
+            "contradiction": side_effect_check.get("contradiction"),
+        }
     if review_incomplete:
         # 账真：不完整的评审如实盖章——冻结门读这个字段区分「审过」与
         # 「审了一半」，缺 verdict 的 critique 不冒充完整评审。

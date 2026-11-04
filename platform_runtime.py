@@ -1045,40 +1045,80 @@ class _ConnectionRequestSource(RequestSource):
             with contextlib.suppress(OSError):
                 wfile.write(json.dumps({"type": "hello_ok"}) + "\n")
                 wfile.flush()
+        # 换连接是**一个**动作：谁是当前连接、转发面指向谁、从哪一刻起没人看，
+        # 三样在同一把锁里一起换（为什么必须如此见 `_drop`）。
         with self._lock:
             previous = (self._conn, self._rfile, self._wfile)
             self._conn, self._rfile, self._wfile = conn, rfile, wfile
             self._adopted_anyone = True
             # 为了认身份读掉的那一行（老后端的第一条请求）还回去。
             self._pushback = pushback
-        for handle in previous:
-            if handle is not None:
-                with contextlib.suppress(OSError):
-                    handle.close()
-        self._on_connect(wfile)      # 转发面换到新连接
-        with self._lock:
+            # 被顶掉的那根先断线（`shutdown` 不碰文件对象的锁）：堵在它上面的
+            # 读与写当场返回 —— 下一行换转发面要拿发射器的锁，而那把锁可能正被
+            # 一次写进旧连接的发射攥着。
+            self._sever(previous[0])
+            self._on_connect(wfile)      # 转发面换到新连接
             self._alone_since = None
-        self._connected.set()
+            self._connected.set()
+        self._hang_up(previous)
 
     def was_ever_adopted(self) -> bool:
         with self._lock:
             return self._adopted_anyone
 
     def _drop(self, rfile) -> None:
-        """当前连接读到了 EOF。摘掉转发面，回到"没人在说话"。"""
+        """当前连接读到了 EOF。摘掉转发面，回到"没人在说话"。
+
+        ## 放手与接手不许交错（#1253）
+
+        这里原来分三段：锁里摘掉连接 → 锁外换转发面（`_on_connect(None)`）→
+        再进锁记"从此没人看"。`_adopt`（另一条线程）也是同样的三段。于是旧后端
+        的 EOF 还在这里处理、新后端已经接进来时，两边可以交错成：
+
+            摘掉旧连接 → [新连接装上、转发面指向它、记"有人看"] → 转发面置空、记"没人看"
+
+        新后端的命令照样读得到（读者拿的是新连接），**回话却全进了 /dev/null**：
+        它接回时问的那句 status 等满 10 秒没有回音 → 接不回来；而 worker 自己以为
+        没人在看，60 秒宽限一到就停下手里的研究、空闲的直接退场 —— 一个后端明明
+        连着。CI 上 `-n 6` 时「后端收摊放手后立刻接回」两次撞进这个窗口
+        （`test_a_docked_worker_survives_backend_shutdown`）；生产里后端重启后
+        马上接回、或者接回撞上旧后端的连接刚断，是同一个窗口。
+
+        所以三样在同一把锁里一起换，**挂断放在最后、锁外**：对面读到 EOF 的那一刻，
+        这边的放手已经做完 —— 那正是后端放手时等的回执（`_SocketChannel.let_go`）。
+        """
         with self._lock:
             if self._rfile is not rfile:
                 return               # 已经被新连接顶掉了，什么都别做
             handles = (self._conn, self._rfile, self._wfile)
             self._conn = self._rfile = self._wfile = None
             self._connected.clear()
+            self._on_connect(None)   # 事件从此只落盘，直到下一个后端接进来
+            self._alone_since = time.monotonic()
+        self._hang_up(handles)
+
+    @staticmethod
+    def _sever(conn) -> None:
+        """断线：两个方向都关掉。堵在这根连接上的读写（别的线程里的）当场返回。
+
+        只关文件对象不够：`makefile` 出来的读流在另一条线程里堵着 `readline` 时，
+        它的 `close()` 要等那把缓冲区锁 —— 对面活着又不说话，就是永远。
+        """
+        if conn is None:
+            return
+        import socket as _socket
+
+        with contextlib.suppress(OSError):
+            conn.shutdown(_socket.SHUT_RDWR)
+
+    @classmethod
+    def _hang_up(cls, handles) -> None:
+        """挂断一根连接（`(conn, rfile, wfile)`）：先断线，再关三个句柄。"""
+        cls._sever(handles[0])
         for handle in handles:
             if handle is not None:
                 with contextlib.suppress(OSError):
                     handle.close()
-        self._on_connect(None)       # 事件从此只落盘，直到下一个后端接进来
-        with self._lock:
-            self._alone_since = time.monotonic()
 
     def watcher_gone_since(self) -> float | None:
         """见基类。**从绑好那一刻起**算，不管有没有人接进来过。
@@ -1124,10 +1164,7 @@ class _ConnectionRequestSource(RequestSource):
         with self._lock:
             handles = (self._conn, self._rfile, self._wfile)
             self._conn = self._rfile = self._wfile = None
-        for handle in handles:
-            if handle is not None:
-                with contextlib.suppress(OSError):
-                    handle.close()
+        self._hang_up(handles)
         self._forget_address()
 
 
@@ -1886,19 +1923,8 @@ def clean_session_title(raw: str) -> str:
 
 
 def _publication_category(paper: Any) -> str:
-    source = str(getattr(paper, "source", "") or "").lower().split("/", 1)[0]
-    if source in {"arxiv", "biorxiv", "medrxiv"}:
-        return "预印本"
-    if source == "pubmed":
-        return "期刊文章"
-    value = str(getattr(paper, "pub_type", "") or "").lower()
-    if "book" in value:
-        return "书籍"
-    if "proceedings" in value or "conference" in value:
-        return "会议文章"
-    if value in {"journal", "journal-article", "article", "article-journal"}:
-        return "期刊文章"
-    return "其他"
+    from shared.contrib.publication_categories import publication_category
+    return publication_category(paper)
 
 
 def _normalized_academic_title(value: str) -> str:
@@ -1910,6 +1936,16 @@ def _clean_literature_text(value: Any) -> str:
     """把来源返回的 JATS/HTML 变成人可读纯文本，不改写或总结内容。"""
     text = str(value or "")
     text = re.sub(r"<\s*(?:script|style)[^>]*>.*?<\s*/\s*(?:script|style)\s*>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    # Keep scientific subscripts/superscripts before stripping markup. Plain
+    # tag removal turns V<sub>OC</sub> into "V OC" and cm<sup>-2</sup> into
+    # "cm -2", obscuring which quantity a value belongs to during translation.
+    for tag, marker in (("sub", "_"), ("sup", "^")):
+        pattern = rf"\s*<\s*(?:[\w-]+:)?{tag}\b[^>]*>\s*(.*?)\s*<\s*/\s*(?:[\w-]+:)?{tag}\s*>"
+        text = re.sub(
+            pattern,
+            lambda match: marker + re.sub(r"<[^>]+>", "", match.group(1)).strip(),
+            text, flags=re.IGNORECASE | re.DOTALL,
+        )
     text = re.sub(r"<[^>]+>", " ", text)
     return " ".join(html.unescape(text).split())
 
@@ -1928,9 +1964,10 @@ def _cached_abstract_matches_title(title: str, abstract: str) -> bool:
     return bool(title_terms & abstract_terms)
 
 
-def _index_paper(paper: Any, query: str) -> dict[str, Any]:
+def _index_paper(paper: Any, query: str, *, relevance: float | None = None) -> dict[str, Any]:
     from nodes.literature.tools.filter import compute_relevance_score, quality_score_breakdown
-    relevance = compute_relevance_score(paper, query)
+    if relevance is None:
+        relevance = compute_relevance_score(paper, query)
     breakdown = quality_score_breakdown(paper, relevance)
     title = _clean_literature_text(getattr(paper, "title", ""))
     abstract = _clean_literature_text(getattr(paper, "abstract", ""))
@@ -2015,6 +2052,10 @@ def _academic_core_terms(query: str) -> list[str]:
         r"[A-Za-z][A-Za-z0-9-]{2,}|\d+(?:\.\d+)?|[\u4e00-\u9fff]{2,}",
         query or "",
     )
+    # A two-letter concept (AI, pH) can be the entire user query. Keep it as
+    # an exact anchor instead of treating an otherwise valid query as empty.
+    if not terms and re.fullmatch(r"[A-Za-z]{2}", (query or "").strip()):
+        terms = [(query or "").strip()]
     return list(dict.fromkeys(
         term.lower()
         for term in terms
@@ -2073,7 +2114,7 @@ def _academic_comparison_facets(
     return [facets[0] + facets[1], *facets[2:]]
 
 
-def _paper_matches_academic_facets(paper: dict[str, Any], facets: list[list[str]]) -> bool:
+def _paper_matches_academic_facets(paper: dict[str, Any], facets: list[list[str]], *, strict_core: bool = False) -> bool:
     if not facets:
         return True
     text = f"{paper.get('title') or ''} {paper.get('abstract') or ''}".lower()
@@ -2122,7 +2163,7 @@ def _paper_matches_academic_facets(paper: dict[str, Any], facets: list[list[str]
         # A third OR group often lists alternative measurement methods. A
         # sparse abstract may name neither, while still studying the target.
         # Keep it for ranking but do not make it a hard admission condition.
-        if index == 2 and len(facet) > 1 and not shared and all(len(item.split()) > 1 for item in facet):
+        if not strict_core and index == 2 and len(facet) > 1 and not shared and all(len(item.split()) > 1 for item in facet):
             continue
         if shared and not all(
             _academic_term_matches(term, title + " " + str(paper.get("abstract") or "")[:350].lower())
@@ -2255,11 +2296,15 @@ def _academic_leading_title_coverage(
     return sum(_academic_term_matches(term, title) for term in leading) / len(leading)
 
 
-def _academic_english_query_ok(value: str) -> bool:
-    """Reject untranslated or single-word fallbacks for a full Chinese question."""
+def _academic_english_query_ok(value: str, original_query: str = "") -> bool:
+    """Allow a one-word term only when the source is a bare short topic."""
+    from nodes.literature.tools.strategy_generator import is_short_standalone_topic
+
     return (
         not re.search(r"[\u4e00-\u9fff]", value)
-        and len(_academic_core_terms(value)) >= 2
+        and len(_academic_core_terms(value)) >= (
+            1 if is_short_standalone_topic(original_query) else 2
+        )
     )
 
 
@@ -2278,6 +2323,10 @@ def _academic_strategy_queries(strategy: dict[str, Any], original_query: str) ->
     ignored it and used Chinese ``search_queries`` for English metadata, then
     required those Chinese phrases to appear in English titles/abstracts.
     """
+    if strategy.get("bilingual_queries"):
+        # The semantic plan already separates questions and preserves all core
+        # concepts. Do not add truncated prefixes or the original paragraph.
+        return list(dict.fromkeys(p["en"] for p in strategy["bilingual_queries"]))[:6]
     raw = strategy.get("search_queries") or []
     queries = list(dict.fromkeys(
         " ".join(str(item.get("query") or "").split())
@@ -2290,7 +2339,7 @@ def _academic_strategy_queries(strategy: dict[str, Any], original_query: str) ->
     english = " ".join(str(strategy.get("english_query") or "").split())
     # A single broad acronym such as "DNA" is not a translation of a detailed
     # research question. Keep it out of the anchor position.
-    if not _academic_english_query_ok(english):
+    if not _academic_english_query_ok(english, original_query):
         return queries[:6] or [original_query]
 
     facets = _academic_boolean_facets(english)
@@ -2314,12 +2363,22 @@ def _academic_strategy_queries(strategy: dict[str, Any], original_query: str) ->
     return [*international, original_query][:6]
 
 
+_ACADEMIC_HYPHEN_MAP = str.maketrans({char: "-" for char in "‐‑﹣－"})
+
+
 def _academic_term_matches(term: str, text: str) -> bool:
     """数字完整匹配；普通词匹配子串及常见属性名词的形容词词形。"""
+    # Publishers commonly use U+2010/U+2011 for compound words, while search
+    # strategies use ASCII hyphens. These are typography, not different terms.
+    term = term.translate(_ACADEMIC_HYPHEN_MAP)
+    if "-" in term:
+        text = text.translate(_ACADEMIC_HYPHEN_MAP)
     if term and term[0].isdigit():
         return re.search(rf"(?<!\d){re.escape(term)}(?!\d)", text) is not None
     if not term:
         return False
+    if len(term) == 2 and term.isalpha():
+        return re.search(rf"(?<![A-Za-z]){re.escape(term)}(?![A-Za-z])", text) is not None
     if term in text:
         return True
     # Noun/adjective forms convey the same property (tolerance/tolerant,
@@ -2430,19 +2489,22 @@ def _academic_named_concept_gate(paper: dict[str, Any], terms: list[str]) -> boo
 
 def _academic_exclusion_reason(
     paper: dict[str, Any], *, core_terms=None, mandatory_facets=None,
-    period_focus=None, method_terms=None,
+    period_focus=None, method_terms=None, strict_core=False,
 ) -> str | None:
     """First failing admission gate; counts are mutually exclusive."""
     if _academic_nonresearch_record(paper):
         return "nonresearch"
     if paper.get("exact_title_match"):
         return None
+    assessment = paper.get("relevance_assessment")
+    if assessment:
+        return assessment["exclusion_reason"]
     relevance = float(((paper.get("score_breakdown") or {}).get("raw") or {}).get("relevance", 0.0) or 0.0)
     if not relevance >= _ACADEMIC_SEARCH_MIN_RELEVANCE:
         return "relevance"
     if not _paper_has_anchor_coverage(paper, core_terms or []):
         return "anchor"
-    if not _paper_matches_academic_facets(paper, mandatory_facets or []):
+    if not _paper_matches_academic_facets(paper, mandatory_facets or [], strict_core=strict_core):
         return "facets"
     if not _paper_has_academic_period(paper, period_focus):
         return "period"
@@ -2461,15 +2523,17 @@ def _select_academic_search_results(
     mandatory_facets: list[list[str]] | None = None,
     period_focus: tuple[str, str, list[str]] | None = None,
     method_terms: list[str] | None = None,
+    strict_core: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
     """先做相关性准入，再按综合质量排序；返回结果绝不补位。"""
     eligible = [paper for paper in papers if _academic_exclusion_reason(
         paper, core_terms=core_terms, mandatory_facets=mandatory_facets,
-        period_focus=period_focus, method_terms=method_terms,
+        period_focus=period_focus, method_terms=method_terms, strict_core=strict_core,
     ) is None]
     # 综合质量分仍然决定相关论文之间的质量顺序，但额外保留 35% 给原始问题
     # 的要素覆盖，避免某个宽泛扩展查询把只沾边的高质量论文抬到最前面。
     for paper in eligible:
+        assessment = paper.get("relevance_assessment") or {}
         intent_coverage = _academic_intent_coverage(
             paper, core_terms or []
         )
@@ -2477,6 +2541,10 @@ def _select_academic_search_results(
         facet_title_coverage = _academic_facet_title_coverage(
             paper, mandatory_facets or []
         )
+        if assessment:
+            intent_coverage = assessment["coverage"]
+            facet_title_coverage = assessment["title_coverage"]
+            paper["intent_coverage"] = intent_coverage
         period_score = _academic_period_focus_score(paper, period_focus)
         leading_title = _academic_leading_title_coverage(paper, core_terms or [])
         paper["ranking_score"] = round(
@@ -2497,6 +2565,7 @@ def _select_academic_search_results(
     eligible.sort(
         key=lambda paper: (
             bool(paper.get("exact_title_match")),
+            (paper.get("relevance_assessment") or {}).get("tier") != "background",
             float(paper.get("ranking_score") or 0.0),
             float(paper.get("score") or 0.0),
         ),
@@ -2601,6 +2670,25 @@ async def _add_chinese_titles(
     missing = [title for title in titles if title not in cached]
     if not missing:
         return {"status": "cache_hit", "cached": len(cached), "translated": 0}
+
+    from nodes.literature.tools.index_translation import configured_provider, translate_index_texts
+    if configured_provider() != "llm":
+        provider_details: dict[str, Any] = {}
+        try:
+            fresh = await translate_index_texts(missing, diagnostics=provider_details)
+        except Exception as exc:
+            return {"status": "failed", "cached": len(cached), "translated": 0,
+                    "error_types": [type(exc).__name__]}
+        if local_index is not None and fresh:
+            try:
+                local_index.save_title_translations(fresh)
+            except Exception:
+                pass
+        for paper in english:
+            paper["title_zh"] = cached.get(str(paper["title"])) or fresh.get(str(paper["title"]))
+        return {"status": "ok" if len(fresh) == len(missing) else "partial" if fresh else "failed",
+                "cached": len(cached), "translated": len(fresh),
+                "provider": configured_provider(), "provider_details": provider_details}
 
     from core.llm import LLMClient, LLMMessage, opening_system_prompt
 
@@ -2843,6 +2931,26 @@ async def _add_chinese_abstracts(
     if not missing_papers:
         return {"status": "cache_hit", "cached": len(cached), "translated": 0}
 
+    from nodes.literature.tools.index_translation import configured_provider, translate_index_texts
+    if configured_provider() != "llm":
+        missing = list(dict.fromkeys(str(paper["abstract"]) for paper in missing_papers))
+        provider_details: dict[str, Any] = {}
+        try:
+            fresh = await translate_index_texts(missing, diagnostics=provider_details)
+        except Exception as exc:
+            return {"status": "failed", "cached": len(cached), "translated": 0,
+                    "error_types": [type(exc).__name__]}
+        if local_index is not None and fresh:
+            try:
+                local_index.save_abstract_translations(fresh)
+            except Exception:
+                pass
+        for paper in targets:
+            paper["abstract_zh"] = cached.get(str(paper["abstract"])) or fresh.get(str(paper["abstract"]))
+        return {"status": "ok" if len(fresh) == len(missing) else "partial" if fresh else "failed",
+                "cached": len(cached), "translated": len(fresh),
+                "provider": configured_provider(), "provider_details": provider_details}
+
     # 完整摘要不能截断；按字符预算分批，防止一页 20 篇的输出超过模型上限。
     batches: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
@@ -2942,11 +3050,52 @@ async def _add_chinese_abstracts(
 _LITERATURE_TRANSLATION_TIMEOUT_SECONDS = 110.0
 
 
-async def _bounded_translation_step(operation) -> dict[str, Any]:
+def _academic_search_warnings(audits: list[dict]) -> list[dict]:
+    """One visible warning per source/failure; per-query audits remain intact."""
+    warnings, seen = [], set()
+    for audit in audits:
+        for original in audit.get("warnings", []):
+            warning = dict(original)
+            sources = tuple(sorted(warning.get("sources", [])))
+            if warning.get("http_status") == 429:
+                key = (sources, 429)
+                warning["detail"] = (
+                    f"{'、'.join(sources)} 请求受到限流（HTTP 429），本轮结果可能缺少部分候选。"
+                )
+            else:
+                key = (sources, warning.get("code"), warning.get("detail"))
+            if key not in seen:
+                seen.add(key)
+                warnings.append(warning)
+    return warnings
+
+
+def _record_literature_performance(operation: str, **metrics: Any) -> None:
+    """Keep recent aggregate timings locally, without paper bodies or credentials."""
     try:
-        return await asyncio.wait_for(operation, timeout=_LITERATURE_TRANSLATION_TIMEOUT_SECONDS)
+        from core.paths import literature_cache_dir
+        directory = literature_cache_dir() / "performance"
+        directory.mkdir(parents=True, exist_ok=True)
+        destination = directory / f"{time.time_ns()}-{uuid.uuid4().hex}.json"
+        row = {"operation": operation, "at": datetime.now(UTC).isoformat(), **metrics}
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, delete=False) as handle:
+            json.dump(row, handle, ensure_ascii=False)
+            temporary = Path(handle.name)
+        temporary.replace(destination)
+        for old in sorted(directory.glob("*.json"))[:-200]:
+            old.unlink(missing_ok=True)
+    except Exception:
+        # A diagnostic write must never turn a successful search into an error.
+        pass
+
+
+async def _bounded_translation_step(operation) -> dict[str, Any]:
+    started = time.perf_counter()
+    try:
+        result = await asyncio.wait_for(operation, timeout=_LITERATURE_TRANSLATION_TIMEOUT_SECONDS)
     except TimeoutError:
-        return {"status": "failed", "error_type": "TimeoutError"}
+        result = {"status": "failed", "error_type": "TimeoutError"}
+    return {**result, "elapsed_seconds": round(time.perf_counter() - started, 3)}
 
 
 async def _add_combined_chinese_translations(papers, local_index, *, titles=True, abstracts=True):
@@ -3022,6 +3171,7 @@ async def _add_combined_chinese_translations(papers, local_index, *, titles=True
 
 async def run_literature_translate_page(request: dict[str, Any]) -> dict[str, Any]:
     """翻译当前可见页；独立于搜索请求，失败或缓慢都不阻塞索引展示。"""
+    started = time.perf_counter()
     if not isinstance(request, dict) or not isinstance(request.get("papers"), list):
         raise RequestError("invalid_request", "papers must be an array")
     raw_papers = request["papers"][:20]
@@ -3055,7 +3205,9 @@ async def run_literature_translate_page(request: dict[str, Any]) -> dict[str, An
     from nodes.literature.tools.local_index import get_index
     local_index = get_index()
     combined_result = None
-    if request.get("combine_translation") and not request.get("generate_summaries", True):
+    from nodes.literature.tools.index_translation import configured_provider
+    if (request.get("combine_translation") and not request.get("generate_summaries", True)
+            and configured_provider() == "llm"):
         combined_result = await _bounded_translation_step(_add_combined_chinese_translations(
             papers, local_index, titles=request.get("translate_titles", True),
             abstracts=request.get("translate_abstracts", True)))
@@ -3072,11 +3224,11 @@ async def run_literature_translate_page(request: dict[str, Any]) -> dict[str, An
         )
     if local_index is not None:
         local_index.record_paper_translations(papers)
-    failed = any(result.get("status") in {"failed", "empty_response"}
+    failed = any(result.get("status") in {"failed", "empty_response", "partial"}
                  for result in (title_result, abstract_result, summary_result))
     has_translation = any(paper.get("title_zh") or paper.get("abstract_zh") or paper.get("ai_summary")
                           for paper in papers)
-    return {
+    result = {
         "translations": [
             {
                 "key": paper["key"],
@@ -3094,6 +3246,39 @@ async def run_literature_translate_page(request: dict[str, Any]) -> dict[str, An
             "summaries": summary_result,
         },
     }
+    _record_literature_performance(
+        "translation", request_id=request.get("request_id"),
+        paper_count=len(papers), provider=configured_provider(),
+        status=result["status"], elapsed_seconds=round(time.perf_counter() - started, 3),
+        fields={
+            name: {key: value for key, value in field.items() if key in {
+                "status", "cached", "translated", "generated", "elapsed_seconds", "provider_details",
+            }}
+            for name, field in (("titles", title_result), ("abstracts", abstract_result), ("summaries", summary_result))
+        },
+    )
+    return result
+
+
+async def run_literature_search_plan(request: dict[str, Any]) -> dict[str, Any]:
+    from nodes.literature.tools.academic_strategy import generate_academic_strategy
+    query = " ".join(str(request.get("query") or "").split())
+    if not query or len(query) > 2000:
+        raise RequestError("invalid_query", "请输入不超过 2000 字的检索问题")
+    strategy, diagnostics = await asyncio.to_thread(generate_academic_strategy, _academic_strategy_question(query))
+    plan = strategy.get("bilingual_queries") or []
+    if not plan:
+        _record_literature_performance("plan", query=query, status="failed", strategy_diagnostics=diagnostics)
+        status = diagnostics.get("translation_request_status")
+        message = ("模型生成中英文检索词时输出被截断，未能在自动恢复时限内生成完整结果，请稍后重试。"
+                   if diagnostics.get("translation_status") == "truncated_output" else
+                   "模型已返回内容，但中英文检索词未通过内容校验，请重试。"
+                   if diagnostics.get("translation_status") == "invalid_output" else
+                   "生成中英文检索词时模型响应超时，请稍后重试。" if status in {"read_timeout", "connect_timeout"} else
+                   "模型未返回有效的中英文检索词，请稍后重试。")
+        raise RequestError("strategy_translation_failed", message,
+                           details={"status": diagnostics.get("translation_request_status")})
+    return {"query": query, "search_plan": plan}
 
 
 async def run_literature_search(request: dict[str, Any], progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
@@ -3151,20 +3336,57 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
             **extra,
         })
 
-    report("strategy", "正在拆解研究问题，生成检索词")
+    from nodes.literature.tools.search_engines import CrossrefSearch, SearchManager
+    from nodes.literature.tools.local_index import get_index
+
+    def lookup_indexed_title():
+        try:
+            return get_index().find_exact_title(query)
+        except Exception:
+            # An unavailable local index must not prevent ordinary remote search.
+            return []
+
+    title_lookup_started = time.perf_counter()
+    known_title_papers = await asyncio.to_thread(lookup_indexed_title)
+    timings["indexed_title_lookup"] = round(time.perf_counter() - title_lookup_started, 3)
+
+    async def lookup_exact_title():
+        # This request uses the original input, so it does not need to wait for
+        # the model. Keep its results separate until the normal merge point.
+        import httpx
+        lookup_started = time.perf_counter()
+        try:
+            if known_title_papers:
+                return known_title_papers, None
+            async with httpx.AsyncClient(follow_redirects=True) as client:
+                return await CrossrefSearch(client).search_title(
+                    query, rows=min(limit, 30),
+                ), None
+        except Exception as exc:
+            return [], type(exc).__name__
+        finally:
+            timings["exact_title"] = round(time.perf_counter() - lookup_started, 3)
+
+    report("strategy", "已匹配库内完整标题，继续拆解问题并检索相关文献" if known_title_papers
+           else "正在拆解研究问题，生成检索词")
+    exact_title_task = asyncio.create_task(lookup_exact_title())
+    strategy_started = time.perf_counter()
     try:
-        from nodes.literature.tools.strategy_generator import generate_strategy_detailed
+        from nodes.literature.tools.academic_strategy import generate_academic_strategy
+        # A question can also be a paper's title. Preserve the exact hit as
+        # an additional candidate, without replacing the question's strategy.
         strategy, diagnostics = await asyncio.to_thread(
-            generate_strategy_detailed,
+            generate_academic_strategy,
             _academic_strategy_question(query),
         )
-        # strategy_generator already owns one bounded recovery attempt. Retrying the
-        # whole generator here repeated both model calls, doubled the worst-case
-        # latency, and did unnecessary work for a valid one-query strategy.
-        translation_valid = (
+        # The generator owns bounded recovery; restarting it here would repeat
+        # the same model calls and multiply both latency and upstream load.
+        translation_valid = bool(strategy.get("bilingual_queries")) or (
             not re.search(r"[\u4e00-\u9fff]", query)
-            or _academic_english_query_ok(str(strategy.get("english_query") or ""))
+            or _academic_english_query_ok(str(strategy.get("english_query") or ""), query)
         )
+        if diagnostics.get("bilingual_plan_required") and not strategy.get("bilingual_queries"):
+            translation_valid = False
         if not translation_valid:
             semantic_issues = diagnostics.get(
                 f"translation_attempt_{diagnostics.get('translation_attempts')}_semantic_issues"
@@ -3173,11 +3395,46 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
             finish_reason = diagnostics.get(
                 f"translation_attempt_{final_attempt}_finish_reason"
             )
+            http_status = diagnostics.get(
+                f"translation_attempt_{final_attempt}_http_status"
+            )
+            request_status = diagnostics.get("translation_request_status")
+            strategy_elapsed = round(time.perf_counter() - strategy_started, 3)
+            if http_status == 429:
+                message = "检索词生成所用的模型服务返回限流（HTTP 429），请稍后重试。"
+            elif http_status in {401, 403}:
+                message = f"检索词生成所用的模型服务拒绝了访问（HTTP {http_status}），请检查模型凭据或权限。"
+            elif request_status in {"connect_timeout", "read_timeout", "write_timeout", "pool_timeout"}:
+                message = (
+                    f"检索词生成所用的模型服务响应超时"
+                    f"（{final_attempt or 1} 次请求，累计 {strategy_elapsed:.1f} 秒），请稍后重试。"
+                )
+            elif http_status and http_status >= 400:
+                message = f"检索词生成所用的模型服务请求失败（HTTP {http_status}），请检查模型服务。"
+            elif finish_reason == "length":
+                message = "模型生成中英文检索词时输出被截断，未能在自动恢复时限内生成完整结果，请稍后重试。"
+            elif diagnostics.get("translation_status") == "request_failed":
+                message = (
+                    "模型未返回英文检索词正文，请稍后重试。"
+                    if request_status == "ok" else
+                    "检索词生成所用的模型服务未能完成请求，请检查模型连接后重试。"
+                )
+            else:
+                message = (
+                    "模型已返回内容，但检索词未通过内容校验，请重试本次学术检索。"
+                    + (f"（校验：{','.join(map(str, semantic_issues))}）" if semantic_issues else "")
+                    + (f"（模型结束原因：{finish_reason}）" if finish_reason else "")
+                )
+            _record_literature_performance(
+                "search", request_id=request.get("request_id"), query=query,
+                status="failed", failed_stage="strategy", error_code="strategy_translation_failed",
+                timings={**timings, "strategy_generation": strategy_elapsed,
+                         "total": round(time.perf_counter() - started, 3)},
+                strategy_diagnostics=diagnostics,
+            )
             raise RequestError(
                 "strategy_translation_failed",
-                "未能生成有效的英文检索词，请重试本次学术检索。"
-                + (f"（校验：{','.join(map(str, semantic_issues))}）" if semantic_issues else "")
-                + (f"（模型结束原因：{finish_reason}）" if finish_reason else ""),
+                message,
                 details={
                     "strategy_status": diagnostics.get("status"),
                     "translation_status": diagnostics.get("translation_status"),
@@ -3185,16 +3442,32 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
                     "translation_attempts": diagnostics.get("translation_attempts"),
                     "semantic_issues": semantic_issues,
                     "finish_reason": finish_reason,
+                    "http_status": http_status,
+                    "elapsed_seconds": strategy_elapsed,
                 },
             )
         queries = _academic_strategy_queries(strategy, query)
         diagnostics["strategy_english_query"] = str(strategy.get("english_query") or "")[:300]
         diagnostics["strategy_translation_valid"] = translation_valid
-    except RequestError:
+    except (RequestError, asyncio.CancelledError):
+        exact_title_task.cancel()
+        await asyncio.gather(exact_title_task, return_exceptions=True)
         raise
-    except Exception:
-        queries, diagnostics = [query], {"status": "strategy_exception"}
-    from nodes.literature.tools.search_engines import CrossrefSearch, SearchManager
+    except Exception as exc:
+        exact_title_task.cancel()
+        await asyncio.gather(exact_title_task, return_exceptions=True)
+        raise RequestError("strategy_generation_failed", "检索计划生成失败，请重试。") from exc
+    search_plan = strategy.get("bilingual_queries") or []
+    if search_plan:
+        report("search_plan", f"已按研究问题生成 {len(search_plan)} 组中英文检索词",
+               search_plan=search_plan)
+    diagnostics["indexed_exact_title_matches"] = len(known_title_papers)
+    timings["strategy_generation"] = round(time.perf_counter() - strategy_started, 3)
+    _record_literature_performance(
+        "strategy", request_id=request.get("request_id"), query=query,
+        status=diagnostics.get("status"), elapsed_seconds=timings["strategy_generation"],
+        strategy_diagnostics=diagnostics,
+    )
 
     def source_progress(event: dict[str, Any]) -> None:
         # 单个远程来源的开始/完成顺序取决于网络响应速度，会在同一组查询内
@@ -3241,9 +3514,14 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
         manager.local_index.register_harvest_query(query)
         for item in queries:
             manager.local_index.register_harvest_query(item)
-    # 学术搜索缓存命中时直接复用；未命中访问五个检索源。
-    # 不把整个本地 catalog 作为普通检索结果，避免旧年份记录污染结果。
-    sources = {"arxiv", "biorxiv", "medrxiv", "pubmed", "crossref", "cnki", "openalex"}
+    # 完整标题命中补充确定的候选，同时照常检索相关文献。
+    sources = {
+        "arxiv", "biorxiv", "medrxiv", "pubmed", "crossref", "cnki", "openalex",
+    }
+    if search_plan:
+        # CNKI uses the separate managed-browser job queue, initiated by the
+        # search-plan event; do not also invoke the legacy cookie search here.
+        sources.discard("cnki")
     all_papers, audits = [], []
     exact_title_keys: set[str] = set()
     journal_recall_keys: set[str] = set()
@@ -3252,16 +3530,10 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
     slow_abstract_sources = {"publisher_landing", "oa_pdf_discovery"}
     report("exact_title", "正在按原始输入执行精确标题检索")
     try:
-        import httpx
-
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            title_results = await CrossrefSearch(client).search_title(
-                query,
-                rows=min(limit, 30),
-            )
+        title_results, title_error = await exact_title_task
         normalized_input = _normalized_academic_title(query)
         for paper in title_results:
-            if _normalized_academic_title(str(getattr(paper, "title", "") or "")) == normalized_input:
+            if known_title_papers or _normalized_academic_title(str(getattr(paper, "title", "") or "")) == normalized_input:
                 key = (getattr(paper, "doi", "") or "").strip().lower()
                 if not key:
                     key = "title:" + " ".join(
@@ -3271,8 +3543,10 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
         all_papers.extend(title_results)
         report(
             "exact_title",
+            f"原始标题检索暂不可用：{title_error}" if title_error else
             f"原始标题检索完成，找到 {len(exact_title_keys)} 篇精确同名记录",
             exact_title_matches=len(exact_title_keys),
+            **({"error_type": title_error} if title_error else {}),
         )
     except Exception as exc:
         report(
@@ -3318,6 +3592,8 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
                 enrich_metadata=False,
             )
 
+        journal_audit: dict[str, Any] = {"status": "not_requested", "raw_count": 0}
+
         async def search_journals():
             # Respect the same source policy as the primary query. Chinese-only
             # CNKI queries must not silently trigger broad Crossref retrieval.
@@ -3334,6 +3610,7 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
                         rows=journal_recall_limit,
                         publication_types=("journal-article",),
                     )
+                journal_audit.update(status="ok", raw_count=len(journal_results))
                 report(
                     "journal_recall",
                     f"第 {idx}/{len(queries)} 组期刊专用召回完成：{len(journal_results)} 篇",
@@ -3343,9 +3620,16 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
                     elapsed_seconds=round(time.perf_counter() - journal_started, 3),
                 )
             except Exception as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                journal_audit.update(
+                    status="error", error_type=type(exc).__name__,
+                    http_status=status,
+                )
                 report(
                     "journal_recall",
-                    f"第 {idx}/{len(queries)} 组期刊专用召回暂不可用：{type(exc).__name__}",
+                    f"第 {idx}/{len(queries)} 组 Crossref 期刊补充检索"
+                    + ("受到限流（HTTP 429），继续检索其他来源" if status == 429 else
+                       f"暂不可用：HTTP {status}" if status else f"暂不可用：{type(exc).__name__}"),
                     query_index=idx,
                     query_count=len(queries),
                     error_type=type(exc).__name__,
@@ -3371,7 +3655,20 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
         query_batch = [*results, *journal_results]
 
         all_papers.extend(query_batch)
-        audits.append(results.audit_dict())
+        audit = results.audit_dict()
+        audit["journal_recall"] = journal_audit
+        if journal_audit["status"] == "error":
+            status = journal_audit.get("http_status")
+            audit.setdefault("warnings", []).append({
+                "code": "journal_recall_unavailable", "sources": ["crossref"],
+                "http_status": status,
+                "detail": (
+                    "Crossref 期刊补充检索失败"
+                    + (f"（HTTP {status}）" if status else "")
+                    + "，本轮结果可能缺少部分候选。"
+                ),
+            })
+        audits.append(audit)
         report(
             "search",
             f"第 {idx}/{len(queries)} 组检索完成，多源 {len(results)} 篇 + 期刊补充 {len(journal_results)} 篇",
@@ -3383,7 +3680,7 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
         )
     finish_stage("source_search")
     post_started = time.perf_counter()
-    report("dedup", f"六组检索已完成，开始对累计 {len(all_papers)} 条记录全局去重", raw_count=len(all_papers))
+    report("dedup", f"{len(queries)} 组检索已完成，开始对累计 {len(all_papers)} 条记录全局去重", raw_count=len(all_papers))
     merged_papers = manager._merge_results([], all_papers)
     unique = {
         ((getattr(paper, "doi", "") or "").strip().lower()
@@ -3392,11 +3689,11 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
         if ((getattr(paper, "doi", "") or "").strip()
             or (getattr(paper, "title", "") or "").strip())
     }
-    # Index 级复用：本次候选集合仍完全来自远程检索；本地库只能按身份
-    # 补字段，不能添加候选，也不参与来源排名。这样复用的是论文 Index，
-    # 不是某个查询上次返回的答案。
+    # Index 级复用：主题查询候选来自远程，完整标题查询可直接定位库内记录。
+    # 其余本地论文只按身份补字段，不添加候选。
     local_index_hits = 0
     local_index_complete_hits = 0
+    local_index_hit_keys: set[str] = set()
     local_index_complete_keys: set[str] = set()
     if manager.local_index and unique:
         cached_by_key = manager.local_index.get_papers_by_identity(list(unique.values()))
@@ -3410,6 +3707,7 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
             if cached_paper is None:
                 continue
             local_index_hits += 1
+            local_index_hit_keys.add(key)
             for field in reusable_fields:
                 current = getattr(remote_paper, field, None)
                 cached_value = getattr(cached_paper, field, None)
@@ -3435,7 +3733,7 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
             (
                 f"候选 Index 本地命中 {local_index_hits}/{len(unique)} 篇，"
                 f"完整 {local_index_complete_hits} 篇、不完整 "
-                f"{local_index_hits - local_index_complete_hits} 篇；仅完整命中跳过补齐"
+                f"{local_index_hits - local_index_complete_hits} 篇；库内命中均复用，不重复补齐"
             ),
             candidate_count=len(unique),
             cache_hit_count=local_index_hits,
@@ -3443,14 +3741,21 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
             cache_miss_count=len(unique) - local_index_hits,
         )
 
-    # 本地完整命中才跳过补齐；命中但缺摘要/作者等核心字段的记录仍参加本轮
-    # 多源补齐。同一次检索中缓存只复用已有字段，不能阻断其他来源补摘要。
+    # Ordinary searches enrich newly discovered papers only. Existing records
+    # retain missing fields too; absence alone must not trigger repeated lookups.
+    # Fresh metadata returned by this search's sources is still merged above.
     relevance_queries = list(dict.fromkeys([query, *queries]))
     anchor_terms = _academic_core_terms(queries[0])
     mandatory_facets = _academic_boolean_facets(
         str(strategy.get("english_query") or queries[0])
     )
     mandatory_facets = _academic_comparison_facets(mandatory_facets, query)
+    if search_plan:
+        # Unlike legacy heuristic facets, the structured core contains only
+        # required concepts. Preserve every one, including fourth/later groups.
+        mandatory_facets = [[" ".join(t.lower() for t in re.findall(r"[A-Za-z][A-Za-z0-9-]*|\d+(?:\.\d+)?", term)
+                                      if t.lower() not in _ACADEMIC_QUERY_STOPWORDS) for term in group]
+                            for group in strategy["concept_groups"]]
     period_focus = _academic_period_focus(
         str(strategy.get("english_query") or queries[0])
     )
@@ -3460,7 +3765,7 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
     obvious_missing = []
     fallback_missing = []
     for key, paper in unique.items():
-        if key in local_index_complete_keys:
+        if key in local_index_hit_keys:
             continue
         # 摘要用于相关度判断；作者、年份、期刊和链接用于完整 Index 展示。
         # 任一核心字段缺失都进入补齐池，不因检索源已经返回标题而假装完整。
@@ -3542,11 +3847,17 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
     def score_unique_papers() -> list[dict[str, Any]]:
         scored = []
         for key, paper in unique.items():
-            best_query = max(
-                relevance_queries,
-                key=lambda candidate: compute_relevance_score(paper, candidate),
-            )
-            indexed = _index_paper(paper, best_query)
+            assessment = None
+            if search_plan:
+                from nodes.literature.tools.bilingual_strategy import scoring_query
+                from nodes.literature.tools.academic_admission import assess_concepts
+                best_query = scoring_query(paper, strategy["concept_groups"])
+                assessment = assess_concepts(paper, strategy, _ACADEMIC_SEARCH_MIN_RELEVANCE)
+            else:
+                best_query = max(relevance_queries, key=lambda candidate: compute_relevance_score(paper, candidate))
+            indexed = _index_paper(paper, best_query, relevance=assessment["relevance"] if assessment else None)
+            if assessment:
+                indexed["relevance_assessment"] = assessment
             indexed["exact_title_match"] = key in exact_title_keys
             scored.append(indexed)
         return scored
@@ -3554,6 +3865,8 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
     scored_papers = score_unique_papers()
     # 中文原始问题不会逐字出现在英文论文里；此时第一组英文检索词就是等价锚点。
     anchor_query = queries[0] if re.search(r"[\u4e00-\u9fff]", query) else query
+    if search_plan:
+        anchor_query = " ".join(group[0] for group in strategy["concept_groups"])
     papers, low_relevance_count = _select_academic_search_results(
         scored_papers,
         limit=limit,
@@ -3561,6 +3874,7 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
         mandatory_facets=mandatory_facets,
         period_focus=period_focus,
         method_terms=period_method_terms,
+        strict_core=bool(search_plan),
     )
 
     finish_stage("initial_scoring")
@@ -3575,7 +3889,7 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
         key = (str(indexed.get("doi") or "").strip().lower()
                or "title:" + " ".join(str(indexed.get("title") or "").lower().split()))
         raw_paper = unique.get(key)
-        if key in local_index_complete_keys:
+        if key in local_index_hit_keys:
             continue
         if not raw_paper or not str(getattr(raw_paper, "doi", "") or "").strip():
             continue
@@ -3680,30 +3994,18 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
             mandatory_facets=mandatory_facets,
             period_focus=period_focus,
             method_terms=period_method_terms,
+            strict_core=bool(search_plan),
         )
     if manager.local_index and unique:
         manager.local_index.add_papers(list(unique.values()), query)
 
     finish_stage("final_enrichment_and_rescoring")
-    title_translation_started = time.perf_counter()
-    report(
-        "translation",
-        f"正在翻译 {len(papers)} 篇论文的标题",
-        target_count=len(papers),
-    )
-    title_translation = await _add_chinese_titles(papers, manager.local_index)
-    report(
-        "translation",
-        (
-            f"标题翻译完成：缓存命中 {title_translation.get('cached', 0)} 篇，"
-            f"新翻译 {title_translation.get('translated', 0)} 篇"
-        ),
-        target_count=len(papers),
-        cached_count=title_translation.get("cached", 0),
-        translated_count=title_translation.get("translated", 0),
-        translation_status=title_translation.get("status"),
-        elapsed_seconds=round(time.perf_counter() - title_translation_started, 3),
-    )
+    # Search returns the Index first. The UI translates only the visible page,
+    # while the shared SQLite cache still supplies translations from earlier runs.
+    report("translation", "检索结果已就绪；当前页标题和摘要按需翻译", target_count=len(papers))
+    if manager.local_index and hasattr(manager.local_index, "hydrate_translations"):
+        manager.local_index.hydrate_translations(papers)
+        manager.local_index.record_paper_translations(papers)
 
     finish_stage("title_translation")
     if manager.local_index and hasattr(manager.local_index, "hydrate_translations"):
@@ -3752,6 +4054,7 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
             candidate, core_terms=_academic_core_terms(anchor_query),
             mandatory_facets=mandatory_facets, period_focus=period_focus,
             method_terms=period_method_terms,
+            strict_core=bool(search_plan),
         )
         if reason:
             exclusion_counts[reason] = exclusion_counts.get(reason, 0) + 1
@@ -3763,9 +4066,24 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
         "eligible_count": len(scored_papers) - sum(exclusion_counts.values()),
         "returned_count": len(papers), "excluded_samples": exclusion_samples,
         "counting": "first_failing_gate",
+        "direct_count": sum((p.get("relevance_assessment") or {}).get("tier") != "background" for p in papers),
+        "background_count": sum((p.get("relevance_assessment") or {}).get("tier") == "background" for p in papers),
     }
     diagnostics["source_audits"] = audits
-    warnings = [w for a in audits for w in a.get("warnings", [])]
+    diagnostics["metadata_reuse"] = {
+        "cached_count": local_index_hits,
+        "cached_with_missing_fields": local_index_hits - local_index_complete_hits,
+        "enrichment_target_count": len(enrichment_targets),
+        "final_enrichment_target_count": len(final_missing_targets),
+    }
+    diagnostics["selection_rules"] = {
+        "decomposed_queries": queries, "mandatory_facets": mandatory_facets,
+        "minimum_relevance": _ACADEMIC_SEARCH_MIN_RELEVANCE,
+        "core_concepts_zh": strategy.get("core_concepts_zh", []),
+        "background_optional_concepts": strategy.get("background_optional_concepts", []),
+        "research_aspects": [a["label"] for a in strategy.get("research_aspects", [])],
+    }
+    warnings = _academic_search_warnings(audits)
     if low_relevance_count:
         warnings.append({
             "code": "low_relevance_candidates_excluded",
@@ -3788,7 +4106,28 @@ async def run_literature_search(request: dict[str, Any], progress: Callable[[dic
     )
     finish_stage("finalize")
     timings["total"] = round(time.perf_counter() - started, 3)
-    return {"query": query, "decomposed_queries": queries, "papers": papers, "total": len(papers), "candidate_count": len(scored_papers), "excluded_low_relevance": low_relevance_count, "minimum_relevance": _ACADEMIC_SEARCH_MIN_RELEVANCE, "required_core_terms": _academic_core_terms(queries[0]), "source_counts": source_counts, "requested_sources": sorted(sources), "attempted_sources": sorted({s for a in audits for s in a.get("attempted_sources", [])}), "unavailable_sources": sorted({s for a in audits for s in a.get("unavailable_sources", [])}), "warnings": warnings, "from_cache": all(bool(a.get("from_cache")) for a in audits) if audits else False, "search_mode": "remote", "timings": timings, "strategy_diagnostics": {k:v for k,v in diagnostics.items() if k != "started_at"}}
+    _record_literature_performance(
+        "search", request_id=request.get("request_id"), query=query,
+        timings=timings, candidate_count=len(scored_papers), returned_count=len(papers),
+        index_cache_hits=local_index_hits, complete_index_cache_hits=local_index_complete_hits,
+        metadata_reuse=diagnostics["metadata_reuse"],
+        selection_rules=diagnostics["selection_rules"],
+        admission={k: v for k, v in diagnostics["admission"].items() if k != "excluded_samples"},
+        category_counts={
+            category: sum(p.get("publication_category") == category for p in papers)
+            for category in sorted({str(p.get("publication_category") or "") for p in papers})
+        },
+        source_status=[
+            {"primary": {
+                source: {key: value for key, value in detail.items()
+                         if key in {"status", "raw_count", "deduped_count", "elapsed_seconds", "http_status"}}
+                for source, detail in audit.get("source_diagnostics", {}).items()
+             },
+             "journal_recall": audit.get("journal_recall", {})}
+            for audit in audits
+        ],
+    )
+    return {"query": query, "search_plan": search_plan, "decomposed_queries": queries, "papers": papers, "total": len(papers), "candidate_count": len(scored_papers), "excluded_low_relevance": low_relevance_count, "minimum_relevance": _ACADEMIC_SEARCH_MIN_RELEVANCE, "required_core_terms": _academic_core_terms(queries[0]), "source_counts": source_counts, "requested_sources": sorted(sources), "attempted_sources": sorted({s for a in audits for s in a.get("attempted_sources", [])}), "unavailable_sources": sorted({s for a in audits for s in a.get("unavailable_sources", [])}), "warnings": warnings, "from_cache": all(bool(a.get("from_cache")) for a in audits) if audits else False, "search_mode": "remote", "timings": timings, "strategy_diagnostics": {k:v for k,v in diagnostics.items() if k != "started_at"}}
 
 
 _FEED_DIGEST_SYSTEM = (
@@ -3824,7 +4163,10 @@ async def run_feed_digest(request: dict[str, Any]) -> dict[str, Any]:
         raise RequestError("invalid_items", "items must be a non-empty list")
     domain_label = str(request.get("domain_label") or "").strip() or "该领域"
 
+    from shared.lib.external_content import read_view, render_frame
+
     lines: list[str] = []
+    witnesses: list[tuple[str, dict | None]] = []
     for index, entry in enumerate(entries[:30], start=1):
         if not isinstance(entry, dict):
             continue
@@ -3835,10 +4177,17 @@ async def run_feed_digest(request: dict[str, Any]) -> dict[str, Any]:
         venue = str(entry.get("venue") or "").strip()
         lines.append(f"[{index}] {title}" + (f"（{venue}）" if venue else "")
                      + (f"\n    {summary}" if summary else ""))
+        persisted = entry.get("witness")
+        witnesses.append((f"[{index}]", read_view(
+            {"title": title, "summary": summary, "venue": venue},
+            persisted if isinstance(persisted, dict) else None)))
     if not lines:
         raise RequestError("invalid_items", "no item carried a usable title")
 
     from core.llm import LLMClient, LLMMessage
+
+    # 材料是外部作者写的（#730）：只许装在数据框里进 prompt，入库见证一并呈现。
+    materials = render_frame("\n".join(lines), via="feed", witnesses=witnesses)
 
     client = LLMClient()
     response = await client.chat(
@@ -3846,7 +4195,7 @@ async def run_feed_digest(request: dict[str, Any]) -> dict[str, Any]:
             LLMMessage(role="system", content=_FEED_DIGEST_SYSTEM),
             LLMMessage(
                 role="user",
-                content=f"领域：{domain_label}\n\n材料：\n" + "\n".join(lines),
+                content=f"领域：{domain_label}\n\n材料：\n" + materials,
             ),
         ],
         # 简报本身几百字，其余留给推理模型的思考 token —— 它们同样算在
@@ -3976,6 +4325,12 @@ async def run_feed_curate_profile(request: dict[str, Any]) -> dict[str, Any]:
     catalog = "\n".join(
         f"  {entry}" for entry in (str(c).strip() for c in candidates) if entry
     )
+    # 收藏的论文标题是外部作者写的（#730）：装进数据框再进 prompt。
+    from shared.lib.external_content import read_view, render_frame
+
+    saved_block = (render_frame("\n".join(f"  {value}" for value in saved_examples),
+                                via="feed", witnesses=[(None, read_view(saved_examples))])
+                   if saved_examples else "  （无）")
 
     from core.llm import LLMClient, LLMMessage
 
@@ -3989,7 +4344,7 @@ async def run_feed_curate_profile(request: dict[str, Any]) -> dict[str, Any]:
                          + ("\n".join(f"  {value}" for value in selected) or "  （未选择）")
                          + "\n\n他手上的课题：\n" + "\n".join(lines)
                          + "\n\n与当前课题匹配的近期收藏论文标题（仅供细化检索角度；不要复制无关主题）：\n"
-                         + ("\n".join(f"  {value}" for value in saved_examples) or "  （无）")
+                         + saved_block
                          + "\n\n候选分类（只能从这里选，逐字照抄）：\n" + catalog),
             ),
         ],
@@ -5073,10 +5428,11 @@ class PlatformSession:
         final_text: str,
         before_artifacts: dict[str, tuple[int, int]],
         tokens_used_before: int,
+        dialogue_only: bool = False,
     ) -> dict[str, Any]:
         import chat
 
-        if status == "paused":
+        if status == "paused" and not dialogue_only:
             # **pause 的归宿只在这一个出口判一次**：给人，还是按档位在进程内消化。
             # 每一种操作（turn / answer / run_unattended / rejoin）都从这里出去，
             # 所以新增的操作自动带上，不需要各自记得判。从前这个判断散在三处
@@ -5086,6 +5442,12 @@ class PlatformSession:
             resumed = await self._auto_resume_pauses()
             if resumed is not None:
                 status, final_text = resumed
+        # 只读约束在场时回复末尾附三类改动（#973）。答复暂停后续跑出来的回复
+        # 不经过 run_turn，只经过这里；append_statement 幂等（两处都调），
+        # 空回复（停在问题上）原样返回。
+        from core.side_effect_contract import append_statement
+
+        final_text = append_statement(self.state, final_text)
         chat._save_conversation(self.state, self.messages)
         # ── 无界等待之前必须先落盘（RFC D12 硬不变量）───────────────────────
         #
@@ -5168,6 +5530,8 @@ class PlatformSession:
         # harness_sessions._rpc_locked）。内层照常发的话，后端会在第 1 轮就以为
         # 整件事做完了，子进程却还在往下跑 —— 一个子进程两个驱动者，正是
         # 平台最不能有的东西。所以由外层统一发一次。
+        if dialogue_only:
+            result["dialogue_only"] = True
         if not self._suppress_terminal_result:
             self.emit("result", request_id=self.request_id, data=result)
         return result
@@ -5280,7 +5644,19 @@ class PlatformSession:
         finally:
             self._inbox_consumers = max(0, self._inbox_consumers - 1)
             if task is not None:
-                task.cancel()
+                # Finish the current reply/tool once before draining again.
+                # Cancelling it mid-effect and immediately taking the same item
+                # again can execute a write twice (Inbox.take is a peek).
+                try:
+                    await task
+                except _asyncio.CancelledError:
+                    task.cancel()
+                    await _asyncio.gather(task, return_exceptions=True)
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    self.state.append_transcript(
+                        "inbox_consumer_failed", error=f"{type(exc).__name__}: {exc}"[:300],
+                    )
                 # ── 收尾前把邮箱清空 —— 每条消息必有终局 ────────────────────
                 #
                 # `stop_now` 的 docstring 早就把这条规矩写下来了：
@@ -5296,7 +5672,7 @@ class PlatformSession:
                 # run 直接 `completed`，没有任何一处显示它们被丢了。
                 # 后端每次都如实回「已送达」—— 送到了，只是没人会来取。
                 #
-                # 所以在 cancel 之后**再排空一次**：这一刻操作还没返回，
+                # 所以在消费者退出后**再排空一次**：这一刻操作还没返回，
                 # 待命轮照常能跑、能回答、能 inject_into_node。处理失败仍走既有的
                 # 隔离/重试路径，不会在这里静默。
                 try:
@@ -5330,7 +5706,7 @@ class PlatformSession:
         """
         import asyncio
 
-        while True:
+        while self._inbox_consumers > 0:
             if not await self.consume_inbox():
                 await asyncio.sleep(self.INTERRUPT_POLL_S)
 
@@ -5345,37 +5721,42 @@ class PlatformSession:
         """
         import asyncio
 
-        consumed_any = False
-        while (item := self._inbox.take()) is not None:
-            try:
-                await self._handle_drained_interrupt(item)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                # ── 毒丸熔断（D12）：熔断就在**消费路径**上 ────────────────
-                #
-                # PR#553 的教训：熔断器挂在账本上，而失败那条路绕过了账本，
-                # 于是熔断器"存在但不在场"。这里的计数由邮箱自己维护。
-                if self._inbox.failed(item):
-                    self.state.append_transcript(
-                        "inbox_item_quarantined",
-                        item_id=item.item_id, kind=item.kind,
-                        author=item.author, message_id=item.message_id,
-                        error=f"{type(exc).__name__}: {exc}"[:300],
-                    )
-                    self.emit(
-                        "progress", request_id=self.request_id,
-                        event="inbox.quarantined",
-                        detail="这条插话反复处理失败，已隔离；本轮继续",
-                    )
-                else:
-                    break   # 还没到阈值：留着下一轮再试，别在这里空转
-                continue
-            self._inbox.consumed(item)
-            self.state.append_transcript(
-                "inbox_item_consumed", item_id=item.item_id, kind=item.kind)
-            consumed_any = True
-        return consumed_any
+        # Both the background consumer and wake-up path can drain this inbox.
+        # A peeked item must have only one handler, including across awaits.
+        if not hasattr(self, "_inbox_consume_lock"):
+            self._inbox_consume_lock = asyncio.Lock()
+        async with self._inbox_consume_lock:
+            consumed_any = False
+            while (item := self._inbox.take()) is not None:
+                try:
+                    await self._handle_drained_interrupt(item)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    # ── 毒丸熔断（D12）：熔断就在**消费路径**上 ────────────────
+                    #
+                    # PR#553 的教训：熔断器挂在账本上，而失败那条路绕过了账本，
+                    # 于是熔断器"存在但不在场"。这里的计数由邮箱自己维护。
+                    if self._inbox.failed(item):
+                        self.state.append_transcript(
+                            "inbox_item_quarantined",
+                            item_id=item.item_id, kind=item.kind,
+                            author=item.author, message_id=item.message_id,
+                            error=f"{type(exc).__name__}: {exc}"[:300],
+                        )
+                        self.emit(
+                            "progress", request_id=self.request_id,
+                            event="inbox.quarantined",
+                            detail="这条插话反复处理失败，已隔离；本轮继续",
+                        )
+                    else:
+                        break   # 还没到阈值：留着下一轮再试，别在这里空转
+                    continue
+                self._inbox.consumed(item)
+                self.state.append_transcript(
+                    "inbox_item_consumed", item_id=item.item_id, kind=item.kind)
+                consumed_any = True
+            return consumed_any
 
     def stop_now(self, *, author: str) -> str:
         """**到达即生效**的停止。返回当下的占用状态（随回执送回）。
@@ -5870,6 +6251,7 @@ class PlatformSession:
                 details={"current_pause_id": current_pause_id},
             )
         before, tokens_used_before = self._operation_start(request_id, "answer")
+        self.state.submission_id = request_id
         consumed = False
 
         async def one_answer(pause_event) -> str:
@@ -5908,14 +6290,33 @@ class PlatformSession:
             # 只不过停止靠"根本不入队"绕开了队列，**消息还留在队列里**，
             # 于是同一个"谁来取"的洞原样落在消息上。
             async with self._inbox_consumer():
-                try:
-                    final_text = await pause_driver.drive_pause_chain(
-                        ask_fn=one_answer,
-                        finalize_fn=finalize_run,
-                    )
-                except _AdditionalPauseRequired:
-                    final_text = ""
-            await self._wait_for_background()
+                dialogue_only = False
+                final_text = ""
+                if choice is None:
+                    from core.pause_dialogue import discuss_pause, exact_pause_answer
+
+                    selection = exact_pause_answer(pending.pause_event, answer)
+                    if selection is None:
+                        selection, final_text = await discuss_pause(
+                            self.state, self.harness, self.client, pending.pause_event, answer,
+                        )
+                    if selection is None:
+                        dialogue_only = True
+                    elif isinstance(selection, dict):
+                        choice = selection
+                        answer = str(selection.get("note") or "")
+                    else:
+                        answer = selection
+                if not dialogue_only:
+                    try:
+                        final_text = await pause_driver.drive_pause_chain(
+                            ask_fn=one_answer,
+                            finalize_fn=finalize_run,
+                        )
+                    except _AdditionalPauseRequired:
+                        final_text = ""
+            if not dialogue_only:
+                await self._wait_for_background()
             status = "paused" if get_deepest_paused() is not None else "completed"
             return await self._operation_end(
                 operation="answer",
@@ -5923,6 +6324,7 @@ class PlatformSession:
                 final_text=final_text,
                 before_artifacts=before,
                 tokens_used_before=tokens_used_before,
+                dialogue_only=dialogue_only,
             )
         except BaseException:
             self._operation_active = False
@@ -6538,6 +6940,9 @@ def _apply_request_scope(session: "PlatformSession", raw: dict) -> None:
         session._app_binding = {
             str(k): v for k, v in app_binding.items() if isinstance(k, str)
         }
+        from core.remote_resources import bind_worker
+        bind_worker(user_id=str(app_binding.get("user_id") or ""),
+                    project_id=session.state.project_id)
         attempt_id = str(app_binding.get("sandbox_attempt_id") or "")
         manifest = app_binding.get("sandbox_manifest")
         manifest_hash = str(app_binding.get("sandbox_manifest_hash") or "")
@@ -6618,6 +7023,43 @@ def _apply_request_scope(session: "PlatformSession", raw: dict) -> None:
             mode is not None and mode != getattr(session, "_autonomy_mode", None)
         ):
             session.declare_authorization(declared, mode)
+    _apply_execution_target(session, raw, present)
+
+
+def _apply_execution_target(session: "PlatformSession", raw: dict, present: tuple) -> None:
+    """命令在哪里跑（``core.execution_target``）：项目配置随每条请求声明，与档位同一条通道。
+
+    字段不在 = 这条请求没谈目标（老客户端），保持原样；在 = 此刻的目标，照做。
+    换目标等于换「谁来守」：在跑的 RunAttempt 冻结的后端不能原地变（与授权范围同一条规矩），
+    空闲时丢掉上一次的绑定，下一轮带新冻结的 manifest 来。
+    """
+    if "execution_target" not in raw:
+        return
+    from core import execution_target as _et
+
+    try:
+        wanted = _et.parse(raw.get("execution_target"))
+    except _et.ExecutionTargetError as exc:
+        raise RequestError("invalid_execution_target", str(exc)) from exc
+    frozen = getattr(session.state, "sandbox_manifest", None)
+    if isinstance(frozen, dict):
+        backend = str(frozen.get("backend") or "")
+        frozen_target = backend if ":" in backend else "local"
+        if frozen_target != wanted.spec:
+            if not all(present) and not session._operation_active:
+                session.state.platform_attempt_id = None
+                session.state.sandbox_manifest = None
+                session.state.sandbox_manifest_hash = None
+            else:
+                raise RequestError(
+                    "sandbox_target_mismatch",
+                    "Changing the execution target requires a new frozen RunAttempt",
+                )
+    previous = _et.current()
+    _et.declare(wanted.spec)
+    if previous != wanted:
+        session.state.append_transcript(
+            "execution_target_declared", target=wanted.spec, previous=previous.spec)
 
 
 def _handle_management_op(
@@ -6815,6 +7257,9 @@ def main(argv: list[str] | None = None) -> int:
                         emit("literature_search_progress", request_id=request_id, **event)
                     emit("literature_search_result", request_id=request_id,
                          **asyncio.run(run_literature_search(raw, progress=_literature_progress)))
+                elif isinstance(raw, dict) and raw.get("op") == "literature_search_plan":
+                    emit("literature_search_plan_result", request_id=request_id,
+                         **asyncio.run(run_literature_search_plan(raw)))
                 elif isinstance(raw, dict) and raw.get("op") == "literature_translate_page":
                     emit("literature_translation_result", request_id=request_id,
                          **asyncio.run(run_literature_translate_page(raw)))

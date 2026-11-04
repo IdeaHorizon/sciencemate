@@ -45,16 +45,16 @@ test("every outcome of a check has something to say — including the ones that 
   for (const [needle, what] of [
     ["已是最新", "查到了、没有新版本"],
     ["有新版本", "查到了、有新版本"],
-    ["已经下好", "更新下好了等重启"],
+    ["已下载，重启后生效", "更新下好了等重启"],
     ["需要重新安装|要重新安装", "这次改了壳、得重装"],
-    ["连不上更新源", "源不可达（离线 / 地址到不了）"],
-    ["没查成", "后端自己报了错"],
-    ["还在发布", "更新的一版还在发布页上传着（still_publishing）"],
-    ["不走自更新", "这是源码目录直接跑的"],
+    ["无法连接更新服务器", "源不可达（离线 / 地址到不了）"],
+    ["检查失败：", "后端自己报了错"],
+    ["正在发布", "更新的一版还在发布页上传着（still_publishing）"],
+    ["请用 git 更新", "这是源码目录直接跑的"],
   ] as const) {
     assert.match(PANEL + SAYS, new RegExp(needle), `「${what}」这种结果没有对应的一句话`);
   }
-  assert.match(PANEL, /查不到更新：/, "请求本身失败了（离线、后端没起）时没有一句话");
+  assert.match(PANEL, /检查更新失败：/, "请求本身失败了（离线、后端没起）时没有一句话");
 });
 
 test("the update row really says what the check found", () => {
@@ -77,10 +77,10 @@ const checked = (over: Partial<UpdateStatus> = {}): UpdateStatus => ({
 
 test("a newer release that is still uploading is said after 'up to date' and after 'available'", () => {
   assert.match(sayWhatTheCheckFound(checked({ still_publishing: ["v0.5.5"] }), "idle", null, zh),
-    /^已是最新。v0\.5\.5 还在发布，文件没传完 —— 过一会儿再查。$/);
+    /^已是最新。v0\.5\.5 正在发布，请稍后再检查。$/);
   assert.match(sayWhatTheCheckFound(checked({ installed_version: "0.5.3", available_version: "0.5.4",
                                               still_publishing: ["v0.5.5"] }), "idle", null, zh),
-    /^有新版本 0\.5\.4。v0\.5\.5 还在发布/);
+    /^有新版本 0\.5\.4。v0\.5\.5 正在发布/);
   assert.equal(sayWhatTheCheckFound(checked(), "idle", null, zh), "已是最新。",
     "没有在传的版本时多说了一句");
 });
@@ -98,25 +98,22 @@ test("the busy states disable the buttons, so a second click cannot start a seco
 
 /**
  * 2026-10-19：英文界面上一离线，「更新」那一行写着 `Check failed: 拿不到更新信息：…` ——
- * 那句是后端的中文诊断原文，两种语言都原样插了进去。人最常撞见的两种（离线、源上还没
- * 发完）英文界面上必须是一句英文；验不过的那种把原文留着当证据。
+ * 那句是后端的中文诊断原文，两种语言都原样插了进去。现在后端按这一屏的语言说那句话；
+ * 异常原文（`error_cause`）不拼进那一行，折在「技术细节」里 —— 报 bug 时要的正是它。
  */
 const en = (p: { en: string }) => p.en;
 const HAN = /[一-鿿]/;
 
-test("offline and nothing-published are said in English on an English screen", () => {
+test("a failed check says the backend's sentence, and the raw cause stays in the details", () => {
   const offline = sayWhatTheCheckFound(checked({
-    reachable: false, error: "拿不到更新信息：ConnectError: [Errno 8] nodename nor servname provided",
+    reachable: false, error: "Could not reach the update server. Check your network connection.",
     error_kind: "unreachable", error_cause: "ConnectError: [Errno 8] nodename nor servname provided",
   }), "idle", null, en);
+  assert.equal(offline, "Check failed: Could not reach the update server. Check your network connection.");
   assert.doesNotMatch(offline, HAN, `离线那一下英文界面上写着中文：${offline}`);
-  assert.match(offline, /ConnectError/, "异常原文丢了 —— 人拿什么去查");
-  const nothing = sayWhatTheCheckFound(checked({
-    reachable: false, error: "最近 5 个 release 都还没传完：v0.5.8（缺 manifest.json）",
-    error_kind: "nothing_published",
-  }), "idle", null, en);
-  assert.doesNotMatch(nothing, HAN, `「还没发完」英文界面上写着中文：${nothing}`);
-  // 中文界面照旧给后端那句原文。
-  assert.match(sayWhatTheCheckFound(checked({ reachable: false, error: "拿不到更新信息：X", error_kind: "unreachable",
-    error_cause: "X" }), "idle", null, zh), /^没查成：拿不到更新信息：X$/);
+  assert.doesNotMatch(offline, /ConnectError/, "异常原文拼进了那一行");
+  assert.match(sayWhatTheCheckFound(checked({ reachable: false, error: "无法连接更新服务器，请检查网络。",
+    error_kind: "unreachable", error_cause: "X" }), "idle", null, zh), /^检查失败：无法连接更新服务器，请检查网络。$/);
+  assert.match(PANEL, /status\?\.error_cause \? \(\s*<details className="settings-technical">/,
+    "异常原文没有地方看 —— 人拿什么去查");
 });

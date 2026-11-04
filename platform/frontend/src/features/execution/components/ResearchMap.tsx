@@ -13,7 +13,8 @@ import {
   stationX,
   visibleServices,
 } from "../lib/research-map-layout";
-import { useT } from "@/shared/i18n";
+import { nodeDisplayName } from "../lib/display-names";
+import { useLanguage, useT, type Language } from "@/shared/i18n";
 
 /**
  * 研究地图渲染。视觉语法（wangd 2026-08-17 定稿）：
@@ -54,17 +55,18 @@ function Station({ station, x, y, onClick }: {
   onClick?: () => void;
 }) {
   const t = useT();
+  const lang = useLanguage();
   const color = station.running ? TEAL : INK;
-  const caption = [
-    station.caption,
-    station.visits > 1 ? `×${station.visits}` : null,
-  ].filter(Boolean).join(" ");
+  const label = nodeDisplayName(station.nodeType, lang);
+  const caption = station.visits > 1 ? `×${station.visits}` : "";
   return (
     <g
       onClick={onClick}
       style={onClick ? { cursor: "pointer" } : undefined}
       role={onClick ? "button" : undefined}
-      aria-label={t({ zh: `${station.label}${station.running ? " · 进行中" : ""}`, en: `${station.label}${station.running ? ` · ${t({ zh: "进行中", en: "in progress" })}` : ""}` })}
+      aria-label={station.running
+        ? t({ zh: "{label} · 进行中", en: "{label} · in progress" }, { label })
+        : label}
     >
       {station.running && (
         <circle cx={x} cy={y} r={9} fill={TEAL} opacity={0.5}>
@@ -83,7 +85,7 @@ function Station({ station, x, y, onClick }: {
         strokeDasharray={station.running ? "3 4" : undefined}
       />
       <text x={x} y={y + LABEL_DY} textAnchor="middle" className="research-map-label">
-        {station.label}
+        {label}
       </text>
       <text x={x} y={y + CAPTION_DY} textAnchor="middle" className="research-map-caption">
         {station.running ? (
@@ -104,10 +106,10 @@ function Station({ station, x, y, onClick }: {
  * - 显示哪几个由 visibleServices 定（架构节点只在跑的时候露面）；
  * - 正在跑的排最前、紫色脉动 —— "此刻有支持性工作在进行"仍然一眼可见；
  * - 车站多时列一个、其余折进 +n（列宽摆不下），完整清单在 hover title 里；
- * - `_reviewer` 这类架构节点去掉前缀下划线再显示。
+ * - 名字用节点名表（display-names.ts）；表里没有的照原样。
  */
-function serviceChip(satellite: MapSatellite): string {
-  const name = satellite.nodeType.replace(/^_/, "");
+function serviceChip(satellite: MapSatellite, lang: Language): string {
+  const name = nodeDisplayName(satellite.nodeType, lang);
   return satellite.count > 1 ? `${name} ×${satellite.count}` : name;
 }
 
@@ -117,20 +119,21 @@ function ServiceLine({ satellites, x, y, maxChips }: {
   y: number;
   maxChips: number;
 }) {
+  const lang = useLanguage();
   const sorted = visibleServices(satellites);
   if (sorted.length === 0) return null;
   const shown = sorted.slice(0, maxChips);
   const hidden = sorted.length - shown.length;
   return (
     <text x={x} y={y} textAnchor="middle" className="research-map-service">
-      <title>{sorted.map(serviceChip).join(" · ")}</title>
+      <title>{sorted.map((satellite) => serviceChip(satellite, lang)).join(" · ")}</title>
       {shown.map((satellite, index) => (
         <tspan
           key={satellite.nodeType}
           className={satellite.running ? "research-map-service-running" : undefined}
         >
           {index > 0 ? " · " : ""}
-          {serviceChip(satellite)}
+          {serviceChip(satellite, lang)}
         </tspan>
       ))}
       {hidden > 0 ? ` +${hidden}` : ""}
@@ -156,7 +159,7 @@ export function ResearchMap({ model, onStationClick }: {
   const floating = satellitesByStation.get(null) ?? [];
 
   if (model.stations.length === 0 && floating.length === 0) {
-    return <p className="research-map-empty">{t({ zh: "还没有节点跑过 —— 派出第一个节点后，地图从这里长出来。", en: "No node has run yet — the map grows from here once the first one is dispatched." })}</p>;
+    return <p className="research-map-empty">{t({ zh: "还没有运行过的节点。开始研究后，进度会显示在这里。", en: "No nodes have run yet. Progress will appear here once research starts." })}</p>;
   }
 
   // 服务原样交给 mapBand —— 画得出来几个（架构节点跑完就不画）由它自己按

@@ -44,10 +44,14 @@ _PUBLIC_REFERENCE_REQUEST_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
-_AIRFOIL_OR_NACA_INTENT_RE = re.compile(
-    r"(?:\bNACA\s*[-_ ]?\d{4}\b|\bairfoil\b|\baerofoil\b|\bwing\b|翼型|机翼)",
-    flags=re.IGNORECASE,
+# Technical identifiers can adjoin Chinese prose. Unicode \b incorrectly
+# treats that prose as part of the identifier; still reject ASCII substrings.
+NACA_DESIGNATION_PATTERN = r"(?<![a-z0-9_])NACA\s*[-_ ]?([0-9]{4,5})(?![a-z0-9_])"
+AIRFOIL_INTENT_PATTERN = (
+    rf"(?:{NACA_DESIGNATION_PATTERN}|"
+    r"(?<![a-z0-9_])(?:airfoil|aerofoil|wing)(?![a-z0-9_])|翼型|机翼)"
 )
+_AIRFOIL_OR_NACA_INTENT_RE = re.compile(AIRFOIL_INTENT_PATTERN, flags=re.IGNORECASE)
 
 _NON_AIRFOIL_GEOMETRY_INTENT_RE = re.compile(
     r"(?:"
@@ -255,7 +259,7 @@ def extract_naca_code(*values: Any) -> str | None:
                 continue
         text = str(value).strip()
         direct = re.fullmatch(r"\d{4,5}", text)
-        labelled = re.search(r"\bNACA\s*[-_ ]?(\d{4,5})\b", text, flags=re.I)
+        labelled = re.search(NACA_DESIGNATION_PATTERN, text, flags=re.I)
         if direct or labelled:
             return direct.group(0) if direct else labelled.group(1)
     return None
@@ -327,44 +331,6 @@ def looks_like_public_reference_request(text: Any) -> bool:
             continue
         return True
     return False
-
-
-def looks_like_airfoil_path(text: str) -> bool:
-    value = extract_airfoil_path_from_text(text) or text.strip()
-    if is_placeholder_value(value):
-        return False
-    suffixes = (".dat", ".txt", ".csv", ".coord", ".coords")
-    if value.startswith(("~", "/")) and len(value) > 1:
-        return True
-    if Path(value).suffix.lower() in suffixes:
-        return True
-    return False
-
-
-def looks_like_geometry_path(text: Any) -> bool:
-    if not isinstance(text, str):
-        return False
-    value = extract_geometry_path_from_text(text) or text.strip()
-    if is_placeholder_value(value):
-        return False
-    suffixes = (
-        ".dat",
-        ".txt",
-        ".csv",
-        ".coord",
-        ".coords",
-        ".geo",
-        ".msh",
-        ".step",
-        ".stp",
-        ".iges",
-        ".igs",
-        ".stl",
-        ".brep",
-    )
-    if value.startswith(("~", "/")) and len(value) > 1:
-        return True
-    return Path(value).suffix.lower() in suffixes
 
 
 def extract_geometry_path_from_text(text: Any) -> str | None:
@@ -448,26 +414,3 @@ def has_valid_airfoil_geometry(params: dict[str, Any]) -> bool:
     if looks_like_airfoil_coordinate_text(coords):
         return True
     return False
-
-
-def _apply_geometry_path(params: dict[str, Any], path: str) -> None:
-    suffix = Path(path).suffix.lower()
-    if suffix in {".dat", ".txt", ".csv", ".coord", ".coords"}:
-        params.setdefault("coordinate_profile_path", path)
-        params.setdefault("blade_profile_path", path)
-        params.setdefault("airfoil_dat_path", path)
-    else:
-        params.setdefault("geometry_file", path)
-
-
-def _normalise_embedded_airfoil_geometry_fields(params: dict[str, Any]) -> None:
-    for key in ("airfoil_dat_path", "geometry_file", "geometry_path", "airfoil_coordinate_text"):
-        extracted_path = extract_airfoil_path_from_text(params.get(key))
-        if extracted_path:
-            if key == "airfoil_dat_path" or is_placeholder_value(params.get("airfoil_dat_path")):
-                params.pop("airfoil_dat_path", None)
-            params.setdefault("airfoil_dat_path", extracted_path)
-            return
-    extracted_text = extract_airfoil_coordinate_text_from_text(params.get("airfoil_coordinate_text"))
-    if extracted_text:
-        params["airfoil_coordinate_text"] = extracted_text

@@ -26,6 +26,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services import refusals
 from app.services.user_interface import language_for, say
 from app.models.execution import ASSERTS_ACTIVE_WORK, Run, RunStatus
 from app.models.project import Project, ProjectStatus
@@ -36,7 +37,7 @@ from app.policies import stewards_it
 async def _the_project(db: AsyncSession, user: User, project_id: str) -> Project:
     project = await db.get(Project, project_id)
     if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail=say(refusals.PROJECT_NOT_FOUND, language_for(user)))
     if not await stewards_it(db, user, project):
         raise HTTPException(status_code=403, detail=say({"zh": "只有项目负责人或组织管理员能归档 / 恢复这个项目",
                         "en": "Only the project lead or an organisation administrator can archive or restore this project"},
@@ -61,8 +62,8 @@ async def archive(db: AsyncSession, user: User, project_id: str) -> Project:
     if project.status == ProjectStatus.ARCHIVED:
         return project
     if await _a_run_still_going(db, project):
-        raise HTTPException(status_code=409, detail=say({"zh": "这个项目有一轮还在跑 —— 先停下它再归档",
-                        "en": "A run is still going in this project — stop it before archiving"},
+        raise HTTPException(status_code=409, detail=say({"zh": "项目中还有正在运行的执行，请先停止再归档。",
+                        "en": "A run is still in progress in this project. Stop it before archiving."},
                        language_for(user)))
     project.status = ProjectStatus.ARCHIVED
     await db.flush()

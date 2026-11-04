@@ -9,6 +9,42 @@ from urllib.parse import parse_qsl, urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ResourceType = Literal["storage", "dataset", "database", "compute"]
+
+
+class SSHConnectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    host: str = Field(min_length=1, max_length=255)
+    user_name: str | None = Field(default=None, max_length=128)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    password: str | None = Field(default=None, max_length=4096, repr=False)
+    jump: str | None = Field(default=None, max_length=500)
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class SSHOperationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["probe", "exec", "submit", "status", "cancel", "jobs", "put", "get"]
+    command: str | None = Field(default=None, max_length=100000)
+    cwd: str | None = Field(default=None, max_length=4096)
+    timeout: float | None = Field(default=None, gt=0, le=604800)
+    environment: dict[str, str] | None = None
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+    job_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    path: str | None = Field(default=None, max_length=4096)
+    content_base64: str | None = Field(default=None, max_length=11184812)
+
+    @model_validator(mode="after")
+    def require_action_inputs(self):
+        needed = {
+            'exec': ('command',), 'submit': ('command', 'idempotency_key'),
+            'status': ('job_id',), 'cancel': ('job_id',),
+            'put': ('path', 'content_base64'), 'get': ('path',),
+        }
+        for field in needed.get(self.action, ()):
+            value = getattr(self, field)
+            if value is None or (field != 'content_base64' and not str(value).strip()):
+                raise ValueError(f'{self.action} requires {field}')
+        return self
 _SENSITIVE_KEYS = {
     "password",
     "secret",
@@ -192,7 +228,7 @@ class ProjectResourceOut(BaseModel):
     workspace_binding: str | None
     config: dict[str, Any]
     is_enabled: bool
-    health_status: Literal["unknown"] = "unknown"
+    health_status: Literal["online", "offline", "unknown"] = "unknown"
     has_secret_reference: bool
     created_by_user_id: str | None
     updated_by_user_id: str | None

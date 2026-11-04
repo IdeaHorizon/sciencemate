@@ -67,9 +67,9 @@ test("推荐卡显示来源日期，月份精度和发现日期不伪造发表�
   assert.equal(feedDate(item({ published_at: "2026-09-01T00:00:00Z",
     extra: { publication_date_precision: "month" } }), "zh"), "2026-09");
   assert.equal(feedDate(item({ published_at: null,
-    extra: { discovered_at: "2026-09-20T10:00:00Z" } }), "zh"), "发现于 2026-09-20");
-  assert.equal(feedDate(item({ published_at: null }), "en"), "Date unavailable");
-  assert.equal(feedDate(item({ published_at: "not-a-date" }), "zh"), "日期未提供");
+    extra: { discovered_at: "2026-09-20T10:00:00Z" } }), "zh"), "收录于 2026-09-20");
+  assert.equal(feedDate(item({ published_at: null }), "en"), "Date unknown");
+  assert.equal(feedDate(item({ published_at: "not-a-date" }), "zh"), "日期不详");
 });
 
 test("截稿倒计时说还剩几天，过期的说已截止", () => {
@@ -78,7 +78,7 @@ test("截稿倒计时说还剩几天，过期的说已截止", () => {
     deadlineCountdown(item({ kind: "deadline", extra: { deadline_at: iso } }), now, "zh");
   assert.equal(deadline("2026-08-22T20:00:00Z"), "今天截止");
   assert.equal(deadline("2026-08-23T20:00:00Z"), "明天截止");
-  assert.equal(deadline("2026-09-01T12:00:00Z"), "还有 10 天");
+  assert.equal(deadline("2026-09-01T12:00:00Z"), "10 天后截止");
   assert.equal(deadline("2026-08-01T12:00:00Z"), "已截止");
   // extra 里没有 deadline_at 就什么都不说，不要显示一个 NaN。
   assert.equal(deadlineCountdown(item({ kind: "deadline" }), now, "zh"), "");
@@ -108,15 +108,15 @@ test("没有 url 的条目不该被当成可点开的外链", () => {
 test("首页那句话必须说实话", () => {
   const personalized = todayHeadline({ personalized: true, onboarded: true, pickCount: 3, lang: "zh" });
   assert.equal(personalized.title, "为你精选");
-  assert.match(personalized.subtitle, /课题/);
+  assert.match(personalized.subtitle, /项目/);
 
   const cold = todayHeadline({ personalized: false, onboarded: false, pickCount: 3, lang: "zh" });
   assert.notEqual(cold.title, "为你精选");
   assert.doesNotMatch(cold.subtitle, /为你挑/);
-  assert.match(cold.subtitle, /选几个关注方向/);
+  assert.match(cold.subtitle, /选择关注的学科/);
 
   const empty = todayHeadline({ personalized: true, onboarded: true, pickCount: 0, lang: "zh" });
-  assert.match(empty.subtitle, /内容池/);
+  assert.match(empty.subtitle, /正在准备/);
 
   // 英文下同样不许把冷启动说成"为你挑的"—— 说实话这条规矩不随语言变。
   const coldEn = todayHeadline({ personalized: false, onboarded: false, pickCount: 3, lang: "en" });
@@ -184,7 +184,7 @@ test("资讯卡保留通往研究的三个出口", () => {
     new URL("../components/HandoffAction.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(handoff, /接入课题/);
+  assert.match(handoff, /在项目中讨论/);
   // 它必须真的建会话再跳，而不是拼一个没人读的查询参数。
   assert.match(handoff, /createProjectSession/);
   assert.match(handoff, /handoffHref/);
@@ -274,7 +274,7 @@ test("自动挖掘开关不许把「没配模型」说成「已开启」", async
   // 平台没配模型：不管用户开没开，都要说清是**平台**缺东西、以及去哪配。
   const unavailable = curationStatusLine({ ...base, available: false, enabled: true }, "zh");
   assert.equal(unavailable.tone, "error");
-  assert.match(unavailable.text, /不可用/);
+  assert.match(unavailable.text, /需要先添加模型连接/);
   assert.match(unavailable.text, /设置/);
 
   // 开着但上次失败：必须说出原因，否则和"确实没什么可推断的"长得一样。
@@ -292,14 +292,14 @@ test("自动挖掘开关不许把「没配模型」说成「已开启」", async
 
   // 跑过、没报错、也没结果：说实话并给下一步，不要假装在忙。
   const empty = curationStatusLine({ ...base, enabled: true, last_run_at: "2026-08-22T00:00:00Z" }, "zh");
-  assert.doesNotMatch(empty.text, /正在第一次/);
-  assert.match(empty.text, /课题描述/);
+  assert.doesNotMatch(empty.text, /正在分析/);
+  assert.match(empty.text, /项目描述/);
 
   // 还没跑过：这时候说"正在挖掘"才是对的。
   const first = curationStatusLine({ ...base, enabled: true }, "zh");
-  assert.match(first.text, /第一次/);
+  assert.match(first.text, /正在分析你的项目/);
 
-  assert.match(curationStatusLine(base, "zh").text, /当前关闭/);
+  assert.match(curationStatusLine(base, "zh").text, /已关闭/);
 });
 
 /**

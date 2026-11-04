@@ -89,8 +89,8 @@ export function DeveloperSourcePanel({ phase, restart }: {
         <div>
           <h2>{t({ zh: "开发者模式", en: "Developer mode" })}</h2>
           <p>{t({
-            zh: "从你自己的源码目录跑这台桌面版。改了 harness（core / shared / nodes），下一条消息就是新代码；改了后端或界面，重启一次。",
-            en: "Run this desktop from your own source checkout. Changes to the harness (core / shared / nodes) take effect on the next message; changes to the backend or the interface need one restart.",
+            zh: "从你自己的源码目录运行桌面版。修改 harness 后用新会话验证；已有会话可能仍在使用旧代码。修改后端后需重启；修改界面后先构建静态界面，再重启。",
+            en: "Run this desktop from your own source checkout. Verify harness changes in a new session; existing sessions may still use earlier code. Restart after backend changes. For interface changes, build the static interface first, then restart.",
           })}</p>
         </div>
       </div>
@@ -98,7 +98,7 @@ export function DeveloperSourcePanel({ phase, restart }: {
       <div className="settings-row-group">
         <div className="settings-row about-update-row">
           <span>
-            <strong>{t({ zh: "现在", en: "Now" })}</strong>
+            <strong>{t({ zh: "当前状态", en: "Status" })}</strong>
             <small>{restarting
               ? <UpdateProgress phase={phase} version={null} elapsedSeconds={0} />
               : sayWhereItRuns(told, t)}</small>
@@ -106,7 +106,7 @@ export function DeveloperSourcePanel({ phase, restart }: {
           {told?.restart_needed && !restarting ? (
             <div className="about-update-actions">
               <button type="button" className="settings-primary-action" disabled={busy} onClick={() => void restart()}>
-                {t({ zh: "现在重启", en: "Restart now" })}
+                {t({ zh: "立即重启", en: "Restart now" })}
               </button>
             </div>
           ) : null}
@@ -117,8 +117,8 @@ export function DeveloperSourcePanel({ phase, restart }: {
             <span>
               <strong>{t({ zh: "界面", en: "Interface" })}</strong>
               <small>{told.static_ui
-                ? t({ zh: `源码目录里构建过的（${told.static_ui}）`, en: `built in the checkout (${told.static_ui})` })
-                : t({ zh: "源码目录里没有构建产物（platform/frontend/out），用安装的那份；要看界面改动先 npm run build。",
+                ? t({ zh: `使用源码目录中的构建（${told.static_ui}）`, en: `built in the checkout (${told.static_ui})` })
+                : t({ zh: "源码目录中没有构建结果（platform/frontend/out），界面使用的是安装版。要查看界面改动，请先运行 npm run build。",
                       en: "The checkout has no build output (platform/frontend/out); the installed interface is used. Run npm run build to see interface changes." })}</small>
             </span>
           </div>

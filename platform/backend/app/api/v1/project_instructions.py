@@ -49,7 +49,8 @@ from app.services.project_repository import (
     run_in_repository_thread,
 )
 from app.services.sessions import require_capability
-from app.services.user_interface import Language, language_on_screen, said_of
+from app.services import refusals
+from app.services.user_interface import Language, language_for, language_on_screen, said_of, say
 
 router = APIRouter()
 
@@ -77,7 +78,7 @@ async def write_personal_instructions(
     data: InstructionText, user: User = Depends(get_current_user)
 ) -> dict:
     path = personal_instruction_path(user.id)
-    write_instruction_file(path, data.content)
+    write_instruction_file(path, data.content, lang=language_for(user))
     return _payload(path, data.content)
 
 
@@ -151,7 +152,7 @@ async def write_project_instructions(
     await require_capability(db, user, project_id, "manage_settings")
     project = await db.get(Project, project_id)
     if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail=say(refusals.PROJECT_NOT_FOUND, lang))
     head = await _ensure_repository(project)
     body = data.content if data.content.endswith("\n") else data.content + "\n"
     try:
@@ -168,7 +169,7 @@ async def write_project_instructions(
         raise HTTPException(
             status_code=409,
             detail={"code": "project_instructions_commit_failed", "message": said_of(exc, lang, otherwise={
-                "zh": "项目指令没能提交：{why}", "en": "The project instructions could not be committed: {why}"})},
+                "zh": "保存项目指令失败，请稍后重试。", "en": "Could not save the project instructions. Try again later."})},
         ) from exc
     return {**_payload(f"{PROJECT_FILENAME}@{commit[:12]}", body), "commit": commit}
 
@@ -192,7 +193,7 @@ async def read_session_instructions(
     await require_capability(db, user, project_id, "view_session")
     session = await db.get(SessionProjection, session_id)
     if session is None or str(session.project_id) != str(project_id):
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail=say(refusals.SESSION_NOT_FOUND, language_for(user)))
 
     try:
         project_layer = await run_in_repository_thread(

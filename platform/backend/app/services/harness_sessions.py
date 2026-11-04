@@ -117,6 +117,13 @@ class ResetRefused(SaidToAPerson, HarnessSessionError):
     """
 
 
+class NothingRunning(SaidToAPerson, ValueError):
+    """这个会话此刻没有活着的 worker —— 插话、停止都没有人收。原话显示在界面上，两种语言都写。
+
+    仍是 `ValueError`：`deliver` 的契约一直是「唯一合法的拒收抛 ValueError」，调用方按它接。
+    """
+
+
 class HarnessAnswerSupersededError(HarnessSessionError):
     """答复指向的是上一次呈递 —— run 还活着，只是它问的问题已经换了。
 
@@ -300,10 +307,16 @@ def _paths(
     # 这几步是持久化前提，不是调模型的前提（RFC_WORKER_START_IS_NOT_A_GATE §G2）：
     # 建不出、改不了权限、身份文件写不进，记一行、继续 —— worker 自己会对同一批路径
     # 逐项探测、降级并报进 ready，这里不抢先把这一轮杀掉。
+    from app.services.harness_imports import ensure_harness_importable
+
+    ensure_harness_importable()
+    from shared.lib.private_files import mkdir_private
+
     for directory in (state_root, home_dir, session_state):
         try:
-            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-            directory.chmod(0o700)
+            # 不写 mkdir(mode=0o700)：Windows 上那是只认 owner 的受保护 DACL，提权跑过一次，
+            # 之后正常运行就进不了自己的家（home_marker_unreadable，#1263 诊断包）。
+            mkdir_private(directory)
         except OSError as exc:
             logger.warning("cannot prepare %s for %s/%s: %s", directory, project_id, session_id, exc)
     # 「我是谁」由平台说（KB 记录的署名、按人写的算力授权都靠它）。
@@ -414,6 +427,15 @@ def _child_environment(
         "HARNESS_SANDBOX_CEILING", "HARNESS_SANDBOX_NAMESPACE",
         "HARNESS_SANDBOX_EGRESS_ALLOWLIST", "HARNESS_JOBS_ROOT",
     ))
+    # Resource operations use the same authenticated service as the UI. Deliver
+    # deployment configuration privately; the worker consumes it before models
+    # or model-controlled subprocesses start.
+    from app.services import ssh_resources
+    child_env["PYTHONPATH"] = os.pathsep.join((str(root), str(Path(ssh_resources.__file__).resolve().parents[2])))
+    child_env["HARNESS_RESOURCE_RUNTIME"] = json.dumps({
+        key: getattr(settings, key) for key in (
+            "database_url", "platform_data_root", "runtime_tenant_id", "profile", "secret_key")
+    })
     child_env.update(
         {
             # 权限账本在哪（RFC §3.9）：worker → 沙箱启动器，每次 icacls 记一行。诊断包收 logs/ 下的一切。
@@ -702,6 +724,15 @@ class _WorkerChannel:
     def close(self) -> None:
         return None
 
+    async def let_go(self, timeout: float) -> bool | None:
+        """放手（本后端退场、会话不退场），并说出对面有没有**确认**它放开了我们。
+
+        True = 确认了；False = 等到上限也没确认；None = 这条传输没有回执可等
+        （老 stdio：关掉 stdin 就是 EOF，worker 跑完队列自己退场）。
+        """
+        self.close()
+        return None
+
 
 class _PipeChannel(_WorkerChannel):
     """老路：worker 的 stdin/stdout。后端一死管道 EOF，worker 跟着走。"""
@@ -753,6 +784,56 @@ class _SocketChannel(_WorkerChannel):
     def close(self) -> None:
         with suppress(Exception):
             self._writer.close()
+
+    async def let_go(self, timeout: float) -> bool | None:
+        """放手握手：只关我们的写端，等 worker 把连接关掉 —— 那一下 EOF 就是它的回执。
+
+        ## 为什么要等这一下（#1253）
+
+        以前放手 = 直接关连接、立刻返回。worker 那头什么时候处理完这次断开，
+        没人知道；下一个后端（或者同一个进程里马上来的接回）赶在它处理完之前
+        连进来，就撞进 worker 的「放手」与「接手」交错的窗口 —— 新连接接上了，
+        回话却被旧连接的善后摘进了 /dev/null，status 探针等满 10 秒，「放开之后
+        接不回来」（CI `-n 6` 下两次）。
+
+        worker 现在把放手做成一个动作：读到 EOF 后在同一把锁里摘掉这根连接、
+        转发面置空、记下"没人看"，**最后**才挂断
+        （`platform_runtime._ConnectionRequestSource._drop`）。所以这边读到 EOF
+        = 它已经放开了我们、只等下一个后端。放手的那一刻因此是一个**被确认的
+        事实**，而不是"连接关了，大概它也知道了"。
+
+        有界：等不到（worker 被饿住、卡在别处）就照旧关掉返回 False。这不会把
+        下一个后端弄丢 —— worker 那头放手与接手互斥，晚到的 EOF 摘不掉已经接上
+        的新连接 —— 只是"它放开了"这件事没有被确认，值得留一行日志。
+
+        被 reset 也算确认：对面关连接时它的接收缓冲里还有没读的字节，内核回的就
+        是 RST 而不是 FIN —— 无论哪种，那根连接在它那头已经没了。
+
+        我们这头的 transport 已经在关（连接早就断了）就不握手：分不清是谁关的，
+        如实报"没确认"。也不能硬做 —— uvloop 对已关的 transport `write_eof()`
+        直接抛 RuntimeError，而生产跑的正是 uvloop。
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        try:
+            if self._writer.is_closing() or not self._writer.can_write_eof():
+                return False
+            self._writer.write_eof()
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return False
+                # 放手途中它说的话（事件早已落盘）读掉丢弃 —— 这里只等 EOF。
+                if not await asyncio.wait_for(self._reader.read(65536), timeout=remaining):
+                    return True
+        except TimeoutError:
+            return False
+        except ConnectionError:
+            return True
+        except OSError:
+            return False
+        finally:
+            self.close()
 
 
 async def reattach_session(
@@ -1104,6 +1185,11 @@ _HANDSHAKE_TIMEOUT_S = 1.0
 #: 收走 socket 文件）。超过就按老规矩 SIGTERM → SIGKILL。
 _GRACEFUL_EXIT_WAIT_S = 5.0
 
+#: 放手时等 worker 回执（它把连接关掉）的上限。正常是毫秒级的事 —— 它的读线程
+#: 一直挂在这根连接上；给到两秒是为了机器忙时不误判。`detach_all` 并发放手，所以
+#: 这是整个关机多出来的**最坏**时间，不按 worker 个数累加。
+_RELEASE_ACK_TIMEOUT_S = 2.0
+
 
 async def _say_hello(reader, writer, *, spawn_token: str, address: str) -> None:
     """报出身份并**等一句回执**。
@@ -1284,6 +1370,9 @@ class _ProjectHarnessSession:
         #: `rejoin` 只许接一次：第二个接的人会和第一个抢同一份终止事件。
         self._rejoined_request_ids: set[str] = set()
         self.binding: AppRunBinding | None = None
+        #: 放手时 worker 有没有回执（`_WorkerChannel.let_go`）。None = 没放过手，
+        #: 或者这条传输没有回执可等（老 stdio）。
+        self.release_acknowledged: bool | None = None
         self.paused = False
         self.pause_id: str | None = None
         #: 这次呈递的身份（`core.decision_offer.Offer.offer_id`）。与 pause_id
@@ -1296,6 +1385,8 @@ class _ProjectHarnessSession:
         self.authorized_risk_classes: list[str] = []
         #: 显式档位，随每条请求送到 worker。
         self.autonomy_mode: str = "assisted"
+        #: 模型命令在哪里跑（`project_configs.execution_target`），随每条请求送到 worker。
+        self.execution_target: str = "local"
 
     def _authorize(self, autonomy: object | None) -> None:
         """把这次派发读到的授权范围记在会话上。
@@ -1309,6 +1400,7 @@ class _ProjectHarnessSession:
             getattr(autonomy, "authorized_risk_classes", ()) or ()
         )
         self.autonomy_mode = str(getattr(autonomy, "mode", "") or "assisted")
+        self.execution_target = str(getattr(autonomy, "execution_target", "") or "local")
 
     @property
     def alive(self) -> bool:
@@ -1508,6 +1600,7 @@ class _ProjectHarnessSession:
             **payload,
             "authorized_risk_classes": list(self.authorized_risk_classes),
             "autonomy_mode": self.autonomy_mode,
+            "execution_target": self.execution_target,
         }
         if include_binding and self.binding is not None:
             # worker 把它写进自己的活动文件 —— 那是**后端重启后**重建"这条 run
@@ -1847,12 +1940,12 @@ class _ProjectHarnessSession:
         互斥也是判据 —— 拿不到就说明有活在跑，如实拒绝而不是排队等。
         """
         if self._operation_lock.locked():
-            raise ResetRefused("这个 Session 正在跑，跑完再重置对话",
-                               en="This Session is running; reset the conversation once it finishes")
+            raise ResetRefused("会话正在运行，请等这次执行结束后再重置对话。",
+                               en="This Session is running. Reset the conversation after this run finishes.")
         async with self._operation_lock:
             if self.paused:
-                raise ResetRefused("有等待回答的暂停，先答复再重置",
-                                   en="A pause is waiting for an answer; answer it before resetting")
+                raise ResetRefused("有问题在等你回答，请先回答再重置对话。",
+                                   en="A question is waiting for your answer. Answer it before resetting.")
 
             async def _noop(_event: dict) -> None:
                 return None
@@ -2009,8 +2102,10 @@ class _ProjectHarnessSession:
           · terminate —— 这个**会话**结束（登出、换绑定 respawn、进程已死清账）：
             发 op=terminate 让 worker 存盘退场，退不了就杀。
           · detach —— 这个**后端**结束，会话不结束：只把我们这头的收发面摘掉。
-            socket 那头读到 EOF 就把转发面摘掉、回到 accept 上等下一个后端
-            （事件照落 events.jsonl；新后端按注册表接回来、按水位补齐）。
+            socket 那头读到 EOF 就把转发面摘掉、只等下一个后端（事件照落
+            events.jsonl；新后端按注册表接回来、按水位补齐）。它摘完会把连接
+            关掉，那就是放手的回执 —— 这里等它（有界，见 `let_go`），于是本后端
+            退场时，每个 worker 放没放开它是一件确认过的事（#1253）。
 
         ## 为什么要有这个方法（2026-09-03 node20 部署 0c9e557）
 
@@ -2030,20 +2125,38 @@ class _ProjectHarnessSession:
         if self.closed:
             return
         self.closed = True
-        self.channel.close()        # socket: worker 读到 EOF → 摘转发面、回 accept
-        self.worker.release()       # 我们这头的管道关掉；asyncio 从此不再替我们杀它
-        for task in (self._reader, self.stderr_task):
-            if task is not None and not task.done():
-                task.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await task
+        # 读者先停：放手的回执（worker 关掉连接 = EOF）要由 `let_go` 亲自读到，
+        # 读者还在就会把它吃掉。
+        await self._cancel(self._reader)
         self._reader = None
+        try:
+            # socket：半关写端 → worker 读到 EOF、摘转发面 → 它关连接 = 回执（有界）。
+            self.release_acknowledged = await self.channel.let_go(_RELEASE_ACK_TIMEOUT_S)
+        finally:
+            # 回执等没等到、等的时候出没出错，这一步都得做：它才是"孩子归操作系统"。
+            self.worker.release()   # 我们这头的管道关掉；asyncio 从此不再替我们杀它
+        if self.release_acknowledged is False:
+            logger.warning(
+                "Released %s/%s without its acknowledgement within %.1fs — "
+                "the next App Server can still adopt it (letting go and taking over "
+                "are mutually exclusive on the worker side), but the moment it let go "
+                "was not confirmed",
+                self.project_id, self.session_id, _RELEASE_ACK_TIMEOUT_S,
+            )
+        await self._cancel(self.stderr_task)
         self.stderr_task = None
         # 放手之后不再持有句柄：谁再问"它为什么退出"（`_process_exit_error`
         # 要 `process.wait()`）都会等一个**不会退出**的进程。没有句柄就只剩
         # 一句如实的"不在本进程手里"。
         self.process = None
         self._provider_secrets = []
+
+    @staticmethod
+    async def _cancel(task: asyncio.Task | None) -> None:
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
 
 
 async def _noop_callback(_event: dict) -> None:
@@ -2578,9 +2691,7 @@ class HarnessSessionManager:
         """
         session = self._sessions.get(self._key(project_id, session_id))
         if session is None or not session.alive:
-            raise ValueError(
-                "Nothing is running in this Session right now — there is no current turn to speak to."
-            )
+            raise NothingRunning("当前没有正在运行的执行。", en="Nothing is running in this Session.")
         return await session.deliver(
             kind=kind, text=text, author=author, message_id=message_id
         )
@@ -2926,24 +3037,29 @@ class HarnessSessionManager:
         async with self._registry_lock:
             sessions = list(self._sessions.values())
             self._sessions.clear()
+        # 并发放手：每个 worker 的回执各等各的（`_RELEASE_ACK_TIMEOUT_S`），关机最多
+        # 多等一个上限，不是 N 个。
+        outcomes = await asyncio.gather(
+            *(session.detach() for session in sessions), return_exceptions=True
+        )
         released = 0
-        for session in sessions:
-            try:
-                await session.detach()
-            except Exception:  # noqa: BLE001 - 一个 worker 的失败不是其余 worker 的判决
+        for session, outcome in zip(sessions, outcomes, strict=True):
+            if isinstance(outcome, Exception):
                 # 这个循环的**全部意义**是"放开所有 worker，一个都不终止"。
-                # 顺序循环让第一个异常把后面每一个都带走：2026-09-16 实测，
+                # 从前顺序循环让第一个异常把后面每一个都带走：2026-09-16 实测，
                 # `release()` 在 uvloop 上抛 AttributeError → 第一个 worker
                 # 之后**一个都没 detach**，收尾报 `Application shutdown failed`，
                 # 而"部署不动 worker"的承诺就是在这里被静默作废的（9 次）。
                 #
                 # 一个工作区（这里是一个 worker）的判决不是整个后端的。
                 # 失败要出声、但只赔上它自己。
-                logger.exception(
+                logger.error(
                     "detach failed for %s/%s — 其余 worker 照常放手",
-                    session.project_id, session.session_id,
+                    session.project_id, session.session_id, exc_info=outcome,
                 )
                 continue
+            if isinstance(outcome, BaseException):
+                raise outcome  # 取消 / 退出不是"这一个 worker 失败了"，照原样往上走
             released += 1
         if released != len(sessions):
             logger.error(

@@ -8,6 +8,7 @@ import {
   BarChart3,
   Bell,
   Bot,
+  BookOpen,
   Info,
   Monitor,
   Search,
@@ -30,17 +31,19 @@ type SettingsNavigationItem = {
 };
 
 const PERSONAL_ITEMS: SettingsNavigationItem[] = [
-  { href: "/settings", label: { zh: "通用", en: "General" }, description: { zh: "打开时落在哪、记什么", en: "Where you land and what is recorded" }, keywords: "landing session token cost 落地 启动", Icon: Wrench, exact: true },
+  { href: "/settings", label: { zh: "通用", en: "General" }, description: { zh: "语言、启动页、会话显示", en: "Language, start page, session display" }, keywords: "landing session token cost 落地 启动", Icon: Wrench, exact: true },
   { href: "/settings/profile", label: { zh: "账户与安全", en: "Account & security" }, description: { zh: "名字与密码", en: "Name and password" }, keywords: "name email account security password 账号 密码", Icon: UserRound },
   { href: "/settings/appearance", label: { zh: "外观", en: "Appearance" }, description: { zh: "主题、密度与字号", en: "Theme, density and type size" }, keywords: "light dark system font motion 主题 深色", Icon: Monitor },
   { href: "/settings/about", label: { zh: "关于", en: "About" }, description: { zh: "版本与更新", en: "Version and updates" }, keywords: "version update release about 版本 更新 升级 关于", Icon: Info },
 ];
 
 const RESEARCH_ITEMS: SettingsNavigationItem[] = [
+  { href: "/settings/cnki", label: { zh: "知网采集", en: "CNKI collection" }, description: { zh: "后台检索与每日采集", en: "Managed search and daily collection" }, keywords: "cnki 知网 采集 中文", Icon: Search },
+  { href: "/settings/skills", label: { zh: "技能库", en: "Skills" }, description: { zh: "导入与管理研究技能", en: "Import and manage research skills" }, keywords: "skill skills import 技能 导入", Icon: BookOpen },
   { href: "/settings/research", label: { zh: "个人指令", en: "Personal instructions" }, description: { zh: "证据要求与回答偏好", en: "Evidence standard and response preferences" }, keywords: "agent citation language instructions reproducibility 指令 偏好", Icon: SlidersHorizontal },
   { href: "/settings/models", label: { zh: "模型与密钥", en: "Models & credentials" }, description: { zh: "默认模型、地址与密钥", en: "Default model, endpoint and keys" }, keywords: "llm api key provider gateway 模型 密钥", Icon: Bot },
-  { href: "/settings/notifications", label: { zh: "通知", en: "Notifications" }, description: { zh: "什么时候提醒你、怎么送达", en: "When you are alerted and how it reaches you" }, keywords: "decision approval email desktop failure 通知 提醒", Icon: Bell },
-  { href: "/settings/usage", label: { zh: "用量", en: "Usage" }, description: { zh: "跑过什么、花了多少", en: "What ran and what it cost" }, keywords: "tokens runs retries heatmap billing 用量 花费", Icon: BarChart3 },
+  { href: "/settings/notifications", label: { zh: "通知", en: "Notifications" }, description: { zh: "哪些事情提醒你", en: "What you are alerted about" }, keywords: "decision approval email desktop failure 通知 提醒", Icon: Bell },
+  { href: "/settings/usage", label: { zh: "用量", en: "Usage" }, description: { zh: "token 与费用", en: "Tokens and cost" }, keywords: "tokens runs retries heatmap billing 用量 花费", Icon: BarChart3 },
 ];
 
 //: 「组织与权限」09-17 搬进了侧栏的「组织」Tab —— 管一个组织不是偏好设置。
@@ -79,13 +82,13 @@ export function SettingsShell({ children }: { children: React.ReactNode }) {
     <main className="settings-center-shell">
       <aside className="settings-center-sidebar">
         <Link className="settings-back-link" href="/projects"><ArrowLeft size={14} />{t({ zh: "回到工作区", en: "Back to app" })}</Link>
-        <div className="settings-center-title"><strong>{t({ zh: "设置", en: "Settings" })}</strong><small>{t({ zh: "这台平台的偏好", en: "Workspace preferences" })}</small></div>
+        <div className="settings-center-title"><strong>{t({ zh: "设置", en: "Settings" })}</strong></div>
         <label className="settings-search">
           <Search size={14} aria-hidden="true" />
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t({ zh: "搜索设置", en: "Search settings" })} aria-label={t({ zh: "搜索设置", en: "Search settings" })} />
         </label>
         <nav aria-label={t({ zh: "设置导航", en: "Settings navigation" })}>
-          {personal.length > 0 && <span className="settings-nav-heading">{t({ zh: "个人", en: "Individual" })}</span>}
+          {personal.length > 0 && <span className="settings-nav-heading">{t({ zh: "个人", en: "Personal" })}</span>}
           {personal.map((item) => <SettingsNavigationLink key={item.href} item={item} pathname={pathname} />)}
           {research.length > 0 && <span className="settings-nav-heading settings-section-nav-heading">{t({ zh: "研究工作区", en: "Research workspace" })}</span>}
           {research.map((item) => <SettingsNavigationLink key={item.href} item={item} pathname={pathname} />)}

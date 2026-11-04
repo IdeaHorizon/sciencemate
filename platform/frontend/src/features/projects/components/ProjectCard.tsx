@@ -6,6 +6,7 @@ import { ContextMenu, useContextMenu } from "@/shared/ui/ContextMenu";
 import { useDeleteProject } from "../hooks/useProjects";
 import { formatRelativeTime } from "@/shared/format/dates";
 import { useLanguage, useT } from "@/shared/i18n";
+import { humanizeStatus } from "../lib/project-identity";
 import type { Project } from "@/lib/api";
 
 export function ProjectCard({ project }: { project: Project }) {
@@ -27,11 +28,11 @@ export function ProjectCard({ project }: { project: Project }) {
       <i className={`project-status-${project.status}`} />
       <span className="project-list-main">
         <strong>{project.name}</strong>
-        <small>{project.description || project.research_domain || t({ zh: "还没写研究简介", en: "No research brief yet" })}</small>
+        <small>{project.description || project.research_domain || t({ zh: "还没有研究说明", en: "No research brief yet" })}</small>
       </span>
       <span className="project-list-context">
         <strong>{ownership}</strong>
-        <small>{project.member_count === null || project.member_count === undefined ? t({ zh: "读不到成员数", en: "Member count unavailable" }) : t({ zh: "{count} 个成员", en: "{count} member{s}" }, {
+        <small>{project.member_count === null || project.member_count === undefined ? t({ zh: "成员数未知", en: "Member count unknown" }) : t({ zh: "{count} 个成员", en: "{count} member{s}" }, {
           count: project.member_count,
           s: project.member_count === 1 ? "" : "s",
         })}</small>
@@ -39,8 +40,8 @@ export function ProjectCard({ project }: { project: Project }) {
       {/* Session 是 Project 内的概念 —— 项目列表这一层只说 Project 自己的状态。
           进了项目才有 Session（wangd 2026-08-21）。 */}
       <span className="project-list-context project-list-activity">
-        <strong>{project.status.replaceAll("_", " ")}</strong>
-        <small>Updated {formatRelativeTime(project.updated_at, lang)}</small>
+        <strong>{humanizeStatus(project.status, lang)}</strong>
+        <small>{t({ zh: "{time}更新", en: "Updated {time}" }, { time: formatRelativeTime(project.updated_at, lang) })}</small>
       </span>
       <ArrowRight size={13} aria-hidden="true" />
     </Link>
@@ -52,7 +53,7 @@ export function ProjectCard({ project }: { project: Project }) {
         danger: true,
         // 确认里带上项目名 —— 列表每行长得差不多，"确定删除吗"回答不了
         // "删的是我选中的那个吗"。
-        confirm: t({ zh: `确定删除项目「${project.name}」吗？这会连同它的会话与记录一起删除，且不可撤销。`, en: `Delete the project "${project.name}"? Its sessions and records go with it, and this cannot be undone.` }),
+        confirm: t({ zh: `删除项目「${project.name}」？项目中的会话和记录会一并删除，且无法恢复。`, en: `Delete the project "${project.name}"? Its sessions and records go with it, and this cannot be undone.` }),
         onSelect: () => remove.mutate(project.id),
       }]}
     />

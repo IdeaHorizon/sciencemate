@@ -5,6 +5,8 @@ export type ChatMessage = {
   role: "user" | "assistant" | "system";
   text: string;
   runId?: string | null;
+  /** The server routed this optimistic message into an existing run. */
+  interjection?: boolean;
   /**
    * 这条消息**就是**哪一次呈递（后端 `session_messages.offer_id`）。
    *

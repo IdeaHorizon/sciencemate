@@ -8,8 +8,9 @@ import type { ExecutionEvent } from "./execution-event";
  * 流程**不是流水线**：核心是 Analysis ⇄ experiment 迭代回路，收敛后 writing
  * 收尾，其余节点都是服务。所以地图只有三种元素：
  *
- * - **车站**：治理型产出节点 —— hypothesis（v0.5 起承载 Analysis 角色，显示名
- *   用 analysis）/ observation / experiment / writing。只画到访过的 —— 地图是记录不是规划，writing 没开始
+ * - **车站**：治理型产出节点 —— hypothesis（v0.5 起承载 Analysis 角色）/
+ *   observation / experiment / writing。显示名由界面按节点名表给
+ *   （display-names.ts 的 nodeDisplayName）。只画到访过的 —— 地图是记录不是规划，writing 没开始
  *   就不存在，到了那天从图上长出来。
  * - **弧线**：车站之间按时间序的真实转移，带次数。去程和回程分开计数 ——
  *   「派出 ×3 / 交回 ×2」对不齐的那个 1 就是正在跑的这一次。
@@ -30,10 +31,6 @@ import type { ExecutionEvent } from "./execution-event";
 
 export type MapStation = {
   nodeType: string;
-  /** 显示名 —— hypothesis 的角色是 Analysis，图上叫 analysis。 */
-  label: string;
-  /** 物理 node_type 与显示名不同时的小注（"hypothesis"）。 */
-  caption?: string;
   visits: number;
   running: boolean;
 };
@@ -78,13 +75,6 @@ const STATION_ORDER = [
   "hypothesis", "observation", "experiment", "derivation", "writing",
 ] as const;
 const STATION_TYPES = new Set<string>(STATION_ORDER);
-
-const STATION_LABELS: Record<string, { label: string; caption?: string }> = {
-  hypothesis: { label: "analysis", caption: "hypothesis" },
-  experiment: { label: "experiment" },
-  derivation: { label: "derivation", caption: "演绎" },
-  writing: { label: "writing" },
-};
 
 const TERMINAL_KINDS = new Set([
   "run.completed",
@@ -172,8 +162,6 @@ export function projectResearchMap(events: readonly ExecutionEvent[]): ResearchM
     .filter((nodeType) => stationVisits.some((visit) => visit.nodeType === nodeType))
     .map((nodeType) => ({
       nodeType,
-      label: STATION_LABELS[nodeType]?.label ?? nodeType,
-      caption: STATION_LABELS[nodeType]?.caption,
       visits: stationVisits.filter((visit) => visit.nodeType === nodeType).length,
       running: stationVisits.some((visit) => visit.nodeType === nodeType && visit.running),
     }));

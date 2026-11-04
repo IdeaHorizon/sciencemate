@@ -21,6 +21,9 @@ import pytest
 
 from core.state import State
 
+# 讲的是续轮行为，前提是研究已经开始（见 conftest.research_under_way）。
+pytestmark = pytest.mark.usefixtures("research_under_way")
+
 
 def _stopped_action(tmp_path, *, phase: str, detail: str):
     """走真的 `next_action`：让 `_continuous_followup` 判停，看出口带出什么。"""

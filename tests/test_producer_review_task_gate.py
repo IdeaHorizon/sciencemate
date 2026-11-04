@@ -272,7 +272,7 @@ def test_decision_package_keeps_failed_entry_as_retry_credential():
         # producing" —— 那是错的，等于呈递本身就放行下游（没有有效 critique 也能
         # 进下一阶段）。呈递只是**等人工**，真正的 done 由 record_decision_answer
         # 在拿到答复后写。
-        assert flow[0]["decision_state"] == "awaiting_human"
+        assert flow[0]["decision_state"] == "pending"
 
 
 @pytest.mark.asyncio

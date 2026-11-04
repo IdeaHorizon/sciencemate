@@ -18,6 +18,7 @@ from core.tool_registry import ToolDefinition, register_tool
 
 from .scihub_fetcher import get_full_text, paper_cache_dir, fulltext_capabilities
 from .paper_images import extract_paper_image, fetch_paper_image_url, generate_title_card, materialize_image_url
+from shared.contrib.paper_image_policy import image_record_rejection_reason
 from .literature_catalog import retry_asset_records, upsert_paper, upsert_papers
 
 # 全文获取涉及多个来源和浏览器回退；90 秒通常只够处理少量论文。
@@ -412,7 +413,7 @@ def complete_missing_figures(
             continue
         image = record.get("image") if isinstance(record.get("image"), dict) else {}
         status = str(record.get("figure_status") or image.get("status") or "not_requested")
-        if record.get("literature_preparation") != "ready" or status in {"", "not_requested", "failed", "unavailable"} or image.get(
+        if image_record_rejection_reason(image) or record.get("literature_preparation") != "ready" or status in {"", "not_requested", "failed", "unavailable"} or image.get(
             "fallback"
         ) == "title_card":
             candidates.append(record)
@@ -430,7 +431,7 @@ def complete_missing_figures(
             image = record.get("image") if isinstance(record.get("image"), dict) else {}
             # Existing assets already satisfy the attempted-enrichment contract.
             # Repair their gate without fetching the same image again.
-            if (record.get("abstract") or record.get("abstract_lookup_completed")) and image.get("status") in {"available", "generated"}:
+            if (record.get("abstract") or record.get("abstract_lookup_completed")) and image.get("status") in {"available", "generated"} and not image_record_rejection_reason(image):
                 record["literature_preparation"] = "ready"
                 archive_indexes_only([record], output_dir)
             else:
@@ -577,6 +578,7 @@ def archive_index_and_figure(paper: dict[str, Any], output_dir: str) -> dict[str
         existing_image.get("status") == "available"
         and existing_image.get("fallback") != "title_card"
         and "_title_card" not in Path(str(existing_image.get("path") or "")).name
+        and not image_record_rejection_reason(existing_image)
     )
     record = {**existing, **incoming}
     # 同一论文可能由期刊采集和项目画像检索同时发现。来源路线取并集，

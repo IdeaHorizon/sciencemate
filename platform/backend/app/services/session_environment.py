@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -140,20 +141,18 @@ async def run_repair(db: AsyncSession, *, project_id: str, session_id: str, code
     matching = [w for w in current["warnings"]
                 if str(w.get("code")) == code and (path is None or str(w.get("path")) == str(path))]
     if not matching:
-        raise RepairRefused(f"这个会话当前没有 {code!r} 这条环境问题",
-                            en=f"This session has no {code!r} environment problem right now")
+        raise RepairRefused("这个问题已不存在，请刷新页面。",
+                            en="This problem no longer applies to this Session. Refresh the page.")
     warning = matching[0]
     proposal = facts.repair_proposal(code, error=warning.get("error"), data_root=the_data_root())
     if proposal is None or not proposal.get("argv"):
         # 唯一不带 argv 的提案是 needs_administrator（`environment_facts.repair_proposal`）。
-        raise RepairRefused(
-            f"{code!r} 没有能代执行的修复：{(proposal or {}).get('changes') or '只有事实，没有提案'}",
-            en=f"{code!r} has no repair that can be run on your behalf: "
-               + ("this is a deployment problem an administrator has to judge (see the backend log)"
-                  if proposal else "there are only facts, no proposal"))
+        raise RepairRefused("这个问题无法自动修复，需要管理员处理。",
+                            en="This problem cannot be fixed automatically; an administrator needs to handle it.")
     argv = list(proposal["argv"])
     logger.warning("running environment repair for %s/%s: %s", project_id, session_id, argv)
-    result = await asyncio.to_thread(_run_argv, argv)
+    runner = _run_argv_elevated if proposal.get("elevated") else _run_argv
+    result = await asyncio.to_thread(runner, argv)
     after = facts.probe_path(warning.get("path"))
     outcome = {
         "code": code, "path": warning.get("path"), "command": proposal["command"],
@@ -166,6 +165,71 @@ async def run_repair(db: AsyncSession, *, project_id: str, session_id: str, code
         if str(w.get("code")) == code and str(w.get("path")) == str(warning.get("path")):
             w["repair_result"] = outcome
     return outcome
+
+
+def _run_argv_elevated(argv: list[str], *, verb: str = "runas", timeout_s: int = 300) -> dict[str, Any]:
+    """Windows：经 UAC 以管理员身份跑（人在这一刻已经点了「修复」，UAC 是 Windows 再问一次）。
+
+    提权的子进程拿不到管道，所以包一层 ``cmd /c … > log 2>&1``，等它退出、读回日志与退出码。人在
+    UAC 上点了「否」→ ``ERROR_CANCELLED``，如实说是拒了，不是失败。``verb`` 只给测试换成 ``open``
+    （同一条路，不弹 UAC）。
+    """
+    import ctypes
+    import tempfile
+    from ctypes import wintypes as w
+
+    from app.services.harness_imports import ensure_harness_importable
+
+    fd, log_name = tempfile.mkstemp(prefix="sciencemate-repair-", suffix=".log")
+    os.close(fd)
+    log = Path(log_name)
+    command = subprocess.list2cmdline(argv)
+    parameters = f'/d /s /c "{command} > "{log}" 2>&1"'
+
+    class SHELLEXECUTEINFOW(ctypes.Structure):
+        _fields_ = [("cbSize", w.DWORD), ("fMask", w.ULONG), ("hwnd", w.HWND), ("lpVerb", w.LPCWSTR),
+                    ("lpFile", w.LPCWSTR), ("lpParameters", w.LPCWSTR), ("lpDirectory", w.LPCWSTR),
+                    ("nShow", ctypes.c_int), ("hInstApp", w.HINSTANCE), ("lpIDList", ctypes.c_void_p),
+                    ("lpClass", w.LPCWSTR), ("hkeyClass", w.HKEY), ("dwHotKey", w.DWORD),
+                    ("hIconOrMonitor", w.HANDLE), ("hProcess", w.HANDLE)]
+
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    shell32.ShellExecuteExW.argtypes = [ctypes.POINTER(SHELLEXECUTEINFOW)]
+    shell32.ShellExecuteExW.restype = w.BOOL
+    kernel32.WaitForSingleObject.argtypes = [w.HANDLE, w.DWORD]
+    kernel32.WaitForSingleObject.restype = w.DWORD
+    kernel32.GetExitCodeProcess.argtypes = [w.HANDLE, ctypes.POINTER(w.DWORD)]
+    kernel32.GetExitCodeProcess.restype = w.BOOL
+    kernel32.CloseHandle.argtypes = [w.HANDLE]
+    info = SHELLEXECUTEINFOW()
+    info.cbSize = ctypes.sizeof(SHELLEXECUTEINFOW)
+    info.fMask = 0x00000040 | 0x00000400          # SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI
+    info.lpVerb = verb
+    info.lpFile = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe")
+    info.lpParameters = parameters
+    info.nShow = 0                                  # SW_HIDE
+    try:
+        if not shell32.ShellExecuteExW(ctypes.byref(info)):
+            code = ctypes.get_last_error()
+            if code == 1223:                        # ERROR_CANCELLED：人在 UAC 上点了「否」
+                return {"returncode": None, "stdout": "",
+                        "stderr": "administrator approval was declined; nothing was changed"}
+            return {"returncode": None, "stdout": "", "stderr": f"ShellExecuteEx failed: WinError {code}"}
+        try:
+            if kernel32.WaitForSingleObject(info.hProcess, timeout_s * 1000) != 0:
+                return {"returncode": None, "stdout": "", "stderr": f"timeout after {timeout_s}s"}
+            exit_code = w.DWORD()
+            kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(exit_code))
+        finally:
+            kernel32.CloseHandle(info.hProcess)
+        ensure_harness_importable()
+        from shared.lib.native_output import to_utf8
+
+        text = to_utf8(log.read_bytes()).decode("utf-8", errors="replace")
+        return {"returncode": int(exit_code.value), "stdout": text[:4000], "stderr": ""}
+    finally:
+        log.unlink(missing_ok=True)
 
 
 def _run_argv(argv: list[str]) -> dict[str, Any]:

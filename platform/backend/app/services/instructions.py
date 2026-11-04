@@ -53,6 +53,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from app.config import data_root
+from app.services.say import say
 
 #: 个人层两个文件的文件名 —— 与 `core.directives_loader` 里那两个常量同名同义。
 #: 这里不 import harness：后端不该为了两个文件名把整个 core 拉进来；名字对不上
@@ -129,10 +130,16 @@ def read_instruction_file(path: Path) -> str:
         return ""
 
 
-def write_instruction_file(path: Path, content: str) -> None:
+def write_instruction_file(path: Path, content: str, *, lang: str = "zh") -> None:
     if len(content.encode("utf-8")) > MAX_INSTRUCTION_LAYER_BYTES:
-        raise HTTPException(status_code=409, detail="Instruction file exceeds the runtime limit")
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        raise HTTPException(status_code=409, detail=say(
+            {"zh": "指令内容超过长度上限", "en": "Instruction file exceeds the runtime limit"}, lang))
+    from app.services.harness_imports import ensure_harness_importable
+
+    ensure_harness_importable()
+    from shared.lib.private_files import mkdir_private
+
+    mkdir_private(path.parent)      # 不是 mkdir(mode=0o700)：Windows 上那份 DACL 只认 owner
     path.write_text(content, encoding="utf-8")
 
 

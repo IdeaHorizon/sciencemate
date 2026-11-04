@@ -42,6 +42,9 @@ from core.research_intake import (
 )
 from core.state import State
 
+# 讲的是续轮行为，前提是研究已经开始（见 conftest.research_under_way）。
+pytestmark = pytest.mark.usefixtures("research_under_way")
+
 _ORIG = "研究东亚季风与气溶胶的相互作用，用 WRF-Chem 做敏感性实验。"
 
 

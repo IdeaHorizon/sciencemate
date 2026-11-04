@@ -23,10 +23,10 @@ export function sayWhatIsHappening(phase: UpdatePhase, version: string | null | 
   if (phase === "restarting") {
     // 没有版本号的重启是开发者模式那种（指了源码目录 / 撤了）：不是「完成更新」。
     if (!which) {
-      return t({ zh: "即将重启 —— 窗口会自动回来。", en: "Restarting — the window comes back on its own." });
+      return t({ zh: "即将重启，窗口会自动重新打开。", en: "Restarting; the window will reopen on its own." });
     }
-    return t({ zh: `${which} 已就绪，即将重启以完成更新 —— 窗口会自动回来。`,
-               en: `${which} is ready. Restarting to finish the update — the window comes back on its own.` });
+    return t({ zh: `${which} 已就绪，即将重启以完成更新，窗口会自动重新打开。`,
+               en: `${which} is ready. Restarting to finish the update; the window will reopen on its own.` });
   }
   return null;
 }

@@ -44,11 +44,12 @@ class Skill:
     canonical 字段来自 SKILL.md frontmatter；body 是 frontmatter 后的 markdown。
     runtime 字段（origin / source_dir / assets）由 loader 填。
 
-    **可见性由 `origin` 决定（folder 位置 = scope，不另设字段）**：
+    **内置与手工安装技能的可见性由 `origin` 决定**：
       - origin="framework"   → shared/skills/，所有节点可见
       - origin="imported"    → org/skills/，所有节点可见
       - origin="node:<X>"    → nodes/X/skills/，只有节点 X 可见
       - origin="runtime"     → 还没落 SKILL.md（在 proposals 里），不渲染
+      - origin="library"     → 界面导入；由项目与节点分配筛选，不进入全局注册表
 
     想"升级"一个 node-local skill 让所有节点共享 —— **直接 mv 文件夹**到
     shared/skills/ 或 org/skills/。这是有意的 friction：移动是有意识的动作，
@@ -64,9 +65,10 @@ class Skill:
     status: str = "validated"                          # proposed | validated | deprecated
     always_load: bool = False                          # True = 正文常驻（流程主干 skill）
     # runtime 字段（不在 frontmatter 也不写回文件）
-    origin: str = "framework"                          # framework | imported | node:<name> | runtime
+    origin: str = "framework"                          # framework | imported | node:<name> | runtime | library
     source_dir: str | None = None                      # 文件夹绝对路径（None = runtime proposal）
     assets: list[str] = field(default_factory=list)    # examples/* + references/* + validation/* 相对路径
+    revision: str = ""                                # immutable revision of a UI-imported skill
 
     def skill_md_path(self) -> str | None:
         """SKILL.md 的绝对路径（诊断 / 落盘用）。
@@ -194,7 +196,8 @@ def render_mode() -> str:
 def render_skills(names: list[str], *,
                    node_type: str | None = None,
                    include_deprecated: bool = False,
-                   mode: str | None = None) -> str:
+                   mode: str | None = None,
+                   state: Any = None) -> str:
     """把指定的若干 skill 渲染为单段 markdown，用于 system_prompt。
 
     两级加载（v3.9）：默认只渲染 L1 索引（名字 + description + applies_when +
@@ -210,9 +213,13 @@ def render_skills(names: list[str], *,
       - 缺失的 skill 名静默跳过（warn 在 loader 那一层）
     """
     effective = mode or render_mode()
+    available = {s.name: s for s in visible_skills_for(
+        node_type, include_deprecated=include_deprecated, state=state)}
+    names = list(dict.fromkeys([*names, *(s.name for s in available.values()
+                                         if s.origin == "library")]))
     blocks: list[str] = []
     for name in names:
-        s = _SKILLS.get(name)
+        s = available.get(name)
         if s is None:
             continue
         if s.status == "deprecated" and not include_deprecated:
@@ -227,7 +234,8 @@ def render_skills(names: list[str], *,
 
 
 def visible_skills_for(node_type: str | None, *,
-                        include_deprecated: bool = False) -> list[Skill]:
+                        include_deprecated: bool = False,
+                        state: Any = None) -> list[Skill]:
     """给某个 node_type 列出它**能看到**的 skill。用于 list_skills 工具。"""
     out = []
     for s in all_skills():
@@ -236,4 +244,9 @@ def visible_skills_for(node_type: str | None, *,
         if not _is_visible_to(s, node_type):
             continue
         out.append(s)
+    if state is not None:
+        from .skill_library import snapshot_skills
+
+        out.extend(s for s in snapshot_skills(state, node_type or state.node_type)
+                   if include_deprecated or s.status != "deprecated")
     return out

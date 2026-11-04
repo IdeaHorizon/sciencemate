@@ -314,18 +314,19 @@ async def curate(
     backend = await bridge.curation_backend(db, user)
     if backend is None:
         # 这一句存进他的偏好、在开关下面显示：按他此刻的界面语言写。
-        _remember(user, error=say({"zh": "没有配资讯挖掘模型（设置 → 模型 → 资讯挖掘模型）",
-                                   "en": "No feed curation model is configured (Settings → Models → "
-                                         "Feed curation model)"}, language_for(user)))
+        _remember(user, error=say({"zh": "还没有设置资讯挖掘模型（设置 → 模型与密钥）",
+                                   "en": "No feed curation model is set up (Settings → Models & credentials)"},
+                                  language_for(user)))
         await db.flush()
         return None
 
     try:
         candidates = list(domain_service.domain_registry().spine_categories())
     except HarnessContractUnavailable as exc:
-        _remember(user, error=say({"zh": "域词表暂时不可用（平台侧）：{why}",
-                                   "en": "The domain vocabulary is unavailable for now (platform side): {why}"},
-                                  language_for(user), why=exc))
+        logger.warning("Feed curation could not read the domain vocabulary: %s", exc)
+        _remember(user, error=say({"zh": "暂时无法读取学科列表，请稍后重试。",
+                                   "en": "Could not load the list of fields. Try again later."},
+                                  language_for(user)))
         await db.flush()
         return None
 
@@ -359,12 +360,13 @@ async def curate(
         )
     except BridgeUnavailable as exc:
         logger.info("Feed curation unavailable for %s: %s", user.id, exc)
-        _remember(user, error=str(exc))
+        _remember(user, error=say(_CURATION_DID_NOT_FINISH, language_for(user)))
         await db.flush()
         return None
-    except Exception as exc:  # noqa: BLE001 - 挖掘失败绝不该影响资讯流本身
+    except Exception:  # noqa: BLE001 - 挖掘失败绝不该影响资讯流本身
+        # 原话（异常类名、桥的 stderr）进日志；开关下面那一句只说发生了什么。
         logger.warning("Feed curation failed for %s", user.id, exc_info=True)
-        _remember(user, error=f"{type(exc).__name__}: {exc}")
+        _remember(user, error=say(_CURATION_DID_NOT_FINISH, language_for(user)))
         await db.flush()
         return None
 
@@ -395,7 +397,9 @@ async def curate(
     )
 
     if not queries and not news_queries:
-        _remember(user, error="资讯挖掘模型未返回有效检索词，本轮未执行检索")
+        _remember(user, error=say({"zh": "资讯挖掘模型没有返回有效的检索词，这次没有检索。",
+                                   "en": "The feed curation model returned no usable search terms, so no "
+                                         "search was run this time."}, language_for(user)))
         await db.flush()
         logger.warning("Feed curation returned no search queries for %s", user.id)
         return None
@@ -419,6 +423,14 @@ async def curate(
         user.id, len(result["domains"]), len(result["queries"]), len(result["news_queries"]),
     )
     return result
+
+
+#: 挖掘中途失败（桥不可用、模型调用出错）时开关下面那一句。失败后会更早再试一次
+#: （`discovery` 按 `curated_error` 缩短间隔）。
+_CURATION_DID_NOT_FINISH = {
+    "zh": "这次没有完成，稍后会自动重试。",
+    "en": "This run did not finish. It will try again automatically.",
+}
 
 
 def _remember(

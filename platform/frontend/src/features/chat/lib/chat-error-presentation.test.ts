@@ -6,7 +6,7 @@ test("能让人动手的失败，给一句人话 + 一个动作", () => {
   const failure = presentChatFailure("Stream failed: 409", "en");
   assert.ok(failure);
   assert.equal(failure.title, "This Session changed before the request could start");
-  assert.match(failure.recovery, /Refresh the Session/);
+  assert.match(failure.recovery, /Refresh the page/);
   // 原始实现细节永远不进正文
   assert.equal(JSON.stringify(failure).includes("409"), false);
   assert.equal(JSON.stringify(failure).includes("Stream failed"), false);

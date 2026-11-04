@@ -9,17 +9,70 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from core import paths
 from core.state import State
+from nodes.data.delivery_contract import (
+    artifact_name_for_attempt, outcome_fields,
+)
+from nodes.data.review.gate_registry import quality_gates_complete
+from nodes.data.planning.schemas import explicit_output_path
 
 
 WORK_ROOT_NAME = ".data_node_work"
 STAGING_NAME = "package_staging"
 DELIVERY_ROOT_NAME = "data_preprocessing"
+
+
+def artifact_delivery_path(
+    plan: dict[str, Any], step: dict[str, Any], output_id: str, source: Path,
+) -> PurePosixPath:
+    """One consumer-facing path for writer, materializer and review bindings."""
+    arguments = step.get("tool_arguments") if isinstance(step.get("tool_arguments"), dict) else {}
+    deliverable = next((item for item in plan.get("required_deliverables") or []
+                        if str(item.get("id")) == str(output_id)), {})
+    # Step paths are private work locations; the delivery contract owns layout.
+    raw = str(deliverable.get("declared_output_path") or "").strip()
+    # Also reconcile saved plans whose old normalizer marked an alternate
+    # spelling explicit without replacing the logical-ID-derived path.
+    caller_path = (explicit_output_path([deliverable], plan.get("preprocessing_request") or {})
+                   if deliverable.get("output_path_is_explicit") is True else "")
+    raw = caller_path or raw
+    explicit_path = bool(raw and deliverable.get("output_path_is_explicit") is True)
+    step_raw = ((arguments.get("output_paths") or {}).get(output_id)
+                if isinstance(arguments.get("output_paths"), dict) else None)
+    raw_name = PurePosixPath(raw).name if raw else ""
+    role_aliases = {
+        re.sub(r"[^a-z0-9]+", "", str(deliverable.get(key) or "").lower())
+        for key in ("name", "name_or_role", "type", "scientific_role")
+        if str(deliverable.get(key) or "").strip()
+    }
+    raw_alias = re.sub(r"[^a-z0-9]+", "", raw_name.lower())
+    step_name = PurePosixPath(str(step_raw or source.name)).name
+    if not explicit_path and step_name and (not raw or (
+        raw_alias in role_aliases
+        and not re.search(r"\.[A-Za-z0-9][A-Za-z0-9._-]*$", raw_name)
+        and (bool(PurePosixPath(step_name).suffix) or source.is_dir())
+    )):
+        raw = step_name
+    path = PurePosixPath(str(raw or source.name))
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"Output path for {output_id} escapes the package stage: {raw!r}")
+    parts = tuple(part for part in path.parts if part not in {".", ""})
+    while not explicit_path and parts and parts[0].lower() in {"outputs", "generated", "config", "scripts", "inputs"}:
+        parts = parts[1:]
+    if not parts:
+        raise ValueError(f"Output path for {output_id} is empty.")
+    path = PurePosixPath(*parts)
+    profile = plan.get("review_profile") or (plan.get("preprocessing_request") or {}).get("review_profile") or "plan_bound"
+    stage = re.sub(r"[^A-Za-z0-9._-]+", "_", str(step.get("stage_id") or deliverable.get("stage_id") or "").strip()).strip("._-")
+    if profile != "request_bound" and stage and stage != "package":
+        path = PurePosixPath("stages", stage) / path
+    return path
 
 
 def package_paths(
@@ -33,6 +86,17 @@ def package_paths(
     delivery_root = Path(
         str(getattr(state, "workspace_root", None) or root)
     ).expanduser().resolve()
+    if not delivery_name or delivery_name == "preprocessing":
+        # A readable directory is presentation metadata, not a mutation of the
+        # caller's signed request. Explicit caller names still take precedence.
+        analysis = state.hook_state.get("_data_latest_requirement_analysis") or {}
+        discipline = analysis.get("discipline") if isinstance(analysis.get("discipline"), dict) else {}
+        software = analysis.get("simulation_software") if isinstance(analysis.get("simulation_software"), dict) else {}
+        delivery_name = "_".join(filter(None, (
+            str(discipline.get("primary") or "").strip(),
+            str(analysis.get("calculation_type") or "").strip(),
+            str(software.get("name") or software.get("primary") or "").strip(),
+        )))
     safe_delivery_name = "".join(
         char if char.isalnum() or char in {"-", "_"} else "_"
         for char in str(delivery_name or "preprocessing").strip()
@@ -108,39 +172,10 @@ def remap_published_paths(value: Any, staging: Path, final: Path) -> Any:
     return value
 
 
-def _rewrite_published_text_paths(root: Path, staging: Path, final: Path) -> None:
-    old = str(staging.resolve())
-    new = str(final.resolve())
-    for path in root.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in {".json", ".md", ".yaml", ".yml", ".txt"}:
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        if old in text:
-            path.write_text(text.replace(old, new), encoding="utf-8")
-
-
 def publish_package(staging: Path, final: Path) -> list[str]:
-    """Atomically promote one reviewed staging tree into final delivery.
-
-    判决拆除 O10（pp:112 降格，2026-08-31，呈裁④定案）：缺 manifest.json 不再
-    拒晋升 —— 照发，包内落一份 audit/manifest_missing.json 见证（产物如实写明
-    哪些检查没过），下游照读照报。**显式接受的风险**：.previous 备份只有一层，
-    降格会提高「不完整包顶掉上一版完整包」的频率；owner 拍板不加深备份层数，
-    以 manifest 见证 + 下游 review 承担质量闭环。
-    """
+    """Atomically promote the staging tree already validated by the publisher."""
     staging = staging.expanduser().resolve()
     final = final.expanduser().resolve()
-    if not (staging / "manifest.json").is_file():
-        witness_dir = staging / "audit"
-        witness_dir.mkdir(parents=True, exist_ok=True)
-        (witness_dir / "manifest_missing.json").write_text(json.dumps({
-            "check": "manifest_present",
-            "passed": False,
-            "reason": "package was published without manifest.json; downstream consumers must not assume a manifest",
-        }, indent=2, ensure_ascii=False), encoding="utf-8")
     final.parent.mkdir(parents=True, exist_ok=True)
     backup = final.with_name(f".{final.name}.previous")
     if backup.exists():
@@ -155,7 +190,6 @@ def publish_package(staging: Path, final: Path) -> list[str]:
         raise
     if backup.exists():
         shutil.rmtree(backup)
-    _rewrite_published_text_paths(final, staging, final)
     return [str(path.resolve()) for path in final.rglob("*") if path.is_file()]
 
 
@@ -181,7 +215,6 @@ def publish_dataset_delivery(
         or review_receipt.get("status") != "pass"
     ):
         raise ValueError("Refusing to publish without a passed authority-specific review receipt")
-    written_files = publish_package(staging, final)
     published_content = remap_published_paths(content, staging, final)
     published_metadata = remap_published_paths(dict(metadata or {}), staging, final)
     delivery_files = published_content.get("files")
@@ -189,25 +222,96 @@ def publish_dataset_delivery(
         data_model = published_content.get("data_model")
         delivery_files = data_model.get("files") if isinstance(data_model, dict) else []
     delivery_files = delivery_files if isinstance(delivery_files, list) else []
-    # ``publish_package`` rewrites staging paths embedded in text files after
-    # the atomic move.  That changes their bytes (notably
-    # ``audit/mesh_delivery.json``), so refresh the already-declared file
-    # records against the published tree before saving the dataset artifact.
-    published_root = final.expanduser().resolve()
-    for record in delivery_files:
-        if not isinstance(record, dict):
-            continue
-        relative = str(record.get("path") or "").strip()
-        if not relative:
-            continue
-        published_path = (published_root / relative).resolve()
+    kind = (review_receipt.get("authority_review") or {}).get("delivery_kind")
+    if not isinstance(kind, str) or kind not in {"dataset_materialized", "partial_dataset", "schema_only", "acquisition_plan"}:
+        raise ValueError("Refusing publication without a reviewed delivery_kind")
+    if not delivery_files or not published_content.get("lineage"):
+        raise ValueError("Publication requires materialized files and source lineage")
+    if (review_receipt.get("request_id") != request_id
+            or review_receipt.get("request_spec_hash") != request_hash
+            or review_receipt.get("review_profile") != review_profile):
+        raise ValueError("Review receipt does not belong to this request")
+    if not quality_gates_complete(review_receipt.get("quality_gates"), review_profile):
+        raise ValueError("Publication requires passed requirement, quality and integrity gates")
+    if not quality_gates_complete(published_content.get("quality_gates"), review_profile):
+        raise ValueError("Published content contains incomplete quality gates")
+    for item in delivery_files:
+        path = (staging / str(item.get("path") or "")).resolve()
+        if not path.is_relative_to(staging.resolve()) or not path.is_file():
+            raise ValueError("Delivery asset is missing or outside the package")
+        data = path.read_bytes()
+        if not data or hashlib.sha256(data).hexdigest() != item.get("sha256"):
+            raise ValueError("Delivery asset changed after review")
+    expected_request = state.hook_state.get("_data_current_request")
+    if isinstance(expected_request, dict) and expected_request:
+        from nodes.data.planning.request_contract import preprocessing_request_fingerprint
+        actual_request = content.get("preprocessing_request") or {}
+        if preprocessing_request_fingerprint(actual_request) != preprocessing_request_fingerprint(expected_request):
+            raise ValueError("Reviewed package belongs to a different bound request")
+    fields = outcome_fields(
+        kind,
+        missing=([] if kind == "dataset_materialized" else
+                 [{"reason": "Delivery is not a complete materialized dataset", "delivery_kind": kind}]),
+    )
+    published_content.update(fields)
+    published_metadata.update(fields)
+    manifest_path = Path(published_content.get("manifest_path") or final / "manifest.json")
+    manifest_relative = manifest_path.resolve().relative_to(final.resolve())
+    staged_manifest = staging / manifest_relative
+    if not staged_manifest.resolve().is_relative_to(staging.resolve()):
+        raise ValueError("Delivery manifest escapes staging")
+    if any((staging / str(item.get("path") or "")).resolve() == staged_manifest.resolve()
+           for item in delivery_files):
+        raise ValueError("Framework delivery manifest cannot overwrite a reviewed asset")
+    manifest = json.loads(staged_manifest.read_text(encoding="utf-8"))
+    if not quality_gates_complete(manifest.get("quality_gates"), review_profile):
+        raise ValueError("Delivery manifest contains incomplete quality gates")
+    manifest.update(fields)
+    staged_manifest.write_text(json.dumps(manifest, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    exports = []
+    workspace = getattr(state, "workspace_root", None)
+    for entry in published_content.get("workspace_exports") or []:
+        if not workspace:
+            raise ValueError("A project-relative export requires a bound Data workspace")
+        root = Path(workspace).resolve()
+        relative = PurePosixPath(entry["destination"])
+        if relative.is_absolute() or ".." in relative.parts or not relative.parts or relative.parts[0] != root.name:
+            raise ValueError("Project export must stay within the Data workspace: " + str(relative))
+        target = root.joinpath(*relative.parts[1:]).resolve()
+        source = (staging / entry["package_path"]).resolve()
+        if not target.is_relative_to(root) or target == root or not source.is_relative_to(staging.resolve()):
+            raise ValueError("Export path escapes its authorized workspace")
+        data = source.read_bytes()
+        if hashlib.sha256(data).hexdigest() != entry["sha256"]:
+            raise ValueError("Export source changed after review")
+        existing_hash = hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else None
+        baseline = entry.get("edit_baseline") or {}
+        expected = {entry["sha256"]}
+        if baseline.get("path") and Path(baseline["path"]).resolve() == target and baseline.get("sha256"):
+            expected.add(baseline["sha256"])
+        if target.exists() and (not target.is_file() or existing_hash not in expected):
+            raise ValueError("Export would overwrite an unrelated existing file: " + str(target))
+        exports.append({**entry, "path": str(target), "source": str(final / entry["package_path"])})
+    # Validate every destination before writing aliases. Keep staging intact
+    # until exports succeed, so an export I/O failure cannot force regeneration.
+    for entry in exports:
+        target = Path(entry["path"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.name + "." + state.run_id + ".tmp")
         try:
-            published_path.relative_to(published_root)
-        except ValueError:
-            continue
-        if published_path.is_file():
-            record["size"] = published_path.stat().st_size
-            record["sha256"] = hashlib.sha256(published_path.read_bytes()).hexdigest()
+            shutil.copyfile(staging / entry["package_path"], temporary)
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        if hashlib.sha256(target.read_bytes()).hexdigest() != entry["sha256"]:
+            raise ValueError("Export bytes do not match the reviewed asset")
+    published_content["workspace_exports"] = exports
+    if exports:
+        manifest["workspace_exports"] = exports
+        staged_manifest.write_text(json.dumps(manifest, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    written_files = publish_package(staging, final)
+    # Promotion preserves reviewed bytes and their hashes. Only framework-owned
+    # metadata is remapped; caller files must never be rewritten after review.
     published_content.update({
         "artifact_kind": "data_preprocessing_delivery",
         "payload_kind": (
@@ -216,19 +320,17 @@ def publish_dataset_delivery(
             else "dataset"
         ),
         "files": delivery_files,
-        "delivery_complete": True,
         "package_dir": str(final.resolve()),
-        "manifest_path": str((final / "manifest.json").resolve()),
+        "manifest_path": published_content.get("manifest_path") or str((final / "manifest.json").resolve()),
     })
     published_metadata.update({
         "artifact_kind": "data_preprocessing_delivery",
-        "delivery_complete": True,
         "package_dir": str(final.resolve()),
-        "manifest_path": str((final / "manifest.json").resolve()),
+        "manifest_path": published_content["manifest_path"],
     })
     artifact = state.save_artifact(
-        "dataset",
-        artifact_name,
+        "dataset" if kind == "dataset_materialized" else "preprocessing_document",
+        artifact_name_for_attempt(state, artifact_name),
         json.dumps(published_content, indent=2, ensure_ascii=False, default=str),
         metadata=published_metadata,
     )
@@ -237,7 +339,7 @@ def publish_dataset_delivery(
         "content": published_content,
         "written_files": written_files,
         "package_dir": str(final.resolve()),
-        "manifest_path": str((final / "manifest.json").resolve()),
+        "manifest_path": published_content["manifest_path"],
     }
 
 
@@ -259,13 +361,19 @@ def save_failed_review(
     return report
 
 
-def cleanup_generated_workspaces(state: State) -> list[str]:
+def cleanup_generated_workspaces(state: State, *, downloads_only: bool = False) -> list[str]:
     root = Path(str(state.root)).expanduser().resolve()
     removed: list[str] = []
     work_root = root / WORK_ROOT_NAME
+    if downloads_only:
+        work_root = work_root / "downloads"
+    if work_root.is_symlink() or work_root.parent.is_symlink():
+        return removed
     if work_root.is_dir():
         shutil.rmtree(work_root)
         removed.append(str(work_root))
+    if downloads_only:
+        return removed
     data_root = Path(
         str(getattr(state, "workspace_root", None) or root)
     ).expanduser().resolve() / DELIVERY_ROOT_NAME

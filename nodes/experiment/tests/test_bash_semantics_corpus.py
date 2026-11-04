@@ -364,3 +364,40 @@ def test_external_control_tri_state_is_recorded_once(command, expected):
     analysis = analyze_bash(command)
 
     assert analysis.external_control == expected
+
+
+@pytest.mark.parametrize("name", ["result'", "apostrophe's", "'quoted'", "space's name"])
+def test_adjacent_literal_quotes_project_one_filename(tmp_path, name):
+    import shlex
+    from nodes.experiment.tools import safe_bash
+
+    command = "printf ready > " + shlex.quote(name)
+    analysis = analyze_bash(command, initial_cwd=str(tmp_path))
+    redirects = [event for event in analysis.static_path_events if event.kind == "redirect"]
+    assert len(redirects) == 1
+    assert redirects[0].target_values == (name,)
+    assert not redirects[0].target_unknown
+    assert safe_bash._analyze_shell_path_effects(command, cwd=str(tmp_path)) == [
+        ("redirect", str(tmp_path / name)),
+    ]
+
+
+def test_adjacent_unknown_expansion_is_not_a_literal_filename(tmp_path):
+    analysis = analyze_bash('printf ready > "prefix""$UNKNOWN_SUFFIX"', initial_cwd=str(tmp_path))
+    redirects = [event for event in analysis.static_path_events if event.kind == "redirect"]
+    assert len(redirects) == 1
+    assert redirects[0].target_unknown
+    assert redirects[0].target_values == ()
+
+
+@pytest.mark.parametrize("operator", ["&&", "||"])
+def test_comment_in_conditional_list_keeps_redirect_at_command_cwd(tmp_path, operator):
+    import shlex
+    from nodes.experiment.tools import safe_bash
+
+    destination = tmp_path / "target directory"
+    command = "cd " + shlex.quote(destination.as_posix()) + f" {operator} # comment\n printf hi > file"
+    expected_cwd = destination if operator == "&&" else tmp_path
+    assert safe_bash._analyze_shell_path_effects(command, cwd=str(tmp_path)) == [
+        ("redirect", str(expected_cwd / "file")),
+    ]

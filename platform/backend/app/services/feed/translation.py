@@ -13,7 +13,7 @@ from app.config import settings
 from app.database import get_session_factory
 from app.models.user import User
 from app.services.feed import bridge
-from app.services.model_backends import resolved_api_key, select_effective_backend
+from app.services.model_backends import credential_is_optional, resolved_api_key, select_effective_backend
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,8 @@ class FeedTranslationWorker:
             async with factory() as db:
                 user = await db.get(User, user_id)
                 backend = await select_effective_backend(db, user, role=bridge.REASONING_ROLE)
-                if backend is None or not resolved_api_key(backend):
+                # 自建端点（填了 base_url）不鉴权是正常形态，和 bridge 同一个判据（credential_is_optional）。
+                if backend is None or not (resolved_api_key(backend) or credential_is_optional(backend)):
                     continue
                 pool = await feed_today(limit=1000000, offset=0, ready_only=False, user=user, db=db)
                 batch = [card.item for card in pool.feed if not translation_ready(card.item)

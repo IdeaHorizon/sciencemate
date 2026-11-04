@@ -10,7 +10,7 @@ const view = source("../components/ProjectOutputsView.tsx");
 const shell = source("../../../shared/layout/AppShell.tsx");
 const api = source("../../../lib/api.ts");
 
-test("只有工作过程默认收起 —— 用户来这一页是找那篇论文的", () => {
+test("只有过程文件默认收起 —— 用户来这一页是找那篇论文的", () => {
   /**
    * 2026-09-09 之前论文被埋在 206 件 compression_log / latex_build_receipt
    * 中间（真项目实测）。
@@ -19,14 +19,16 @@ test("只有工作过程默认收起 —— 用户来这一页是找那篇论文
    * `group-by-tier.test.ts` —— 那里用**数据**测，不靠比对源码。这一条只
    * 剩下"渲染时用的是那个纯函数"这一句。
    */
-  assert.match(view, /tier !== "working"/, "只有工作过程默认收起");
+  assert.match(view, /tier !== "working"/, "只有过程文件默认收起");
   assert.match(view, /groupByTier\(catalog\.data\?\.entries \?\? \[\]\)/);
   assert.match(view, /TIER_ORDER\.map/, "档的顺序也只有一处定义");
 });
 
-test("每一档都有自己的标题 —— 工作过程照样列得出来", () => {
+test("每一档都有自己的标题 —— 过程文件照样列得出来", () => {
   assert.match(view, /TIER_LABEL/);
-  assert.match(view, /working: { zh: "工作过程"/);
+  assert.match(view, /working: { zh: "过程文件"/);
+  // 中间那组不再和页面同名（页面叫「研究成果」）。
+  assert.match(view, /output: { zh: "其他成果"/);
 });
 
 test("一行就是一件产物，点得开的文件挂在那一行上", () => {
@@ -52,8 +54,8 @@ test("类型名取自共用的那张表 —— 表本身的判据在 kind-label.
   assert.match(view, /artifactKindLabel\(entry\.kind, lang\)/);
 });
 
-test("导航里「研究产出」是这个问题的唯一入口", () => {
-  assert.match(shell, /\$\{root\}\/outputs`, label: \{ zh: "研究产出"/);
+test("导航里「研究成果」是这个问题的唯一入口", () => {
+  assert.match(shell, /\$\{root\}\/outputs`, label: \{ zh: "研究成果"/);
 });
 
 test("目录是一次请求，不是前端把几个来源拼起来", () => {

@@ -290,8 +290,11 @@ class FeedDailyPick(Base):
     )
     pick_date: Mapped[date] = mapped_column(Date, primary_key=True)
 
-    #: [{"item_id": ..., "reason": "...", "project_id": ... | None}]
-    #: `reason` 是"为什么推给你"，`project_id` 是它对上了你的哪个课题。
+    #: [{"item_id": ..., "why": {"kind": ..., ...}, "project_id": ... | None}]
+    #: `why` 是"为什么推给你"的事实（`ScoredItem.why()`），读的时候按那一屏的语言
+    #: 说成一句话；`project_id` 是它对上了你的哪个项目。
+    #: 更早的版本存的是写好的一句中文 `reason`、没有 `why`：读到时按当天的打分重说
+    #: （`api/v1/feed._build_feed_pool`）。往日的行只为轮换提供 item_id，不再显示。
     picks: Mapped[list] = mapped_column(_JSON, nullable=False, default=list)
 
     created_at: Mapped[datetime] = mapped_column(

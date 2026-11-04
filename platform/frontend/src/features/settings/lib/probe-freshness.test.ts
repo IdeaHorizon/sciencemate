@@ -8,7 +8,7 @@ const at = (msAgo: number) => new Date(NOW - msAgo).toISOString();
 test("从没探过 ≠ 刚探过 —— 不能安静地当新鲜", () => {
   assert.deepEqual(probeFreshness({ last_probe_at: null }, NOW, "zh"), { kind: "never" });
   assert.deepEqual(probeFreshness({ last_probe_at: undefined }, NOW, "zh"), { kind: "never" });
-  assert.equal(probeSummary({ last_probe_at: null, last_probe_ok: null, last_probe_detail: null }, NOW, "zh"), "从未检测");
+  assert.equal(probeSummary({ last_probe_at: null, last_probe_ok: null, last_probe_detail: null }, NOW, "zh"), "尚未测试");
 });
 
 test("解析不出的时间戳算「不知道」，不算新鲜", () => {
@@ -36,14 +36,14 @@ test("陈旧的观测必须**明说**过期，而不是只显示一个 Ready", (
   );
   assert.match(summary, /3 天前/);
   assert.match(summary, /通过/);
-  assert.match(summary, /已过期/, "陈旧却不吭声 = 让人继续把快照当事实");
+  assert.match(summary, /结果较旧/, "陈旧却不吭声 = 让人继续把快照当事实");
 });
 
 test("三态：通过 / 被拒 / 未判定 —— 探不出结论不能说成通过", () => {
   const base = { last_probe_at: at(60_000), last_probe_detail: null };
   assert.match(probeSummary({ ...base, last_probe_ok: true }, NOW, "zh"), /通过/);
-  assert.match(probeSummary({ ...base, last_probe_ok: false }, NOW, "zh"), /被拒/);
-  assert.match(probeSummary({ ...base, last_probe_ok: null }, NOW, "zh"), /未判定/);
+  assert.match(probeSummary({ ...base, last_probe_ok: false }, NOW, "zh"), /未通过/);
+  assert.match(probeSummary({ ...base, last_probe_ok: null }, NOW, "zh"), /结果不明/);
 });
 
 test("相对时间的分档", () => {

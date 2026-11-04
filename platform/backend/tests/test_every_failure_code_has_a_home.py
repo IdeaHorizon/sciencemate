@@ -107,12 +107,12 @@ def test_every_registered_code_says_why():
 
 
 def test_the_three_hard_start_failures_each_say_their_own_thing():
-    """RFC §3.1：模型不可达说模型，身份冲突说「是别人的」，不说「读不到」。"""
+    """RFC §3.1：模型不可达说模型，身份冲突说「属于其他用户」，不说「读不到」。"""
     provider = run_failures.copy_for("provider_not_configured")
     tenant = run_failures.copy_for("tenant_home_conflict")
     state = run_failures.copy_for("runtime_identity_conflict")
     assert "模型" in provider["title"]
-    assert "别人" in tenant["title"] and "读不到" not in tenant["body"]
+    assert "其他用户" in tenant["title"] and "读不到" not in tenant["body"]
     assert "会话" in state["title"]
     assert provider["retryable"] is False and tenant["retryable"] is False
 

@@ -137,6 +137,55 @@ def test_the_dmg_is_assembled_with_a_tool_that_keeps_hardlinks(packaging) -> Non
     assert '"cp", "-R"' not in code, "cp -R 不保留硬链接"
 
 
+def test_a_build_leaves_one_app_and_spotlight_does_not_list_it(packaging, tmp_path, monkeypatch) -> None:
+    """打一次包只留一份 `.app`，而且在 Spotlight 不进的目录里。
+
+    2026-11-03：打包机上 Spotlight 搜 ScienceMate 列出 16 份，只有 /Applications 那份是装的。
+    其余是每次打包留下的**两份**完整 app —— `dist/ScienceMate.app` 和打 dmg 用的暂存
+    `dist/dmg/ScienceMate.app`（打完从没删过）。
+
+    判据：① main 把 app 建在 `APP_DIR` 里，`APP_DIR` 以 `.noindex` 结尾（目录里放
+    `.metadata_never_index` 在 macOS 26.3 上实测不管用）；② 真跑一次 `make_the_dmg`
+    （ditto / hdiutil 换成在盘上做同样的事），打完之后 `dist/` 里除了 `APP_DIR` 没有别的 `.app`。
+    """
+    import ast
+    import shutil
+
+    assert packaging.APP_DIR.name.endswith(".noindex"), "APP_DIR 不以 .noindex 结尾 —— Spotlight 会把产物当应用列出来"
+    main = next(n for n in ast.walk(ast.parse(SCRIPT.read_text(encoding="utf-8")))
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    built_at = [ast.unparse(n.value) for n in ast.walk(main) if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "app" for t in n.targets)]
+    assert built_at == ["APP_DIR / f'{APP_NAME}.app'"], f"main 没把 app 建在 APP_DIR 里：{built_at}"
+
+    dist = tmp_path / "dist"
+    monkeypatch.setattr(packaging, "DIST", dist)
+    monkeypatch.setattr(packaging, "APP_DIR", dist / "app.noindex")
+    monkeypatch.setattr(packaging.payload_release, "the_version", lambda: "9.9.9")
+    app = packaging.APP_DIR / f"{packaging.APP_NAME}.app"
+    (app / "Contents" / "MacOS").mkdir(parents=True)
+    (app / "Contents" / "MacOS" / packaging.BINARY_NAME).write_bytes(b"shell")
+    seen_in_staging: list[str] = []
+
+    def run(command, **kwargs):
+        if command[0] == "ditto":
+            shutil.copytree(command[1], command[2], symlinks=True)
+        elif command[0] == "hdiutil":
+            staging = Path(command[command.index("-srcfolder") + 1])
+            seen_in_staging.extend(sorted(p.name for p in staging.iterdir()))
+            Path(command[-1]).write_bytes(b"dmg")
+        else:
+            raise AssertionError(f"make_the_dmg 跑了意料之外的命令：{command}")
+
+    monkeypatch.setattr(packaging, "run", run)
+    dmg = packaging.make_the_dmg(app)
+
+    assert dmg.read_bytes() == b"dmg"
+    assert seen_in_staging == ["Applications", app.name], f"dmg 里装的不对：{seen_in_staging}"
+    leftover = [p.relative_to(dist).as_posix() for p in dist.rglob("*.app") if p != app]
+    assert not leftover, f"打完 dmg 还留着别的 .app（每次打包多一份）：{leftover}"
+
+
 @pytest.mark.parametrize("packager", PACKAGERS)
 def test_every_packager_carries_them_through_the_one_derivation(packager) -> None:
     if not (REPO / "scripts" / "package" / packager).exists():

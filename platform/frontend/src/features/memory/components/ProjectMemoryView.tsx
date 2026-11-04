@@ -32,8 +32,8 @@ export function ProjectMemoryView({ projectId }: { projectId: string }) {
   if (error) {
     return (
       <Empty
-        title={t({ zh: "读不到项目记忆", en: "Project memory is unavailable" })}
-        hint={t({ zh: "读不到项目仓库里的 MEMORY.md。", en: "MEMORY.md could not be read from the Project repository." })}
+        title={t({ zh: "无法加载项目记忆", en: "Project memory is unavailable" })}
+        hint={t({ zh: "请稍后重试。", en: "Please try again later." })}
       />
     );
   }
@@ -43,7 +43,7 @@ export function ProjectMemoryView({ projectId }: { projectId: string }) {
     return (
       <Empty
         title={t({ zh: "还没有项目记忆", en: "No project memory yet" })}
-        hint={t({ zh: "随着决策和发现积累，curator 会把它们写进 MEMORY.md。", en: "The curator writes MEMORY.md as decisions and findings accumulate." })}
+        hint={t({ zh: "研究中的决策和发现会自动记录在这里。", en: "Decisions and findings are recorded here automatically as research goes on." })}
       />
     );
   }
@@ -55,7 +55,6 @@ export function ProjectMemoryView({ projectId }: { projectId: string }) {
           <Card.Body>
             <div className="memory-row-head">
               <Badge size="sm" kind="info">{section.heading}</Badge>
-              <span className="memory-topic">{t({ zh: "MEMORY.md · 跟着 Git 走", en: "MEMORY.md · tracked in Git" })}</span>
             </div>
             {section.entries.map((entry, index) => {
               const id = entryId(entry);

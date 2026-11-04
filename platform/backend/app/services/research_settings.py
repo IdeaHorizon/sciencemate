@@ -62,67 +62,32 @@ def _effective_layers(
     instructions: list[dict],
     *,
     memory_enabled: bool,
-    institution_version: int | None = None,
-    group_version: int | None = None,
-    personal_version: int | None = None,
 ) -> list[dict]:
-    layers = [
-        {
-            "kind": "institution",
-            "name": user.institution_name,
-            "editable": False,
-            "instruction_count": 1 if institution_version else 0,
-            "summary": (
-                f"Published organization instructions v{institution_version} are active."
-                if institution_version
-                else "No published institution behavior instructions are active."
-            ),
-        }
-    ]
-    if user.group_id:
-        layers.append(
-            {
-                "kind": "group",
-                "name": user.group_name or user.group_id,
-                "editable": False,
-                "instruction_count": 1 if group_version else 0,
-                "summary": (
-                    f"Published research-group instructions v{group_version} are active."
-                    if group_version
-                    else "No published research-group behavior instructions are active."
-                ),
-            }
-        )
+    """助手实际会读到的指令层 —— 这里只答「个人」那一层。
+
+    harness 读的指令只有两层（`core/directives_loader.py`）：个人层（`PROFILE.md` +
+    平台渲染的 `RESEARCH_SETTINGS.md`）和项目层（项目仓库里的 `PROJECT.md`，在项目设置
+    里改）。机构 / 研究组那两层在 RFC X2 删表时就没了（见 `services/instructions.py`
+    「组织层删掉了」）：没有文件、没有写入口、没有注入。这里以前照旧报着那两层，
+    `instruction_count` 永远是 0，界面于是永远显示「未设置」，还说它们「由管理员维护」。
+    """
     enabled_count = sum(1 for item in instructions if item["enabled"])
-    personal_summary = (
-        f"{enabled_count} of {len(instructions)} personal instructions enabled."
-        if memory_enabled
-        else "Personal instruction memory is disabled for new Sessions."
-    )
-    layers.append(
+    return [
         {
             "kind": "personal",
             "name": user.display_name,
             "editable": True,
-            "instruction_count": len(instructions) + (1 if personal_version else 0),
+            "instruction_count": len(instructions),
             "summary": (
-                f"Published PROFILE.md v{personal_version}; {personal_summary}"
-                if personal_version
-                else personal_summary
+                f"{enabled_count} of {len(instructions)} personal instructions enabled."
+                if memory_enabled
+                else "Personal instruction memory is disabled for new Sessions."
             ),
         }
-    )
-    return layers
+    ]
 
 
-def research_settings_payload(
-    user: User,
-    record: UserResearchSettings | None,
-    *,
-    institution_version: int | None = None,
-    group_version: int | None = None,
-    personal_version: int | None = None,
-) -> dict:
+def research_settings_payload(user: User, record: UserResearchSettings | None) -> dict:
     instructions = _normalized_instructions(record.instructions if record else [])
     memory_enabled = _memory_enabled(user)
     return {
@@ -131,14 +96,7 @@ def research_settings_payload(
         "evidence_standard": (record.evidence_standard if record else DEFAULT_EVIDENCE_STANDARD),
         "memory_enabled": memory_enabled,
         "instructions": instructions,
-        "effective_layers": _effective_layers(
-            user,
-            instructions,
-            memory_enabled=memory_enabled,
-            institution_version=institution_version,
-            group_version=group_version,
-            personal_version=personal_version,
-        ),
+        "effective_layers": _effective_layers(user, instructions, memory_enabled=memory_enabled),
         "updated_at": record.updated_at if record else None,
     }
 
@@ -146,15 +104,7 @@ def research_settings_payload(
 async def effective_research_settings(db: AsyncSession, *, user: User) -> dict:
     record = await get_research_settings_record(db, user_id=user.id)
     # 指令的"第几版"随三张指令表一起没了（RFC X2）：指令现在是文件，版本是 git。
-    # 这里留 None 而不是编一个数 —— 一个永远为 0 的版本号比没有版本号更坏。
-    versions = {"institution": None, "group": None, "personal": None}
-    return research_settings_payload(
-        user,
-        record,
-        institution_version=versions["institution"],
-        group_version=versions["group"],
-        personal_version=versions["personal"],
-    )
+    return research_settings_payload(user, record)
 
 
 async def replace_research_settings(

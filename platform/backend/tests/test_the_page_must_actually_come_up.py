@@ -65,6 +65,10 @@ def _a_package_shaped_like_the_real_one(tmp_path: Path) -> Path:
     loop = stage / "app" / "harness" / "core" / "agent_loop.py"
     loop.parent.mkdir(parents=True)
     loop.write_text("", encoding="utf-8")
+    # 实际 harness 包还带 shared/，后端的图像与分类纯函数直接使用它。
+    # 只摆 core 空文件会漏掉新增的真实打包依赖；与实际包同样复制 shared 树。
+    shutil.copytree(REPO_ROOT / "shared", stage / "app" / "harness" / "shared",
+                    ignore=shutil.ignore_patterns("__pycache__"))
     return stage
 
 

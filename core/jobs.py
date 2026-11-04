@@ -63,9 +63,11 @@ _JOBS_FILE = "jobs.jsonl"
 
 # 起后台进程的 shell 形态 —— 用来机械识别「起了作业却没登记」。
 # 覆盖 nohup / setsid / 行尾 & / disown；不覆盖 `sleep N; cmd` 这类前台等待
-# （那是轮询，不是起作业）。
+# （那是轮询，不是起作业）。`&&` 是「前一条成功再跑」，不是后台：`which x && echo ok`
+# 曾被 `&\s*echo` 认成起作业（#1187 真跑撞到 —— 调度器的只读 shell 据此会说
+# 「你的后台进程被收掉了」，而它根本没起）。
 _BACKGROUND_LAUNCH = re.compile(
-    r"(^|[;&|]\s*)(nohup|setsid)\s|&\s*$|&\s*(echo|disown)", re.MULTILINE)
+    r"(^|[;&|]\s*)(nohup|setsid)\s|(?<!&)&\s*$|(?<!&)&(?!&)\s*(echo|disown)", re.MULTILINE)
 
 OPEN_STATUSES = frozenset({"running", "unknown"})
 

@@ -16,6 +16,8 @@ from app.models.project import (
     ProjectStatus,
 )
 from app.models.user import User, UserRole
+from app.services import refusals
+from app.services.user_interface import language_for, say
 
 ROLE_PERMISSIONS: dict[str, tuple[str, ...]] = {
     UserRole.INSTITUTION_ADMIN.value: (
@@ -168,9 +170,9 @@ async def require_project_access(
 ) -> Project:
     project = await db.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail=say(refusals.PROJECT_NOT_FOUND, language_for(user)))
     if not await can_access_project(db, user, project):
-        raise HTTPException(status_code=403, detail="Not authorized for this project")
+        raise HTTPException(status_code=403, detail=say(refusals.NOT_AUTHORIZED_FOR_PROJECT, language_for(user)))
     return project
 
 

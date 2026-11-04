@@ -18,6 +18,7 @@ from app.models.user import User
 from app.schemas.literature import (
     LiteratureSearchIn,
     LiteratureSearchOut,
+    LiteraturePlanOut,
     LiteratureTranslateIn,
     LiteratureTranslateOut,
 )
@@ -33,6 +34,23 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+@router.post("/plan", response_model=LiteraturePlanOut)
+async def plan_literature(payload: LiteratureSearchIn, user: User = Depends(get_current_user), db=Depends(get_db),
+                          lang: Language = Depends(language_on_screen)):
+    backend = await select_effective_backend(db, user, role=bridge.REASONING_ROLE)
+    if backend is None:
+        raise HTTPException(status_code=503, detail=say(_NO_REASONING_MODEL, lang))
+    try:
+        result = await bridge.call(op="literature_search_plan", payload={"query": payload.query},
+                                   result_type="literature_search_plan_result", backend=backend)
+    except (bridge.BridgeUnavailable, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail=said_of(exc, lang, otherwise={
+            "zh": "检索词生成这次没完成，请重试。", "en": "Search planning did not complete. Please retry."})) from exc
+    for key in ("type", "request_id", "at"):
+        result.pop(key, None)
+    return LiteraturePlanOut.model_validate(result)
+
+
 async def _school_search(query: str, user: User, limit: int) -> list[dict]:
     try:
         return await asyncio.to_thread(
@@ -44,7 +62,9 @@ async def _school_search(query: str, user: User, limit: int) -> list[dict]:
         return []
 
 #: 三个端点同一句，写一份。
-_NO_REASONING_MODEL = {"zh": "没有可用的 reasoning 模型后端", "en": "No reasoning model backend is available"}
+_NO_REASONING_MODEL = {"zh": "还没有可用的主推理模型，请在「设置 → 模型与密钥」中添加。",
+                       "en": "No main reasoning model is available. Add one under Settings → Models & credentials."}
+_STARTING = {"zh": "正在生成检索策略…", "en": "Generating a search strategy…"}
 
 
 @router.post("/search", response_model=LiteratureSearchOut)
@@ -60,7 +80,7 @@ async def search_literature(payload: LiteratureSearchIn, user: User = Depends(ge
     except (bridge.BridgeUnavailable, RuntimeError) as exc:
         school_task.cancel()
         raise HTTPException(status_code=503, detail=said_of(exc, lang, otherwise={
-            "zh": "学术搜索这次没做成：{why}", "en": "The literature search did not go through: {why}"})) from exc
+            "zh": "学术搜索失败，请稍后重试。", "en": "The literature search failed. Try again later."})) from exc
     result.pop("type", None)
     result.pop("request_id", None)
     # JSONL emitter 为每个事件统一附加时间戳；它属于传输元数据，不是
@@ -125,7 +145,7 @@ async def translate_literature_page(
         )
     except (bridge.BridgeUnavailable, RuntimeError) as exc:
         raise HTTPException(status_code=503, detail=said_of(exc, lang, otherwise={
-            "zh": "这一页没翻译成：{why}", "en": "This page could not be translated: {why}"})) from exc
+            "zh": "翻译失败，请稍后重试。", "en": "Could not translate this page. Try again later."})) from exc
     for key in ("type", "request_id", "at"):
         result.pop(key, None)
     return LiteratureTranslateOut.model_validate(result)
@@ -211,7 +231,7 @@ async def search_literature_stream(payload: LiteratureSearchIn, user: User = Dep
                 {
                     "type": "progress",
                     "stage": "strategy",
-                    "detail": "正在启动检索策略生成",
+                    "detail": say(_STARTING, lang),
                     "progress_percent": 3,
                 },
                 ensure_ascii=False,
@@ -244,7 +264,7 @@ async def search_literature_stream(payload: LiteratureSearchIn, user: User = Dep
         last_heartbeat = started
         current_progress = {
             "stage": "strategy",
-            "detail": "正在启动检索策略生成",
+            "detail": say(_STARTING, lang),
             "progress_percent": 3,
         }
 
@@ -255,7 +275,7 @@ async def search_literature_stream(payload: LiteratureSearchIn, user: User = Dep
                 if event.get("type") == "progress":
                     current_progress = {
                         "stage": str(event.get("stage") or "search"),
-                        "detail": str(event.get("detail") or "正在检索"),
+                        "detail": str(event.get("detail") or say({"zh": "正在检索…", "en": "Searching…"}, lang)),
                         "progress_percent": int(
                             event.get("progress_percent")
                             or current_progress["progress_percent"]
@@ -274,7 +294,8 @@ async def search_literature_stream(payload: LiteratureSearchIn, user: User = Dep
                     heartbeat = {
                         "type": "progress",
                         "stage": current_progress["stage"],
-                        "detail": f"{current_progress['detail']}（已等待 {elapsed} 秒）",
+                        "detail": current_progress["detail"] + say(
+                            {"zh": "（已等待 {n} 秒）", "en": " (waited {n} s)"}, lang, n=elapsed),
                         "elapsed_seconds": elapsed,
                         "progress_percent": current_progress["progress_percent"],
                     }
@@ -308,9 +329,15 @@ async def search_literature_stream(payload: LiteratureSearchIn, user: User = Dep
         except Exception as exc:
             # SSE 响应头已经发出后，异常不能再由 FastAPI 改成普通 5xx；必须
             # 变成流内 error 事件，否则浏览器只会永远停在最后一条 progress。
+            logger.warning(
+                "literature search result handling failed: %s", type(exc).__name__, exc_info=True)
+            message = said_of(exc, lang, otherwise={
+                "zh": "无法处理检索结果，请重试。",
+                "en": "Could not process the search results. Try again.",
+            })
             error_event = {
                 "type": "error",
-                "message": f"检索结果处理失败：{type(exc).__name__}",
+                "message": message,
             }
 
             yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"

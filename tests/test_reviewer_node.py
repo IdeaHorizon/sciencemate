@@ -247,6 +247,7 @@ async def test_present_decision_package_redirect_upstream_metadata():
             source_node_type="hypothesis",
             producing_run_id="r_test",
             review_critique_artifact_id=art["id"],
+            human_decision_reason="需要负责人确认本次研究取舍。",
         )
         assert res["status"] == "pause"
         pe = res["pause_event"]
@@ -377,6 +378,7 @@ async def test_redirect_upstream_missing_target_degrades_to_revise():
             source_node_type="hypothesis",
             producing_run_id="r_bad",
             review_critique_artifact_id=art["id"],
+            human_decision_reason="需要负责人确认本次研究取舍。",
         )
         md = res["pause_event"]["metadata"]
         # hypothesis 唯一的依赖图上游 literature 后来改成了服务节点，退回它这条
@@ -408,15 +410,8 @@ def test_hook_no_pending_no_inject():
         print("  ✓ pending 空 → 不注入")
 
 
-def test_hook_is_silent_while_the_runtime_drives_the_flow():
-    """Move 1d 之后：flow 的常规两步由运行时走完，提醒 hook **不该说话**。
-
-    此前它每轮把下一步调用连参数打印给调度器照抄（"NEXT: Step 2 — call _reviewer"）。
-    手续归运行时之后，再提醒就是让它去做一件已经做完的事 —— 换来一次重复呈递。
-
-    hook 只在**真需要调度器动手**的状态说话：人选了 REVISE/REDIRECT 要起指定节点，
-    人选了 EDIT 要等人改完，以及进程重启丢了 pause 需要重新呈递。
-    """
+def test_hook_leaves_review_automatic_and_explanation_to_the_orchestrator():
+    """不重复派审查；审完提醒调度器自然解释，原有恢复/授权路径继续可用。"""
     from core.loop_hooks_builtin import _post_node_review_flow_reminder_on_turn_start
     from core.loop_hooks import HookContext
     with tempfile.TemporaryDirectory() as td:
@@ -437,7 +432,7 @@ def test_hook_is_silent_while_the_runtime_drives_the_flow():
             state=state, messages=[], turn=1,
         )
 
-        # review 待办 / 决策待呈递 —— 两者都是运行时的活，不提醒调度器。
+        # 审查由运行时完成；只有拿到结果后才提醒调度器解释和呈递。
         for state_name in ("pending", "done"):
             entry["review_state"] = state_name
             if state_name == "done":
@@ -445,7 +440,11 @@ def test_hook_is_silent_while_the_runtime_drives_the_flow():
             out = _post_node_review_flow_reminder_on_turn_start(ctx)
             text = out[0].content if out else ""
             assert "call _reviewer" not in text, "运行时自己派 reviewer，别再教调度器抄"
-            assert "call present_decision_package" not in text, "呈递也归运行时"
+            if state_name == "done":
+                assert "先在对话中向用户说明" in text
+                assert "present_decision_package" in text
+            else:
+                assert out is None
 
         # 人选了 REVISE → 起指定节点，这一步运行时替不了（是人的决定的执行面）
         entry["decision_state"] = "action_authorized"
@@ -494,12 +493,7 @@ def test_hook_re_presents_stale_awaiting_decision_after_restart():
 
 
 def test_hook_review_skipped_path():
-    """reviewer 被 owner 跳过
-
-    Move 1d 之后：review 无论 skipped 还是 failed，下一步（呈递决策包）都归运行时，
-    所以 hook 在这两个状态下**不注入** —— 状态本身仍如实记在 flow entry 里，
-    决策包会带着 review_failed_reason 呈递，人看得到。
-    """
+    """跳过审查时，提醒调度器如实解释后自行呈递选择。"""
     from core.loop_hooks_builtin import _post_node_review_flow_reminder_on_turn_start
     from core.loop_hooks import HookContext
     with tempfile.TemporaryDirectory() as td:
@@ -517,16 +511,13 @@ def test_hook_review_skipped_path():
             harness=NodeHarness(node_type="_orchestrator"),
             state=state, messages=[], turn=1,
         )
-        assert _post_node_review_flow_reminder_on_turn_start(ctx) is None
+        result = _post_node_review_flow_reminder_on_turn_start(ctx)
+        assert result and "独立审查已跳过" in result[0].content
+        assert "present_decision_package" in result[0].content
 
 
 def test_hook_review_failed_path():
-    """reviewer 失败
-
-    Move 1d 之后：review 无论 skipped 还是 failed，下一步（呈递决策包）都归运行时，
-    所以 hook 在这两个状态下**不注入** —— 状态本身仍如实记在 flow entry 里，
-    决策包会带着 review_failed_reason 呈递，人看得到。
-    """
+    """审查失败的原由交给调度器，不能误报为科研产物的问题。"""
     from core.loop_hooks_builtin import _post_node_review_flow_reminder_on_turn_start
     from core.loop_hooks import HookContext
     with tempfile.TemporaryDirectory() as td:
@@ -544,7 +535,9 @@ def test_hook_review_failed_path():
             harness=NodeHarness(node_type="_orchestrator"),
             state=state, messages=[], turn=1,
         )
-        assert _post_node_review_flow_reminder_on_turn_start(ctx) is None
+        result = _post_node_review_flow_reminder_on_turn_start(ctx)
+        assert result and "reviewer 子 run 没产出可解析 critique" in result[0].content
+        assert "present_decision_package" in result[0].content
 
 
 # ─────────────────────────────────────────────────────────────────────────────

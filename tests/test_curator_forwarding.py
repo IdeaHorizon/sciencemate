@@ -99,7 +99,7 @@ def test_orchestrator_guidance_tells_to_forward():
     from core.loader import load_harness
     sp = load_harness("_orchestrator").system_prompt
     assert "forward_artifact_ids" in sp
-    assert "#254" in sp or "254" in sp
+    assert "机械参数框架会自动补齐" in sp
 
 
 # ── 修好之后：receipt 应判整合成功 ─────────────────────────────────────────

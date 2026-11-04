@@ -7,6 +7,8 @@ from typing import Any
 from core.state import State
 from core.tool_registry import ToolDefinition, register_tool
 
+DEFAULT_DOWNLOAD_MAX_BYTES = 512 * 1024 * 1024
+DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 300.0
 
 _IMPLEMENTATIONS = {
     "build_scientific_preprocessing_package": (
@@ -38,7 +40,8 @@ register_tool(
         description=(
             "Generate approved cross-discipline preprocessing assets in executor-owned staging. "
             "Solver-deck adapters can write complete input files around dependency meshes using the bound "
-            "material, boundary and load controls; this tool is not merely a file copier. "
+            "material, section, boundary and load controls; changing these controls does not remesh "
+            "or edit dependency geometry. Repair those assets at their upstream producers. "
             "Review, manifest finalization, and publication are performed only by the plan executor."
         ),
         parameters_schema={
@@ -62,7 +65,8 @@ register_tool(
         allowed_node_types=["data"],
         risk_level="low",
         content_contract={
-            "boundary_conditions": "Map existing mesh region names to the requested physical condition. Mechanical examples: {region: {u1: 0, u2: 0}} or {region: {type: 'fixed'}}. Steady heat-transfer examples: {region: {type: 'dirichlet', temperature: 400, unit: 'K'}} or {region: {type: 'neumann', heat_flux: 0}} for insulation. Compound kind/field labels are equivalent. Preserve the supplied values and units; do not reinterpret convection/radiation or a nonzero flux as a prescribed temperature or insulation. Nested overrides merge with the original bindings before assembly.",
+            "geometry": "Solver-deck section thickness only (thickness or thickness_mm in consistent geometry units); this adapter does not alter dependency geometry or mesh sizing.",
+            "boundary_conditions": "Map existing mesh region names to the requested physical condition. Mechanical examples: {region: {u1: 0, u2: 0}}, {region: {type: 'fixed'}}, or {region: {type: 'free'}} (no prescribed displacement). Numeric displacement assignments preserve their values; unsupported text must not be guessed as zero. Steady heat-transfer examples: {region: {type: 'dirichlet', temperature: 400, unit: 'K'}} or {region: {type: 'neumann', heat_flux: 0}} for insulation. Compound kind/field labels are equivalent. Preserve the supplied values and units; do not reinterpret convection/radiation or a nonzero flux as a prescribed temperature or insulation. Only constrain regions/DOFs required by the request; a named mesh region or applied load does not imply displacement fixation. Nested overrides merge with the original bindings; an explicit empty region object {} removes its prescribed condition without removing a separately declared load.",
             "material": "Material controls merge with the asset's frozen bindings. For steady conductive heat transfer supply thermal_conductivity; do not invent heat capacity for a steady-state request. Other thermal formulations or sources require an explicit solver-input generation step.",
             "loads": "For the CSM solver-deck adapter, parameters.loads maps existing mesh boundary region names to {magnitude: number, direction: '+x' | '-x' | '+y' | '-y' | '+z' | '-z'}. Magnitude is traction in the request's consistent units; the adapter integrates boundary-edge length times section thickness into nodal forces. Do not encode the magnitude in a region name or in boundary_conditions.",
         },
@@ -104,15 +108,21 @@ register_tool(
     ToolDefinition(
         name="data_web_download",
         description=(
-            "Planning-gated fallback downloader for a selected public scientific asset or download page. "
-            "It records the local path and hash and is loaded only when selected."
+            "HTTP GET downloader for a selected public scientific asset or discovery page, using its own "
+            "HTTP client rather than shell networking. Select advertised file_download links or a fully "
+            "specified subset request returning file bytes; a data_service URL is not necessarily a file. "
+            "This tool does not implement OPeNDAP. It records the local path, source URL and hash."
         ),
         parameters_schema={
             "type": "object",
             "properties": {
                 "url": {"type": "string"}, "output_name": {"type": "string"},
-                "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 250000000},
+                "max_bytes": {
+                    "type": "integer", "minimum": 1024, "default": DEFAULT_DOWNLOAD_MAX_BYTES,
+                    "description": "Transfer byte budget; defaults to 512 MiB. Set a larger budget for a known larger file when resources permit.",
+                },
                 "discover_links": {"type": "boolean"},
+                "discovery_only": {"type": "boolean", "description": "Inspect a bounded source preview and candidate links without materializing the dataset."},
                 "download_first_matching_link": {"type": "boolean"},
                 "link_pattern": {"type": "string"}, "allow_non_mesh_file": {"type": "boolean"},
                 "allow_reference_documents": {"type": "boolean"},
@@ -125,7 +135,10 @@ register_tool(
                         "geometry_or_mesh", "official_file",
                     ],
                 },
-                "timeout_seconds": {"type": "number", "minimum": 5, "maximum": 60},
+                "timeout_seconds": {
+                    "type": "number", "minimum": 5, "default": DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
+                    "description": "HTTP connection/read inactivity timeout, not a total transfer duration limit. Active large transfers may take longer.",
+                },
             },
             "required": ["url"],
             "additionalProperties": True,

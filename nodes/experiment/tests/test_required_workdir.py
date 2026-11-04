@@ -84,6 +84,17 @@ def _run_root(state: State) -> Path:
     return Path(state.hook_state["path_roles"]["run_root"])
 
 
+def _assert_same_directory(observed: str, expected: Path) -> None:
+    """Compare filesystem identity, including MSYS's /c/... Windows spelling."""
+    directory = observed.strip()
+    assert directory, "the command did not report its working directory"
+    if (os.name == "nt" and len(directory) >= 3
+            and directory[0] == "/" and directory[1].isalpha()
+            and directory[2] == "/"):
+        directory = directory[1] + ":" + directory[2:]
+    assert Path(directory).samefile(expected), (observed, str(expected))
+
+
 # ── 1. cd 失败不得执行后续命令 ───────────────────────────────────────────────
 
 @requires_sandbox
@@ -226,7 +237,7 @@ def test_full_log_header_records_actual_workdir(state):
     log = Path(res["log_path"]).read_text(encoding="utf-8")
     assert f"# workdir: {run_root}" in log
     assert "# workdir_authority: cwd_param" in log
-    assert res["stdout_tail"].strip() == str(run_root)
+    _assert_same_directory(res["stdout_tail"], run_root)
 
 
 # ── 加固的边界：不能改坏本来就写对的命令 ────────────────────────────────────
@@ -292,7 +303,7 @@ def test_safe_tools_ignore_legacy_stage_and_default_to_run_root(state):
     runtime = sb.experiment_output_dir(state, "runtime", create=False)
     bash, python = asyncio.run(run())
     assert bash["status"] == "success", bash
-    assert str(runtime) in bash.get("stdout_tail", "")
+    _assert_same_directory(bash.get("stdout_tail", ""), runtime)
     assert python["status"] == "success", python
     assert str(runtime) in python.get("stdout", "") + python.get("stdout_tail", "")
 
@@ -326,3 +337,79 @@ def test_default_workdir_derivation_failure_never_starts_an_executor(state, monk
     assert bash["reason"] == sb.DEFAULT_WORKDIR_UNAVAILABLE
     assert python["reason"] == sb.DEFAULT_WORKDIR_UNAVAILABLE
     assert started == []
+
+
+@pytest.mark.parametrize("tool", ["bash", "python"])
+def test_workdir_alias_conflict_fails_before_any_action(state, monkeypatch, tool):
+    async def never(*args, **kwargs):
+        raise AssertionError("a conflicting workdir must not start an executor")
+
+    monkeypatch.setattr(sb, "_exec_and_log", never)
+    root = _run_root(state)
+    args = {"cwd": str(root), "workdir": str(root / "different")}
+    if tool == "bash":
+        result = asyncio.run(sb._safe_run_bash(state, "echo no", **args))
+    else:
+        result = asyncio.run(sb._safe_execute_python(state, "print(1)", **args))
+    assert result["reason"] == "conflicting_workdir_arguments"
+    assert result["payload_spawned"] is False
+
+
+@pytest.mark.parametrize("tool", ["bash", "python"])
+def test_missing_workdir_alias_is_not_created_or_executed(state, tool):
+    missing = _run_root(state) / "alias-not-created"
+    if tool == "bash":
+        result = asyncio.run(sb._safe_run_bash(state, "echo no", workdir=str(missing)))
+    else:
+        result = asyncio.run(sb._safe_execute_python(state, "print(1)", workdir=str(missing)))
+    assert result["status"] == "error"
+    assert result["blocker"]["kind"] == sb.WORKDIR_UNAVAILABLE
+    assert not missing.exists()
+
+
+@pytest.mark.parametrize("tool", ["bash", "python"])
+def test_workdir_alias_does_not_authorize_unrelated_directory(state, tmp_path, monkeypatch, tool):
+    async def never(*args, **kwargs):
+        raise AssertionError("an unauthorized workdir must not start an executor")
+
+    monkeypatch.setattr(sb, "_exec_and_log", never)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if tool == "bash":
+        result = asyncio.run(sb._safe_run_bash(state, "printf no > probe", workdir=str(outside)))
+    else:
+        result = asyncio.run(sb._safe_execute_python(state, "open('probe', 'w').write('no')", workdir=str(outside)))
+    assert result.get("reason") == sb.WORKDIR_UNAVAILABLE, result
+    assert result["blocker"]["kind"] == sb.WORKDIR_UNAVAILABLE
+    assert not (outside / "probe").exists()
+
+
+def test_workdir_alias_selection_and_schema():
+    from core.tool_registry import _REGISTRY
+
+    assert sb._declared_workdir(None, "folder") == ("folder", "workdir_param", None)
+    assert sb._declared_workdir("folder", "folder/.") == ("folder", "cwd_param", None)
+    assert sb._declared_workdir(None, "")[2]["reason"] == "invalid_workdir_argument"
+    for name in ("safe_run_bash", "safe_execute_python"):
+        assert _REGISTRY.tools[name].parameters_schema["properties"]["workdir"]["type"] == "string"
+
+
+@requires_sandbox
+@pytest.mark.parametrize("tool", ["bash", "python"])
+@pytest.mark.parametrize("argument,authority", [("workdir", "workdir_param"), ("cwd", "cwd_param"), (None, "action_default")])
+def test_actual_execution_reports_workdir_source(state, tool, argument, authority):
+    root = _run_root(state)
+    selected = root / "phase"
+    selected.mkdir()
+    kwargs = {argument: str(selected)} if argument else {}
+    if tool == "bash":
+        result = asyncio.run(sb._safe_run_bash(state, "printf marker > workdir_marker.txt", **kwargs))
+    else:
+        result = asyncio.run(sb._safe_execute_python(state, "open('workdir_marker.txt', 'w').write('marker')", **kwargs))
+    assert result["status"] == "success", result
+    expected = selected if argument else root
+    assert Path(result["workdir"]) == expected
+    assert result["workdir_authority"] == authority
+    assert (expected / "workdir_marker.txt").read_text() == "marker"
+    other = root if argument else selected
+    assert not (other / "workdir_marker.txt").exists()

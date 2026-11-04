@@ -2,16 +2,21 @@
 
 import { FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUpDown, Bookmark, CalendarRange, ChartBar, ChevronDown, ExternalLink, Gauge, Heart, Search, Share2, X } from "lucide-react";
+import { AcademicSearchLanding } from "./AcademicSearchLanding";
 import { useAcademicSearch } from "../hooks/useAcademicSearch";
+import { usePaperSaves } from "../hooks/usePaperSaves";
 import { AC, SORT_OPTIONS, SORT_PHRASES } from "../lib/copy";
 import { compareAcademicPapers, type AcademicSortMode as SortMode } from "../lib/academic-search-order";
 import {
   CATEGORIES,
+  CATEGORY_BY_VALUE,
   CATEGORY_JOURNAL,
+  isJournalCategory,
   type PublicationCategory as PaperCategory,
 } from "@/lib/publication-categories";
 import { Badge, Button, Card, CardBody, CardFooter, CardHeader } from "@/shared/ui";
 import { useT } from "@/shared/i18n";
+import { pushError } from "@/stores/notification";
 import {
   api,
   literatureAssetUrl,
@@ -22,6 +27,8 @@ import {
 type ScoreDimension = "relevance" | "cas" | "citation" | "recency";
 type JcrFilter = "all" | "Q1" | "Q2" | "Q3" | "Q4";
 type FilterControl = "year" | "jcr" | "impact" | "sort" | null;
+const TRANSLATION_BATCH_SIZE = 3;
+const TRANSLATION_WORKERS = 3;
 
 function paperKey(paper: LiteraturePaper): string {
   return (paper.doi || paper.url || paper.title).toLowerCase();
@@ -54,7 +61,7 @@ async function openLiteratureAsset(path: string, failureMessage: string): Promis
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
   } catch {
     popup?.close();
-    window.alert(failureMessage);
+    pushError(failureMessage);
   }
 }
 
@@ -76,6 +83,10 @@ function LiteratureAssetLink({ path, children }: { path: string; children: React
   );
 }
 
+function showsRecommendation(category: PaperCategory): boolean {
+  return category === CATEGORY_JOURNAL.zh;
+}
+
 function scoreValue(paper: LiteraturePaper, key: ScoreDimension): number {
   const raw = (paper.score_breakdown?.raw ?? {}) as Record<string, unknown>;
   if (key === "cas" && paper.cas_quartile === null) return 0;
@@ -85,7 +96,7 @@ function scoreValue(paper: LiteraturePaper, key: ScoreDimension): number {
 
 function ScoreRadar({ paper }: { paper: LiteraturePaper }) {
   const t = useT();
-  const isJournal = paper.publication_category === CATEGORY_JOURNAL.zh;
+  const isJournal = isJournalCategory(paper.publication_category);
   const dimensions: Array<{ key: ScoreDimension; label: string }> = isJournal
     ? [
         { key: "relevance", label: t(AC.dimensionRelevance) },
@@ -139,10 +150,20 @@ function ScoreRadar({ paper }: { paper: LiteraturePaper }) {
 }
 
 
+function RelevanceNote({paper}: {paper: LiteraturePaper}) {
+  const t = useT();
+  const assessment = paper.relevance_assessment;
+  if (!assessment || !assessment.tier || assessment.tier === "excluded") return null;
+  return <p style={{fontSize:12, margin:"6px 0", color:assessment.tier === "background" ? "#986a24" : "var(--color-fg-muted)"}}>
+    {assessment.detail || (assessment.tier === "background" ? t({zh:"背景参考",en:"Background reference"}) : t({zh:"直接相关",en:"Directly relevant"}))}
+  </p>;
+}
+
 function AcademicPaperDialog({ paper, onClose }: { paper: LiteraturePaper; onClose: () => void }) {
   const t = useT();
   const closeRef = useRef<HTMLButtonElement>(null);
   const link = paperLink(paper);
+  const showRecommendation = showsRecommendation(paper.publication_category);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -180,9 +201,10 @@ function AcademicPaperDialog({ paper, onClose }: { paper: LiteraturePaper; onClo
               ) : (paper.title || t(AC.untitledPaper))}
             </h2>
             {paper.title_zh && <p className="academic-paper-title-zh">{paper.title_zh}</p>}
+            <RelevanceNote paper={paper} />
           </div>
         </div>
-        <div className="academic-paper-dialog-content">
+        <div className={`academic-paper-dialog-content${showRecommendation ? "" : " academic-paper-without-score"}`}>
           <div className="academic-paper-copy">
             <div className="academic-paper-metadata">
               {(paper.year || paper.authors.length > 0) && (
@@ -193,7 +215,7 @@ function AcademicPaperDialog({ paper, onClose }: { paper: LiteraturePaper; onClo
               )}
               <div className="academic-paper-meta-row academic-paper-meta-secondary">
                 {paper.venue && <span>{paper.venue}</span>}
-                {paper.publication_category === CATEGORY_JOURNAL.zh && (<>
+                {isJournalCategory(paper.publication_category) && (<>
                   <span>{paper.cas_quartile ? `${t(AC.casQuartile, { quartile: paper.cas_quartile })}${paper.cas_top ? " · Top" : ""}${paper.cas_year ? t(AC.yearSuffix, { year: paper.cas_year }) : ""}` : t(AC.casQuartileMissing)}</span>
                   {paper.jcr_quartile && <span>JCR {paper.jcr_quartile}</span>}
                   <span>{paper.impact_factor === null ? t(AC.impactFactorMissing) : `${t(AC.impactFactor, { value: paper.impact_factor.toFixed(3).replace(/0+$/, "").replace(/\.$/, "") })}${paper.impact_factor_year ? t(AC.yearSuffix, { year: paper.impact_factor_year }) : ""}`}</span>
@@ -208,7 +230,7 @@ function AcademicPaperDialog({ paper, onClose }: { paper: LiteraturePaper; onClo
                 <strong>{t(AC.aiSummaryLabel)}</strong>{paper.ai_summary}
               </p>
             )}
-            <div className="academic-paper-identifier"><Badge>{paper.source}</Badge>{paper.school_holdings?.filter((holding) => holding !== paper.source).map((holding) => <Badge key={holding}>{holding}</Badge>)}{paper.doi && <small>DOI：{paper.doi}</small>}</div>
+            <div className="academic-paper-identifier"><Badge>{paper.source}</Badge>{paper.school_holdings?.filter((holding) => holding !== paper.source).map((holding) => <Badge key={holding}>{holding}</Badge>)}{paper.doi && <small>{t(AC.doi, { doi: paper.doi })}</small>}</div>
             {(paper.local_pdf_url || paper.school_fulltext_url) && (
               <div className="academic-paper-assets" aria-label={t(AC.localAssetsAria)} onClick={(event) => event.stopPropagation()}>
                 {paper.local_pdf_url && <LiteratureAssetLink path={paper.local_pdf_url}>{t(AC.openLocalPdf)}</LiteratureAssetLink>}
@@ -216,10 +238,10 @@ function AcademicPaperDialog({ paper, onClose }: { paper: LiteraturePaper; onClo
               </div>
             )}
           </div>
-          <div className="academic-paper-score-column">
+          {showRecommendation && <div className="academic-paper-score-column">
             <ScoreRadar paper={paper} />
             <strong className="academic-recommendation">{t(AC.recommendation, { score: (paper.score * 100).toFixed(1) })}</strong>
-          </div>
+          </div>}
         </div>
       </article>
     </div>
@@ -228,10 +250,16 @@ function AcademicPaperDialog({ paper, onClose }: { paper: LiteraturePaper; onClo
 
 export function AcademicSearch() {
   const t = useT();
+  const queryInputRef = useRef<HTMLTextAreaElement>(null);
   const pageSize = 20;
-  const [query, setQuery] = useState("");
+  const search = useAcademicSearch();
+  const {query, setQuery} = search;
   const [category, setCategory] = useState<PaperCategory>(CATEGORY_JOURNAL.zh);
   const [sortMode, setSortMode] = useState<SortMode>("recommendation");
+  const sortPhrase = (mode: SortMode) => mode === "recommendation" && !showsRecommendation(category)
+    ? AC.defaultSort
+    : SORT_PHRASES[mode];
+  const [showBackground, setShowBackground] = useState(true);
   const [jcrFilter, setJcrFilter] = useState<JcrFilter>("all");
   const [impactMin, setImpactMin] = useState(0);
   const [impactMax, setImpactMax] = useState<number | null>(null);
@@ -239,17 +267,17 @@ export function AcademicSearch() {
   const [yearMax, setYearMax] = useState<number | null>(null);
   const [activeControl, setActiveControl] = useState<FilterControl>(null);
   const [page, setPage] = useState(1);
-  const [liked, setLiked] = useState<Set<string>>(new Set());
-  const [saved, setSaved] = useState<Set<string>>(new Set());
+  // 「收藏」接的是科研资讯的收藏（usePaperSaves）；「点赞」没有对应的后端，删了。
+  const saves = usePaperSaves();
   const [shared, setShared] = useState<Set<string>>(new Set());
+  // 浏览器不支持系统分享时只是把链接复制进剪贴板：按钮要说「已复制链接」，不说「已分享」。
+  const [copied, setCopied] = useState<Set<string>>(new Set());
   const [selectedPaper, setSelectedPaper] = useState<LiteraturePaper | null>(null);
   const [translations, setTranslations] = useState<Record<string, LiteratureTranslation>>({});
   const [translationStatus, setTranslationStatus] = useState<"idle" | "pending" | "error">("idle");
   const translationRequestId = useRef(0);
   const requestedTranslations = useRef<Set<string>>(new Set());
   const filterBarRef = useRef<HTMLDivElement>(null);
-  const search = useAcademicSearch();
-
   useEffect(() => {
     const closeOnOutsideClick = (event: PointerEvent) => {
       if (!filterBarRef.current?.contains(event.target as Node)) setActiveControl(null);
@@ -265,22 +293,17 @@ export function AcademicSearch() {
     };
   }, []);
 
-  const toggle = (setter: (value: Set<string>) => void, current: Set<string>, key: string) => {
-    const next = new Set(current);
-    if (next.has(key)) next.delete(key); else next.add(key);
-    setter(next);
-  };
-
   const sharePaper = async (paper: LiteraturePaper) => {
     const url = paperLink(paper);
     if (!url) return;
     try {
       if (navigator.share) {
         await navigator.share({ title: paper.title, url });
+        setShared((current) => new Set(current).add(paperKey(paper)));
       } else {
         await navigator.clipboard.writeText(url);
+        setCopied((current) => new Set(current).add(paperKey(paper)));
       }
-      setShared((current) => new Set(current).add(paperKey(paper)));
     } catch {
       // 用户取消分享或浏览器拒绝剪贴板时保持原状态。
     }
@@ -300,10 +323,28 @@ export function AcademicSearch() {
       setYearMin(null);
       setYearMax(null);
       setActiveControl(null);
-      search.start({ query: value, limit: 200 });
+      search.start({ query: value, limit: 200, source: "all" });
     }
   };
   const result = search.data;
+  // Detailed source counts, query groups and admission diagnostics remain in
+  // the search response/backend records. Only actionable notices reach the UI.
+  const blockedStates = ["waiting_for_verification", "error", "paused", "browser_closed", "unavailable"];
+  const channelAlerts = Object.entries(search.channels)
+    .filter(([, channel]) => blockedStates.includes(channel.state))
+    .filter(() => !search.isError)
+    .map(([key, channel]) => ({
+      key,
+      detail: channel.groups?.find(group => blockedStates.includes(group.state))?.detail || channel.detail,
+    }));
+  const visibleWarnings = (result?.warnings ?? []).filter(warning =>
+    !["source_no_matches", "low_relevance_candidates_excluded"].includes(String(warning.code || "")));
+  const progressLabels: Record<string, string> = {
+    strategy: t({zh:"正在准备检索…",en:"Preparing search\u2026"}), dedup: t({zh:"正在整理检索结果…",en:"Organizing results\u2026"}),
+    metadata_enrichment: t({zh:"正在补充文献信息…",en:"Enriching paper metadata\u2026"}), final_abstract_enrichment: t({zh:"正在补充文献信息…",en:"Enriching paper metadata\u2026"}),
+    scoring: t({zh:"正在整理检索结果…",en:"Organizing results\u2026"}), translation: t({zh:"正在准备文献信息…",en:"Preparing paper details\u2026"}),
+    finalize: t({zh:"正在整理检索结果…",en:"Organizing results\u2026"}), cnki: t({zh:"正在检索中文文献…",en:"Searching Chinese literature\u2026"}),
+  };
   const categoryCounts = useMemo(() => {
     const counts = Object.fromEntries(CATEGORIES.map((item) => [item.zh, 0])) as Record<PaperCategory, number>;
     for (const paper of result?.papers ?? []) counts[paper.publication_category] += 1;
@@ -327,7 +368,7 @@ export function AcademicSearch() {
     const maximum = Math.max(
       0,
       ...(result?.papers
-        .filter((paper) => paper.publication_category === CATEGORY_JOURNAL.zh)
+        .filter((paper) => isJournalCategory(paper.publication_category))
         .map((paper) => Number(paper.impact_factor || 0)) ?? []),
     );
     return Math.max(10, Math.ceil(maximum));
@@ -336,12 +377,13 @@ export function AcademicSearch() {
   const impactFilterActive = impactMin > 0 || selectedImpactMax < impactCeiling;
   const visiblePapers = useMemo(() => {
     const matching = result?.papers.filter((paper) => {
+      if (!showBackground && paper.relevance_assessment?.tier === "background") return false;
       if (paper.publication_category !== category) return false;
       if (yearFilterActive) {
         const paperYear = Number(paper.year);
         if (!Number.isInteger(paperYear) || paperYear < selectedYearMin || paperYear > selectedYearMax) return false;
       }
-      if (category !== CATEGORY_JOURNAL.zh) return true;
+      if (!isJournalCategory(category)) return true;
       const normalizedJcr = String(paper.jcr_quartile || "").trim().toUpperCase();
       if (jcrFilter !== "all" && normalizedJcr !== jcrFilter) return false;
       if (!impactFilterActive) return true;
@@ -349,7 +391,7 @@ export function AcademicSearch() {
       return paper.impact_factor >= impactMin && paper.impact_factor <= selectedImpactMax;
     }) ?? [];
     return [...matching].sort((left, right) => compareAcademicPapers(left, right, sortMode));
-  }, [category, impactFilterActive, impactMin, jcrFilter, result, selectedImpactMax, selectedYearMax, selectedYearMin, sortMode, yearFilterActive]);
+  }, [category, impactFilterActive, impactMin, jcrFilter, result, selectedImpactMax, selectedYearMax, selectedYearMin, showBackground, sortMode, yearFilterActive]);
   const pageCount = Math.min(10, Math.max(1, Math.ceil(visiblePapers.length / pageSize)));
   const currentPage = Math.min(page, pageCount);
   const pagedPapers = visiblePapers.slice((currentPage - 1) * pageSize, currentPage * pageSize);
@@ -369,7 +411,7 @@ export function AcademicSearch() {
       );
       const needsTitle = /[A-Za-z]/.test(paper.title) && !/[\u4e00-\u9fff]/.test(paper.title)
         && !(translated?.title_zh || paper.title_zh);
-      const needsSummary = !paper.abstract && !(translated?.ai_summary || paper.ai_summary);
+      const needsSummary = paper.source !== "cnki" && !paper.abstract && !(translated?.ai_summary || paper.ai_summary);
       return needsTitle || needsAbstract || needsSummary;
     });
     if (targets.length === 0) {
@@ -379,53 +421,93 @@ export function AcademicSearch() {
     for (const paper of targets) requestedTranslations.current.add(paperKey(paper));
     const requestId = ++translationRequestId.current;
     setTranslationStatus("pending");
-    void api.translateLiteraturePage(targets.map((paper) => ({
-      // 翻译接口只需要少量书目信息辅助消歧；不要让大型合作论文的完整
-      // 作者列表触发输入契约 422。这里裁剪的是请求副本，不改搜索 index。
-      key: paperKey(paper).slice(0, 500),
-      title: paper.title.slice(0, 1000),
-      doi: paper.doi,
-      url: paper.url,
-      abstract: paper.abstract,
-      authors: paper.authors.slice(0, 10),
-      year: paper.year,
-      venue: paper.venue?.slice(0, 1000) ?? null,
-    }))).then((response) => {
-      setTranslations((current) => {
-        const next = { ...current };
-        for (const item of response.translations) {
-          const previous = next[item.key];
-          next[item.key] = {
-            key: item.key,
-            title_zh: item.title_zh || previous?.title_zh || null,
-            abstract_zh: item.abstract_zh || previous?.abstract_zh || null,
-            ai_summary: item.ai_summary || previous?.ai_summary || null,
-          };
+    // Separate requests use separate bridge processes. Keep each request small
+    // while allowing a few independent website translation sessions to run.
+    const batches = Array.from({ length: Math.ceil(targets.length / TRANSLATION_BATCH_SIZE) }, (_, index) =>
+      targets.slice(index * TRANSLATION_BATCH_SIZE, (index + 1) * TRANSLATION_BATCH_SIZE));
+    let nextBatch = 0;
+    let failed = false;
+    const worker = async () => {
+      while (nextBatch < batches.length) {
+        const batch = batches[nextBatch++];
+        try {
+          const response = await api.translateLiteraturePage(batch.map((paper) => ({
+            // Large author lists can breach the translation input contract.
+            key: paperKey(paper).slice(0, 500),
+            title: paper.title.slice(0, 1000),
+            doi: paper.doi,
+            url: paper.url,
+            abstract: paper.abstract,
+            authors: paper.authors.slice(0, 10),
+            year: paper.year,
+            venue: paper.venue?.slice(0, 1000) ?? null,
+          })));
+          setTranslations((current) => {
+            const next = { ...current };
+            for (const item of response.translations) {
+              const previous = next[item.key];
+              next[item.key] = {
+                key: item.key,
+                title_zh: item.title_zh || previous?.title_zh || null,
+                abstract_zh: item.abstract_zh || previous?.abstract_zh || null,
+                ai_summary: item.ai_summary || previous?.ai_summary || null,
+              };
+            }
+            return next;
+          });
+          if (response.status === "failed" || response.status === "partial") {
+            for (const paper of batch) requestedTranslations.current.delete(paperKey(paper));
+            failed = true;
+          }
+        } catch {
+          for (const paper of batch) requestedTranslations.current.delete(paperKey(paper));
+          failed = true;
         }
-        return next;
+      }
+    };
+    void Promise.all(Array.from({ length: Math.min(TRANSLATION_WORKERS, batches.length) }, () => worker()))
+      .then(() => {
+        if (translationRequestId.current === requestId) setTranslationStatus(failed ? "error" : "idle");
       });
-      if (translationRequestId.current === requestId) setTranslationStatus("idle");
-    }).catch(() => {
-      for (const paper of targets) requestedTranslations.current.delete(paperKey(paper));
-      if (translationRequestId.current === requestId) setTranslationStatus("error");
-    });
   }, [category, currentPage, result, translationPageKey]);
 
   return (
-    <div className="academic-search">
+    <div className="academic-search academic-search-discovery">
+      <AcademicSearchLanding initial={!result && !search.isPending && !search.cnkiPending && !search.isError}
+        onExample={(value) => { setQuery(value); queryInputRef.current?.focus(); }}>
       <form className="academic-search-form" onSubmit={submit}>
         <textarea
+          ref={queryInputRef}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           placeholder={t(AC.searchPlaceholder)}
           rows={3}
           aria-label={t(AC.searchInputAria)}
         />
+        <div className="academic-discovery-form-actions">
+          <span>{t({ zh: "自然语言提问 · 中英文文献检索", en: "Natural-language questions · Chinese and English literature" })}</span>
         <Button type="submit" variant="primary" loading={search.isPending} iconLeft={<Search size={16} />}>
           {t(AC.searchButton)}
         </Button>
+        </div>
       </form>
+      </AcademicSearchLanding>
       {search.isError && <Card accent="danger"><CardBody>{t(AC.searchFailed)}{search.error instanceof Error && search.error.message ? search.error.message : t(AC.retryLater)}</CardBody></Card>}
+      {(search.cnkiPending || channelAlerts.length > 0 || Boolean(result?.unavailable_sources?.length) || visibleWarnings.length > 0) && <Card><CardBody>
+        {channelAlerts.map(alert => <p key={alert.key} role="status">
+          {alert.key === "cnki" ? t({zh:"知网：",en:"CNKI: "}) : t({zh:"部分文献检索暂未完成：",en:"Some sources are still pending: "})}{alert.detail}
+        </p>)}
+        {search.cnkiPending && <div style={{display:"flex",gap:12,alignItems:"center"}}>
+          {!channelAlerts.some(alert => alert.key === "cnki") && <span>{t({zh:"正在检索中文文献…",en:"Searching Chinese literature\u2026"})}</span>}
+          {["waiting_for_verification","error","paused","browser_closed"].includes(search.channels.cnki?.state) && <Button onClick={search.retryChinese}>{t({zh:"重试知网",en:"Retry CNKI"})}</Button>}
+          <Button onClick={search.stopWaiting}>{t({zh:"停止等待（保留后台任务）",en:"Stop waiting (keep collection running)"})}</Button>
+        </div>}
+        {Boolean(result?.unavailable_sources?.length) && <p>{t({zh:"本次暂不可用的来源",en:"Sources unavailable in this search"})}：{result?.unavailable_sources.join("、")}</p>}
+        {visibleWarnings.map((warning,index)=>{
+          const detail = warning.message || warning.detail;
+          return typeof detail === "string" ? <p key={index}>{detail}</p> : null;
+        })}
+      </CardBody></Card>}
       {search.isPending && search.progress && (
         <Card accent="info">
           <CardBody>
@@ -439,7 +521,8 @@ export function AcademicSearch() {
               <div className="academic-search-progress-track">
                 <span style={{ width: `${search.progress.percent}%` }} />
               </div>
-              <p>{search.progress.detail}</p>
+              <p>{progressLabels[search.progress.stage] || t({zh:"正在检索文献…",en:"Searching literature\u2026"})}</p>
+              {search.progress.stage === "cnki" && <Button onClick={search.stopWaiting}>{t({zh:"停止等待（保留后台任务）",en:"Stop waiting (keep collection running)"})}</Button>}
             </div>
           </CardBody>
         </Card>
@@ -456,10 +539,14 @@ export function AcademicSearch() {
                 className={category === item.zh ? "is-active" : ""}
                 onClick={() => { setCategory(item.zh); setPage(1); }}
               >
-                {t(item)} <span>{categoryCounts[item.zh]}</span>
+                {t(CATEGORY_BY_VALUE[item.zh])} <span>{categoryCounts[item.zh]}</span>
               </button>
             ))}
           </div>
+          {Boolean(result.papers.some(p=>p.relevance_assessment?.tier === "background")) && <label style={{display:"flex",alignItems:"center",gap:8,margin:"10px 0"}}>
+            <input type="checkbox" checked={showBackground} onChange={event=>{setShowBackground(event.target.checked);setPage(1);}} />
+            {t({zh:"显示背景参考",en:"Show background references"})}
+          </label>}
           <div className="academic-filter-bar" ref={filterBarRef}>
             <div className="academic-filter-menu">
               <button
@@ -492,14 +579,14 @@ export function AcademicSearch() {
                 type="button"
                 className={activeControl === "jcr" ? "academic-filter-trigger is-open" : "academic-filter-trigger"}
                 aria-expanded={activeControl === "jcr"}
-                disabled={category !== CATEGORY_JOURNAL.zh}
+                disabled={!isJournalCategory(category)}
                 onClick={() => setActiveControl((current) => current === "jcr" ? null : "jcr")}
               >
                 <ChartBar size={19} />
-                <span><small>{t(AC.jcrQuartile)}</small><strong>{category === CATEGORY_JOURNAL.zh ? (jcrFilter === "all" ? t(AC.all) : jcrFilter) : t(AC.notApplicable)}</strong></span>
+                <span><small>{t(AC.jcrQuartile)}</small><strong>{isJournalCategory(category) ? (jcrFilter === "all" ? t(AC.all) : jcrFilter) : t(AC.notApplicable)}</strong></span>
                 <ChevronDown size={15} />
               </button>
-              {activeControl === "jcr" && category === CATEGORY_JOURNAL.zh && (
+              {activeControl === "jcr" && isJournalCategory(category) && (
                 <div className="academic-filter-popover">
                   <div className="academic-filter-options" role="group" aria-label={t(AC.jcrFilterAria)}>
                     {(["all", "Q1", "Q2", "Q3", "Q4"] as const).map((value) => (
@@ -515,14 +602,14 @@ export function AcademicSearch() {
                 type="button"
                 className={activeControl === "impact" ? "academic-filter-trigger is-open" : "academic-filter-trigger"}
                 aria-expanded={activeControl === "impact"}
-                disabled={category !== CATEGORY_JOURNAL.zh}
+                disabled={!isJournalCategory(category)}
                 onClick={() => setActiveControl((current) => current === "impact" ? null : "impact")}
               >
                 <Gauge size={19} />
-                <span><small>{t(AC.impactFactorLabel)}</small><strong>{category === CATEGORY_JOURNAL.zh ? `${impactMin.toFixed(1)}–${selectedImpactMax.toFixed(1)}` : t(AC.notApplicable)}</strong></span>
+                <span><small>{t(AC.impactFactorLabel)}</small><strong>{isJournalCategory(category) ? `${impactMin.toFixed(1)}–${selectedImpactMax.toFixed(1)}` : t(AC.notApplicable)}</strong></span>
                 <ChevronDown size={15} />
               </button>
-              {activeControl === "impact" && category === CATEGORY_JOURNAL.zh && (
+              {activeControl === "impact" && isJournalCategory(category) && (
                 <div className="academic-filter-popover">
                   <fieldset className="academic-range-filter">
                     <legend>{t(AC.impactFactorRange)}</legend>
@@ -545,14 +632,14 @@ export function AcademicSearch() {
                 onClick={() => setActiveControl((current) => current === "sort" ? null : "sort")}
               >
                 <ArrowUpDown size={19} />
-                <span><small>{t(AC.sortMode)}</small><strong>{t(SORT_PHRASES[sortMode])}</strong></span>
+                <span><small>{t(AC.sortMode)}</small><strong>{t(sortPhrase(sortMode))}</strong></span>
                 <ChevronDown size={15} />
               </button>
               {activeControl === "sort" && (
                 <div className="academic-filter-popover is-right">
                   <div className="academic-filter-options" role="group" aria-label={t(AC.sortModeAria)}>
-                    {SORT_OPTIONS.map(([mode, phrase]) => (
-                      <button key={mode} type="button" className={sortMode === mode ? "is-active" : ""} onClick={() => { setSortMode(mode); setPage(1); setActiveControl(null); }}>{t(phrase)}</button>
+                    {SORT_OPTIONS.map(([mode]) => (
+                      <button key={mode} type="button" className={sortMode === mode ? "is-active" : ""} onClick={() => { setSortMode(mode); setPage(1); setActiveControl(null); }}>{t(sortPhrase(mode))}</button>
                     ))}
                   </div>
                 </div>
@@ -577,6 +664,8 @@ export function AcademicSearch() {
                 title_zh: translated?.title_zh || originalPaper.title_zh,
               };
               const link = paperLink(paper);
+              const showRecommendation = showsRecommendation(paper.publication_category);
+              const isSaved = Boolean(saves.savedItemId(originalPaper));
               return (
                 <Card key={`${key}-${index}`} className="academic-paper-result-card" interactive onClick={() => setSelectedPaper(paper)}>
                   <CardHeader className="academic-paper-card-header">
@@ -590,11 +679,12 @@ export function AcademicSearch() {
                           ) : <span className="academic-paper-title-text">{paper.title || t(AC.untitledPaper)}</span>}
                         </h2>
                         {paper.title_zh && <p className="academic-paper-title-zh">{paper.title_zh}</p>}
+                        <RelevanceNote paper={paper} />
                       </div>
                     </div>
                   </CardHeader>
                   <CardBody>
-                    <div className="academic-paper-content">
+                    <div className={`academic-paper-content${showRecommendation ? "" : " academic-paper-without-score"}`}>
                       <div className="academic-paper-copy">
                         <div className="academic-paper-metadata">
                           {(paper.year || paper.authors.length > 0) && (
@@ -605,7 +695,7 @@ export function AcademicSearch() {
                           )}
                           <div className="academic-paper-meta-row academic-paper-meta-secondary">
                             {paper.venue && <span>{paper.venue}</span>}
-                            {paper.publication_category === CATEGORY_JOURNAL.zh && (<>
+                            {isJournalCategory(paper.publication_category) && (<>
                               <span>{paper.cas_quartile ? `${t(AC.casQuartile, { quartile: paper.cas_quartile })}${paper.cas_top ? " · Top" : ""}${paper.cas_year ? t(AC.yearSuffix, { year: paper.cas_year }) : ""}` : t(AC.casQuartileMissing)}</span>
                               {paper.jcr_quartile && <span>JCR {paper.jcr_quartile}</span>}
                               <span>{paper.impact_factor === null ? t(AC.impactFactorMissing) : `${t(AC.impactFactor, { value: paper.impact_factor.toFixed(3).replace(/0+$/, "").replace(/\.$/, "") })}${paper.impact_factor_year ? t(AC.yearSuffix, { year: paper.impact_factor_year }) : ""}`}</span>
@@ -620,7 +710,7 @@ export function AcademicSearch() {
                             <strong>{t(AC.aiSummaryLabel)}</strong>{paper.ai_summary}
                           </p>
                         )}
-                        <div className="academic-paper-identifier"><Badge>{paper.source}</Badge>{paper.school_holdings?.filter((holding) => holding !== paper.source).map((holding) => <Badge key={holding}>{holding}</Badge>)}{paper.doi && <small>DOI：{paper.doi}</small>}</div>
+                        <div className="academic-paper-identifier"><Badge>{paper.source}</Badge>{paper.school_holdings?.filter((holding) => holding !== paper.source).map((holding) => <Badge key={holding}>{holding}</Badge>)}{paper.doi && <small>{t(AC.doi, { doi: paper.doi })}</small>}</div>
                         {(paper.local_pdf_url || paper.school_fulltext_url) && (
                           <div className="academic-paper-assets" aria-label={t(AC.localAssetsAria)} onClick={(event) => event.stopPropagation()}>
                             {paper.local_pdf_url && <LiteratureAssetLink path={paper.local_pdf_url}>{t(AC.openLocalPdf)}</LiteratureAssetLink>}
@@ -628,16 +718,15 @@ export function AcademicSearch() {
                           </div>
                         )}
                       </div>
-                      <div className="academic-paper-score-column">
+                      {showRecommendation && <div className="academic-paper-score-column">
                         <ScoreRadar paper={paper} />
                         <strong className="academic-recommendation">{t(AC.recommendation, { score: (paper.score * 100).toFixed(1) })}</strong>
-                      </div>
+                      </div>}
                     </div>
                   </CardBody>
                   <CardFooter className="academic-paper-actions">
-                    <button type="button" aria-pressed={liked.has(key)} className={liked.has(key) ? "is-active" : ""} onClick={(event) => { event.stopPropagation(); toggle(setLiked, liked, key); }}><Heart size={16} />{t(AC.like)}</button>
-                    <button type="button" aria-pressed={saved.has(key)} className={saved.has(key) ? "is-active" : ""} onClick={(event) => { event.stopPropagation(); toggle(setSaved, saved, key); }}><Bookmark size={16} />{t(AC.save)}</button>
-                    <button type="button" className={shared.has(key) ? "is-active" : ""} disabled={!link} onClick={(event) => { event.stopPropagation(); void sharePaper(paper); }}><Share2 size={16} />{shared.has(key) ? t(AC.shared) : t(AC.share)}</button>
+                    <button type="button" aria-pressed={isSaved} className={isSaved ? "is-active" : ""} disabled={saves.busy} onClick={(event) => { event.stopPropagation(); saves.toggle(originalPaper); }}><Bookmark size={16} />{isSaved ? t(AC.saved) : t(AC.save)}</button>
+                    <button type="button" className={shared.has(key) || copied.has(key) ? "is-active" : ""} disabled={!link} onClick={(event) => { event.stopPropagation(); void sharePaper(paper); }}><Share2 size={16} />{shared.has(key) ? t(AC.shared) : copied.has(key) ? t(AC.linkCopied) : t(AC.share)}</button>
                   </CardFooter>
                 </Card>
               );
@@ -651,7 +740,7 @@ export function AcademicSearch() {
                 <button key={item} type="button" aria-current={currentPage === item ? "page" : undefined} className={currentPage === item ? "is-active" : ""} onClick={() => setPage(item)}>{item}</button>
               ))}
               <button type="button" disabled={currentPage === pageCount} onClick={() => setPage(currentPage + 1)}>{t(AC.nextPage)}</button>
-              <span>{t(AC.pageStatus, { page: currentPage, total: pageCount, size: pageSize })}</span>
+              <span>{t(AC.pageStatus, { page: currentPage, total: pageCount })}</span>
             </nav>
           )}
         </>

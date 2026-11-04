@@ -185,6 +185,10 @@ def enforcement_policy() -> str:
 
 #: ``CommandSpec.home`` 的合法取值：``host`` 用户的家（只读可见），``own`` 墙给的家。
 HOMES = ("host", "own")
+#: 后端可以按 run 开的口（RFC_CAPABILITY_GRANTS_LAYERING D2 那张小表里落到墙上的 kind）。
+#: 授权在 ``core.capability_grants``；这里只认名字，不认识的拒收 —— 拼错一个字母就是
+#: 一个永远不开的口，而账上看起来像批过。
+CAPABILITIES = frozenset({"gpu_runtime"})
 
 
 @dataclass(frozen=True)
@@ -204,6 +208,13 @@ class CommandSpec:
       它在每台机器上的行为都一样，不取决于用户的家里恰好有什么。2026-09-23 那台干净
       Windows 上 tectonic 5 秒 ``os error 5``、而开发机上从没露面，就是它依赖了用户家里
       「恰好已经存在」的一个目录。
+
+    ``ephemeral`` —— 这条命令写下的东西**一样都留不下**（#1187）。它不声明可写根：唯一
+    可写的是后端给它的私有 scratch（``TMPDIR`` 在那里，命令结束整块删），也不挂跨命令
+    持久的缓存区（:func:`core.isolation._native.cache_scratch`）—— 缓存是声明根之外唯一
+    能留下东西的地方，留着它，「只读」就只是「只读，除了这一块」。调度器的只读探查
+    shell 用它：它的写边界为空。``ephemeral`` 与可写根互斥 —— 声明了根，写进去的就活过
+    了命令，这两句话不能同时成立。
     """
 
     argv: tuple[str, ...]
@@ -214,15 +225,31 @@ class CommandSpec:
     environment: Mapping[str, str] | None = None
     network_access: bool = False
     home: str = "host"
+    #: 这条命令所在的 run 批到的能力（:data:`CAPABILITIES`）。后端为每一项开对应的口
+    #: （linux 的 ``gpu_runtime``：``/proc`` 可写，CUDA 运行时要写线程名，#1174）；不批不开。
+    capabilities: frozenset[str] = frozenset()
+    ephemeral: bool = False
 
     def __post_init__(self) -> None:
         if not self.argv or any(not isinstance(part, str) or "\x00" in part for part in self.argv):
             raise IsolationContractError("argv must be a non-empty sequence of NUL-free strings")
-        if not self.writable_roots:
-            raise IsolationContractError("a model command needs at least one writable root")
+        if self.ephemeral and self.writable_roots:
+            raise IsolationContractError(
+                "an ephemeral command declares no writable root: whatever it wrote there "
+                "would outlive it")
+        if not self.writable_roots and not self.ephemeral:
+            raise IsolationContractError(
+                "a model command needs at least one writable root (or ephemeral=True: "
+                "its only write surface is its private scratch)")
         if self.home not in HOMES:
             raise IsolationContractError(
                 f"home={self.home!r} is not a home; valid values: {', '.join(HOMES)}")
+        caps = frozenset(self.capabilities or ())
+        if caps - CAPABILITIES:
+            raise IsolationContractError(
+                f"unknown capabilities {sorted(caps - CAPABILITIES)}; "
+                f"valid values: {', '.join(sorted(CAPABILITIES))}")
+        object.__setattr__(self, "capabilities", caps)
 
 
 @runtime_checkable
@@ -312,6 +339,12 @@ def enforcement_record(backend: Backend) -> EnforcementRecord:
     if not isinstance(write_scope, str):
         write_scope = (
             "content_and_metadata" if Invariant.WRITE_BOUNDARY in caps else "none")
+    # 受管作业里本机回环 TCP 的处境（#1166：MPI_Init 的 bind/connect）。后端自己报
+    # （linux / wsl）；没报的按断网推：守住了 = 回环也断（seatbelt 的 deny network*），
+    # 没守住 = 与宿主共享（Windows 原生）。
+    job_loopback = getattr(backend, "job_loopback", None)
+    if not isinstance(job_loopback, str):
+        job_loopback = "denied" if Invariant.NET_DENY in caps else "host_shared"
     return EnforcementRecord(
         backend=backend.name,
         policy=enforcement_policy(),
@@ -321,6 +354,7 @@ def enforcement_record(backend: Backend) -> EnforcementRecord:
         extras={
             "net_scope": net_scope,
             "write_boundary_scope": write_scope,
+            "job_loopback": job_loopback,
             # 这台机器的 PID 1 会不会收割孤儿僵尸（#1085 B）。受管作业的
             # supervisor 是双 fork 出来的孤儿，框架里没有进程能对它 waitpid，
             # 所以收尸的 owner 是部署方（带 init 的 PID 1）。**探一次记下来**，
@@ -332,6 +366,8 @@ def enforcement_record(backend: Backend) -> EnforcementRecord:
             # 指过去的那个目录，没有别的间接层；Windows 要看 Known Folder 跟不跟着走，
             # 由后端的探针答。
             "payload_home": getattr(backend, "payload_home_scope", "container"),
+            # 命令在哪里跑（core.execution_target）：本机，还是某个 WSL 发行版。
+            "target": getattr(backend, "target_spec", "local"),
         },
     )
 
@@ -413,8 +449,43 @@ def _resolve_auto() -> str:
     )
 
 
+_wsl_cache: dict[str, Backend] = {}
+
+
+def _target_backend() -> Backend | None:
+    """执行目标不是本机时交出对应后端；本机 → None（照旧按 ``HARNESS_EXECUTOR`` 选）。
+
+    目标由人定（``core.execution_target``）。选了到不了的目标就报错 —— 不悄悄回落到本机。
+    """
+    from core import execution_target
+
+    try:
+        target = execution_target.current()
+    except execution_target.ExecutionTargetError as exc:
+        raise IsolationContractError(str(exc)) from exc
+    if target.is_local:
+        return None
+    if target.kind == "wsl":
+        backend = _wsl_cache.get(target.name)
+        if backend is None:
+            from .wsl import WslBackend
+
+            backend = WslBackend(target.name)
+            _wsl_cache[target.name] = backend
+        return backend
+    raise IsolationContractError(
+        f"execution target {target.spec!r} is not implemented yet "
+        "(RFC_WINDOWS_EXECUTION_TARGETS P4); commands do not fall back to this machine"
+    )
+
+
 def select_backend(name: str | None = None) -> Backend:
-    """按 ``HARNESS_EXECUTOR``（或显式 ``name``）交出后端实例；非法名字把合法值念出来。"""
+    """交出后端实例。执行目标不是本机时由目标定（``wsl:<发行版>`` → wsl 后端）；本机按
+    ``HARNESS_EXECUTOR``（或显式 ``name``）选，非法名字把合法值念出来。"""
+    if name is None:
+        remote = _target_backend()
+        if remote is not None:
+            return remote
     raw = (name if name is not None else os.environ.get(EXECUTOR_ENV, "auto")).strip().lower()
     if raw not in _BACKEND_NAMES:
         raise IsolationContractError(
@@ -446,19 +517,54 @@ def enforcement_snapshot() -> dict:
     return enforcement_record(backend).as_event()
 
 
-def attempt_capability(backend: Backend | None = None) -> dict[str, str]:
+def target_facts() -> dict[str, Any] | None:
+    """执行目标不是本机时，那一边是什么样（给开局说明）；本机 → None。只读，不起载荷。
+
+    到不了的目标也是一个答案（``{"target": …, "error": …}``），不是一次失败。
+    """
+    from core import execution_target
+
+    try:
+        backend = _target_backend()
+    except IsolationContractError as exc:
+        try:
+            spec = execution_target.current().spec
+        except execution_target.ExecutionTargetError:
+            spec = os.environ.get(execution_target.ENV, "")
+        return {"target": spec, "error": str(exc)}
+    if backend is None:
+        return None
+    describe = getattr(backend, "describe", None)
+    facts = dict(describe()) if callable(describe) else {}
+    facts["target"] = getattr(backend, "target_spec", backend.name)
+    return facts
+
+
+def attempt_capability(
+    backend: Backend | None = None, *, target: str | None = None
+) -> dict[str, str]:
     """一个 attempt 出生时冻进 manifest 的「谁来守」。
 
-    原生后端冻的是后端名。``core.sandbox._local_manifest`` 与平台的
+    原生后端冻的是后端名；执行目标不是本机时冻目标（``wsl:Ubuntu-24.04``）。平台在冻结时
+    显式传项目配置里的 ``target``（平台进程里没有 worker 收到的那份声明）；不传就按本进程
+    当前的目标。``core.sandbox._local_manifest`` 与平台的
     ``local_execution._freeze_attempt_sandbox_manifest`` 都从这里拿，不各写一份。
     """
+    if backend is None and target is not None:
+        from core import execution_target
+
+        parsed = execution_target.parse(target)
+        if not parsed.is_local:
+            return {"backend": parsed.spec}
+        return {"backend": select_backend(os.environ.get(EXECUTOR_ENV, "auto")).name}
     chosen = backend or select_backend()
-    return {"backend": chosen.name}
+    return {"backend": getattr(chosen, "target_spec", None) or chosen.name}
 
 
 def _reset_for_tests() -> None:
     global _auto_cache
     _cache.clear()
+    _wsl_cache.clear()
     _auto_cache = None
     _recorded_ids.clear()
 
@@ -515,4 +621,5 @@ __all__ = [
     "native_backend_name",
     "record_enforcement_once",
     "select_backend",
+    "target_facts",
 ]

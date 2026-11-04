@@ -154,6 +154,9 @@ def test_single_open_job_lets_you_omit_the_id():
     ("sleep 1500; tail -4 h3_run2.log", False),      # 这是轮询，不是起作业
     ("wc -l results/*.jsonl", False),
     ("grep -c foo bar.txt", False),
+    ("sleep 30 & echo $!", True),
+    ("which lammps && echo ok", False),               # && 是「成功再跑」，不是后台
+    ("make && make install", False),
 ])
 def test_background_launch_detection(cmd, expected):
     assert jobs.looks_like_background_launch(cmd) is expected

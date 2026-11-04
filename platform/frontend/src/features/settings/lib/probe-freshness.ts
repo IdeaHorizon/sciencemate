@@ -55,16 +55,16 @@ export function probeSummary(
   lang: Language,
 ): string {
   const freshness = probeFreshness(backend, now, lang);
-  if (freshness.kind === "never") return say({ zh: "从未检测", en: "Never probed" }, lang);
+  if (freshness.kind === "never") return say({ zh: "尚未测试", en: "Not tested yet" }, lang);
   const verdict = backend.last_probe_ok === true
     ? say({ zh: "通过", en: "passed" }, lang)
     : backend.last_probe_ok === false
-      ? say({ zh: "被拒", en: "rejected" }, lang)
-      : say({ zh: "未判定", en: "inconclusive" }, lang);
+      ? say({ zh: "未通过", en: "failed" }, lang)
+      : say({ zh: "结果不明", en: "inconclusive" }, lang);
   const suffix = freshness.kind === "stale"
-    ? say({ zh: "（已过期，建议重测）", en: " (stale — probe it again)" }, lang)
+    ? say({ zh: "（结果较旧，建议重新测试）", en: " (out of date; test again)" }, lang)
     : "";
-  return say({ zh: "{age}检测：{verdict}{suffix}", en: "Probed {age}: {verdict}{suffix}" }, lang,
+  return say({ zh: "{age}测试：{verdict}{suffix}", en: "Tested {age}: {verdict}{suffix}" }, lang,
     { age: freshness.label, verdict, suffix });
 }
 

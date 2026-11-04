@@ -59,10 +59,27 @@ def test_probe_keeps_the_denial_as_a_fact(tmp_path):
 def test_token_names_this_process():
     token = facts.probe_token()
     assert token["user"]
-    assert set(token) == {"user", "uid", "integrity", "error"}
+    assert set(token) == {"user", "uid", "integrity", "elevated", "error"}
+    if sys.platform == "win32":
+        # 没声明 argtypes 时 64 位上 SID 地址被截断，这里曾经恒为 None（lujy 10-29 诊断包）。
+        assert token["integrity"] in {"Low", "Medium", "MediumPlus", "High", "System"}
+        assert isinstance(token["elevated"], bool)
 
 
 # ── 提案 ─────────────────────────────────────────────────────────────────────
+
+
+def test_the_windows_repair_says_it_needs_an_administrator(tmp_path, monkeypatch):
+    """读不了的东西是以管理员身份运行时建的（owner = Administrators，DACL 只认 owner）：本人未提权
+    连改权限的资格都没有。提案要如实说会弹一次管理员确认，并标成提权执行。"""
+    monkeypatch.setattr(facts.sys, "platform", "win32")
+    got = facts.repair_proposal("home_marker_unreadable", error="PermissionError: [WinError 5] 拒绝访问。",
+                                data_root=tmp_path)
+    assert got["argv"][0] == "icacls" and got["elevated"] is True
+    assert "管理员" in got["changes"]["zh"] and "administrator" in got["changes"]["en"]
+    monkeypatch.setattr(facts.sys, "platform", "linux")
+    got = facts.repair_proposal("home_marker_unreadable", error="PermissionError: [Errno 13]", data_root=tmp_path)
+    assert got["argv"][0] == "chmod" and got["elevated"] is False
 
 
 def test_a_permission_shaped_failure_proposes_resetting_the_data_root(tmp_path):
@@ -203,7 +220,7 @@ async def test_the_banner_reads_the_last_run_when_no_worker_is_alive_and_refuses
 
     refused = await client.post(f"/api/v1/projects/{project_id}/sessions/{session_id}/environment/repair",
                                 headers=_headers(token), json={"code": "nothing_like_this"})
-    assert refused.status_code == 409 and "nothing_like_this" in refused.json()["detail"]
+    assert refused.status_code == 409 and "已不存在" in refused.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -232,3 +249,38 @@ async def test_a_repair_runs_the_server_side_proposal_and_reports_its_output(run
     assert body["returncode"] == 0 and body["stdout"] == "ok"
     assert ran and str(the_data_root()) in ran[0], "执行的是服务端按表重算的命令，不是前端回传的"
     assert body["command"] and "facts_after" in body
+
+
+@pytest.mark.asyncio
+async def test_an_elevated_proposal_goes_through_the_elevated_runner(runtime_client, tmp_path, monkeypatch) -> None:
+    """Windows 的提案标了 elevated：照原样以本人身份跑只会「处理 0 个文件」（lujy 10-29 诊断包）。"""
+    client, factory = runtime_client
+    token = await _token(client, "researcher@atrium.local")
+    warning = {"type": "environment_warning", "code": "home_marker_unreadable", "severity": "degraded",
+               "path": str(tmp_path / "home" / ".platform-tenant-identity.json"),
+               "error": "PermissionError: [WinError 5] 拒绝访问。", "consequences": []}
+    async with factory() as db:
+        run = await _seed(db, run_id="run_env_9", environment={"warnings": [warning], "repeated": 0,
+                                                              "escalated": False, "doctor": None})
+        project_id, session_id = run.project_id, run.session_id
+        await db.commit()
+    monkeypatch.setattr(facts.sys, "platform", "win32")
+    elevated: list[list[str]] = []
+
+    def fake_elevated(argv):
+        elevated.append(argv)
+        return {"returncode": 0, "stdout": "Successfully processed 3 files", "stderr": ""}
+
+    monkeypatch.setattr(env, "_run_argv_elevated", fake_elevated)
+    monkeypatch.setattr(env, "_run_argv", lambda argv: pytest.fail("提权的提案不能以本人身份照原样跑"))
+    done = await client.post(f"/api/v1/projects/{project_id}/sessions/{session_id}/environment/repair",
+                             headers=_headers(token), json={"code": "home_marker_unreadable", "path": warning["path"]})
+    assert done.status_code == 200, done.text
+    assert elevated and elevated[0][0] == "icacls" and str(the_data_root()) in elevated[0]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="ShellExecuteEx 只在 Windows 上")
+def test_the_elevated_runner_brings_back_output_and_exit_code() -> None:
+    """同一条路（ShellExecuteEx → cmd /c … > log）换成不弹 UAC 的 ``open``：退出码与输出要读得回来。"""
+    got = env._run_argv_elevated(["cmd", "/c", "echo repaired & exit 3"], verb="open", timeout_s=60)
+    assert got["returncode"] == 3 and "repaired" in got["stdout"], got

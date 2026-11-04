@@ -19,7 +19,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { sessionInputPlan } from "./answer-affordance.ts";
+import { canUseComposer, sessionInputPlan } from "./answer-affordance.ts";
 import { adaptExecutionView } from "./session-adapter.ts";
 import type { ResearchSession, SessionPendingApproval } from "../types";
 
@@ -73,6 +73,18 @@ const PAUSED_VIEW = (pause: SessionPendingApproval | null) => ({
   label: "Needs your answer",
   runId: INCIDENT_PAUSE.runId,
   since: "2026-09-01T02:05:51Z",
+});
+
+test("a pending decision keeps both its shortcuts and normal chat available", () => {
+  for (const pause of [INCIDENT_PAUSE, REPAIRED_PAUSE, { ...REPAIRED_PAUSE, pauseKind: "permission" }]) {
+    const plan = sessionInputPlan({
+      lang: "en", session: sessionWith(PAUSED_VIEW(pause)), messages: [], sending: false,
+    });
+    assert.equal(plan.kind, "prompt");
+    assert.equal(canUseComposer(plan), true);
+  }
+  assert.equal(canUseComposer({ kind: "locked", reason: "Archived", recheckAt: null }), false);
+  assert.equal(canUseComposer(null), false);
 });
 
 // ── 事故回放 ──────────────────────────────────────────────────────────────

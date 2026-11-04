@@ -204,10 +204,10 @@ def record_startup(data_root: Path, *, app_version: str | None) -> dict[str, Any
                 "path": str(data_root),
                 "error": None,
                 "consequences": [{
-                    "zh": f"从 {previous.get('app_version') or '?'} 升到 {app_version or '?'} 之间，"
-                          f"数据根下 {len(diffs)} 处权限变了",
-                    "en": f"Between {previous.get('app_version') or '?'} and {app_version or '?'}, "
-                          f"{len(diffs)} permissions under the data root changed",
+                    "zh": f"从 {previous.get('app_version') or '?'} 升级到 {app_version or '?'} 后，"
+                          f"数据目录中有 {len(diffs)} 处文件权限发生了变化",
+                    "en": f"After upgrading from {previous.get('app_version') or '?'} to {app_version or '?'}, "
+                          f"permissions changed on {len(diffs)} items in the data folder",
                 }],
                 "diffs": diffs[:200],
                 "previous_taken_at": previous.get("taken_at"),

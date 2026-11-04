@@ -15,19 +15,23 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .agent_loop import end_pause, reinstate_pause, resume_loop, run_loop
+from .agent_loop import end_pause, reinstate_pause, resume_loop, run_loop, write_pause_pending
 from .llm import LLMMessage
 from .pause import (
+    PausedRunContext,
     PauseEvent,
     clear_pause,
     get_deepest_paused,
     get_paused_run,
+    list_paused,
+    register_pause,
 )
 
 log = logging.getLogger("pause_driver")
@@ -49,7 +53,21 @@ AskFn = Callable[[PauseEvent], Awaitable[AnswerValue]]
 FinalizeFn = Callable[..., Awaitable[dict]]
 
 
+class AutomaticAnswer(str):
+    """没有人答、由档位按推荐项**替人**给出的答复。
+
+    和人打出来的是同一个字符串（下游照常比较、照常回填），但来历不同：能力授权卡
+    被替人拒掉，是「没有人在所以没批」，要记成被挡住的前提（RFC D6）；人亲手点的
+    拒绝是一个决定，不记。来历只在这一处能确知 —— 结算时只剩一个字符串。
+    """
+
+
 def auto_approve_answer(pause_event: PauseEvent) -> str:
+    """档位替人答（:class:`AutomaticAnswer`）。选法见 :func:`_auto_approve_text`。"""
+    return AutomaticAnswer(_auto_approve_text(pause_event))
+
+
+def _auto_approve_text(pause_event: PauseEvent) -> str:
     """Return the answer selected by auto-approve for a pause event.
 
     Decision packages carry a 0-indexed recommended option in metadata.  Other
@@ -157,7 +175,7 @@ async def resolve_pause_answer(
     if _rid:
         _pause.claim_driver(_rid)
     try:
-        if not AUTO_APPROVE_ENABLED or _is_high_risk(pause_event):
+        if not AUTO_APPROVE_ENABLED or must_ask_a_person(pause_event):
             return _clean_answer(await manual_ask(pause_event))
 
         automatic = auto_approve_answer(pause_event)
@@ -191,6 +209,20 @@ async def _immediate(value: str) -> str:
     return value
 
 
+class _LeftForAPerson(Exception):
+    """孤儿链条里撞上一问只能由人本人答 —— 不替人答，整链停在这里。"""
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__(run_id)
+        self.run_id = run_id
+
+
+async def _answer_unless_a_person_must(pause_event) -> str:
+    if needs_a_person(pause_event):
+        raise _LeftForAPerson(getattr(pause_event, "asking_run_id", "") or "")
+    return auto_approve_answer(pause_event)
+
+
 async def resolve_orphan_pauses(state, orphans: list) -> bool:
     """把**没人管**的 pause 用 auto-approve 答掉，让无人值守真的能无人值守。
 
@@ -207,6 +239,9 @@ async def resolve_orphan_pauses(state, orphans: list) -> bool:
 
     返回是否真的处理了孤儿。做不成**绝不能把调用方拖住** —— 那就退化回
     它要治的死锁。失败就如实留痕、清注册表、放行。
+
+    例外是「只能由人本人答」的那一问（`needs_a_person`）：它没人管时该做的
+    就是等人，不是被这里替人答掉 —— 原样留着、返回 False，调用方据此停下。
     """
     import asyncio
 
@@ -215,6 +250,11 @@ async def resolve_orphan_pauses(state, orphans: list) -> bool:
     if not orphans:
         return False
     ids = [c.run_id for c in orphans]
+    waiting = [c.run_id for c in orphans
+               if needs_a_person(getattr(c, "pause_event", None))]
+    if waiting:
+        _t(state, "orphan_pause_left_for_a_person", paused_runs=waiting)
+        return False
     _t(state, "orphan_pause_detected", paused_runs=ids,
        note="无人在等答复，用 auto-approve 自动答复")
     try:
@@ -225,7 +265,7 @@ async def resolve_orphan_pauses(state, orphans: list) -> bool:
 
             await asyncio.wait_for(
                 drive_pause_chain(
-                    ask_fn=lambda pe: _immediate(auto_approve_answer(pe)),
+                    ask_fn=_answer_unless_a_person_must,
                     # 跟正常路径同一套收尾：resume 完的 run 必须跟一次跑完的
                     # 写出一样的 summary，否则收拾掉孤儿
                     # 之后留下的是半截 run。
@@ -237,6 +277,10 @@ async def resolve_orphan_pauses(state, orphans: list) -> bool:
             set_auto_approve(prev, 5)
         _t(state, "orphan_pause_resolved", paused_runs=ids)
         return True
+    except _LeftForAPerson as left:
+        # 链条中途冒出一问只能由人答：停在那里，注册表照旧（它就是在等人）。
+        _t(state, "orphan_pause_left_for_a_person", paused_runs=[left.run_id])
+        return False
     except Exception as e:
         # 兜底：无论如何把注册表清干净，否则下一轮又被同一批孤儿卡住
         for rid in ids:
@@ -296,7 +340,9 @@ async def _default_ask(pause_event: PauseEvent) -> str:
         print("  （或自由输入任意文本）")
     print("=" * 60)
 
-    if AUTO_APPROVE_ENABLED and not _is_high_risk(pause_event):
+    if needs_a_person(pause_event):
+        print(f"⏸ 这一问要你本人答：{needs_a_person(pause_event)}")
+    elif AUTO_APPROVE_ENABLED and not _is_high_risk(pause_event):
         picked = auto_approve_answer(pause_event)
         print(f"⚡ AUTO-APPROVE ON. 自动回复：{picked}")
 
@@ -351,6 +397,54 @@ def _is_high_risk(pause_event) -> bool:
     return (pause_event.metadata or {}).get("type") in NEVER_AUTO_APPROVE_TYPES
 
 
+#: pause metadata 里的这个键 = 「这一问只能由人本人答」，值是给人看的理由。
+#: 建卡的那一方按盘上事实写它（见下），自动作答的各条路只读它，不再各判一次。
+NEEDS_A_PERSON_KEY = "needs_a_person"
+
+
+def needs_a_person(pause_event) -> str | None:
+    """这一问是不是**连续档也不能替人答**的那一类；是则返回理由。
+
+    `_is_high_risk` 管的是「危不危险」—— 连续档里用户逐类授权过，所以放行。
+    这里管的是「这件事归谁定」，跟授权了多少类别无关。现在有两种：
+
+      · 项目里还没有研究，调度器在问研究什么（`request_human_input` 写）——
+        研究什么只有用户能定。代答一次就是替用户开了题（2026-10-30 node20：
+        一句「你好」被开成了三小时的硬碳储钠课题）。
+      · 同一份产物已经被连续 REVISE 到上限，reviewer 还推荐再改一轮
+        （`present_decision_package` 写）—— 再自动改下去不收敛，要人看一眼。
+
+    理由由建卡方在**建卡那一刻**按盘上事实写定，随这一次呈递走；它不改变人能
+    选什么，只改变「没人答时能不能替人答」。
+    """
+    reason = (getattr(pause_event, "metadata", None) or {}).get(NEEDS_A_PERSON_KEY)
+    return str(reason) if reason else None
+
+
+def must_ask_a_person(pause_event) -> bool:
+    """自动作答的唯一闸：高危（非连续档）、能力授权（非连续档）、或这一问只能由人本人答。"""
+    return (bool(needs_a_person(pause_event)) or _is_high_risk(pause_event)
+            or _a_grant_waits_for_its_person(pause_event))
+
+
+def _a_grant_waits_for_its_person(pause_event) -> bool:
+    """能力授权卡（出网主机 / GPU）在**有人的档位**里留给人答。
+
+    这张卡的推荐项是「拒绝」—— 那是给「没人答」准备的安全默认（RFC D6），不是替人做的
+    判断。协作档和自主档里人就在跟前：自主档按推荐项替人点掉它，等于人还没看见就被拒了。
+    #1254（0.5.6 Windows，自主档）：experiment 申请连 repo.msys2.org，卡片 1.2 秒内被替人
+    拒掉，人在旁边连打六次「允许」都落空，子节点在没有授权的情况下又跑了一个小时。
+
+    只有连续档（真没人在，`BYPASS_ENABLED` 由同一份档位声明推出）才按推荐项拒，并把这件
+    事记成 blocker（`capability_grants.record_not_granted`）。
+    """
+    if (getattr(pause_event, "metadata", None) or {}).get("type") != "capability_grant":
+        return False
+    from shared.lib import dangerous_commands as _dc
+
+    return not getattr(_dc, "BYPASS_ENABLED", False)
+
+
 def set_auto_approve(enabled: bool, countdown_sec: int = 5) -> None:
     """设置"要不要自动放行"这个进程级开关。
 
@@ -382,7 +476,10 @@ async def _ask_decision_package(pause_event: PauseEvent) -> str:
         else "(unknown)"
     )
 
-    if AUTO_APPROVE_ENABLED:
+    if needs_a_person(pause_event):
+        print()
+        print(f"⏸ 这张卡要你本人选：{needs_a_person(pause_event)}")
+    elif AUTO_APPROVE_ENABLED:
         # 倒计时 + 自动选 recommended（user 按 enter 立刻执行，按数字 override）
         print()
         print(f"⚡ AUTO-APPROVE ON. Auto-selecting [{recommended_number}] {recommended_label} in "
@@ -390,14 +487,16 @@ async def _ask_decision_package(pause_event: PauseEvent) -> str:
               "enter 'skip' to abort):")
 
     async def ask_stdin(_: PauseEvent) -> str:
-        prompt = "  > " if AUTO_APPROVE_ENABLED else "Your choice: "
+        prompt = ("  > " if AUTO_APPROVE_ENABLED and not needs_a_person(pause_event)
+                  else "Your choice: ")
         try:
             return await asyncio.to_thread(input, prompt)
         except (EOFError, KeyboardInterrupt):
             return ""
 
     answer = await resolve_pause_answer(pause_event, ask_stdin)
-    if AUTO_APPROVE_ENABLED and answer == str(recommended_number):
+    if (AUTO_APPROVE_ENABLED and not needs_a_person(pause_event)
+            and answer == str(recommended_number)):
         print(f"  → auto-executing [{recommended_number}]")
     return answer
 
@@ -408,25 +507,17 @@ async def _ask_decision_package(pause_event: PauseEvent) -> str:
 _DECISION_REASK_MAX = 3
 
 
-async def _execute_authorized_action(ctx, entry: dict | None) -> bool:
-    """人选了 REVISE / REDIRECT → 运行时直接把指定节点起起来。
+async def execute_authorized_action(state, entry: dict | None) -> dict | None:
+    """Dispatch the recorded target with the existing inputs and review feedback.
 
-    只执行**人明确授权**的那一个目标：`authorized_target_node` 由
-    `record_decision_answer` 从人的选择推导，不是模型说了算。执行完 flow entry
-    由 `_finish_child` 的既有路径推进（替代产物跑完才算数）。
-
-    **派发失败不把控制权交回去**：起不来说明运行时没能执行人的决定，那是框架的
-    失败，不是"轮到调度器自己想办法"。此时返回 False，由调用方保持 pause 并把
-    失败带进下一次呈递 —— 否则就又出现一个「调度器手握控制权且 flow 开着」的
-    窗口，而那正是这一整轮要消灭的东西。
-
-    返回 True = 已执行（或不适用）；False = 该执行但没执行成。
+    Return the actual tool result, including a child pause or failure. The
+    compatibility wrapper below retains the pause driver's boolean contract.
     """
     if not entry or entry.get("decision_state") != "action_authorized":
-        return True
+        return None
     target = str(entry.get("authorized_target_node") or "").strip()
     if not target:
-        return True
+        return None
     from shared.tools.run_node import _run_node_tool
 
     feedback = entry.get("recommended_feedback") or ""
@@ -447,11 +538,11 @@ async def _execute_authorized_action(ctx, entry: dict | None) -> bool:
             f"{feedback}"
         )
 
-    def _note_dispatch_failure(reason: str) -> bool:
+    def _note_dispatch_failure(reason: str) -> dict:
         # 名字刻意不叫 `_failed`：拒绝点扫盘（scripts/scan_refusal_sites.py）按
         # `_fail*` 前缀认「给模型的拒绝信封工厂」。这个函数不拒绝任何人，它是
         # **记一笔失败**并回答"起没起来"，登记成拒绝点会往棘轮里塞两条假账。
-        ctx.state.append_transcript(
+        state.append_transcript(
             "authorized_action_dispatch_failed",
             producing_run_id=entry.get("producing_run_id"),
             authorized_action=entry.get("authorized_action"),
@@ -459,7 +550,7 @@ async def _execute_authorized_action(ctx, entry: dict | None) -> bool:
             error=reason,
         )
         entry["action_last_failure"] = reason[:400]
-        return False
+        return {"status": "error", "error": reason}
 
     # 重跑带着**原任务**走，不是只带反馈（#1082 第 2 条，选的是 experiment owner
     # 倾向的 (b)）。此前这里只传 mode / reviewer_feedback / human_directive 三个
@@ -477,12 +568,13 @@ async def _execute_authorized_action(ctx, entry: dict | None) -> bool:
         "reviewer_feedback": str(feedback)[:4000],
         "human_directive": human_note[:2000],
     }
+    decision_actor = "调度器决定" if entry.get("decided_by") == "orchestrator" else "人工决定"
     try:
         result = await _run_node_tool(
-            ctx.state,
+            state,
             target,
             node_inputs=dispatch_inputs,
-            user_note=(f"人工决定 {entry.get('authorized_action')!r} → 由运行时执行："
+            user_note=(f"{decision_actor} {entry.get('authorized_action')!r} → 由运行时执行："
                        f"重跑 {target}"),
         )
     except Exception as exc:                      # noqa: BLE001
@@ -499,7 +591,12 @@ async def _execute_authorized_action(ctx, entry: dict | None) -> bool:
     # 返回值和抛出的异常是同一个答案的两种写法，两种都要认。
     if isinstance(result, dict) and str(result.get("status") or "") == "error":
         return _note_dispatch_failure(str(result.get("error") or "run_node 返回 status=error，无错误正文"))
-    return True
+    return result
+
+
+async def _execute_authorized_action(ctx, entry: dict | None) -> bool:
+    result = await execute_authorized_action(ctx.state, entry)
+    return not (isinstance(result, dict) and result.get("status") == "error")
 
 
 def _cascade_tool_result(ctx, parent_ctx, result, child_summary: dict | None) -> dict:
@@ -621,6 +718,20 @@ async def _settle_decision_answer(
         record_decision_answer,
     )
 
+    # CLI replies also remain a conversation until a decision is actually made.
+    from core.pause_dialogue import discuss_pause, exact_pause_answer
+
+    while isinstance(answer, str) and exact_pause_answer(ctx.pause_event, answer) is None:
+        selection, _ = await discuss_pause(
+            ctx.state, ctx.harness, ctx.llm, ctx.pause_event, answer,
+        )
+        if selection is not None:
+            answer = selection
+            break
+        answer = await ask(ctx.pause_event)
+        if not answer:
+            return "", None, False
+
     payload = ctx.pause_event.to_dict()
     for attempt in range(_DECISION_REASK_MAX):
         try:
@@ -713,6 +824,77 @@ async def _settle_decision_answer(
     return answer, None, False
 
 
+# ── 转发的卡跟着叶子的答复走（#1254）────────────────────────────────────────
+#
+# 子节点停下来问人时，它的父 run（通常是调度器）跟着停、把同一张卡转给人看。叶子的答复一受理，
+# 运行时就续跑叶子 —— 一跑可能几十分钟到几小时 —— 跑完才轮到父 run 记 `loop_resume`（#1083）。
+# 这段时间里父 run 的投影一直说「等你回答」，而那个问题早就有了答复：人在卡片上再点、在聊天框
+# 里再打，都落空（#1254：0.5.6 Windows，子节点又跑了一个小时，人连打六次「允许」）。
+# 和 #1261 修决策卡的是同一个洞，那次只修了顶层、普通 pause 原样，转发这条路一直没补。
+#
+# 父 run 的注册表条目**留着**：叶子跑完时级联要靠 `get_paused_run(parent)` 找到它续跑。收起的只是
+# 「等人」的三个投影：transcript 的 `loop_resume`、磁盘标记、`resume_recorded`。
+
+
+def _settle_relays(leaf: PausedRunContext) -> None:
+    """叶子的问题有了受理的答复 → 沿途转发这张卡的祖先不再「等人」。
+
+    同一个父 run 下还有别的子 run 停着等人（并行派发）：父 run 改呈那一张，不收起。
+    """
+    child = leaf
+    while child.parent_run_id:
+        parent = get_paused_run(child.parent_run_id)
+        if parent is None:
+            return
+        waiting = [c for c in list_paused()
+                   if c.parent_run_id == parent.run_id and c.run_id != child.run_id]
+        if waiting:
+            _present_again(parent, waiting[0].pause_event, reason="sibling_still_waiting")
+            return
+        if not parent.resume_recorded:
+            parent.resume_recorded = True
+            parent.state.append_transcript(
+                "loop_resume",
+                pending_tool_call_id=parent.pending_tool_call_id,
+                response_preview=f"子 run {leaf.run_id} 的问题已有答复，正在继续"[:200],
+                recorded_decision=None,
+                cascaded_from_run_id=leaf.run_id,
+                awaiting_child_run_id=child.run_id,
+            )
+            try:
+                (parent.state.root / "pause_pending.json").unlink(missing_ok=True)
+            except Exception:
+                pass
+        child = parent
+
+
+def _present_again(parent: PausedRunContext, pause_event: PauseEvent, *, reason: str) -> None:
+    """父 run 重新转发一张卡。**父 run 自己的 `pending_tool_call_id` 不变** —— 它是那次 `run_node`
+    调用的 id，级联回填子 run 结果时要靠它找到那条 tool 消息；子 run 的 id 不能盖过去。"""
+    relayed = dataclasses.replace(pause_event, pending_tool_call_id=parent.pending_tool_call_id)
+    parent.pause_event = relayed
+    parent.resume_recorded = False
+    register_pause(parent)
+    turn = getattr(parent.state, "turn", None)
+    parent.state.append_transcript(
+        "loop_pause", turn=turn, question=relayed.question[:200],
+        pending_tool_call_id=parent.pending_tool_call_id,
+        reinstated=True, reason=reason, relayed_from_run_id=pause_event.asking_run_id or None,
+    )
+    write_pause_pending(parent.state, relayed, turn or 0)
+
+
+def _relay_again(run_id: str) -> None:
+    """叶子续跑之后又停下来问人：已经收起的祖先重新转发这一张新卡。"""
+    child = get_paused_run(run_id)
+    while child is not None and child.parent_run_id:
+        parent = get_paused_run(child.parent_run_id)
+        if parent is None or not parent.resume_recorded:
+            return
+        _present_again(parent, child.pause_event, reason="child_paused_again")
+        child = parent
+
+
 async def drive_pause_chain(
     *,
     ask_fn: AskFn | None = None,
@@ -792,20 +974,47 @@ async def drive_pause_chain(
             # 和 highrisk_confirm 同一个位置、同一个理由：判定必须在**框架同时握有
             # 原始答复和那张选项表**的这一刻做完；到了 hook 那边只剩一条 JSON 信封。
             try:
-                from core.capability_grants import grant_from_answer, read_answer
-
-                _host = str(_meta.get("host") or "")
-                _verdict = read_answer(answer)
-                _granted = grant_from_answer(
-                    ctx.state, _host, answer, reason=str(_meta.get("reason") or ""))
-                ctx.state.append_transcript(
-                    "capability_grant_answered",
-                    host=_host,
-                    granted=bool(_granted),
-                    # 「读不出来」和「拒绝」在记账上是两件事：后者是人做了决定，
-                    # 前者是这条链某处坏了，而把它记成拒绝会让那处永远查不到。
-                    answer_unreadable=(_verdict is None),
+                from core.capability_grants import (
+                    GPU_CAPABILITY,
+                    gpu_grant,
+                    grant_from_answer,
+                    grant_gpu_from_answer,
+                    read_answer,
+                    record_not_granted,
                 )
+
+                _verdict = read_answer(answer)
+                _answered_by = "auto" if isinstance(answer, AutomaticAnswer) else "person"
+                if _meta.get("capability") == GPU_CAPABILITY:
+                    # GPU 运行时（#893 / #1174）：批了就当场分卡；卡被占满也如实记下来。
+                    _granted = grant_gpu_from_answer(
+                        ctx.state, int(_meta.get("gpus") or 1), answer,
+                        reason=str(_meta.get("reason") or ""))
+                    _grant = gpu_grant(ctx.state)
+                    ctx.state.append_transcript(
+                        "capability_grant_answered",
+                        capability=GPU_CAPABILITY,
+                        granted=bool(_granted),
+                        answer_unreadable=(_verdict is None),
+                        answered_by=_answered_by,
+                        **({"gpu": _grant.as_dict()} if _grant is not None else {}),
+                    )
+                else:
+                    _host = str(_meta.get("host") or "")
+                    _granted = grant_from_answer(
+                        ctx.state, _host, answer, reason=str(_meta.get("reason") or ""))
+                    ctx.state.append_transcript(
+                        "capability_grant_answered",
+                        host=_host,
+                        granted=bool(_granted),
+                        # 「读不出来」和「拒绝」在记账上是两件事：后者是人做了决定，
+                        # 前者是这条链某处坏了，而把它记成拒绝会让那处永远查不到。
+                        answer_unreadable=(_verdict is None),
+                        answered_by=_answered_by,
+                    )
+                if not _granted and _answered_by == "auto":
+                    # 没有人在，所以没批：如实记成这个 run 被挡住的前提（RFC D6）。
+                    record_not_granted(ctx.state, _meta)
             except Exception as e:      # 记账失败绝不能打断 resume
                 log.warning("grant_from_answer failed: %s", e)
         elif _meta.get("type") == "highrisk_confirm":
@@ -821,12 +1030,17 @@ async def drive_pause_chain(
                 log.warning("record_highrisk_answer failed: %s", e)
         # pause 类型 writing_gate_override 已随 writing-gate 整套退场（判决拆除第三波）。
 
+        # 答复已受理：沿途转发这张卡的祖先先收起「等人」（#1254），再去续跑叶子。
+        _settle_relays(ctx)
+
         # 3. resume 这级
         result = await resume_loop(ctx, answer, recorded_decision=_authoritative)
 
         if result.status == "paused":
             # 同一级又 pause 了（agent 在 resume 之后又调了 request_human_input）
-            # ctx 已被 clear，run_loop 内重新注册了新 ctx → 下次循环捡起来
+            # ctx 已被 clear，run_loop 内重新注册了新 ctx → 下次循环捡起来。
+            # 祖先刚才已经收起了转发的卡，这张新卡要重新转发上去，人才看得见。
+            _relay_again(ctx.run_id)
             continue
 
         # 4a. leaf 完成 / cancel / 失败：写 summary（如果 caller 提供了 finalize_fn）
@@ -878,14 +1092,21 @@ async def drive_pause_chain(
                 # 改回 running 的只有 run.started / run.resumed / run.retrying。
                 # 于是连续档自动作答之后，父 run 永远停在「Needs your answer」，
                 # 而 worker 里早已没有待答的 pause：**视图说的和事实相反**。
-                parent_ctx.state.append_transcript(
-                    "loop_resume",
-                    pending_tool_call_id=ctx.parent_tool_call_id,
-                    response_preview=f"子 run {ctx.run_id} 恢复后已收尾"[:200],
-                    recorded_decision=None,
-                    cascaded_from_run_id=ctx.run_id,
-                )
+                # 叶子的答复受理时 `_settle_relays` 已经替它记过了 —— 只记一次。
+                if not parent_ctx.resume_recorded:
+                    parent_ctx.resume_recorded = True
+                    parent_ctx.state.append_transcript(
+                        "loop_resume",
+                        pending_tool_call_id=ctx.parent_tool_call_id,
+                        response_preview=f"子 run {ctx.run_id} 恢复后已收尾"[:200],
+                        recorded_decision=None,
+                        cascaded_from_run_id=ctx.run_id,
+                    )
                 clear_pause(parent_ctx.run_id)
+                try:
+                    (parent_ctx.state.root / "pause_pending.json").unlink(missing_ok=True)
+                except Exception:
+                    pass
                 parent_result = await run_loop(
                     parent_ctx.harness, parent_ctx.state,
                     parent_ctx.messages, parent_ctx.llm,

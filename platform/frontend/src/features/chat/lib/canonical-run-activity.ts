@@ -4,10 +4,10 @@ import { normalizeChatPause, type ChatPause } from "./chat-terminal.ts";
 import { say, type Language, type Phrase } from "../../../shared/i18n/language.ts";
 
 // 这两句在三个分支里重复出现 —— 同一句话在两处各写一遍，就会各自演化。
-const TURN_DID_NOT_FINISH: Phrase = { zh: "这一轮没跑完", en: "This turn did not finish" };
+const TURN_DID_NOT_FINISH: Phrase = { zh: "这次执行未完成", en: "This run did not finish" };
 const NO_USABLE_RESULT: Phrase = {
-  zh: "平台没有为这次运行记录到可用的结果。",
-  en: "The platform recorded no usable result for this run.",
+  zh: "这次执行没有产生可用的结果。",
+  en: "This run produced no usable result.",
 };
 
 export type CanonicalRunActivitySummary = {
@@ -106,8 +106,8 @@ function persistedRunFailure(detail: RunDetailResponse, lang: Language): Canonic
     title: say(TURN_DID_NOT_FINISH, lang),
     message: say(NO_USABLE_RESULT, lang),
     recovery: say({
-      zh: "下面是已经记录下来的工作；发下一条消息接着跑。",
-      en: "What was recorded is below; send another message to continue.",
+      zh: "已完成的部分保留在下方，发送新消息即可继续。",
+      en: "Completed work is kept below. Send a new message to continue.",
     }, lang),
     detail: legacy || undefined,
     tone: "continue",
@@ -209,12 +209,12 @@ export function canonicalRunAttention(
       // 那是自动续跑上线前的建议，现在发下一条就接着跑。
       title: say(TURN_DID_NOT_FINISH, lang),
       message: say({
-        zh: "执行进程在写下终态之前退出了 —— 已经做完的部分都还在。",
-        en: "The execution process exited before recording a final state — everything already done is still here.",
+        zh: "执行意外中断，已完成的部分都还保留着。",
+        en: "The run stopped unexpectedly. Everything already done is kept.",
       }, lang),
       recovery: say({
-        zh: "发下一条消息就从断点接着跑，不会从头再来。",
-        en: "Send another message and it continues from where it stopped, not from the beginning.",
+        zh: "发送新消息即可从中断处继续。",
+        en: "Send a new message to continue from where it stopped.",
       }, lang),
       tone: "continue",
     };
@@ -224,8 +224,8 @@ export function canonicalRunAttention(
       title: failure?.title ?? say(TURN_DID_NOT_FINISH, lang),
       message: failure?.message ?? say(NO_USABLE_RESULT, lang),
       recovery: failure?.recovery ?? say({
-        zh: "发下一条消息接着跑；技术细节留在执行历史里。",
-        en: "Send another message to continue; the technical detail stays in the execution history.",
+        zh: "发送新消息即可继续，详细信息可在执行历史中查看。",
+        en: "Send a new message to continue. Details are in Execution history.",
       }, lang),
       tone: "continue",
     };
@@ -250,13 +250,13 @@ export function canonicalRunAttention(
   // 运行记录不再重复宣布一次它管不着的事。
   if (view.outcome === "ok_with_warning") {
     return {
-      title: say({ zh: "跑完了，有几处要看一眼", en: "Research completed with notes" }, lang),
+      title: say({ zh: "执行完成，有需要检查的内容", en: "Completed with items to review" }, lang),
       message: say({
-        zh: "结果出来了，但至少有一项记下来的检查需要你过目。",
-        en: "A result was produced, but at least one recorded check needs review.",
+        zh: "已产生结果，但至少有一项检查需要你确认。",
+        en: "A result was produced, but at least one check needs your review.",
       }, lang),
       recovery: say({
-        zh: "发布之前先看一遍结果和执行历史。",
+        zh: "发布前请检查结果和执行历史。",
         en: "Review the result and Execution history before publishing.",
       }, lang),
       tone: "attention",

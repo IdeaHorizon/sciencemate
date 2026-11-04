@@ -70,6 +70,25 @@ def test_placeholder_titles_are_machine_made():
         assert session_title_is_machine_made(_Session(placeholder), LONG_REQUEST)
 
 
+def test_every_title_the_frontend_creates_sessions_with_is_a_placeholder():
+    """前端新建会话时起的标题（两种语言）都得被认成占位符。
+
+    扫前端，不写名单：中文界面新建会话用「新的研究」，而这里以前只认英文，于是中文用户的
+    会话既不换成第一句话、也不自动命名（11-04）。"""
+    import re
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[2] / "frontend" / "src"
+    created = set()
+    for path in src.rglob("*.tsx"):
+        for zh, en in re.findall(r'create\.mutateAsync\(t\(\{ zh: "([^"]+)", en: "([^"]+)" \}\)\)',
+                                 path.read_text(encoding="utf-8")):
+            created.update({zh, en})
+    assert created, "前端里一处新建会话都没扫到 —— 扫法该更新了"
+    missing = created - PLACEHOLDER_SESSION_TITLES
+    assert not missing, f"这些新建会话的标题不被认成占位符，会话永远不会被命名：{sorted(missing)}"
+
+
 def test_the_current_mechanical_truncation_is_recognised():
     title = mechanical_session_title(LONG_REQUEST)
     assert session_title_is_machine_made(_Session(title), LONG_REQUEST)

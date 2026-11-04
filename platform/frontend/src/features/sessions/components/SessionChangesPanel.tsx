@@ -20,7 +20,7 @@ import { ContractViolation } from "@/shared/contract-violation";
 import { useT, useLanguage, say, type Language, type Phrase } from "@/shared/i18n";
 
 const resourceLabels: Record<RevisionResourceType, Phrase> = {
-  artifact: { zh: "产物", en: "Artifact" },
+  artifact: { zh: "成果", en: "Output" },
   project_doc: { zh: "项目文档", en: "Project document" },
   project_config: { zh: "项目设置", en: "Project settings" },
 };
@@ -36,19 +36,19 @@ function fileCountLabel(count: number, lang: Language) {
 }
 
 function readyChangeLabel(count: number, lang: Language) {
-  return say({ zh: "这条会话改了 {count} 个文件", en: "{count} file{s} changed in this Session" }, lang,
+  return say({ zh: "这个会话修改了 {count} 个文件", en: "{count} file{s} changed in this Session" }, lang,
     { count, s: count === 1 ? "" : "s" });
 }
 
-function shortSha(value: string | null | undefined) {
-  return value?.slice(0, 8) ?? "uncommitted";
+function shortSha(value: string | null | undefined, lang: Language) {
+  return value?.slice(0, 8) ?? say({ zh: "未提交", en: "uncommitted" }, lang);
 }
 
 function errorMessage(error: unknown, lang: Language) {
   // 对面违约（变更集的形状不对、身份串了）的 message 是写给排查的人的诊断，不照念。
   return error instanceof Error && !(error instanceof ContractViolation)
     ? error.message
-    : say({ zh: "刷新不到这次提交的状态。", en: "Revision state could not be refreshed." }, lang);
+    : say({ zh: "无法加载改动，请稍后重试。", en: "Could not load changes. Please try again later." }, lang);
 }
 
 function Preview({
@@ -64,7 +64,7 @@ function Preview({
   return (
     <div className="session-change-preview">
       {value ? <pre>{value}</pre> : <p>{fallback ?? t({ zh: "预览不可用", en: "Preview unavailable" })}</p>}
-      {truncated && <small>{t({ zh: "服务端截断了预览。", en: "Preview truncated by server." })}</small>}
+      {truncated && <small>{t({ zh: "预览已截断。", en: "Preview truncated." })}</small>}
     </div>
   );
 }
@@ -89,7 +89,7 @@ function ConflictItem({
       </header>
 
       <details className="session-conflict-base">
-        <summary>{t({ zh: "显示共同基线", en: "Show common base" })}</summary>
+        <summary>{t({ zh: "显示修改前的版本", en: "Show the original version" })}</summary>
         <Preview
           value={conflict.basePreview}
           fallback={conflict.baseVersionId}
@@ -99,7 +99,7 @@ function ConflictItem({
 
       <div className="session-conflict-comparison">
         <section>
-          <span>{t({ zh: "项目那一版 · theirs", en: "Project version · theirs" })}</span>
+          <span>{t({ zh: "项目中的版本", en: "Project version" })}</span>
           <Preview
             value={conflict.theirsPreview}
             fallback={conflict.projectVersionId}
@@ -110,11 +110,11 @@ function ConflictItem({
               type="button"
               disabled={resolving}
               onClick={() => onResolve(conflict.id, "use_project")}
-            >{t({ zh: "保留项目那一版", en: "Keep Project version" })}</button>
+            >{t({ zh: "保留项目中的版本", en: "Keep Project version" })}</button>
           )}
         </section>
         <section>
-          <span>{t({ zh: "会话这一版 · ours", en: "Session version · ours" })}</span>
+          <span>{t({ zh: "这个会话的版本", en: "Session version" })}</span>
           <Preview
             value={conflict.oursPreview}
             fallback={conflict.proposedVersionId}
@@ -125,7 +125,7 @@ function ConflictItem({
               type="button"
               disabled={resolving}
               onClick={() => onResolve(conflict.id, "use_proposed")}
-            >{t({ zh: "用会话这一版", en: "Use Session version" })}</button>
+            >{t({ zh: "使用这个会话的版本", en: "Use Session version" })}</button>
           )}
         </section>
       </div>
@@ -183,14 +183,14 @@ export function SessionChangesPanel({
   if (!loading && !error && changeCount === 0 && conflictCount === 0) {
     if (!requested) return null;
     return (
-      <section className="session-changes-panel is-empty" aria-label={t({ zh: "这条会话里等待发布的改动", en: "Session changes awaiting publication" })}>
+      <section className="session-changes-panel is-empty" aria-label={t({ zh: "这个会话中待发布的改动", en: "Session changes awaiting publication" })}>
         <div className="session-changes-inner">
           <div className="session-changes-summary">
             <span className="session-changes-empty">
               <GitCompareArrows size={13} />
               <span>
                 <strong>{t({ zh: "没有未发布的改动", en: "No unpublished changes" })}</strong>
-                <small>{changeSet?.gitBranch ?? session.gitBranch ?? t({ zh: "会话分支", en: "Session branch" })} · {t({ zh: "工作区与项目 head 一致", en: "workspace matches the project head" })}</small>
+                <small>{t({ zh: "与项目最新版本一致", en: "Matches the latest project version" })}</small>
               </span>
             </span>
           </div>
@@ -200,7 +200,7 @@ export function SessionChangesPanel({
   }
 
   return (
-    <section className={`session-changes-panel${conflictCount > 0 ? " has-conflicts" : ""}`} aria-label={t({ zh: "这条会话里等待发布的改动", en: "Session changes awaiting publication" })}>
+    <section className={`session-changes-panel${conflictCount > 0 ? " has-conflicts" : ""}`} aria-label={t({ zh: "这个会话中待发布的改动", en: "Session changes awaiting publication" })}>
       <div className="session-changes-inner">
         <div className="session-changes-summary">
           <button
@@ -217,8 +217,8 @@ export function SessionChangesPanel({
               <strong>{conflictCount > 0 ? conflictCountLabel(conflictCount, lang) : readyChangeLabel(changeCount, lang)}</strong>
               <small>
                 {conflictCount > 0
-                  ? t({ zh: "项目主线和这条会话改了同一份资源", en: "Project head and this Session changed the same resource" })
-                  : `${changeSet?.gitBranch ?? session.gitBranch ?? t({ zh: "会话分支", en: "Session branch" })} · ${t({ zh: "工作区实时 diff", en: "live workspace diff" })}`}
+                  ? t({ zh: "项目和这个会话修改了同一项内容", en: "The project and this session changed the same item" })
+                  : t({ zh: "实时改动", en: "Live changes" })}
               </small>
             </span>
             <ChevronDown size={13} className={detailExpanded ? "is-expanded" : ""} />
@@ -234,17 +234,21 @@ export function SessionChangesPanel({
 
         {detailExpanded && (
           <div className="session-changes-detail">
+            {/* 分支全名、提交号、领先 / 落后几个提交：排查用的信息，默认收起。 */}
             {changeSet?.gitBranch && (
-              <div className="session-git-summary">
-                <span><GitBranch size={12} /><code>{changeSet.gitBranch}</code></span>
-                <span><code>{shortSha(changeSet.gitBaseCommitSha)}</code> → <code>{shortSha(changeSet.gitHeadCommitSha)}</code></span>
-                <span>{t({ zh: "领先 {ahead} · 落后 {behind}", en: "{ahead} ahead · {behind} behind" }, { ahead: changeSet.aheadBy, behind: changeSet.behindBy })}</span>
-                <span className="session-git-stats"><b>+{changeSet.additions}</b><i>−{changeSet.deletions}</i> · {fileCountLabel(changeSet.filesChanged, lang)}</span>
-              </div>
+              <details className="session-git-details">
+                <summary>{t({ zh: "版本详情", en: "Version details" })}</summary>
+                <div className="session-git-summary">
+                  <span><GitBranch size={12} /><code>{changeSet.gitBranch}</code></span>
+                  <span><code>{shortSha(changeSet.gitBaseCommitSha, lang)}</code> → <code>{shortSha(changeSet.gitHeadCommitSha, lang)}</code></span>
+                  <span>{t({ zh: "领先 {ahead} · 落后 {behind}", en: "{ahead} ahead · {behind} behind" }, { ahead: changeSet.aheadBy, behind: changeSet.behindBy })}</span>
+                  <span className="session-git-stats"><b>+{changeSet.additions}</b><i>−{changeSet.deletions}</i> · {fileCountLabel(changeSet.filesChanged, lang)}</span>
+                </div>
+              </details>
             )}
             {conflictCount > 0 && (
               <p className="session-conflict-explanation">
-                {t({ zh: "什么都没有被覆盖。发布之前，对每一份资源选择保留项目那一版还是会话这一版。", en: "Nothing was overwritten. Choose the Project version or the Session version for each resource before publishing." })}
+                {t({ zh: "两边的内容都还在。发布前，请为每一项选择保留项目中的版本还是这个会话的版本。", en: "Nothing has been overwritten. Before publishing, choose the project version or the session version for each item." })}
               </p>
             )}
 
@@ -269,11 +273,8 @@ export function SessionChangesPanel({
               </div>
             ))}
 
-            {loading && !changeSet && openConflicts.length === 0 && <p className="session-changes-loading">{t({ zh: "正在刷新待提交的改动…", en: "Refreshing staged changes…" })}</p>}
+            {loading && !changeSet && openConflicts.length === 0 && <p className="session-changes-loading">{t({ zh: "正在加载改动…", en: "Loading changes…" })}</p>}
 
-            <p className="session-kb-boundary">
-              {t({ zh: "知识库里的论断仍然是项目级的只追加提案，不会进这次提交。", en: "Knowledge Base claims remain project-level append-only proposals and are not included in this Revision." })}
-            </p>
           </div>
         )}
       </div>

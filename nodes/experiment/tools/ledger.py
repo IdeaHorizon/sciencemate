@@ -30,6 +30,11 @@ from typing import Any, Iterable
 from shared.lib.filelock import exclusive
 
 try:
+    from . import persistence as _persistence
+except ImportError:  # pragma: no cover - standalone node bootstrap
+    from tools import persistence as _persistence  # type: ignore
+
+try:
     from .protocol_epoch import (
         LEDGER_SCHEMA_VERSION,
         PROTOCOL_EPOCH,
@@ -95,27 +100,16 @@ def _now() -> float:
 
 
 def _fsync_dir(path: Path) -> None:
-    try:
-        _fsync_dir_strict(path)
-    except OSError:
-        pass
+    _fsync_dir_strict(path)
 
 
 def _fsync_dir_strict(path: Path) -> None:
-    fd = os.open(str(path), os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    _persistence.fsync_directory(path)
 
 
 def _fsync_file_and_parent(path: Path) -> None:
-    """Confirm an already-visible event file and its directory are durable."""
-    fd = os.open(str(path), os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    """Re-flush visible bytes under the host platform persistence contract."""
+    _persistence.fsync_file(path)
     _fsync_dir_strict(path.parent)
 
 
@@ -510,11 +504,104 @@ def project_jobs(records: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]
             # 确定没进队列（adapter 正向查过）或提交前就失败：intent 关闭，可重提（Codex 41 P0）
             job["state"] = "absent"
             job["absent_reason"] = row.get("reason")
+        if kind in {"job_bound", "job_reconciled"}:
+            runtime = row.get("container_runtime_id")
+            if runtime not in (None, ""):
+                known_runtime = job.get("container_runtime_id")
+                if known_runtime not in (None, "") and runtime != known_runtime:
+                    # A reconciliation may fill an unknown identity, but it
+                    # cannot silently replace an already bound physical job.
+                    job["runtime_identity_conflict"] = True
+                else:
+                    job["container_runtime_id"] = runtime
     return jobs
 
 
 def open_jobs(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return [job for job in project_jobs(records).values() if job["state"] in {"intent", "submitted", "unknown"}]
+
+
+def _collected_job_observation(
+    row: dict[str, Any], terminal: tuple[dict[str, Any], dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Project a verified mirror using the original job's producer handle.
+
+    The collection receipt owns only transport and local identity observations.
+    It cannot alter the terminal job fact, invent a computation, or upgrade an
+    unchanged/uncertain remote file into an output of this job.
+    """
+    local_path = row.get("local_path")
+    valid_path = (isinstance(local_path, str) and bool(local_path)
+                  and Path(local_path).is_absolute() and ".." not in Path(local_path).parts)
+    observation = {
+        "kind": "observation", "source_kind": "job_output_collected",
+        "action_id": "", "nonce": row.get("nonce"), "seq": row.get("seq"),
+        "terminal_seq": row.get("terminal_seq"), "remote_path": row.get("remote_path"),
+        "created": [], "modified": [], "deleted": [], "identities": {},
+        "unknown": [local_path] if valid_path else [], "truncated": True,
+        "observation_error": "collection is not bound to a verified remote output identity",
+    }
+    if terminal is None or not valid_path:
+        return observation
+    fact, remote_observation = terminal
+    handle = fact.get("output_observation")
+    if not isinstance(handle, str) or not handle:
+        return observation
+    observation["action_id"] = handle
+    remote_path = row.get("remote_path")
+    created, modified = remote_observation.get("created") or [], remote_observation.get("modified") or []
+    if (not isinstance(remote_path, str) or not isinstance(created, list) or not isinstance(modified, list)
+            or remote_path not in created + modified or remote_path in (remote_observation.get("unknown") or [])):
+        return observation
+    frozen = (remote_observation.get("identities") or {}).get(remote_path) or {}
+    before, after = frozen.get("before"), frozen.get("after")
+    if (frozen.get("before_unknown") or frozen.get("basis") == "hash_unavailable"
+            or not isinstance(after, dict) or after.get("kind") != "file"
+            or any(isinstance(value, dict) and value.get("hash_error") for value in (before, after))
+            or row.get("remote_identity") != after):
+        return observation
+    # Match finish._producer_rows' distinction between a physical new output
+    # and an unchanged object's metadata adjustment. A copy must not turn touch
+    # or an unobservable same-size rewrite into a new scientific producer.
+    if (isinstance(before, dict) and before.get("kind") == "file"
+            and before.get("inode") == after.get("inode") and before.get("size") == after.get("size")
+            and (before.get("sha256") is None or after.get("sha256") is None
+                 or before.get("sha256") == after.get("sha256"))):
+        return observation
+    local = row.get("local_identity")
+    digest = row.get("content_sha256")
+    if (not isinstance(local, dict) or local.get("kind") != "file" or local.get("hash_error")
+            or not isinstance(digest, str) or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)):
+        return observation
+    for identity in (after, local):
+        if any(not isinstance(identity.get(key), int) or isinstance(identity.get(key), bool)
+               for key in ("size", "inode", "mtime_ns")) or identity["size"] < 0:
+            return observation
+    if local["size"] != after["size"] or (local.get("sha256") is not None and local["sha256"] != digest):
+        return observation
+    try:
+        from .capture import SMALL_FILE_BYTES
+    except ImportError:  # pragma: no cover - standalone node bootstrap
+        from tools.capture import SMALL_FILE_BYTES
+    if after.get("sha256") is not None:
+        if after["sha256"] != digest:
+            return observation
+    elif (after["size"] <= SMALL_FILE_BYTES
+          or row.get("verification_basis") != "frozen_metadata_and_transfer_sha256"):
+        return observation
+    if local["size"] <= SMALL_FILE_BYTES and local.get("sha256") != digest:
+        return observation
+    observation.pop("observation_error")
+    observation.update(
+        created=[local_path], unknown=[], truncated=False,
+        identities={local_path: {"before": None, "after": local, "before_unknown": False,
+                                 "basis": "verified_mirror_of_remote_job_output"}},
+        content_sha256=digest, verification_basis=row.get("verification_basis"),
+        remote_identity=after,
+        limitation="The local file is a verified mirror of the job's frozen output; collection is not a new computation.",
+    )
+    return observation
 
 
 def project_output_observations(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -526,10 +613,16 @@ def project_output_observations(records: Iterable[dict[str, Any]]) -> list[dict[
     observations = []
     capture_directories: dict[str, Path] = {}
     known_paths: set[str] = set()
+    remote_terminals: dict[tuple[str, int], tuple[dict[str, Any], dict[str, Any]]] = {}
     for row in records:
         if row.get("kind") == "action_started" and row.get("capture_record"):
             capture_directories[str(row.get("action_id"))] = Path(row["capture_record"])
-        if row.get("kind") == "observation":
+        if row.get("kind") == "job_output_collected":
+            terminal_seq = row.get("terminal_seq")
+            source = (remote_terminals.get((str(row.get("nonce") or ""), terminal_seq))
+                      if isinstance(terminal_seq, int) and not isinstance(terminal_seq, bool) else None)
+            observation = _collected_job_observation(row, source)
+        elif row.get("kind") == "observation":
             observation = row
         elif row.get("kind") == "job_terminal" and isinstance(row.get("output_diff"), dict):
             observation = {**row["output_diff"], "kind": "observation",
@@ -559,6 +652,15 @@ def project_output_observations(records: Iterable[dict[str, Any]]) -> list[dict[
                 observation = {**observation, "created": [], "modified": [], "identities": {},
                                "unknown": sorted(uncertain), "truncated": True,
                                "observation_error": f"{type(exc).__name__}: {exc}"}
+        if (row.get("kind") == "job_terminal"
+                and (row.get("output_diff") or {}).get("coordinate_space") == "slurm_remote"):
+            # Remote POSIX coordinates must never be interpreted as paths on
+            # the current worker. Keep the immutable source for later mirror
+            # receipts; only their verified local coordinates enter this view.
+            seq = row.get("seq")
+            if isinstance(seq, int) and not isinstance(seq, bool):
+                remote_terminals[(str(row.get("nonce") or ""), seq)] = (row, observation)
+            continue
         known_paths.update(observation.get("created") or [])
         known_paths.update(observation.get("modified") or [])
         known_paths.update(observation.get("unknown") or [])

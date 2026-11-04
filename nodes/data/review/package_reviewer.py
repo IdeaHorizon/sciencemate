@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
+from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 from typing import Any
+from xml.etree import ElementTree
 
 import yaml
 
 from nodes.data.pipeline_contract import revision_contract
 from nodes.data.planning.schemas import (
-    blocked_placeholder_markers,
+    blocked_placeholder_markers, explicit_output_path,
 )
 from nodes.data.stage_semantics import dependency_artifact_ready, produces_runtime_result
 
@@ -18,6 +21,42 @@ from nodes.data.stage_semantics import dependency_artifact_ready, produces_runti
 def _common_review(files: dict[str, str], requested: dict[str, Any]) -> dict[str, Any]:
     checks: dict[str, Any] = {}
     issues: list[dict[str, Any]] = []
+    assets = {str(item.get("id")): item for item in requested.get("source_assets") or []}
+    assets.update({str(item.get("id")): item for item in requested.get("required_deliverables") or []})
+    paths = {str(item.get("asset_id")): item.get("path") for item in requested.get("delivery_files") or []}
+    for asset_id, asset in assets.items():
+        if not asset.get("edit_source") or not asset.get("preserve_keywords"):
+            continue
+        source = assets.get(str(asset["edit_source"]), {})
+        baseline_path = (source.get("local_match") or {}).get("path") or source.get("requested_path")
+        name = paths.get(asset_id) or asset.get("declared_output_path")
+        if name not in files:
+            continue  # Required-asset binding diagnoses a missing output separately.
+        from .abaqus_inspection import keyword_block_signatures
+
+        baseline_error = ""
+        try:
+            raw = Path(baseline_path).read_bytes()
+            expected = (source.get("local_match") or {}).get("sha256")
+            if expected and hashlib.sha256(raw).hexdigest() != expected:
+                raise OSError("Edit baseline changed since binding")
+            before = keyword_block_signatures(raw.decode(), asset["preserve_keywords"])
+            after = keyword_block_signatures(files[name], asset["preserve_keywords"])
+            changed = [key for key in before if before[key] != after[key]]
+        except (OSError, TypeError, UnicodeError) as exc:
+            baseline_error = str(exc)
+            changed = []
+        checks[f"edit_preservation:{name}"] = not (changed or baseline_error)
+        if baseline_error:
+            issues.append({"code": "local_source_binding_unavailable", "severity": "critical", "file": name,
+                "deliverable_id": asset_id, "repair_kind": "plan_structure", "repairable": True,
+                "message": "Bound edit baseline is unavailable or changed: " + baseline_error,
+                "recommendation": "Restore the original source binding before editing; do not regenerate or substitute the baseline."})
+        elif changed:
+            issues.append({"code": "edit_preservation_failed", "severity": "critical", "file": name,
+                "deliverable_id": asset_id, "repair_kind": "artifact_content", "repairable": True,
+                "message": "Edit changed protected baseline blocks: " + ", ".join(changed),
+                "recommendation": "Patch the bound original file; restore these blocks exactly and keep only requested changes."})
     for name, content in files.items():
         path = PurePosixPath(str(name))
         safe_path = not path.is_absolute() and ".." not in path.parts
@@ -37,10 +76,19 @@ def _common_review(files: dict[str, str], requested: dict[str, Any]) -> dict[str
                 "severity": "critical",
                 "file": name,
                 "message": f"Generated file {name} is empty.",
-                "recommendation": "Regenerate it or remove it from required deliverables.",
-                "repairable": False,
+                "recommendation": "Regenerate this asset with its required content, preserving the locked deliverables.",
+                "repairable": True,
             })
             continue
+        if path.name.upper() == "KPOINTS" or path.suffix.lower() == ".kpoints":
+            from .vasp_inspection import validate_kpoints_header
+
+            error = validate_kpoints_header(content)
+            checks[f"kpoints_header:{name}"] = error is None
+            if error:
+                issues.append({"code": "invalid_kpoints_header", "severity": "critical", "file": name,
+                               "message": error, "recommendation": error,
+                               "repair_kind": "artifact_content", "repairable": True})
         placeholders = blocked_placeholder_markers(content)
         # Package path safety is enforced above. An absolute path inside file
         # content can be producer provenance (for example a mesher source
@@ -73,12 +121,32 @@ def _common_review(files: dict[str, str], requested: dict[str, Any]) -> dict[str
                 parsed = json.loads(content)
             elif suffix in {".yaml", ".yml"}:
                 parsed = yaml.safe_load(content)
+            elif suffix in {".xml", ".sbml"}:
+                parsed = ElementTree.fromstring(content)
+                if parsed.tag.startswith("{http://www.sbml.org/sbml/") and parsed.tag.endswith("}sbml"):
+                    try:
+                        import libsbml
+                    except ImportError:
+                        issues.append({"code": "native_validator_unavailable", "severity": "critical", "file": name,
+                            "message": "SBML validation requires python-libsbml in the Data runtime.",
+                            "recommendation": "Install nodes/data/requirements.txt in the Data runtime and resume review; preserve the generated files.",
+                            "required_dependencies": ["python-libsbml>=5.20,<6"], "repairable": False})
+                        continue
+                    document = libsbml.readSBMLFromString(content)
+                    document.checkConsistency()
+                    errors = [document.getError(i) for i in range(document.getNumErrors())
+                              if document.getError(i).getSeverity() >= libsbml.LIBSBML_SEV_ERROR]
+                    checks[f"native_sbml:{name}"] = not errors
+                    if errors:
+                        issues.append({"code": "native_sbml_invalid", "severity": "critical", "file": name,
+                            "message": "libSBML rejected this file: " + "\n".join(
+                                f"line {e.getLine()}, code {e.getErrorId()}: {e.getMessage()}" for e in errors[:12]),
+                            "recommendation": "Correct the cited SBML schema/reference/unit defects while preserving the requested model; regenerate dependent reports.",
+                            "repair_kind": "artifact_content", "repairable": True})
             else:
                 continue
-            if not isinstance(parsed, (dict, list)):
-                raise ValueError("top-level value must be a mapping or sequence")
             checks[f"structured_format:{name}"] = True
-        except (json.JSONDecodeError, yaml.YAMLError, ValueError) as exc:
+        except (json.JSONDecodeError, yaml.YAMLError, ElementTree.ParseError, ValueError) as exc:
             checks[f"structured_format:{name}"] = False
             issues.append({
                 "code": "invalid_structured_file",
@@ -86,7 +154,7 @@ def _common_review(files: dict[str, str], requested: dict[str, Any]) -> dict[str
                 "file": name,
                 "message": f"{name} is not valid structured data: {exc}",
                 "recommendation": "Regenerate syntactically valid structured content.",
-                "repairable": False,
+                "repairable": True,
             })
         if path.name == "parameter_contract.json":
             valid_contract = bool(
@@ -399,6 +467,7 @@ def _requested_stage_conformance_review(requested: dict[str, Any]) -> dict[str, 
 
 def matching_asset_paths(
     requirement: dict[str, Any], paths: set[str], bound_paths: list[str] | None = None,
+    *, plan: dict[str, Any] | None = None,
 ) -> list[str]:
     """Resolve a declared location or a unique filename, never guess between duplicates."""
     aliases = {
@@ -406,31 +475,67 @@ def matching_asset_paths(
         for key in ("declared_output_path", "expected_filename", "filename", "path")
         if str(requirement.get(key) or "").strip()
     }
+    caller_path = (explicit_output_path([requirement], (plan or {}).get("preprocessing_request") or {})
+                   if requirement.get("output_path_is_explicit") is True else "")
+    if caller_path:
+        aliases = {str(PurePosixPath(caller_path)).rstrip("/")}
+    producer = next((step for step in (plan or {}).get("generation_steps") or []
+                     if requirement.get("id") in (step.get("outputs") or [])), {})
+    owner_stage = requirement.get("stage_id") or producer.get("stage_id")
+    stage_scoped = plan is not None and owner_stage not in (None, "", "package") and (
+        plan.get("review_profile") or (plan.get("preprocessing_request") or {}).get("review_profile") or "plan_bound"
+    ) != "request_bound"
+    if stage_scoped:
+        from nodes.data.tools.package_publisher import artifact_delivery_path
+
+        stage_root = PurePosixPath(*artifact_delivery_path(
+            plan, producer, str(requirement.get("id") or ""), Path("asset"),
+        ).parts[:2])
+        aliases = {str(artifact_delivery_path(
+            {**plan, "required_deliverables": [{**requirement,
+                "declared_output_path": alias}]},
+            producer, str(requirement.get("id") or ""), Path(alias),
+        )) for alias in aliases}
     matches = {path for path in paths if any(
-        path == alias or path.startswith(f"{alias}/") for alias in aliases
+        path == alias or path.startswith(f"{alias}/") or fnmatchcase(path, alias)
+        for alias in aliases
     )}
-    if not matches:
+    if not matches and not stage_scoped:
         # A filename does not prescribe the producer's internal directory.
         # Explicit directory paths still require exact relative locations.
         candidates = {path for path in paths if any(
-            len(PurePosixPath(alias).parts) == 1 and PurePosixPath(path).name == alias
+            len(PurePosixPath(alias).parts) == 1 and fnmatchcase(PurePosixPath(path).name, alias)
             for alias in aliases
         )}
         if len(candidates) == 1:
             matches.update(candidates)
     if requirement.get("output_path_is_explicit") is False:
-        matches.update(path for path in bound_paths or [] if path in paths)
+        matches.update(path for path in bound_paths or [] if path in paths
+                       and (not stage_scoped or path.startswith(f"{stage_root}/")))
     return sorted(matches)
 
 
 def _required_asset_review(files: dict[str, str], requested: dict[str, Any]) -> dict[str, Any]:
     """Verify the approved deliverables by stable asset identity."""
+    asset_scoped = (requested.get("review_profile") == "request_bound"
+                    or not (requested.get("requirement_analysis") or {}).get("calculation_stages"))
     requirements = [
         item for item in requested.get("required_deliverables") or []
         if isinstance(item, dict)
         and item.get("required", True) is not False
         and item.get("delivery_required", True) is not False
     ]
+    # Check caller locations independently of the planner's internal IDs. One
+    # native producer can fulfill several caller files, but omitting any named
+    # output must still fail even if the planner omitted its logical asset.
+    requirements.extend({
+        **asset,
+        "id": f"caller:{asset.get('asset_id') or asset['filename']}",
+        "expected_filename": asset["filename"],
+        "output_path_is_explicit": True,
+    } for asset in (requested.get("preprocessing_request") or {}).get("requested_assets") or []
+        if isinstance(asset, dict) and asset.get("filename")
+        and asset_scoped)
     if not requirements:
         return {"checks": {}, "issues": []}
     delivered_paths = {
@@ -457,7 +562,19 @@ def _required_asset_review(files: dict[str, str], requested: dict[str, Any]) -> 
             for key in ("declared_output_path", "expected_filename", "filename", "path")
             if str(requirement.get(key) or "").strip()
         }
-        matches = matching_asset_paths(requirement, delivered_paths, delivered_by_asset.get(requirement_id))
+        matches = matching_asset_paths(
+            requirement, delivered_paths, delivered_by_asset.get(requirement_id),
+            plan=requested if requested.get("review_profile") else None,
+        )
+        if (not matches and requirement.get("output_path_is_explicit") is False
+                and asset_scoped
+                and any(item.get("filename") for item in
+                        (requested.get("preprocessing_request") or {}).get("requested_assets") or []
+                        if isinstance(item, dict))):
+            # An Analyst's proposed filename is not another caller deliverable.
+            # Caller paths are checked independently below; authority review
+            # still checks the actual files' scientific content and role.
+            continue
         satisfied = bool(matches)
         checks[f"required_asset:{requirement_id}"] = {
             "satisfied": satisfied,
@@ -479,7 +596,11 @@ def _required_asset_review(files: dict[str, str], requested: dict[str, Any]) -> 
             from nodes.data.tools.scientific_assets import validate_format_version
 
             bindings = canonical_mesh_controls(flatten_parameter_groups(requirement.get("parameter_bindings") or {}))
-            declared_format = bindings.get("solver_mesh_format") or requirement.get("format") or ""
+            declared_format = str(requirement.get("format") or "")
+            # Generation controls describe the consumer's output, not the
+            # serialization of its input script/configuration.
+            if declared_format.lower() in {"msh", "gmsh", "mesh", "vtk"}:
+                declared_format = bindings.get("solver_mesh_format") or declared_format
             declared_version = bindings.get("output_version") or ""
             errors = {name: validate_format_version(files[name], declared_format, declared_version) for name in matches}
             # An asset can include an internal representation and a final
@@ -514,23 +635,17 @@ def review_preprocessing_package(
     # Domain semantics are reviewed once against the locked authority by the
     # model-assisted authority reviewer.  This function intentionally retains
     # only deterministic checks that are broadly reusable across disciplines.
-    domain_review = {
-        "review_type": "deterministic_preprocessing_package",
-        "status": "pass",
-        "checks": {},
-        "issues": [],
-        "repairs": [],
-    }
     issues = [
         *(common.get("issues") or []),
         *(scientific_assets.get("issues") or []),
         *(stage_conformance.get("issues") or []),
         *(required_assets.get("issues") or []),
-        *(domain_review.get("issues") or []),
     ]
     failed = any(item.get("severity") == "critical" for item in issues)
     return {
-        **domain_review,
+        "review_type": "deterministic_preprocessing_package",
+        "checks": {},
+        "repairs": [],
         "status": "fail" if failed else "pass",
         "discipline": normalized or discipline,
         "issues": issues,

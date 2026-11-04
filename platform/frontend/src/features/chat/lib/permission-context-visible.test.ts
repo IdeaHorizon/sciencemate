@@ -42,7 +42,7 @@ test("permission 类停靠的 context 默认展开", () => {
 
 test("context 折面本身还在（没被顺手改成常驻展开）", () => {
   assert.ok(
-    SOURCE.includes('<summary>{t({ zh: "背景"'),
+    /<summary>\{pause\.kind === "permission"[\s\S]{0,160}?zh: "背景"/.test(SOURCE),
     "非 permission 类的 context 仍应是可折叠的次要材料",
   );
 });

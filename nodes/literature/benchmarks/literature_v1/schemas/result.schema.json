@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LiteratureBench normalized result",
+  "type": "object",
+  "required": ["benchmark_version", "system", "task_id", "attempts", "status"],
+  "properties": {
+    "benchmark_version": {"type": "string", "minLength": 1},
+    "system": {"type": "object", "required": ["name", "mode"], "properties": {"name": {"type": "string"}, "mode": {"type": "string"}, "tier": {"type": "string"}, "model": {"type": "string"}}},
+    "task_id": {"type": "string"},
+    "status": {"enum": ["success", "partial", "timeout", "rate_limited", "error", "not_offered"]},
+    "attempts": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"elapsed_seconds": {"type": "number"}, "outcome": {"type": "string"}, "raw_evidence_path": {"type": "string"}}}},
+    "papers": {"type": "array", "items": {"type": "object", "required": ["rank", "title"], "properties": {"rank": {"type": "integer", "minimum": 1}, "title": {"type": "string"}, "doi": {"type": "string"}, "url": {"type": "string"}, "authors": {"type": "array"}, "year": {"type": ["integer", "string", "null"]}, "venue": {"type": "string"}, "abstract": {"type": "string"}, "abstract_status": {"enum": ["source", "enriched_source", "ai_summary", "missing", "unknown"]}, "abstract_provenance": {"type": "string"}, "source": {"type": "string"}}}},
+    "e2e": {"type": "object"}
+  }
+}

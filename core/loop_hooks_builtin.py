@@ -377,18 +377,25 @@ def _kb_delta_on_turn_start(ctx: HookContext) -> list[LLMMessage] | None:
     if not all_new and not all_updated:
         return None
 
+    # 条目正文可能来自外部（文献转述、晋升上来的 org 卡）—— 进 prompt 只许走数据框（#730）。
+    from shared.lib.external_content import record_view, render_frame
+
     lines: list[str] = []
 
     if all_new:
         total = sum(len(n) for _, n in all_new)
         lines.append(f"📚 KB 新增（turn {ctx.turn}）：自上轮以来新写入 {total} 条 KB 条目：")
-        for entity, new_entries in all_new:
-            for r in new_entries:
-                lines.append(_format_kb_brief(entity, r))
+        lines.append(render_frame(
+            "\n".join(_format_kb_brief(entity, r)
+                      for entity, new_entries in all_new for r in new_entries),
+            via="kb",
+            witnesses=[(r.get("id"), record_view(r))
+                       for _, new_entries in all_new for r in new_entries]))
 
     if all_updated:
         total = sum(len(u) for _, u in all_updated)
         lines.append(f"📝 KB 变更（turn {ctx.turn}）：{total} 条 KB 条目状态有更新（含合并 / 状态机变更）：")
+        body: list[str] = []
         for entity, updated_entries in all_updated:
             for r in updated_entries:
                 extra = ""
@@ -397,7 +404,11 @@ def _kb_delta_on_turn_start(ctx: HookContext) -> list[LLMMessage] | None:
                         f" → status={r.get('status', '?')}"
                         f" (review_history={len(r.get('review_history') or [])})"
                     )
-                lines.append(_format_kb_brief(entity, r) + extra)
+                body.append(_format_kb_brief(entity, r) + extra)
+        lines.append(render_frame(
+            "\n".join(body), via="kb",
+            witnesses=[(r.get("id"), record_view(r))
+                       for _, updated_entries in all_updated for r in updated_entries]))
 
     if lines:
         lines.append("")
@@ -560,23 +571,24 @@ def _post_node_review_flow_reminder_on_turn_start(ctx: HookContext) -> list[LLMM
         f"🚨 **POST-PRODUCING FLOW PENDING** ({source_node} 刚完，run_id={producing_run_id})",
         f"产出 artifact: [{artifact_preview}]",
         "",
-        "Post-producing flow（每个 producing 节点完后必走，严格按顺序）：",
+        "当前产出与审查状态：",
     ]
 
-    # Step 1/2（reviewer、决策包呈递）不再提醒 —— 运行时自己走完（Move 1d）。
-    #
-    # 这两段原本把下一步调用**连参数都打印**给调度器照抄。那正是"框架已经知道
-    # 答案却让模型抄一遍，再用一排墙防它抄错"：能被打印出来的东西不是判断，是
-    # 手续。手续归运行时之后，这里没有可提醒的东西 —— 调度器发起一次
-    # `run_node(<producing>)`，下一次醒来看到的就是人的答复。
-    #
-    # 留下的只有**真需要调度器动手**的那两个状态：人选了 REVISE/REDIRECT 之后
-    # 要起指定节点（action_authorized），和人选了 EDIT 之后要等人改完
-    # （awaiting_manual_edit）。那两件事运行时替不了 —— 它们是人的决定的执行面。
-    if r_state == "failed":
+    # 审查自动执行，解释与呈递由调度器负责；无需模型重复派审查节点。
+    if r_state in ("failed", "failed_awaiting_human"):
         lines.append(f"  ⚠️  reviewer FAILED: {(review_failed or '')[:160]}")
     elif r_state == "done":
         lines.append(f"  ✅ reviewer done, review_critique={review_critique_id}")
+    elif r_state == "skipped":
+        lines.append("  本轮独立审查已跳过，请如实说明。")
+
+    if d_state == "pending" and r_state != "pending":
+        lines.append(
+            "审查结果已返回。结合产出和审查意见，先在对话中向用户说明你的判断，"
+            "已有目标与授权内的日常决定，用 present_decision_package(action=...) 自行判断并推进；"
+            "确需用户判断才填写 human_decision_reason 提问。内容和详略按当前情况组织。"
+        )
+        return [LLMMessage(role="system", content="\n".join(lines))]
 
     # 人选了 REVISE / REDIRECT 之后要起指定节点。这一步运行时替不了 ——
     # 它是**人的决定的执行面**，目标节点由人的选择决定。The flow
@@ -634,21 +646,17 @@ def _post_node_review_flow_reminder_on_turn_start(ctx: HookContext) -> list[LLMM
         lines.append("  ⏸️ EDIT was selected; wait for the human edit and a new decision.")
         return [LLMMessage(role="system", content="\n".join(lines))]
 
-    # 决策包的**恢复**路径（只此一种，Move 1d 之后）。
-    #
-    # 正常路径由运行时在 `run_node(<producing>)` 内部呈递，调度器不经手，所以
-    # `d_state == "pending"` 时这里不再提醒 —— 提醒它去做一件运行时已经做了的事，
-    # 只会换来一次重复呈递。
-    #
+    # 决策包的恢复路径。
     # 但**进程重启会丢掉 in-memory pause**：账本上 decision_state 停在
     # awaiting_human，而现场那个 pause 已经不在了。这时确实需要调度器用同一个
     # producing_run_id 重新呈递一次。这条路运行时替不了 —— 它没有"上一轮呈递过
     # 但现在没了"这个信息，只有账本有。
     if d_state == "awaiting_human":
         lines.append("")
+        lines.append("  先说明当前判断与需要重新确认的原因，再重新呈递选择。")
         lines.append("  ⏳ **NEXT: 重新呈递决策包（进程重启丢了 in-memory pause）**")
-        lines.append("  用同一 producing_run_id 重新呈递，让 auto-approve 按 reviewer")
-        lines.append("  recommended action 机械作答。")
+        lines.append("  用同一 producing_run_id 恢复决定。已有授权内自行判断；")
+        lines.append("  确需用户判断时保留 human_decision_reason，不把 reviewer 推荐当作授权。")
         lines.append("  ```")
         lines.append("  present_decision_package(")
         lines.append(f"    source_node_type='{source_node}',")
@@ -1443,6 +1451,20 @@ def build_orientation_snapshot(state) -> str | None:
     except Exception:
         pass
 
+    # 5) 这一轮跑在什么执行上下文里（机械生成：OS、隔离后端守住/没守住什么、shell、
+    #    python、后端特有的「别去碰」）。
+    #
+    # 加这一段的理由也是一次真实事故（#1263，2026-10-29 诊断包）：Windows 个人版上
+    # 用户问「能连本机 ubuntu 子系统吗」，experiment 在受限完整性级别下跑了两趟 11 条
+    # wsl.exe 探针、两趟 reviewer，约 1200 万 token，最后得出一个进程起来之前就确定
+    # 的事实：这个上下文够不着 WSL 服务。平台知道，模型不知道 —— 和第 4 段同一种病。
+    try:
+        from .execution_context_facts import render_section as render_execution_context
+
+        lines += ["", render_execution_context()]
+    except Exception:
+        log.warning("orientation: 执行上下文段落生成失败", exc_info=True)
+
     return "\n".join(lines)
 
 
@@ -1681,7 +1703,18 @@ def _situation_overlays(state) -> list[str]:
         pass
     if (state.hook_state.get("continuous_loop")
             and state.hook_state.get("continuous_phase", "running") == "running"):
-        out.append("- ♾️ continuous mode 生效：按协议推进，每轮末尾单独一行 CONTINUOUS_STATUS。")
+        from core.research_situation import research_under_way
+
+        if research_under_way(state):
+            out.append("- ♾️ continuous mode 生效：按协议推进，每轮末尾单独一行 CONTINUOUS_STATUS。")
+        else:
+            # 机制在 chat._nothing_to_continue / builtin._only_the_user_can_answer；
+            # 这里只把它说给模型听，免得它照「连续档别停」的协议去替用户开题。
+            out.append(
+                "- ♾️ continuous mode 已开，但项目里还没有研究可续：连续档只接着跑"
+                "已经开始的研究。用户说了要研究什么 → 照常起节点；没说（问候、闲聊、"
+                "问问题）→ 直接答、等用户说，不要替用户选方向开题。这时框架不会自动续轮，"
+                "`request_human_input` 也会真的停下来等人答。")
     return out
 
 
@@ -1907,18 +1940,21 @@ register_loop_hook(LoopHook(
 
 
 def _read_only_promise_before_finish(ctx: HookContext) -> list[LLMMessage] | None:
-    """用户要求只读、而本次真改了用户的文件 —— 在写最终陈述**之前**把事实递回去。
+    """只读约束下真改了用户源文件 —— 在写最终陈述**之前**把事实递回去。
 
     2026-09 现场：用户明说「不要修改文件」，实际写了 24 个 Project 文件，
     而最终回复和独立审稿**双双称「全程只读」**，审稿还给了 0.92 通过。
 
-    事实一直在盘上（每次改动都有 `workspace_changed` 事件），缺的是没人把它和
-    那句承诺放在一起、并且**在模型下笔的那一刻**送到它手里
-    （[[project_mechanical_bookkeeping_to_the_framework]]）。
+    口径见 `core.side_effect_contract`（wangd 2026-10-21 裁决）：文件分三类，
+    **只有用户源文件**构成矛盾；节点证据（各节点自己的目录）与 `.research` 记账
+    照数不报矛盾 —— 那 24 个文件就全是节点证据，按旧口径挂到调度器上，每个只读
+    任务都会误报（lujy 09-18）。改动按调度器自己的 transcript 算，子 run 的写入
+    已在收尾时汇总进来（`child_workspace_changed`），起点是承诺声明那一刻。
 
-    这里只递事实、不拦：矛盾了要怎么说是模型的事，但它**不可能再声称自己没改**
-    —— 这句话就在它上一条消息里。口径见 `core.side_effect_contract`：
-    只算用户带进来的文件，框架自己的 `.research/` 记账不算。
+    判据刻意收窄：收尾闸每个 run 只放一次（`_finish_gate_used`），对长会话的调度
+    器而言就是每个会话一次。用户源文件在只读约束下本来就写不进去（写入咽喉会拒），
+    所以这里只在真出事时开口；正常情况的三类计数由回复出口机械附上
+    （`side_effect_contract.append_statement`），不靠这道闸。
     """
     from core.side_effect_contract import reconcile
 
@@ -1928,15 +1964,17 @@ def _read_only_promise_before_finish(ctx: HookContext) -> list[LLMMessage] | Non
     try:
         ctx.state.append_transcript(
             "read_only_promise_contradicted",
-            user_files_changed=len(result.user_paths),
-            paths=result.user_paths[:50],
+            user_source_changed=len(result.user_source),
+            paths=result.user_source[:50],
         )
     except Exception:
         pass
     return [LLMMessage(role="user", content=(
-        f"{result.sentence()}\n\n"
+        "用户要求不修改文件，但用户源文件被改了。框架会在你的回复末尾附上这一行：\n"
+        f"> {result.statement()}\n\n"
         "写最终陈述之前必须处理这一条：**不要说「未修改文件」**。"
-        "如实说明改了哪些、为什么改，以及要不要撤回。"
+        "按三类如实说明（你的源文件 / 节点证据 / .research 记账），"
+        "说清改了哪些源文件、为什么改，以及要不要撤回。"
         "如果这些改动是必要的，就说清楚必要在哪；如果是失误，就说是失误。"
     ))]
 
@@ -1944,8 +1982,8 @@ def _read_only_promise_before_finish(ctx: HookContext) -> list[LLMMessage] | Non
 register_loop_hook(LoopHook(
     name="read_only_promise",
     description=(
-        "用户要求只读、而本次真改了用户的文件时，在写最终陈述前把事实递回去。"
-        "只递事实不拦 —— 但模型不可能再声称自己没改。"
+        "只读约束（run_node 派发时的 read_only）下真改了用户源文件时，在写最终陈述前把事实递回去。"
+        "节点证据与 .research 记账不算矛盾；只递事实不拦 —— 但模型不可能再声称自己没改。"
     ),
     on_before_finish=_read_only_promise_before_finish,
     emits=("read_only_promise_contradicted",),

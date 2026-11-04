@@ -15,6 +15,8 @@
  * 所以每个 chip 背后都对应一个真实存在的后端能力：
  *   模式  → PATCH /projects/{id}/config     （operation_mode 真能改）
  *   模型  → PATCH …/sessions/{id}（model_backend_id，随时可换）
+ *   执行位置 → PATCH /projects/{id}/config（execution_target：本机 / WSL 发行版；
+ *            只在这台机器上真有第二个选项时才摆，见 RFC_WINDOWS_EXECUTION_TARGETS）
  *   分支  → session.gitBranch + 未发布改动数（Git 工作区是真相源）
  *   添加  → POST …/sessions/{id}/files（落进工作区 sources/，agent 直接读）
  *   上下文 → harness 每次 LLM 响应后自报的 `context.updated`（只读状态：占了多少、
@@ -23,7 +25,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Bot, Check, GitBranch, Loader2, Paperclip, Zap } from "lucide-react";
+import { Bot, Check, GitBranch, Loader2, Paperclip, Server, Zap } from "lucide-react";
 
 import { pushError } from "@/stores/notification";
 import { useT, type Phrase } from "@/shared/i18n";
@@ -49,11 +51,13 @@ const MODE_LABEL: Record<OperationMode, Phrase> = {
 };
 
 const MODE_HINT: Record<OperationMode, Phrase> = {
-  assisted: { zh: "每个决策点都停下来问你", en: "Stops and asks you at every decision point" },
+  assisted: { zh: "已授权工作继续，需要你的判断时再问", en: "Continues authorized work and asks when your judgment is needed" },
   // 「高风险处」具体指哪些，取决于预授权范围；一个没授权任何类别的自主模式
   // 会停在第一个真实作业提交上，所以这句话要说全，别让开关自吹自擂。
-  autonomous: { zh: "自己往下推，未授权的高风险处仍会停下问你", en: "Pushes ahead on its own; still stops at high-risk points you have not pre-authorised" },
-  continuous: { zh: "预授权全部高风险操作，一路跑到底、不停", en: "All high-risk actions pre-authorised; runs straight through without stopping" },
+  autonomous: { zh: "自动推进，遇到未授权的高风险操作或必须由你回答的问题时停下", en: "Proceeds on its own; stops for high-risk actions you haven't pre-authorised, or questions only you can answer" },
+  // 「连续」也不是一路不停：只能由人回答的问题照样停（core/pause_driver.py 的
+  // must_ask_a_person），说明里要写出来。
+  continuous: { zh: "预先授权所有高风险操作，只在必须由你回答的问题上停下", en: "All high-risk actions pre-authorised; stops only for questions only you can answer" },
 };
 
 export type ComposerModelOption = {
@@ -64,6 +68,13 @@ export type ComposerModelOption = {
   ready: boolean;
 };
 
+export type ComposerTargetOption = {
+  /** `local` / `wsl:<发行版>` —— 原样存进项目配置 */
+  value: string;
+  kind: "local" | "wsl" | "ssh";
+  name: string;
+};
+
 export type ComposerRunState =
   | { kind: "idle" }
   | { kind: "running" }
@@ -71,26 +82,11 @@ export type ComposerRunState =
   | { kind: "readonly"; reason: string }
   | { kind: "unavailable"; reason: string };
 
-/**
- * 会话分支名是 `session/<uuid>`，剥掉前缀之后剩下的就是 36 位 UUID —— 展示层
- * 没有理由出现它。这个组件自己的原则是「每一项要么能操作、要么一眼能读懂」，
- * 一串 UUID 两头都不占。
- *
- * 取末段 8 位做短号：足够在一个项目里区分开，也足够短到不挤掉旁边的 chip。
- * 完整分支名在 title 里（调用处已经写了），要复制的人拿得到。
- */
 /** 只给这一行 chip 用的可读体积。数字要给人看，别给字节数。 */
 function formatBytes(size: number) {
   if (size >= 1024 ** 3) return `${(size / 1024 ** 3).toFixed(1)} GB`;
   if (size >= 1024 ** 2) return `${(size / 1024 ** 2).toFixed(1)} MB`;
   return `${Math.max(1, Math.round(size / 1024))} KB`;
-}
-
-function branchChipLabel(branch: string) {
-  const withoutPrefix = branch.replace(/^session\//, "");
-  const uuidish = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  if (!uuidish.test(withoutPrefix)) return withoutPrefix;
-  return `#${withoutPrefix.slice(-8)}`;
 }
 
 /**
@@ -111,8 +107,8 @@ function StateDot({ state }: { state: ComposerRunState }) {
     : state.kind === "readonly" ? t({ zh: "只读", en: "Read only" })
     : t({ zh: "状态未知", en: "Status unknown" });
   const title =
-    state.kind === "running" ? t({ zh: "这个会话在后台继续跑，你可以离开本页，不会中断它；也可以在下面直接插话", en: "This session keeps running in the background. You can leave this page without interrupting it, or interject below" })
-    : state.kind === "answering" ? t({ zh: "上面有个问题在等你回答", en: "There is a question above waiting for your answer" })
+    state.kind === "running" ? t({ zh: "会话在后台运行，离开本页不会中断。你也可以在下方继续发消息。", en: "This session keeps running in the background; leaving this page won't stop it. You can also send messages below." })
+    : state.kind === "answering" ? t({ zh: "请回答上方的问题", en: "Please answer the question above" })
     : state.reason;
   return (
     <span className={`composer-chip composer-chip--state is-${state.kind}`} title={title}>
@@ -172,6 +168,10 @@ export function SessionComposerBar({
   maxFileBytes,
   state,
   contextWindow = null,
+  target = null,
+  targets = [],
+  onTargetChange,
+  targetBusy,
 }: {
   mode: OperationMode | null;
   onModeChange: (next: OperationMode) => void;
@@ -193,9 +193,20 @@ export function SessionComposerBar({
   state: ComposerRunState;
   /** 调度器上一次请求的窗口占用；null = 还没发过请求，chip 不画。 */
   contextWindow?: ContextWindowState | null;
+  /** 项目当前的执行位置（`local` / `wsl:<发行版>`）。 */
+  target?: string | null;
+  /** 这台机器上可选的执行位置。少于两个就不摆 chip —— 没得选的开关只是占地方。 */
+  targets?: readonly ComposerTargetOption[];
+  onTargetChange?: (value: string) => void;
+  targetBusy?: boolean;
 }) {
   const t = useT();
-  const [openMenu, setOpenMenu] = useState<"mode" | "model" | "context" | null>(null);
+  const [openMenu, setOpenMenu] = useState<"mode" | "model" | "target" | "context" | null>(null);
+  const targetLabel = (option: { kind: string; name: string } | undefined) =>
+    !option || option.kind === "local"
+      ? t({ zh: "本机", en: "This computer" })
+      : t({ zh: "WSL · {name}", en: "WSL · {name}" }, { name: option.name });
+  const currentTarget = targets.find((option) => option.value === (target ?? "local"));
   const fileRef = useRef<HTMLInputElement>(null);
 
   return (
@@ -207,7 +218,7 @@ export function SessionComposerBar({
           className={`composer-chip composer-chip--mode${mode === "autonomous" || mode === "continuous" ? " is-on" : ""}`}
           onClick={() => setOpenMenu(openMenu === "mode" ? null : "mode")}
           disabled={!canChangeMode || modeBusy}
-          title={mode ? t(MODE_HINT[mode]) : t({ zh: "加载中", en: "Loading" })}
+          title={mode ? t(MODE_HINT[mode]) : t({ zh: "正在加载…", en: "Loading…" })}
         >
           {modeBusy ? <Loader2 size={13} className="spin" /> : <Zap size={13} />}
           {mode ? t(MODE_LABEL[mode]) : "…"}
@@ -231,9 +242,10 @@ export function SessionComposerBar({
               {value === mode && <Check size={14} />}
             </button>
           ))}
-          <p className="composer-popover-foot">{t({ zh: "这是", en: "This is" })}<strong>{t({ zh: "项目级", en: "Project level" })}</strong>{t({
-            zh: "设置，会影响该项目的所有会话。自主模式下高风险操作（外部作业提交、批量写入）仍然会停下来问你。",
-            en: " setting: it applies to every session in this project. In autonomous mode, high-risk actions (submitting external jobs, bulk writes) still stop and ask you.",
+          {/* 一整句一个 Phrase：拆成三段拼，英文会丢掉中间的空格。 */}
+          <p className="composer-popover-foot">{t({
+            zh: "这是项目级设置，会影响该项目的所有会话。",
+            en: "This is a project-level setting and applies to every session in this project.",
           })}
           </p>
         </Popover>
@@ -254,7 +266,7 @@ export function SessionComposerBar({
         <Popover open={openMenu === "model"} onClose={() => setOpenMenu(null)}>
           <p className="composer-popover-title">{t({ zh: "本会话使用的模型", en: "Model used by this session" })}</p>
           {models.length === 0 && (
-            <p className="composer-popover-foot">{t({ zh: "还没有可用的模型后端。", en: "No model connection is available yet." })}</p>
+            <p className="composer-popover-foot">{t({ zh: "还没有可用的模型。", en: "No model is available yet." })}</p>
           )}
           {models.map((item) => (
             <button
@@ -274,14 +286,54 @@ export function SessionComposerBar({
               {item.id === modelId && <Check size={14} />}
             </button>
           ))}
-          <p className="composer-popover-foot">{t({ zh: "换了之后", en: "After switching" })}<strong>{t({ zh: "只影响后面的轮次", en: "Applies to later turns only" })}</strong>{t({
-            zh: "，已经跑完的不会重跑。每条 run 都记着它当时实际用的模型，要追溯结论是谁产出的看 run。",
-            en: "; work already finished is not re-run. Every run records the model it actually used, so trace a conclusion back through its run.",
-          })}
-          </p>
-          <Link className="composer-popover-link" href="/settings/models">{t({ zh: "管理模型后端 →", en: "Manage model connections →" })}</Link>
+          <p className="composer-popover-foot">{t({ zh: "切换后只对之后的执行生效。", en: "After switching, it applies to later runs only." })}</p>
+          <Link className="composer-popover-link" href="/settings/models">{t({ zh: "管理模型连接 →", en: "Manage model connections →" })}</Link>
         </Popover>
       </div>
+
+      {/* 执行位置 —— 命令在本机跑还是在某个 WSL 发行版里跑。项目级设置，与模式一样标注出来。 */}
+      {targets.length > 1 && onTargetChange && (
+        <div className="composer-chip-wrap">
+          <button
+            type="button"
+            className={`composer-chip${currentTarget && currentTarget.kind !== "local" ? " is-on" : ""}`}
+            onClick={() => setOpenMenu(openMenu === "target" ? null : "target")}
+            disabled={!canChangeMode || targetBusy}
+            title={t({ zh: "模型命令在哪里跑", en: "Where the assistant's commands run" })}
+          >
+            {targetBusy ? <Loader2 size={13} className="spin" /> : <Server size={13} />}
+            <span className="composer-chip-text">{targetLabel(currentTarget)}</span>
+          </button>
+          <Popover open={openMenu === "target"} onClose={() => setOpenMenu(null)}>
+            <p className="composer-popover-title">{t({ zh: "命令在哪里跑", en: "Where commands run" })}</p>
+            {targets.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className="composer-popover-item"
+                onClick={() => {
+                  setOpenMenu(null);
+                  if (option.value !== (target ?? "local")) onTargetChange(option.value);
+                }}
+              >
+                <span>
+                  <strong>{targetLabel(option)}</strong>
+                  <small>{option.kind === "local"
+                    ? t({ zh: "在这台 Windows 上跑", en: "Runs on this Windows computer" })
+                    : t({ zh: "在这个 Linux 发行版里跑：用它自己的 bash、python3 和工具链", en: "Runs inside this Linux distro, with its own bash, python3 and toolchains" })}
+                  </small>
+                </span>
+                {option.value === (target ?? "local") && <Check size={14} />}
+              </button>
+            ))}
+            <p className="composer-popover-foot">{t({
+              zh: "这是项目级设置，对之后的执行生效。WSL 发行版里需要装 bubblewrap（sudo apt install bubblewrap），没装时命令会如实报错，不会改在本机跑。",
+              en: "This is a project-level setting and applies to later runs. A WSL distro needs bubblewrap installed (sudo apt install bubblewrap); without it commands fail with that reason instead of running on this computer.",
+            })}
+            </p>
+          </Popover>
+        </div>
+      )}
 
       {/* 上下文 —— 只读状态：占了多少、离自动压缩线多远。数是 harness 自报的，
           这里只画；没有报告（会话还没发过请求）就不摆。 */}
@@ -302,18 +354,18 @@ export function SessionComposerBar({
         </div>
       )}
 
-      {/* 分支 —— Git 工作区是真相源，把它摆出来 */}
+      {/* 改动 —— 点开是这个会话的改动面板。分支名对读者没有意义，只留在 title 里。 */}
       {branch && (
         <button
           type="button"
           className="composer-chip"
           onClick={onOpenChanges}
           title={`${t({ zh: "会话分支", en: "Session branch" })} ${branch} · ${unpublishedCount
-            ? t({ zh: `${unpublishedCount} 处改动未发布`, en: `${unpublishedCount} unpublished changes` })
-            : t({ zh: "无未发布改动", en: "nothing unpublished" })}`}
+            ? t({ zh: "{count} 处改动未发布", en: "{count} unpublished change{s}" }, { count: unpublishedCount, s: unpublishedCount === 1 ? "" : "s" })
+            : t({ zh: "没有未发布的改动", en: "No unpublished changes" })}`}
         >
           <GitBranch size={13} />
-          <span className="composer-chip-text">{branchChipLabel(branch)}</span>
+          <span className="composer-chip-text">{t({ zh: "改动", en: "Changes" })}</span>
           {unpublishedCount > 0 && <em className="composer-chip-badge">{unpublishedCount}</em>}
         </button>
       )}
@@ -328,12 +380,12 @@ export function SessionComposerBar({
             disabled={addingFile}
             title={
               maxFileBytes
-                ? t({ zh: `把文件交进这个会话的工作区，agent 直接按路径读（单份上限 ${formatBytes(maxFileBytes)}）`, en: `Hand a file to this session's workspace; the agent reads it straight from the path (limit ${formatBytes(maxFileBytes)} per file)` })
-                : t({ zh: "把文件交进这个会话的工作区，agent 直接按路径读", en: "Hand a file to this session's workspace; the agent reads it straight from the path" })
+                ? t({ zh: "上传文件到这个会话的工作区，助手可以直接读取（单个文件不超过 {limit}）", en: "Upload a file to this session's workspace for the assistant to read (up to {limit} per file)" }, { limit: formatBytes(maxFileBytes) })
+                : t({ zh: "上传文件到这个会话的工作区，助手可以直接读取", en: "Upload a file to this session's workspace for the assistant to read" })
             }
           >
             {addingFile ? <Loader2 size={13} className="spin" /> : <Paperclip size={13} />}
-            {addingFile ? t({ zh: "上传中…", en: "Uploading…" }) : t({ zh: "添加文件", en: "Add a file" })}
+            {addingFile ? t({ zh: "正在上传…", en: "Uploading…" }) : t({ zh: "添加文件", en: "Add a file" })}
           </button>
           <input
             ref={fileRef}
@@ -348,11 +400,12 @@ export function SessionComposerBar({
               // 不写常量 —— 写了它就会跟后端分叉，而且没人会发现。
               if (maxFileBytes && file.size > maxFileBytes) {
                 pushError(
+                  // 下一步只写算力端这一条：「请管理员挂载数据目录」对应的是部署配置
+                  // （sandbox_mount_bindings），界面上没有入口，个人版用户也无从找管理员。
                   t({
-                    zh: `「${file.name}」${formatBytes(file.size)}，超过单份上限 ${formatBytes(maxFileBytes)}。更大的数据集别走上传：让 data 节点在计算侧就地取用，或让部署侧给这个项目挂一个数据集绑定。`,
-                    en: `"${file.name}" is ${formatBytes(file.size)}, over the ${formatBytes(maxFileBytes)} per-file limit. `
-                      + "Do not upload larger datasets: have the data node read them in place on the compute side, or have the deployment mount a dataset binding for this project.",
-                  }),
+                    zh: "「{name}」大小为 {size}，超过单个文件的上限 {limit}。更大的数据请放在算力端，由助手直接读取。",
+                    en: "\"{name}\" is {size}, over the {limit} per-file limit. Keep larger data on the compute side for the assistant to read in place.",
+                  }, { name: file.name, size: formatBytes(file.size), limit: formatBytes(maxFileBytes) }),
                 );
                 return;
               }

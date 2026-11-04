@@ -1,0 +1,19 @@
+suite: literaturebench_v1_e2e
+version: 0.2.0
+sampling_frame: "与 search_v1 相同的 12 个宏观领域；每个领域一题，避免将熟悉的单一工程问题作为公开优势题。"
+instructions_to_system: |
+  请完成完整文献调研。不要编造引用；每条关键结论应能追溯到纳入论文。若无法获得
+  全文或摘要，明确说明来源和限制。论文可属于多个主题，不要求互斥分类。
+tasks:
+  - {id: E01, stratum: mathematical_sciences, scope: method_lookup, prompt: "调研未观测混杂条件下因果效应估计的识别假设、敏感性分析与双重稳健方法，并区分可检验与不可检验假设。"}
+  - {id: E02, stratum: physical_astronomical, scope: landscape, prompt: "调研多信使天文学中引力波与电磁观测联合约束双致密星并合的主要证据、方法与未解问题。"}
+  - {id: E03, stratum: chemistry_materials, scope: landscape, prompt: "调研锂金属固态电池界面失效机制，比较化学分解、枝晶穿透和接触损失的证据与表征方法。"}
+  - {id: E04, stratum: earth_environment, scope: landscape, prompt: "调研城市热岛的遥感—地面观测融合方法及其对暴露与健康风险评估的影响。"}
+  - {id: E05, stratum: life_medicine, scope: contradiction_check, prompt: "调研单细胞与空间组学关于阿尔茨海默病细胞类型变化的证据，明确一致结论、分歧与样本局限。"}
+  - {id: E06, stratum: engineering_energy, scope: landscape, prompt: "调研建筑全生命周期碳排放核算，重点讨论材料、运行和改造阶段的边界设定、不确定性和减排策略。"}
+  - {id: E07, stratum: information_ai, scope: method_lookup, prompt: "调研大语言模型幻觉的定义、评测数据集、自动指标与人工核验方式，区分事实性、忠实性和不确定性。"}
+  - {id: E08, stratum: agriculture_food, scope: landscape, prompt: "调研精准农业中提高氮肥利用效率的遥感、传感器和作物模型方法，评估环境代价与可推广性。"}
+  - {id: E09, stratum: economics_management, scope: landscape, prompt: "调研碳信息披露对企业价值、融资成本和资本市场定价的影响，区分相关性证据和因果识别策略。"}
+  - {id: E10, stratum: society_education, scope: landscape, prompt: "调研学习分析用于个性化教育时的学习效果、隐私保护和公平性问题，比较实证证据与治理建议。"}
+  - {id: E11, stratum: law_governance, scope: landscape, prompt: "调研公共部门算法决策的透明度、问责、歧视风险和审计机制，梳理法律与公共治理文献。"}
+  - {id: E12, stratum: humanities_arts, scope: landscape, prompt: "调研生成式人工智能对作者身份、原创性与署名规范的影响，区分文学艺术研究、伦理讨论和政策观点。"}

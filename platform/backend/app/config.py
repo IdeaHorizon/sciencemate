@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     app_name: str = "Research Platform"
     debug: bool = False
     local_demo_mode: bool = False
+    # Same managed collector in web and desktop. No user extension/pairing.
+    cnki_server_enabled: bool = True
+    cnki_browser_executable: str = ""
+    cnki_browser_headless: bool | None = None
+    cnki_browser_virtual_display: bool = False
 
     #: 静态导出的 UI 目录（`platform/frontend/out`）。给了就由 App Server 自己
     #: serve —— 个人档运行期没有 Node，也没有 nginx。留空 = 不挂载（组织档由
@@ -154,7 +159,7 @@ class Settings(BaseSettings):
     literature_harvester_max_queries_per_round: int = 100
     literature_harvester_batch_pause_seconds: int = 60
     literature_harvester_max_per_source: int = 20
-    feed_translation_concurrency: int = 4
+    feed_translation_concurrency: int = 5
     literature_asset_completion_concurrency: int = 3
     literature_asset_completion_max_per_round: int = 20
     literature_asset_completion_budget_seconds: int = 600

@@ -143,77 +143,54 @@ Direct
 """
 
 
-def _data_state() -> State:
-    return State.new(node_type="data", base_dir=Path(tempfile.mkdtemp()))
+def _review_structure(tmp_path, filename, content):
+    from nodes.data.review.package_reviewer import review_preprocessing_package
+
+    (tmp_path / filename).write_text(content, encoding="utf-8")
+    return review_preprocessing_package(
+        "materials", {filename: content}, {"package_dir": str(tmp_path)},
+    )
 
 
-def _latest_event(state: State, name: str) -> dict | None:
-    import json
-    if not state.transcript_path.exists():
-        return None
-    latest = None
-    for line in state.transcript_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            e = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if e.get("event") == name:
-            latest = e
-    return latest
+def test_structure_validation_passes_on_good_poscar(tmp_path):
+    review = _review_structure(tmp_path, "POSCAR", _GOOD_POSCAR)
+    assert review["status"] == "pass"
+    assert review["common_checks"]["structure_format:POSCAR"]
 
 
-def test_structure_validation_passes_on_good_poscar() -> None:
-    from nodes.data.hooks import validate_structure_outputs
-    state = _data_state()
-    (Path(state.root) / "POSCAR").write_text(_GOOD_POSCAR, encoding="utf-8")
-
-    payload = validate_structure_outputs(state)
-    assert payload["n_scanned"] == 1
-    assert payload["n_invalid"] == 0
-    assert _latest_event(state, "structure_file_validation")["n_invalid"] == 0
+def test_structure_validation_catches_broken_poscar(tmp_path):
+    review = _review_structure(tmp_path, "POSCAR", _BROKEN_POSCAR)
+    assert review["status"] == "fail"
+    assert any(issue["code"] == "invalid_structure_asset" and issue["file"] == "POSCAR"
+               and issue["severity"] == "critical" for issue in review["issues"])
 
 
-def test_structure_validation_catches_broken_poscar() -> None:
-    """这条就是 e2e 实测的事故：格式错误的 POSCAR 必须被机械抓住。"""
-    from nodes.data.hooks import validate_structure_outputs
-    state = _data_state()
-    (Path(state.root) / "POSCAR").write_text(_BROKEN_POSCAR, encoding="utf-8")
-
-    payload = validate_structure_outputs(state)
-    assert payload["n_invalid"] == 1
-    ev = _latest_event(state, "structure_file_validation")
-    assert ev["n_invalid"] == 1
-    assert "POSCAR" in ev["invalid_files"][0]["path"]
+def test_structure_validation_no_files_is_pass(tmp_path):
+    review = _review_structure(tmp_path, "table.csv", "a,b\n1,2\n")
+    assert review["status"] == "pass"
+    assert not any(key.startswith("structure_format:") for key in review["common_checks"])
 
 
-def test_structure_validation_no_files_is_pass() -> None:
-    """非结构类前处理任务（纯表格清洗等）不该被这条 QC 误伤。"""
-    from nodes.data.hooks import validate_structure_outputs
-    state = _data_state()
-    (Path(state.root) / "table.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+@pytest.mark.asyncio
+async def test_bad_structure_is_stopped_at_publication_before_model_approval(tmp_path, monkeypatch):
+    from nodes.data.tools import execute_preprocessing_plan as pipeline
+    from nodes.data.tools.package_publisher import package_paths
 
-    payload = validate_structure_outputs(state)
-    assert payload["n_scanned"] == 0 and payload["n_invalid"] == 0
+    state = State.new(node_type="data", base_dir=tmp_path / "runs")
+    staging, final = package_paths(state, "")
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "POSCAR").write_text(_BROKEN_POSCAR, encoding="utf-8")
 
+    async def cannot_approve(*args, **kwargs):
+        pytest.fail("invalid native structure reached model approval")
 
-# test_structure_qc_mechanical_pass_and_fail 已随 QC 层删除（2026-08-22）：structure_file_validation 事件仍由
-# hook 落盘，reviewer 硬规则（n_invalid ≥ 1 → critical）继续消费它。
-
-# test_structure_qc_fails_closed_without_event 已随 QC 层删除（2026-08-22）：structure_file_validation 事件仍由
-# hook 落盘，reviewer 硬规则（n_invalid ≥ 1 → critical）继续消费它。
-
-# test_data_qc_contract_is_satisfied_by_enabled_hooks 已随 QC 层删除（2026-08-22）：structure_file_validation 事件仍由
-# hook 落盘，reviewer 硬规则（n_invalid ≥ 1 → critical）继续消费它。
-
-def test_data_custom_loop_wraps_for_guaranteed_validation() -> None:
-    """data 的 custom loop 有多条早退路径从不调 run_default（框架 on_end 不
-    触发）—— run_loop 必须是包装器，在 finally 里兜底跑结构校验。"""
-    import inspect
-    from nodes.data import data_agent_loop
-
-    src = inspect.getsource(data_agent_loop.run_loop)
-    assert "_run_loop_impl" in src
-    assert "validate_structure_outputs" in src
-    assert "finally" in src
+    monkeypatch.setattr(pipeline, "review_delivery_against_authority", cannot_approve)
+    result = await pipeline._review_and_publish_candidate(
+        state, {}, {"staging_dir": str(staging), "final_dir": str(final),
+                    "delivery_files": [{"path": "POSCAR"}]}, [],
+    )
+    assert result["status"] == "review_failed"
+    assert not state.list_artifacts("dataset")
+    assert not final.exists()
+    assert (staging / "POSCAR").read_text() == _BROKEN_POSCAR
+    assert "invalid_structure_asset" in Path(result["review_report"]).read_text()

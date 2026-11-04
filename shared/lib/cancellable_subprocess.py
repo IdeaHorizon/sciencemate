@@ -140,6 +140,7 @@ async def spawn_and_wait(
     network_access: bool = False,
     sandbox_environment: "dict[str, str] | None" = None,
     sandbox_home: str = "host",
+    sandbox_ephemeral: bool = False,
 ) -> tuple[str, int | None, bytes, bytes]:
     """起子进程并等它**退出**。返回 (status, returncode, stdout, stderr)。
 
@@ -156,11 +157,14 @@ async def spawn_and_wait(
     ``core.isolation.select_backend()`` 交出的后端进入操作系统；后端不可用或
     契约无效时直接 ``spawn_failed``，这里没有绕开后端的路。None 只供参数完全
     由框架控制的内部进程。``sandbox_home`` 是 ``CommandSpec.home``：``host``（默认，用户的
-    程序看见用户的家）或 ``own``（平台自带的程序住墙给的家）。
+    程序看见用户的家）或 ``own``（平台自带的程序住墙给的家）。``sandbox_ephemeral`` 是
+    ``CommandSpec.ephemeral``：写下的东西一样都留不下（此时 ``writable_roots`` 为空、``cwd``
+    必须给）—— 调度器的只读探查 shell（#1187，``core.sandbox.model_tool_wall``）。
     """
     import tempfile
 
     sandbox_launch = None
+    windows_native = False
     if writable_roots is not None:
         from core import isolation as _isolation
         from core import sandbox as _sandbox
@@ -172,12 +176,23 @@ async def spawn_and_wait(
             return "spawn_failed", None, b"", b"empty sandbox command"
         sandbox_cwd = cwd
         if sandbox_cwd is None:
+            if not writable_roots:
+                return "spawn_failed", None, b"", b"a command with no writable root needs a cwd"
             first = _Path(writable_roots[0]).expanduser().resolve(strict=True)
             sandbox_cwd = str(first if first.is_dir() else first.parent)
         limits = sandbox_limits or _sandbox.SandboxLimits()
         limits = dataclasses.replace(limits, walltime_seconds=max(1, math.ceil(timeout)))
+        # GPU（#893 阶段 1）：这个 run 批到了卡，就只看得见那几张、墙为 CUDA 开口；
+        # 没批就一张都不给看。分配与记账在 core.gpu，授权在 core.capability_grants。
+        from core import gpu as _gpu
+        from core.capability_grants import gpu_lease
+
+        lease = gpu_lease(state)
+        sandbox_environment = {**(sandbox_environment or {}),
+                               **(lease.env() if lease is not None else _gpu.HIDDEN)}
         try:
             backend = _isolation.select_backend()
+            windows_native = getattr(backend, "name", "") == "win32"
             spec = _isolation.CommandSpec(
                 argv=tuple(inner),
                 cwd=str(sandbox_cwd),
@@ -189,6 +204,8 @@ async def spawn_and_wait(
                 # Only framework-built acquisition commands set this; regular
                 # model commands are permanently networkless.
                 network_access=bool(network_access),
+                capabilities=frozenset({"gpu_runtime"}) if lease is not None else frozenset(),
+                ephemeral=bool(sandbox_ephemeral),
             )
             # 这条 run 跑在什么墙后面 —— 第一条命令之前记一次，进 transcript。
             # 记账层永不杀轮：记不上吵一声，命令照起（墙在 prepare 里，不在账本里）。
@@ -350,6 +367,13 @@ async def spawn_and_wait(
                 spill["stdout_path"] = _op
             if _ep:
                 spill["stderr_path"] = _ep
+        if windows_native:
+            # Windows 原生程序按 OEM 代码页（中文机 CP936）或 UTF-16LE（wsl.exe）写字节，
+            # 下游每个调用方都按 UTF-8 解（#1263 诊断包：模型拿 od / iconv 一条条试编码）。
+            # 编码是起进程之前就确定的事实，在这里转一次。只转交出去的尾巴，落盘的完整输出不动。
+            from shared.lib.native_output import to_utf8
+
+            _out_b, _err_b = to_utf8(_out_b), to_utf8(_err_b)
         return status, returncode, _out_b, _err_b
     finally:
         if sandbox_launch is not None:

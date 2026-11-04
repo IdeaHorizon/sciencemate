@@ -4,15 +4,15 @@ import { useEffect, useId, useMemo, useState } from "react";
 import { ArrowRight, CircleHelp, ShieldAlert } from "lucide-react";
 import type { ChatPause } from "../types";
 import { summarizePauseFacts } from "../lib/pause-facts";
+import { decisionChoiceText, decisionQuestion } from "../lib/decision-package";
 import { composeAnswer, type Answer } from "../lib/answer";
-import { useT, type Phrase } from "@/shared/i18n";
+import { nodeDisplayName } from "@/features/execution/lib/display-names";
+import { useLanguage, useT, type Language, type Phrase } from "@/shared/i18n";
 
-function nodeLabel(value: string | undefined, t: (p: Phrase) => string) {
-  if (!value) return t({ zh: "研究 agent", en: "Research agent" });
-  return value
-    .replace(/^_/, "")
-    .replaceAll("_", " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+/** 谁在问：节点的显示名（同一张节点名表）；没写是谁时就是研究助手。 */
+function nodeLabel(value: string | undefined, t: (p: Phrase) => string, lang: Language) {
+  if (!value) return t({ zh: "研究助手", en: "Research assistant" });
+  return nodeDisplayName(value, lang);
 }
 
 function copyFor(pause: ChatPause, t: (p: Phrase) => string) {
@@ -61,6 +61,7 @@ export function HumanInputPrompt({
   onAnswer: (answer: Answer) => void;
 }) {
   const t = useT();
+  const lang = useLanguage();
   const titleId = useId();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [note, setNote] = useState("");
@@ -86,7 +87,12 @@ export function HumanInputPrompt({
   const labels = copyFor(pause, t);
   const Icon = pause.kind === "permission" ? ShieldAlert : CircleHelp;
   const hasOptions = pause.options.length > 0;
-  const facts = useMemo(() => summarizePauseFacts(pause.facts), [pause.facts]);
+  const facts = useMemo(() => summarizePauseFacts(pause.facts, lang), [pause.facts, lang]);
+  // 折起来的那一栏：授权类只放待批准的那条命令本身；其它类在背景后面接上没起名字的事实
+  // （`键: 值`），上游加的东西都看得到，只是不在正文里露英文字段名。
+  const background = pause.kind === "permission"
+    ? pause.context
+    : [pause.context, facts.technical.join("\n")].filter(Boolean).join("\n\n");
 
   /**
    * 自由文本框：有选项时折起来，没选项时它就是主输入，直接展开。
@@ -104,7 +110,7 @@ export function HumanInputPrompt({
         setNote(event.target.value);
         if (!selectedHasIdentity) setSelectedId(null);
       }}
-      placeholder={t({ zh: "把它需要的信息补上", en: "Add the information the research agent needs" })}
+      placeholder={t({ zh: "输入回答或补充说明", en: "Type an answer or add a note" })}
       disabled={!interactive}
     />
   );
@@ -121,20 +127,20 @@ export function HumanInputPrompt({
             压成标题右边一行 meta，说一次。 */}
         <span className="human-input-from">
           {pause.header && <mark>{pause.header}</mark>}
-          {nodeLabel(pause.askingNodeType, t)}
+          {nodeLabel(pause.askingNodeType, t, lang)}
         </span>
       </header>
 
       {/* 问句是这个面板存在的理由，给它最大的视觉权重，且不再挂「Question」标签 */}
-      <p className="human-input-question">{stripLeadingIcon(pause.question)}</p>
+      <p className="human-input-question">{stripLeadingIcon(decisionQuestion(pause, lang))}</p>
 
       {/* 「为什么问你」。这些是呈递方附带的判断依据（review 失败没有、重试还有
           没有额度、要几个人批 …）—— 此前它们全留在呈递方进程里，人在面板上只
           看得见五个动作名，没有任何判据。这里不枚举字段名：上游加什么就显示
           什么（见 summarizePauseFacts）。 */}
-      {facts.length > 0 && (
+      {facts.forPeople.length > 0 && (
         <ul className="human-input-facts">
-          {facts.map((fact) => (
+          {facts.forPeople.map((fact) => (
             <li key={fact.key} className={`is-${fact.tone}`}>
               <b>{fact.label}</b>
               {fact.value && <span>{fact.value}</span>}
@@ -151,6 +157,7 @@ export function HumanInputPrompt({
               两边呈现同一个答案，人才能预期"我不管的话会发生什么"。 */}
           {[...pause.options].sort((a, b) => Number(b.recommended) - Number(a.recommended)).map((option) => {
             const checked = option.id === selectedId;
+            const said = decisionChoiceText(option.choiceId, option, lang, pause.facts);
             return (
               <button
                 key={option.id}
@@ -165,8 +172,8 @@ export function HumanInputPrompt({
               >
                 <i aria-hidden="true" />
                 <span>
-                  <strong>{option.label}{option.recommended && <em>{t({ zh: "推荐", en: "Recommended" })}</em>}</strong>
-                  {option.description && <small>{option.description}</small>}
+                  <strong>{said.label}{option.recommended && <em>{t({ zh: "推荐", en: "Recommended" })}</em>}</strong>
+                  {said.description && <small>{said.description}</small>}
                 </span>
               </button>
             );
@@ -178,32 +185,34 @@ export function HumanInputPrompt({
           原始 dump：工具名、命中类别、300 字符 payload、以及一句「批准请回复
           批准/同意/approve」—— 最后那句是给模型和纯文本客户端看的，在有真按钮
           的界面上就是把同一件事又说一遍。折起来即可，不必去解析它的措辞。 */}
-      {pause.context && (
+      {background && (
         // 高危审批的 context 就是**被批的那条命令** —— 后端注释原话："审批一个
         // 看不见内容的高危操作没有意义"。默认折叠时它形同不存在：2026-08-22
         // 实测连排查的人都两次没发现它在（innerText 不含折叠内容，肉眼也不会
         // 点开一个不起眼的 "Context"），差点当成"字段被吞"去修管道。
         // permission 类默认展开；其它类（decision/human_input 的次要材料）维持
         // 折叠 —— 那些的 context 是背景不是审批对象。
+        // 折面标题按类型说：授权类折起来的是待批准的那条命令本身，不是「背景」。
         <details className="human-input-detail" open={pause.kind === "permission"}>
-          <summary>{t({ zh: "背景", en: "Context" })}</summary>
-          <pre>{pause.context}</pre>
+          <summary>{pause.kind === "permission"
+            ? t({ zh: "将要执行的内容", en: "What will run" })
+            : t({ zh: "背景", en: "Context" })}</summary>
+          <pre>{background}</pre>
         </details>
       )}
 
       {/* 输入框常驻。我上一版把它折起来了 —— 那是把「少占地方」当成了目标本身：
           选项之外还想说点什么，是这个面板的正常用法，不该每次先点开一层。 */}
       <label className="human-input-freeform">
-        <span>{hasOptions ? t({ zh: "或者自己写一个答案", en: "Or write a different answer" }) : t({ zh: "你的回答", en: "Your answer" })}</span>
+        <span>{hasOptions ? t({ zh: "补充说明，或写下你自己的回答", en: "Add a note or write your own answer" }) : t({ zh: "你的回答", en: "Your answer" })}</span>
         {freeform}
       </label>
 
       <footer>
-        {/* 删掉的是标题下那句「X is waiting for approval.」—— 它和标题说的是
-            同一件事。这一句留着：它说的不是"有个待办"，而是"**现在什么都没在
-            发生**"，高危审批里这条保证有真实价值，且它就在按钮旁边，正是做
-            决定的地方。 */}
-        <small>{t({ zh: "你不点，它就一直等着。", en: "Nothing continues until you confirm." })}</small>
+        {/* The operation can await permission while the conversation stays open. */}
+        <small>{pause.kind === "permission"
+          ? t({ zh: "该操作会等你授权；你也可以先在对话里询问。", en: "This operation awaits your permission. You can ask about it in the chat first." })
+          : t({ zh: "可以选快捷选项，也可以直接在对话里讨论或说明决定。", en: "Use a shortcut, or discuss and give your decision in the chat." })}</small>
         <button
           type="button"
           disabled={!canContinue}
@@ -212,7 +221,7 @@ export function HumanInputPrompt({
           // 取舍全在 composeAnswer 里，组件只把构造结果交出去。
           onClick={() => { if (answer) onAnswer(answer); }}
         >
-          {submitting ? "Continuing…" : labels.button}<ArrowRight size={13} />
+          {submitting ? t({ zh: "正在提交…", en: "Submitting…" }) : labels.button}<ArrowRight size={13} />
         </button>
       </footer>
     </section>

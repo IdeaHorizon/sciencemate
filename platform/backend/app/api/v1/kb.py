@@ -29,7 +29,7 @@ from pydantic import BaseModel
 from app.auth import get_current_user
 from app.models.user import User
 from app.services import harness_kb
-from app.services.user_interface import Language, language_on_screen
+from app.services.user_interface import Language, language_on_screen, say
 
 logger = logging.getLogger(__name__)
 
@@ -198,11 +198,12 @@ async def get_concept(
     concept_id: str,
     project_id: str | None = Query(None),
     user: User = Depends(get_current_user),
+    lang: Language = Depends(language_on_screen),
 ):
     matches = await harness_kb.query(user, project_id or "", "concepts", limit=500)
     record = next((c for c in matches if c.get("id") == concept_id), None)
     if record is None:
-        raise HTTPException(404, "Concept not found")
+        raise HTTPException(404, say({"zh": "找不到这个概念", "en": "Concept not found"}, lang))
     return _as_concept(record)
 
 

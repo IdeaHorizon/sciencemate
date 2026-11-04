@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><link rel="stylesheet" href="popup.css"><title>ScienceMate 知网采集</title></head>
+<body><h1>知网本机采集</h1><p>使用当前电脑的 Chrome 获取题名、摘要等 index。</p>
+<form id="pair"><label>平台地址<input id="server" type="url" placeholder="https://www.ideahorizon.ai" required></label>
+<label>平台生成的连接码<input id="code" autocomplete="off" required></label><button>连接平台</button></form>
+<section id="connected" hidden><p id="status" role="status"></p><div><button id="open">打开知网 / 完成验证</button><button id="resume">继续采集</button><button id="pause">暂停</button></div><button id="change">更换连接</button></section>
+<p id="error" role="alert"></p><small>登录状态留在本机。关闭 Chrome 时暂停，下次启动后继续。仅采集 index。</small>
+<script src="popup.js" type="module"></script></body></html>

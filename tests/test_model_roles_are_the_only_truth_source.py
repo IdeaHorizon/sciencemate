@@ -141,6 +141,26 @@ def test_the_cli_entry_still_works_without_a_channel(monkeypatch):
     assert binding.api_key == "sk-cli"
 
 
+def test_the_cli_entry_accepts_a_self_hosted_endpoint_without_a_key(monkeypatch):
+    """没有通道时从 LLM_* 合成也照交付通道那条规则：有地址、有模型就是配好了，没有 key 不算没配。
+
+    平台的单次调用（会话命名、资讯翻译）走的就是这一条：给不鉴权的自建模型时 LLM_API_KEY 是空串。
+    以前这里要 key，子进程一律报「当前没有可用后端」（11-04 真跑撞到）。
+    """
+    monkeypatch.setenv("LLM_API_KEY", "")
+    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:18495/v1")
+    monkeypatch.setenv("LLM_MODEL", "stub-model")
+
+    binding = model_roles.require("reasoning")
+    assert binding.base_url == "http://127.0.0.1:18495" and binding.api_key == ""
+
+
+def test_the_cli_entry_without_an_address_is_still_unconfigured(monkeypatch):
+    monkeypatch.setenv("LLM_API_KEY", "sk-cli")
+    monkeypatch.setenv("LLM_MODEL", "cli-model")
+    assert model_roles.resolve("reasoning") is None
+
+
 def test_the_injected_section_lists_missing_roles_too(monkeypatch):
     """缺的角色也要出现在开局注入里，并带着出路。
 

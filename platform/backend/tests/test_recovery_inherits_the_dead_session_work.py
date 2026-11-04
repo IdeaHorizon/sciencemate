@@ -69,18 +69,10 @@ def test_a_live_runtime_still_blocks_recovery() -> None:
     )
 
 
-def test_continuation_branches_from_the_dead_session_head() -> None:
-    """接续会话的起点是源会话停下的地方，不是项目基线。
-
-    否则 checkpoint 出来的半成品全部作废 —— 存了没人读，等于没存。
-    """
-    source = _source()
-    assert "source.git_head_commit_sha" in source, (
-        "接续必须从源会话 head 开分支，否则它看不到源会话已提交的工作"
-    )
-    assert "source_head or project_base_commit" in source, (
-        "源会话没有 head（刚建就死）时才退回项目基线"
-    )
+# 「接续会话的起点是源会话停下的地方」原来在这里按源码文本断言（`source_head or
+# project_base_commit`）。那条文本连同它说的事一起被 #1186 推翻了：没有分支头时退回的
+# 是源会话**自己的 base**，不是项目当前的 main；有分支头也要先与账本核对。起点与冻结件
+# 的去向现在由真 git 仓上的行为测试钉住 —— test_a_recovered_session_sees_what_the_original_froze.py。
 
 
 def test_source_branch_is_left_untouched() -> None:

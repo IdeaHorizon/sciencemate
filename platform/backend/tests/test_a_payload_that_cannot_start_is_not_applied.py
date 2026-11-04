@@ -54,7 +54,7 @@ def test_a_payload_missing_a_dependency_is_refused_and_the_old_one_keeps_running
     assert su.apply_staged_at_launch(tmp_path) is None, "起不来的载荷被切过去了 —— 应用会砖掉"
     assert su.read_pointer(tmp_path) is None, "指针被改了，下次启动还会走同一条死路"
     problem = su.apply_error_path(tmp_path).read_text(encoding="utf-8")
-    assert "起不来" in problem and "重新下载安装包" in problem, (
+    assert "无法在这台电脑上启动" in problem and "重新下载安装包" in problem, (
         f"没有把「为什么没装上、用户该做什么」说出来：{problem!r}")
 
 

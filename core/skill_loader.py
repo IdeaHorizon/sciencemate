@@ -94,7 +94,7 @@ def load_skill_from_folder(skill_dir: Path, *, origin: str = "framework") -> Ski
         log.warning("跳过 %s：缺 SKILL.md", skill_dir)
         return None
     try:
-        text = skill_md.read_text(encoding="utf-8")
+        text = skill_md.read_text(encoding="utf-8-sig")
     except Exception as e:
         log.warning("读 %s 失败：%s", skill_md, e)
         return None

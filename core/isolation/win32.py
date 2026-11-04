@@ -143,7 +143,8 @@ class Win32Backend:
     def prepare(self, spec: CommandSpec, *, state: Any) -> NativeLaunch:
         del state
         scratch_dir = private_scratch()
-        layers = write_layers(spec.writable_roots, spec.readonly_roots, scratch_dir=scratch_dir)
+        layers = write_layers(spec.writable_roots, spec.readonly_roots, scratch_dir=scratch_dir,
+                              persistent_cache=not spec.ephemeral)
         limits = spec.limits
         # 可写面用 ``layers.writable``（声明的根 + 私有 scratch + harness 自己的缓存
         # 子目录）。共享 /tmp 与整棵用户缓存已经不在里面了 —— 收窄发生在 write_layers，
@@ -181,7 +182,7 @@ class Win32Backend:
             argv=argv,
             cwd=spec.cwd,
             env=payload_environment(spec.environment, scratch_dir=scratch_dir, home=spec.home,
-                                    msys_bin=msys_bin),
+                                    msys_bin=msys_bin, persistent_cache=not spec.ephemeral),
             scratch_dir=scratch_dir,
             cwd_in_argv=True,
         )

@@ -23,8 +23,8 @@ test("类型名表覆盖 artifact_policy 里全部 permanent 类型", () => {
 test("表里没有的照原样显示，不猜", () => {
   assert.equal(artifactKindLabel("pre_registration", "zh"), "预注册");
   assert.equal(artifactKindLabel("compression_log", "zh"), "compression_log");
-  assert.equal(artifactKindLabel(null, "zh"), "产物");
-  assert.equal(artifactKindLabel("", "zh"), "产物");
+  assert.equal(artifactKindLabel(null, "zh"), "成果");
+  assert.equal(artifactKindLabel("", "zh"), "成果");
 });
 
 test("类型名只有这一张表", () => {

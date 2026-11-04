@@ -199,7 +199,7 @@ export function SessionInspectorPanel({
         >
           <ChevronDown size={12} className={mapOpen ? "" : "is-collapsed"} />{t({ zh: "流程图", en: "Flow map" })}</button>
         {mapOpen && (loading && allEvents.length === 0
-          ? <p className="session-inspector-empty">{t({ zh: "正在读取运行记录…", en: "Reading the run record…" })}</p>
+          ? <p className="session-inspector-empty">{t({ zh: "正在加载执行记录…", en: "Loading run records…" })}</p>
           : <ResearchMap model={model} onStationClick={scrollToStation} />)}
         <div className="session-inspector-tabs" role="tablist">
           <button
@@ -237,7 +237,7 @@ export function SessionInspectorPanel({
         ))}
         {!loading && shown.length === 0 && (
           <p className="session-inspector-empty">
-            {tab === "current" ? t({ zh: "当前没有节点在跑。", en: "No node is running right now." }) : t({ zh: "还没有运行记录。", en: "No run record yet." })}
+            {tab === "current" ? t({ zh: "当前没有正在运行的节点。", en: "No node is running right now." }) : t({ zh: "还没有执行记录。", en: "No run records yet." })}
           </p>
         )}
       </div>

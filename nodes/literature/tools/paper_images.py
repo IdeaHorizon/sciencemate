@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from shared.contrib.paper_image_policy import (
+    challenge_page, image_bytes_rejection_reason, image_url_rejection_reason,
+)
 
 IMAGE_SCHEMA_VERSION = 1
 _MODEL_TERMS = ("graphical abstract", "architecture", "framework", "model overview", "pipeline", "schematic", "system overview", "structure", "流程图", "架构", "框架", "模型结构", "系统结构")
@@ -149,22 +152,53 @@ def _arxiv_id(paper: dict[str, Any]) -> str:
     return ""
 
 
-def _image_url_from_html(html: str, base_url: str) -> str:
-    """从论文 landing page 找图片，排除站点 logo 和图标。"""
+def _image_urls_from_html(html: str, base_url: str) -> list[str]:
+    """Prefer article metadata/figures; never choose an arbitrary site image."""
+    from html.parser import HTMLParser
     from urllib.parse import urljoin
-    patterns = [
-        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
-        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)',
-        r'<meta[^>]+name=["\']citation_image["\'][^>]+content=["\']([^"\']+)',
-        r'<img[^>]+(?:src|data-src)=["\']([^"\']+)["\']',
-    ]
-    blocked = ("logo", "icon", "avatar", "favicon", "sprite", "cookie", "placeholder", "cover", "journal-cover")
-    for pattern in patterns:
-        for match in re.finditer(pattern, html, re.I):
-            url = urljoin(base_url, match.group(1).strip())
-            if url.startswith(("http://", "https://")) and not any(x in url.lower() for x in blocked):
-                return url
-    return ""
+    if challenge_page(html):
+        return []
+
+    class Images(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.figure_depth = 0
+            self.figures, self.metadata = [], []
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "figure":
+                self.figure_depth += 1
+            if tag == "meta" and (attrs.get("property") or attrs.get("name")) in {
+                "og:image", "twitter:image", "citation_image",
+            }:
+                self.metadata.append(attrs.get("content") or "")
+            if tag == "img":
+                url = attrs.get("data-src") or attrs.get("src") or ""
+                context = " ".join(str(attrs.get(k) or "") for k in ("alt", "id", "class", "title"))
+                if self.figure_depth or re.search(
+                    r"\bfig(?:ure)?[ ._-]*\d|graphical[ _-]*abstract|article[ _-]*image",
+                    context, re.I,
+                ) or re.search(r"(?:[/_.-])(?:fig(?:ure)?|gr|g)\d+", url, re.I):
+                    self.figures.append(url)
+
+        def handle_endtag(self, tag):
+            if tag == "figure":
+                self.figure_depth = max(0, self.figure_depth - 1)
+
+    parser = Images()
+    parser.feed(html)
+    urls = []
+    for value in [*parser.figures, *parser.metadata]:
+        url = urljoin(base_url, value.strip())
+        if value and url.startswith(("http://", "https://")) \
+                and not image_url_rejection_reason(url) and "cover" not in url.lower():
+            urls.append(url)
+    return list(dict.fromkeys(urls))
+
+
+def _image_url_from_html(html: str, base_url: str) -> str:
+    return next(iter(_image_urls_from_html(html, base_url)), "")
 
 
 def _is_image_response(response: httpx.Response) -> bool:
@@ -195,13 +229,16 @@ def _response_failure_reason(response: httpx.Response) -> str:
 
 
 def _verify_image_url_detailed(client: httpx.Client, url: str) -> tuple[bool, str]:
+    if reason := image_url_rejection_reason(url):
+        return False, reason
     try:
         response = client.get(url, headers={"Range": "bytes=0-4095"})
     except httpx.TimeoutException:
         return False, "network_timeout"
     except httpx.HTTPError:
         return False, "network_error"
-    return (True, "") if not _response_failure_reason(response) else (False, _response_failure_reason(response))
+    reason = image_url_rejection_reason(str(response.url)) or _response_failure_reason(response)
+    return not bool(reason), reason
 
 
 def _verify_image_url(client: httpx.Client, url: str) -> bool:
@@ -259,7 +296,10 @@ def fetch_paper_image_url(paper: dict[str, Any], output_dir: str, *, timeout: fl
     cache_path, cache = _cached_image_urls(output_dir)
     cached = cache.get(identity)
     cached_url = str(cached.get("url", "")) if isinstance(cached, dict) else ""
-    cached_blocked = ("cover" in cached_url.lower() or "journal-cover" in cached_url.lower())
+    cached_blocked = ("cover" in cached_url.lower() or image_url_rejection_reason(cached_url))
+    if cached_blocked:
+        cache.pop(identity, None)
+        cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
     if isinstance(cached, dict) and cached_url and not cached_blocked and time.time() - float(cached.get("ts", 0)) < ttl:
         return {"status": "available", "url": cached_url, "source": cached.get("source", "remote_cache"), "method": "cache", "reason": ""}
 
@@ -321,12 +361,12 @@ def fetch_paper_image_url(paper: dict[str, Any], output_dir: str, *, timeout: fl
     doi_value = str(paper.get("doi") or "").strip()
     # OpenAlex 的 url 通常只是 openalex.org/W... 记录页，不是出版社论文页。
     # 有 DOI 时优先走 DOI 跳转，让出版社 landing page 暴露图注/og:image；
-    # OpenAlex 页面仍保留为最后兜底，避免丢掉没有 DOI 的记录。
+    # OpenAlex 是索引站；其页面的社交分享图是站点标志，不能作为论文图片。
     is_openalex_record = str(paper.get("source") or "").lower() == "openalex" or "openalex.org/" in landing.lower()
     if doi_value and (is_openalex_record or not landing):
         candidates.append((f"https://doi.org/{doi_value}", "doi_landing_page"))
     candidates.extend(_publisher_page_candidates(paper, doi_value.lower()))
-    if landing.startswith(("http://", "https://")):
+    if landing.startswith(("http://", "https://")) and "openalex.org/" not in landing.lower():
         candidates.append((landing, "landing_page"))
 
     failure_reasons: list[str] = []
@@ -344,13 +384,22 @@ def fetch_paper_image_url(paper: dict[str, Any], output_dir: str, *, timeout: fl
                         if "text/html" not in (response.headers.get("content-type") or ""):
                             failure_reasons.append("invalid_landing_response")
                             continue
-                        image_url = _image_url_from_html(response.text[:2_000_000], str(response.url))
-                        if not image_url:
+                        html = response.text[:2_000_000]
+                        if challenge_page(html):
+                            failure_reasons.append("captcha_or_anti_bot")
+                            continue
+                        image_urls = _image_urls_from_html(html, str(response.url))
+                        if not image_urls:
                             failure_reasons.append("no_image_metadata")
                             continue
-                        verified, reason = _verify_image_url_detailed(client, image_url)
-                        if not verified:
+                        image_url = ""
+                        for candidate in image_urls[:8]:
+                            verified, reason = _verify_image_url_detailed(client, candidate)
+                            if verified:
+                                image_url = candidate
+                                break
                             failure_reasons.append(reason)
+                        if not image_url:
                             continue
                         result = {"status": "available", "url": image_url, "source": "arxiv_html" if method == "arxiv_html" else "landing_page", "method": "html_meta_or_img", "reason": ""}
                         cache[identity] = {"url": image_url, "source": result["source"], "ts": time.time()}
@@ -392,11 +441,16 @@ def materialize_image_url(remote: dict[str, Any], output_dir: str, paper: dict[s
     url = str(remote.get("url") or "").strip()
     if not url:
         return {"status": "unavailable", "reason": "remote_url_missing", "url": url}
+    if reason := image_url_rejection_reason(url):
+        return {"status": "unavailable", "reason": reason, "url": url}
     identity = "|".join(str(paper.get(key) or "").strip().lower() for key in ("doi", "url", "title"))
     image_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
     try:
         with httpx.Client(follow_redirects=True, timeout=timeout, headers={"User-Agent": "harness-literature-image/1.0"}) as client:
             response = client.get(url)
+        reason = image_url_rejection_reason(str(response.url)) or image_bytes_rejection_reason(response.content)
+        if reason:
+            return {"status": "unavailable", "reason": reason, "url": url}
         if response.status_code >= 400 or not _is_image_response(response) or len(response.content) < 256:
             return {"status": "unavailable", "reason": f"download_invalid:{response.status_code}", "url": url}
         content_type = (response.headers.get("content-type") or "").lower()

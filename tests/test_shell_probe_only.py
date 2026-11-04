@@ -8,6 +8,10 @@
 判决拆除第三波（builtin:645 降格）：识别照跑，但不再硬拒 —— 那是角色/资格判决
 （S3）；写边界真正的守卫在 spawn 层沙箱。越界命令照跑，如实见证
 `probe_only_shell_violation` 进 transcript 与返回值，referee 终审。不联网。
+
+#1187 起那堵墙对调度器是**空的写边界**（core/sandbox.model_tool_wall）：命令照跑，
+有副作用的那一步落不了地。真起进程的判据在
+tests/test_the_orchestrator_shell_is_read_only.py；本文件管文本见证与装配链。
 """
 from __future__ import annotations
 

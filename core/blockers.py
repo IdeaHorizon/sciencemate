@@ -46,6 +46,7 @@ def record_blocker(
     suggested_owner: str = "",
     retryable_after_change: bool = True,
     reported_by: str | None = None,
+    facts: dict[str, Any] | None = None,
 ) -> dict:
     """把一条 blocker 记进 `hook_state["blockers"]` + transcript，返回该条记录。
 
@@ -69,6 +70,10 @@ def record_blocker(
     }
     if reported_by:
         blocker["reported_by"] = str(reported_by)[:200]
+    if facts:
+        # 框架代记时附带的结构化事实（例如 capability_not_granted 的 kind / subject）。
+        # 不覆盖上面的标准字段：那几个是所有 blocker 读者都依赖的口径。
+        blocker.update({k: v for k, v in facts.items() if k not in blocker})
     blockers.append(blocker)
     try:
         state.append_transcript("blocker_reported", **blocker)

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { latestMessageRun, messageRunOwners } from "./message-run.ts";
+import { latestMessageRun, messageRunOwners, reconcileInterjection } from "./message-run.ts";
 
 test("latest Run ownership comes from the latest explicit message.runId", () => {
   assert.deepEqual(latestMessageRun([
@@ -39,6 +39,57 @@ test("every distinct Run is owned by its final attributable message", () => {
 // ── messageRunSegments：时间穿插归属（2026-08-17）─────────────────────────────
 
 import { messageRunSegments } from "./message-run.ts";
+
+test("interjection receipts replace the optimistic identity before hydration", () => {
+  const messages = reconcileInterjection([
+    { id: "start", role: "assistant", text: "Working", runId: "root", sequence: 1267 },
+    { id: "local-user", role: "user", text: "Check the host" },
+    { id: "empty-answer", role: "assistant", text: "" },
+  ], "local-user", "empty-answer", {
+    runId: "root", messageId: "durable-user", messageSequence: 1444,
+  });
+  assert.equal(messages.length, 2);
+  assert.deepEqual(messages.at(-1), {
+    id: "durable-user", role: "user", text: "Check the host", runId: "root",
+    sequence: 1444, interjection: true,
+  });
+  assert.deepEqual(messageRunSegments(messages).at(-1), {
+    messageId: "durable-user", runId: "root", window: { start: 1444, end: null }, interjection: true,
+  });
+});
+
+test("two live interjections keep distinct windows without refreshing the chat", () => {
+  const first = reconcileInterjection([
+    { id: "start", role: "assistant", text: "Working", runId: "root", sequence: 1267 },
+    { id: "local-1", role: "user", text: "Check" },
+    { id: "answer-1", role: "assistant", text: "" },
+  ], "local-1", "answer-1", { runId: "root", messageId: "user-1", messageSequence: 1444 });
+  const second = reconcileInterjection([
+    ...first,
+    { id: "local-2", role: "user", text: "Also check memory" },
+    { id: "answer-2", role: "assistant", text: "" },
+  ], "local-2", "answer-2", { runId: "root", messageId: "user-2", messageSequence: 1480 });
+  const segments = messageRunSegments(second).filter((segment) => segment.interjection);
+  assert.deepEqual(segments.map((segment) => [segment.messageId, segment.window]), [
+    ["user-1", { start: 1444, end: 1480 }],
+    ["user-2", { start: 1480, end: null }],
+  ]);
+});
+
+test("an interjection is still a reply mount when it is the first known run message", () => {
+  const messages = reconcileInterjection([
+    { id: "local", role: "user", text: "Question" },
+  ], "local", "empty", { runId: "root", messageId: "user", messageSequence: 1444 });
+  assert.equal(messageRunSegments(messages)[0].interjection, true);
+});
+
+test("older receipts keep the existing identity and sequence", () => {
+  const messages = reconcileInterjection([
+    { id: "local", role: "user", text: "Question", sequence: 12 },
+  ], "local", "empty", { runId: "root" });
+  assert.equal(messages[0].id, "local");
+  assert.equal(messages[0].sequence, 12);
+});
 
 test("已经发生的活动排在插话上面，之后发生的排在下面", () => {
   // wangd 2026-08-18：「我现在输入之后，当前正在运行的这个内容还是会出现

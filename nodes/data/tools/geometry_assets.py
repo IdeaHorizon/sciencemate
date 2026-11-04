@@ -31,13 +31,26 @@ GEOMETRY_INPUT_KEYS = GEOMETRY_FILE_KEYS + COORDINATE_PROFILE_KEYS + (
 _PARAMETER_GROUPS = ("geometry", "flow", "domain", "mesh", "mesh_density", "outputs")
 
 
-def canonical_condition_region(name: Any) -> str:
+def canonical_condition_region(name: Any, controls: Any = None, known_regions=()) -> str:
     """Recover a physical region from a model-flattened condition key."""
     region = re.sub(r"[^a-z0-9]+", "_", str(name or "").casefold()).strip("_")
+    # Mesh physical groups are authoritative identities, including names such
+    # as LOAD. A scalar quantity/default is different from a region assignment.
+    if any(re.sub(r"[^a-z0-9]+", "_", str(item).casefold()).strip("_") == region
+           for item in known_regions):
+        return region
+    assignment = (isinstance(controls, dict) and bool(controls.keys() - {"value", "unit", "units"})) or (
+        isinstance(controls, str) and bool(re.search(r"(?:\bon\s+[xyz]\s*=|[+-][xyz]\b)", controls, re.I)))
+    if region in {"pressure", "traction", "stress", "load", "force"} and assignment:
+        return region
     if region in {
-        "direction", "magnitude", "value", "unit", "pressure", "traction",
+        "direction", "magnitude", "value", "unit", "units", "pressure", "traction",
         "stress", "load", "force", "pressure_mpa", "traction_mpa", "stress_mpa",
     }:
+        return ""
+    # Aggregate checks describe a load, not an extra physical group. Preserve
+    # them in the bindings for review; never create a second loaded boundary.
+    if re.search(r"(?:^|_)(?:resultant|total_force)(?:_(?:n|kn|mn))?$", region):
         return ""
     return re.sub(
         r"_(?:pressure|traction|stress|load|force)(?:_(?:pa|kpa|mpa|gpa|n|kn|mn))?$",
@@ -53,6 +66,7 @@ def canonical_parameter_bindings(value: Any) -> dict[str, Any]:
     aliases = {
         "boundary": "boundary_conditions",
         "boundaries": "boundary_conditions",
+        "boundary_condition": "boundary_conditions",
         "constraint": "boundary_conditions",
         "constraints": "boundary_conditions",
         "load": "loads",
@@ -63,11 +77,35 @@ def canonical_parameter_bindings(value: Any) -> dict[str, Any]:
     for raw_key, item in value.items():
         token = re.sub(r"[^a-z0-9]+", "_", str(raw_key).casefold()).strip("_")
         key = aliases.get(token, token)
+        region = re.fullmatch(r"(.+?)_(?:boundary_)?(condition|constraint|load|traction)", token)
+        if region and token not in aliases:
+            key = "boundary_conditions" if region[2] in {"condition", "constraint"} else "loads"
+            item = {region[1]: item}
         if isinstance(item, dict) and isinstance(normalized.get(key), dict):
             normalized[key] = {**normalized[key], **item}
         else:
             normalized[key] = item
     return normalized
+
+
+def parameter_binding_value(group: dict[str, Any], *names: str, default: Any = None) -> Any:
+    """Read a runtime value; leave its authoritative unit/condition record intact."""
+    values = {
+        re.sub(r"[^a-z0-9]+", "", str(key).casefold()): value
+        for key, value in group.items()
+    }
+    value = default
+    for name in names:
+        token = re.sub(r"[^a-z0-9]+", "", name.casefold())
+        if token in values and values[token] not in (None, ""):
+            value = values[token]
+            break
+    # Unwrap only a quantity envelope, not a condition such as
+    # {type: 'dirichlet', value: 400, unit: 'K'} or an arbitrary model object.
+    # Magnitudes stay in the supplied consistent units; this is no SI conversion.
+    if isinstance(value, dict) and "value" in value and not value.keys() - {"value", "unit", "units"}:
+        return value["value"]
+    return value
 
 
 def flatten_parameter_groups(
@@ -88,12 +126,13 @@ def canonical_mesh_controls(params: dict[str, Any], supported: Any = None) -> di
     effective = dict(params)
     aliases = {
         "far_field": ("farfield_radius", "far_field_radius", "farfield", "domain_radius"),
+        "required_far_field": ("far_field_distance_min", "farfield_distance_min", "minimum_far_field_distance"),
         "airfoil_name": ("airfoil", "profile_name"),
         "reynolds_number": ("reynolds", "re", "Re"),
         "upstream_length": ("domain_upstream_length",),
         "downstream_length": ("domain_downstream_length",),
         "characteristic_length": ("target_size", "target_element_size"),
-        "minimum_length": ("min_size", "minimum_element_size", "min_element_size"),
+        "minimum_length": ("min_size", "minimum_size", "minimum_element_size", "min_element_size"),
         "element_order": ("order",),
         "solver_mesh_format": ("output_format", "mesh_format"),
         "output_version": ("output_format_version", "msh_file_version"),
@@ -109,16 +148,47 @@ def canonical_mesh_controls(params: dict[str, Any], supported: Any = None) -> di
     return effective
 
 
-def mesh_visualization_requested(params: dict[str, Any], formats: Any = ()) -> bool:
-    """Choose companion visualization by delivery format, preserving opt-outs."""
+def mesh_visualization_requested(
+    params: dict[str, Any], formats: Any = (), *, request: dict[str, Any] | None = None,
+) -> bool:
+    """Use caller choices, then delivery-format defaults; inferred flags are not opt-outs."""
+    from nodes.data.planning.request_contract import caller_request_text
+
+    analysis = params.get("requirement_analysis") or {}
+    request = request or params.get("preprocessing_request") or analysis.get("preprocessing_request") or {}
     params = canonical_mesh_controls(flatten_parameter_groups(params))
-    if params.get("write_tecplot") is not None:
-        return str(params["write_tecplot"]).strip().lower() not in {"false", "0", "no", "off", ""}
+    choice = params.get("write_tecplot") if not request else None
+    text = caller_request_text(request or params, preprocessing_request=request)
+    flag = re.search(r"\bwrite_tecplot\s*[:=]\s*(true|false|0|1)\b", text, re.I)
+    if flag:
+        choice = flag.group(1)
+    elif re.search(r"(?:不需要|无需|不要|不用|不生成|不输出|省略|跳过|\b(?:without|no|omit|skip|disable)\b)"
+                   r"[^\n。；;,.]{0,24}(?:可视化|tecplot|visualization)", text, re.I):
+        choice = False
+    elif re.search(r"可视化|\b(?:tecplot|visualization)\b", text, re.I):
+        choice = True
+    elif request:
+        inputs = request.get("inputs") or []
+        sources = [request.get("authority_snapshot"), request,
+                   *(inputs if isinstance(inputs, list) else [inputs]),
+                   *(request.get("requested_assets") or [])]
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            controls = flatten_parameter_groups(source, ("parameters", "parameter_bindings"))
+            controls = flatten_parameter_groups(controls)
+            if controls.get("write_tecplot") is not None:
+                choice = controls["write_tecplot"]
+                break
+    if choice is not None:
+        return str(choice).strip().lower() not in {"false", "0", "no", "off", ""}
     if str(params.get("convert_to_openfoam") or "").lower() in {"true", "1"}:
         return True
     labels = [str(value or "").lower() for value in (
         params.get("solver_mesh_format"), params.get("mesh_format"), *formats,
     )]
+    if any("openfoam" in label or "polymesh" in label for label in labels):
+        return True
     if any("tecplot" in label for label in labels):
         return True
     if params.get("solver_mesh_format"):
@@ -139,6 +209,16 @@ def geometry_file_from_params(params: dict[str, Any]) -> str:
     return ""
 
 
+def coordinate_profile_from_params(params: dict[str, Any]) -> str:
+    """Recognize coordinate input even when supplied through a generic file key."""
+    params = flatten_parameter_groups(params)
+    for key in (*COORDINATE_PROFILE_KEYS, *GEOMETRY_FILE_KEYS):
+        path = existing_geometry_like_path(params.get(key))
+        if path and Path(path).suffix.lower() in COORDINATE_PROFILE_SUFFIXES:
+            return path
+    return ""
+
+
 def existing_geometry_like_path(path: Any) -> str:
     value = str(path or "").strip()
     if not value:
@@ -152,7 +232,7 @@ def existing_geometry_like_path(path: Any) -> str:
 def has_explicit_geometry_input(params: dict[str, Any]) -> bool:
     if geometry_file_from_params(params):
         return True
-    if any(existing_geometry_like_path(params.get(key)) for key in COORDINATE_PROFILE_KEYS):
+    if coordinate_profile_from_params(params):
         return True
     return any(
         params.get(key) not in (None, "", [], {}) and not is_placeholder_value(params.get(key))

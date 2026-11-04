@@ -31,21 +31,16 @@ def _q(path: str | Path) -> str:
 
 
 def _run(cmd: str, *, state: Any, cwd: str, timeout: int = 20) -> tuple[int | None, str]:
-    env_path = os.environ.get("EXPERIMENT_ACTIVE_BUILD_ENV")
-    if env_path:
-        try:
-            from tools.env_provision import wrap_command
-        except Exception:
-            try:
-                from .env_provision import wrap_command
-            except Exception:
-                wrap_command = None
-        if wrap_command is not None:
-            cmd = wrap_command(cmd, env_path)
     from core.sandbox import SandboxLimits, prepare_attempt_command
 
     launch = None
     try:
+        try:
+            from .env_provision import existing_env_script, wrap_command
+        except ImportError:
+            from tools.env_provision import existing_env_script, wrap_command
+        environment = existing_env_script(state)
+        cmd = wrap_command(cmd, environment["env_path"] if environment else None)
         writable, readonly = sandbox_mount_roots(state)
         command_cwd = Path(cwd).resolve(strict=True)
         if not any(command_cwd == root or command_cwd.is_relative_to(root)

@@ -66,6 +66,10 @@ class NetworkGrant:
     asked_by_node_type: str = ""
     asked_by_run_id: str = ""
     answer: str = ""
+    #: 谁批的：``person``（人在卡片上点了允许）或 ``dispatch``（批准派发时按冻结预注册里
+    #: 显式声明的数据源一并授予，#1244 / RFC D7）。两种在账上必须分得开。
+    source: str = "person"
+    basis: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -74,6 +78,8 @@ class NetworkGrant:
             "asked_by_node_type": self.asked_by_node_type,
             "asked_by_run_id": self.asked_by_run_id,
             "answer": self.answer,
+            "source": self.source,
+            **({"basis": self.basis} if self.basis else {}),
         }
 
 
@@ -316,3 +322,239 @@ def grant_from_answer(
 def grants_ledger(state: Any) -> list[dict[str, Any]]:
     """本次 run 批过的全部授权 —— 给记账/收尾清单用。"""
     return [g.as_dict() for _, g in sorted(_grants(state).items())]
+
+
+# ── 派发即授权（#1244 / RFC D7）────────────────────────────────────────────────
+#
+# 冻结预注册的「数据源 / 许可与前提」里显式写了的主机，是人批准这份计划时就看过、批过的；
+# 派发绑定它的 run 时一并落成授权，无人值守的长课题第一次取数据就不会停下来等一个没人
+# 答的问题。边界：只认显式声明的主机（`core.prereg_sources`，宁可漏报不可误报）；运行中新
+# 冒出来的主机照旧问人；授权仍只在内存里，跟着 run 走，不落盘。
+
+
+def grant_declared_hosts(state: Any, hosts: list[str], *, basis: str) -> list[str]:
+    """把派发依据里声明的主机落成本 run 的出网授权。返回这次新授予的主机（已有的不重复记）。"""
+    granted: list[str] = []
+    grants = _grants(state)
+    for raw in hosts:
+        host = normalize_host(raw)
+        if not host or host in grants:
+            continue
+        grants[host] = NetworkGrant(
+            host=host,
+            reason="冻结预注册里声明的数据源，批准派发时一并授予",
+            asked_by_node_type=getattr(state, "node_type", "") or "",
+            asked_by_run_id=getattr(state, "run_id", "") or "",
+            source="dispatch",
+            basis=basis,
+        )
+        granted.append(host)
+    return granted
+
+
+def dispatch_granted_hosts(state: Any) -> tuple[str, ...]:
+    """本 run 手里**派发时**授予的主机 —— 它再派子 run（Experiment → Data）时原样带下去。
+
+    人在卡片上批的不带：那张卡问的是「这个 run 能不能连」，答案不外推到别的 run。
+    """
+    return tuple(sorted(h for h, g in _grants(state).items() if g.source == "dispatch"))
+
+
+# ── 无人值守下没人答 = 没批，并且如实记成被挡住（RFC D6）─────────────────────────
+
+
+def record_not_granted(state: Any, metadata: dict[str, Any]) -> dict[str, Any] | None:
+    """连续档替人按推荐项拒掉了一张授权卡 → 这个 run 缺一个前提，记成 blocker。
+
+    人亲手点「拒绝」**不**走这里：那是一个决定，模型可以换路。这里记的是「没有人在，
+    所以没批」—— 不记的话 run 照样 completed，谁也不知道它其实少了一样东西
+    （#1254：0.5.6 Windows，一张出网卡 1.2 秒内被替人拒掉，人在旁边连打六次「允许」）。
+    """
+    from core.blockers import record_blocker
+
+    capability = str(metadata.get("capability") or "")
+    if capability == GPU_CAPABILITY:
+        subject = f"{int(metadata.get('gpus') or 1)} 张本机 GPU"
+        kind = GPU_CAPABILITY
+    else:
+        subject = normalize_host(str(metadata.get("host") or "")) or str(metadata.get("host") or "?")
+        kind = "egress_host"
+    declared = None
+    if kind == "egress_host":
+        try:
+            from core.prereg_sources import declared_hosts_for_run
+
+            hosts, basis = declared_hosts_for_run(state)
+            declared = (subject in hosts) if basis.get("bound") else None
+        except Exception:
+            declared = None
+    blocker = record_blocker(
+        state,
+        summary=(f"无人值守，没有人批准这个 run 使用 {subject}（{kind}）；授权卡按推荐项被自动拒绝。"
+                 f"用到它的那一步没有做。"),
+        category="permission",
+        requested_action=(
+            "有人在场时重跑这一步并在卡片上允许；数据源主机写进冻结预注册的「数据源 / 许可与前提」"
+            "小节，批准派发时就会一并授予（#1244）。"),
+        retryable_after_change=True,
+        reported_by="framework:capability_grants",
+        facts={"kind": "capability_not_granted", "capability": kind, "subject": subject,
+               "declared_in_prereg": declared},
+    )
+    return blocker
+
+
+# ── GPU 运行时（#893 阶段 1 / #1174，wangd 10-21 裁决）────────────────────────────
+#
+# 与出网同一条通道、同一套规矩：按 run 给，不落盘，没答就是没批。批了之后这个 run 拿到
+# N 张卡的独占锁（``core.gpu``），它的命令看得见这几张卡（``CUDA_VISIBLE_DEVICES``），
+# Linux 的墙放开 CUDA 运行时要写的 ``/proc``（lujy 在 #1174 实证：驱动给新线程写
+# ``/proc/self/task/<tid>/comm``，被 Landlock 拒就 ``cuInit=304``）。粒度按内核做得到的写：
+# 放开的是整个 ``/proc`` 的写（同一用户自己进程的 comm / oom_score_adj 一类），不装更细。
+
+#: state 上挂 GPU 授权的属性名。只在内存里。
+_GPU_ATTR = "_capability_gpu"
+GPU_CAPABILITY = "gpu_runtime"
+
+
+@dataclass(frozen=True)
+class GpuGrant:
+    requested: int
+    lease: Any                     # core.gpu.GpuLease | None（批了但卡被占满时为 None）
+    reason: str = ""
+    answer: str = ""
+    busy: bool = False
+    error: str = ""                # 批了但账本读写不了：分不了卡的原因
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"capability": GPU_CAPABILITY, "requested": self.requested,
+                "indices": list(self.lease.indices) if self.lease else [],
+                "busy": self.busy, "reason": self.reason, "answer": self.answer,
+                **({"error": self.error} if self.error else {})}
+
+
+def gpu_grant(state: Any) -> GpuGrant | None:
+    value = getattr(state, _GPU_ATTR, None)
+    return value if isinstance(value, GpuGrant) else None
+
+
+def gpu_lease(state: Any):
+    """本 run 手里的卡（``core.gpu.GpuLease``）；没批 / 批了没分到 → None。"""
+    grant = gpu_grant(state)
+    return grant.lease if grant is not None else None
+
+
+def require(state: Any, kind: str, subject: Any, *, reason: str = "") -> dict[str, Any] | None:
+    """节点的提交路径问「这个能力批了没有」（RFC_CAPABILITY_GRANTS_LAYERING §3.2）。
+
+    返回 None = 已批，照常往下走；返回一个结果 = 原样交回给 loop：没批就是那张授权卡
+    （pause），后端开不了这个口就是带事实的 error（§3.3，没有卡片 —— 批了也用不上的卡
+    不弹）。需要与否从作业声明机械可得，所以由框架问，不交给模型去申请。
+
+    今天落地的 kind 只有 ``gpu_runtime``（subject = 卡数）；``egress_host`` 仍走
+    ``request_network_grant``，``job_tcp`` 未实施。
+    """
+    if kind != GPU_CAPABILITY:
+        raise ValueError(f"capability {kind!r} has no require() path yet")
+    from core.sandbox import gpu_capability
+
+    gpus = max(1, int(subject or 1))
+    lease = gpu_lease(state)
+    if lease is not None and len(lease.indices) >= gpus:
+        return None
+    cap = gpu_capability()
+    if not cap.schedulable:
+        return {"status": "error", "error_code": "capability_not_enforceable",
+                "capability": GPU_CAPABILITY, "error": cap.sentence(), "gpu": cap.as_dict(),
+                "side_effects": "none"}
+    return request_gpu_grant(state, gpus, reason)
+
+
+def request_gpu_grant(state: Any, gpus: int, reason: str) -> dict[str, Any]:
+    """把「这个 run 要用 N 张 GPU」呈到人面前。返回一个 pause 结果（同出网那张卡的形状）。"""
+    from core.sandbox import gpu_capability
+
+    gpus = max(1, int(gpus or 1))
+    cap = gpu_capability()
+    question = f"允许这个 run 使用 {gpus} 张本机 GPU 吗？"
+    context = "\n".join([
+        f"申请：{gpus} 张",
+        f"用途：{reason.strip() or '（调用方没说，这本身是个问题）'}",
+        cap.sentence(),
+        "批准后：这几张卡在本 run 结束前只归它用（本平台的其它 run 分不到）；它的命令"
+        "看得见这几张卡；Linux 上墙会放开 CUDA 运行时需要写的 /proc。",
+        "不是隔离：同机不经本平台的程序仍看得见这些卡。批准只在**本次 run** 内有效。",
+        "批准后请原样重新提交这个作业（提交本身还有一张确认卡）。",
+    ])
+    return {
+        "status": "pause",
+        "pause_event": {
+            "question": question,
+            "context": context,
+            "header": "GPU 授权",
+            "asking_node_type": getattr(state, "node_type", "") or "",
+            "asking_run_id": getattr(state, "run_id", "") or "",
+            "options": ["允许", "拒绝"],
+            "recommended_option_index": 1,
+            "metadata": {
+                "type": GRANT_PAUSE_TYPE,
+                "header": "GPU 授权",
+                "capability": GPU_CAPABILITY,
+                "gpus": gpus,
+                "reason": reason,
+            },
+        },
+    }
+
+
+def grant_gpu_from_answer(state: Any, gpus: int, answer: str | None, *,
+                          reason: str = "") -> bool:
+    """人批了就分卡。返回是否批准（批了但卡被占满也算批准，``busy`` 记下来）。"""
+    from core import gpu as _gpu
+
+    if read_answer(answer) is not True:
+        return False
+    gpus = max(1, int(gpus or 1))
+    run_id = str(getattr(state, "run_id", "") or "run")
+    previous = gpu_lease(state)
+    if previous is not None and len(previous.indices) >= gpus:
+        return True                  # 已经够用：同一个 run 不重复占卡
+    if previous is not None:
+        _gpu.release_run(previous)
+    error = ""
+    try:
+        lease = _gpu.acquire(run_id, gpus)
+    except OSError as exc:
+        lease, error = None, f"{exc.__class__.__name__}: {exc}"
+    grant = GpuGrant(requested=gpus, lease=lease, reason=reason, answer=str(answer or ""),
+                     busy=lease is None and not error, error=error)
+    try:
+        setattr(state, _GPU_ATTR, grant)
+    except Exception:
+        if lease is not None:
+            _gpu.release_run(lease)
+        return False
+    if lease is not None:
+        import weakref
+
+        try:                         # 兜底：run 没走到 finalize_run 时，state 被回收就放卡
+            weakref.finalize(state, _gpu.release_run, lease)
+        except TypeError:
+            pass
+    return True
+
+
+def release_gpu(state: Any) -> list[int]:
+    """run 结束放卡（幂等）。返回真正空出来的卡。"""
+    from core import gpu as _gpu
+
+    grant = gpu_grant(state)
+    if grant is None or grant.lease is None:
+        return []
+    freed = _gpu.release_run(grant.lease)
+    try:
+        setattr(state, _GPU_ATTR, GpuGrant(requested=grant.requested, lease=None,
+                                           reason=grant.reason, answer=grant.answer))
+    except Exception:
+        pass
+    return freed

@@ -134,3 +134,109 @@ async def test_foreground_default_unchanged(tmp_path, monkeypatch):
     out = await rn._run_node_tool(parent, node_type="_curator", user_note="测试派发", node_inputs={})
     assert out["status"] == "success"
     assert out["child_run_id"] == "run_fg"
+
+
+@pytest.mark.asyncio
+async def test_child_completion_resumes_the_scheduler_with_pending_user_work(tmp_path, monkeypatch):
+    """Actual parent loop + dispatch; only the child's internal work is stubbed.
+
+    Progress doesn't call the parent model. The user can still use the parent's
+    scoped tools. Finishing the child resumes the parent and drains the handoff.
+    """
+    import json
+    from unittest.mock import AsyncMock, MagicMock
+
+    import chat
+    from core.agent_loop import run_loop
+    from core.harness import NodeHarness
+    from core.llm import LLMMessage, LLMResponse
+    from core.pause import ActiveRunInfo, clear_all, register_active, unregister_active
+
+    def call(name, args, call_id):
+        return LLMResponse(content=None, finish_reason="tool_calls", usage={}, tool_calls=[{
+            "id": call_id, "type": "function", "function": {
+                "name": name, "arguments": json.dumps(args),
+            },
+        }])
+
+    parent = _parent(tmp_path / "parent")
+    child = State.new("_curator", tmp_path / "child")
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_execute(**kwargs):
+        register_active(ActiveRunInfo(child.run_id, "_curator", child, parent_run_id=parent.run_id))
+        started.set()
+        try:
+            await release.wait()
+            return _summary(run_id=child.run_id, state_dir=str(child.root))
+        finally:
+            unregister_active(child.run_id)
+
+    monkeypatch.setattr("core.executor.execute_node", slow_execute)
+    main_llm = MagicMock()
+    main_llm.chat = AsyncMock(side_effect=[
+        call("run_node", {"node_type": "_curator", "node_inputs": {"mode": "dreaming"},
+                          "user_note": "独立整理研究记录"}, "child"),
+        call("write_scratchpad", {"content": "接着处理服务器检查，尚未完成"}, "continue"),
+        LLMResponse(content="子任务已结束，继续处理你的新安排。",
+                    tool_calls=[], finish_reason="stop", usage={}),
+    ])
+    harness = NodeHarness(node_type="_orchestrator", system_prompt="scheduler", kb_query="_disable",
+                          tools=["run_node", "write_scratchpad"], max_turns=4)
+    clear_all()
+    task = asyncio.create_task(run_loop(
+        harness, parent, [LLMMessage(role="user", content="整理记录")], main_llm,
+    ))
+    try:
+        await asyncio.wait_for(started.wait(), 3)
+        for i in range(5):
+            child.append_transcript("tool_call_end", tool="read_file", result={"progress": i})
+            await asyncio.sleep(0)
+        assert main_llm.chat.call_count == 1  # no progress polling by the model
+
+        reply_started, finish_reply = asyncio.Event(), asyncio.Event()
+        responses = [
+            LLMResponse(content="我先记下安排。", finish_reason="tool_calls", usage={}, tool_calls=[
+                call("write_scratchpad", {"content": "记下服务器检查"}, "notes").tool_calls[0],
+                call("run_node", {"node_type": "experiment",
+                                  "node_inputs": {"task": "服务器检查"}}, "later").tool_calls[0],
+            ]),
+            LLMResponse(content="已记录，检查会在当前节点返回后处理。",
+                        tool_calls=[], finish_reason="stop", usage={}),
+        ]
+
+        async def answer(*args, **kwargs):
+            response = responses.pop(0)
+            if not response.tool_calls:
+                reply_started.set()
+                await finish_reply.wait()
+            return response
+
+        interject_llm = MagicMock()
+        interject_llm.chat = AsyncMock(side_effect=answer)
+        interrupt = asyncio.create_task(chat._handle_interrupt(
+            parent, harness, interject_llm, "顺便检查服务器", reply_to_message_id="user-host",
+        ))
+        await asyncio.wait_for(reply_started.wait(), 3)
+        assert not task.done() and parent.scratchpad == "记下服务器检查"
+        assert main_llm.chat.call_count == 1
+
+        release.set()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert main_llm.chat.call_count == 1  # handoff waits for this reply's results
+        finish_reply.set()
+        await asyncio.wait_for(interrupt, 3)
+        result = await asyncio.wait_for(task, 3)
+        context = "\n".join(m.content or "" for m in main_llm.chat.call_args_list[1].args[0])
+        assert "顺便检查服务器" in context and "deferred" in context
+        assert child.run_id in context
+        assert parent.scratchpad == "接着处理服务器检查，尚未完成"
+        assert result.status == "completed"
+        assert main_llm.chat.call_count == 3
+        assert not parent.hook_state.get("injected_messages")
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        clear_all()

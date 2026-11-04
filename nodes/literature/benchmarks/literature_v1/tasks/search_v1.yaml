@@ -1,0 +1,101 @@
+suite: literaturebench_v1_search
+version: 0.2.0
+sampling_frame: |
+  以中国学位学科目录的一级学科为依据，但为避免 89 个一级学科带来样本碎片化，
+  合并为 12 个公开、可解释的宏观领域。每个领域固定五种题型：精确题名、短关键词、
+  自然语言问题、方法—对象问题、歧义/边界问题。流体、海洋、微塑料、防波堤等
+  曾用于本项目调试的题目不进入公开集，只保留在内部回归集。
+instructions_to_system: |
+  请直接完成用户问题。返回不超过 50 篇论文；每篇尽可能提供标题、作者、年份、
+  期刊/预印本、DOI 或可访问 URL、摘要来源状态。若没有足够相关论文，明确说明，
+  不得用主题相邻论文凑数。
+
+# 一级学科依据：仓库 discipline_catalog.source.json 所记录的传统一级/二级学科目录。
+# 这里的宏观层只用于平衡抽样、分层报告，绝不要求系统采用同一分类体系。
+strata:
+  - {id: mathematical_sciences, label: 数学与统计, china_first_level: [数学, 统计学, 系统科学]}
+  - {id: physical_astronomical, label: 物理与天文, china_first_level: [物理学, 天文学]}
+  - {id: chemistry_materials, label: 化学与材料, china_first_level: [化学, 材料科学与工程, 冶金工程]}
+  - {id: earth_environment, label: 地球、环境与海洋系统, china_first_level: [地理学, 大气科学, 海洋科学, 地球物理学, 地质学, 环境科学与工程]}
+  - {id: life_medicine, label: 生命科学与医学, china_first_level: [生物学, 基础医学, 临床医学, 公共卫生与预防医学, 药学]}
+  - {id: engineering_energy, label: 工程、建造与能源, china_first_level: [力学, 机械工程, 土木工程, 水利工程, 动力工程及工程热物理, 交通运输工程, 船舶与海洋工程]}
+  - {id: information_ai, label: 信息科学与人工智能, china_first_level: [计算机科学与技术, 控制科学与工程, 软件工程, 网络空间安全, 电子科学与技术]}
+  - {id: agriculture_food, label: 农业、食品与生态生产, china_first_level: [作物学, 园艺学, 农业资源与环境, 植物保护, 畜牧学, 水产, 食品科学与工程]}
+  - {id: economics_management, label: 经济、管理与会计, china_first_level: [理论经济学, 应用经济学, 工商管理, 管理科学与工程, 农林经济管理]}
+  - {id: society_education, label: 社会科学、教育与心理, china_first_level: [社会学, 教育学, 心理学, 新闻传播学, 体育学]}
+  - {id: law_governance, label: 法学、政治与公共治理, china_first_level: [法学, 政治学, 民族学, 公共管理]}
+  - {id: humanities_arts, label: 人文、历史、语言与艺术, china_first_level: [哲学, 历史学, 中国语言文学, 外国语言文学, 艺术学]}
+
+# pilot=true 的 12 题每个宏观领域一题，先用于确认不同产品的输出形状与可核验字段。
+tasks:
+  - {id: S01, pilot: true, stratum: mathematical_sciences, type: exact_title, language: en, prompt: "A Mathematical Theory of Communication"}
+  - {id: S02, pilot: false, stratum: mathematical_sciences, type: short_keyword, language: zh, prompt: "因果推断 未观测混杂"}
+  - {id: S03, pilot: false, stratum: mathematical_sciences, type: natural_question, language: zh, prompt: "在存在未观测混杂时，观察性数据中的因果效应有哪些可检验的识别假设和敏感性分析方法？"}
+  - {id: S04, pilot: false, stratum: mathematical_sciences, type: method_object, language: en, prompt: "doubly robust estimation causal inference unmeasured confounding sensitivity analysis"}
+  - {id: S05, pilot: false, stratum: mathematical_sciences, type: boundary, language: en, prompt: "sequential model estimation"}
+
+  - {id: S06, pilot: true, stratum: physical_astronomical, type: exact_title, language: en, prompt: "Observation of Gravitational Waves from a Binary Black Hole Merger"}
+  - {id: S07, pilot: false, stratum: physical_astronomical, type: short_keyword, language: zh, prompt: "量子纠缠 贝尔不等式"}
+  - {id: S08, pilot: false, stratum: physical_astronomical, type: natural_question, language: zh, prompt: "引力波探测如何联合电磁观测约束双致密星并合的物理过程？"}
+  - {id: S09, pilot: false, stratum: physical_astronomical, type: method_object, language: en, prompt: "multi-messenger observation compact binary merger gravitational waves electromagnetic counterparts"}
+  - {id: S10, pilot: false, stratum: physical_astronomical, type: boundary, language: en, prompt: "quantum observation model"}
+
+  - {id: S11, pilot: true, stratum: chemistry_materials, type: exact_title, language: en, prompt: "The Materials Project: A materials genome approach to accelerating materials innovation"}
+  - {id: S12, pilot: false, stratum: chemistry_materials, type: short_keyword, language: zh, prompt: "固态电池 界面稳定性"}
+  - {id: S13, pilot: false, stratum: chemistry_materials, type: natural_question, language: zh, prompt: "锂金属固态电池中，界面化学和力学失效如何共同影响循环稳定性？"}
+  - {id: S14, pilot: false, stratum: chemistry_materials, type: method_object, language: en, prompt: "operando characterization solid-state battery interface lithium metal dendrite"}
+  - {id: S15, pilot: false, stratum: chemistry_materials, type: boundary, language: en, prompt: "materials stability model"}
+
+  - {id: S16, pilot: true, stratum: earth_environment, type: exact_title, language: en, prompt: "The global carbon budget 2023"}
+  - {id: S17, pilot: false, stratum: earth_environment, type: short_keyword, language: zh, prompt: "城市热岛 遥感"}
+  - {id: S18, pilot: false, stratum: earth_environment, type: natural_question, language: zh, prompt: "卫星遥感与地面观测如何结合评估城市热岛的时空变化及其健康风险？"}
+  - {id: S19, pilot: false, stratum: earth_environment, type: method_object, language: en, prompt: "urban heat island satellite remote sensing ground observation health risk"}
+  - {id: S20, pilot: false, stratum: earth_environment, type: boundary, language: en, prompt: "environmental transport model"}
+
+  - {id: S21, pilot: true, stratum: life_medicine, type: exact_title, language: en, prompt: "Highly accurate protein structure prediction with AlphaFold"}
+  - {id: S22, pilot: false, stratum: life_medicine, type: short_keyword, language: zh, prompt: "阿尔茨海默病 单细胞测序"}
+  - {id: S23, pilot: false, stratum: life_medicine, type: natural_question, language: zh, prompt: "单细胞与空间组学研究对阿尔茨海默病细胞类型变化提出了哪些一致和相互矛盾的证据？"}
+  - {id: S24, pilot: false, stratum: life_medicine, type: method_object, language: en, prompt: "single-cell spatial transcriptomics Alzheimer's disease cell type changes"}
+  - {id: S25, pilot: false, stratum: life_medicine, type: boundary, language: en, prompt: "cell replacement brain immune"}
+
+  - {id: S26, pilot: true, stratum: engineering_energy, type: exact_title, language: en, prompt: "Topology optimization of compliant mechanisms"}
+  - {id: S27, pilot: false, stratum: engineering_energy, type: short_keyword, language: zh, prompt: "建筑全生命周期 碳排放"}
+  - {id: S28, pilot: false, stratum: engineering_energy, type: natural_question, language: zh, prompt: "建筑全生命周期碳排放评估中，材料阶段、运行阶段和改造阶段的关键不确定性来自哪里？"}
+  - {id: S29, pilot: false, stratum: engineering_energy, type: method_object, language: en, prompt: "building life cycle assessment embodied carbon operational carbon uncertainty"}
+  - {id: S30, pilot: false, stratum: engineering_energy, type: boundary, language: en, prompt: "structural response optimization"}
+
+  - {id: S31, pilot: true, stratum: information_ai, type: exact_title, language: en, prompt: "Attention Is All You Need"}
+  - {id: S32, pilot: false, stratum: information_ai, type: short_keyword, language: zh, prompt: "大语言模型 幻觉评测"}
+  - {id: S33, pilot: false, stratum: information_ai, type: natural_question, language: zh, prompt: "大语言模型幻觉评测应如何区分事实性错误、不可验证生成和任务本身的歧义？"}
+  - {id: S34, pilot: false, stratum: information_ai, type: method_object, language: en, prompt: "large language model hallucination evaluation factuality benchmark uncertainty"}
+  - {id: S35, pilot: false, stratum: information_ai, type: boundary, language: en, prompt: "foundation model safety"}
+
+  - {id: S36, pilot: true, stratum: agriculture_food, type: exact_title, language: en, prompt: "Feeding nine billion by 2050"}
+  - {id: S37, pilot: false, stratum: agriculture_food, type: short_keyword, language: zh, prompt: "精准农业 氮肥 利用效率"}
+  - {id: S38, pilot: false, stratum: agriculture_food, type: natural_question, language: zh, prompt: "遥感、土壤传感和作物模型如何协同提高氮肥利用效率，同时控制氮损失？"}
+  - {id: S39, pilot: false, stratum: agriculture_food, type: method_object, language: en, prompt: "precision agriculture nitrogen use efficiency remote sensing crop model"}
+  - {id: S40, pilot: false, stratum: agriculture_food, type: boundary, language: en, prompt: "agricultural sustainability assessment"}
+
+  - {id: S41, pilot: true, stratum: economics_management, type: exact_title, language: en, prompt: "The Market for Lemons: Quality Uncertainty and the Market Mechanism"}
+  - {id: S42, pilot: false, stratum: economics_management, type: short_keyword, language: zh, prompt: "碳信息披露 企业价值"}
+  - {id: S43, pilot: false, stratum: economics_management, type: natural_question, language: zh, prompt: "碳信息披露是否影响企业融资成本和市场估值？文献中的因果识别主要依赖哪些设计？"}
+  - {id: S44, pilot: false, stratum: economics_management, type: method_object, language: en, prompt: "carbon disclosure firm value cost of capital difference-in-differences"}
+  - {id: S45, pilot: false, stratum: economics_management, type: boundary, language: en, prompt: "accounting research"}
+
+  - {id: S46, pilot: true, stratum: society_education, type: exact_title, language: en, prompt: "The marshmallow test: A 50-year retrospective"}
+  - {id: S47, pilot: false, stratum: society_education, type: short_keyword, language: zh, prompt: "在线教育 学习分析 隐私"}
+  - {id: S48, pilot: false, stratum: society_education, type: natural_question, language: zh, prompt: "学习分析系统如何在个性化教学效果、数据隐私与教育公平之间权衡？"}
+  - {id: S49, pilot: false, stratum: society_education, type: method_object, language: en, prompt: "learning analytics personalized education privacy fairness evaluation"}
+  - {id: S50, pilot: false, stratum: society_education, type: boundary, language: en, prompt: "social learning model"}
+
+  - {id: S51, pilot: true, stratum: law_governance, type: exact_title, language: en, prompt: "Governing the Commons: The Evolution of Institutions for Collective Action"}
+  - {id: S52, pilot: false, stratum: law_governance, type: short_keyword, language: zh, prompt: "算法治理 公共部门"}
+  - {id: S53, pilot: false, stratum: law_governance, type: natural_question, language: zh, prompt: "公共部门使用算法决策时，透明度、问责和歧视风险分别如何被法律与治理研究处理？"}
+  - {id: S54, pilot: false, stratum: law_governance, type: method_object, language: en, prompt: "algorithmic governance public sector accountability transparency discrimination"}
+  - {id: S55, pilot: false, stratum: law_governance, type: boundary, language: en, prompt: "policy governance model"}
+
+  - {id: S56, pilot: true, stratum: humanities_arts, type: exact_title, language: en, prompt: "What Is an Author?"}
+  - {id: S57, pilot: false, stratum: humanities_arts, type: short_keyword, language: zh, prompt: "生成式人工智能 作者身份"}
+  - {id: S58, pilot: false, stratum: humanities_arts, type: natural_question, language: zh, prompt: "生成式人工智能改变了文学与艺术创作中的作者身份、原创性和署名规范吗？主要观点如何分歧？"}
+  - {id: S59, pilot: false, stratum: humanities_arts, type: method_object, language: en, prompt: "generative AI authorship originality literary studies art ethics"}
+  - {id: S60, pilot: false, stratum: humanities_arts, type: boundary, language: en, prompt: "artificial intelligence ethics"}

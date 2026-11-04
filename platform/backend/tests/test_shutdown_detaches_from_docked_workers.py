@@ -32,6 +32,7 @@ import gc
 import os
 import pathlib
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -167,7 +168,7 @@ async def docked_worker(worker_paths):
 @pytest.mark.asyncio
 async def test_a_docked_worker_survives_backend_shutdown(quiet_startup, registry, docked_worker):
     """现场那一种：停靠中的 worker，后端收摊。它必须还活着、没收到 terminate，
-    而且下一个后端接得回来。"""
+    确认它放开了我们，而且下一个后端接得回来。"""
     from app.main import app, lifespan
 
     session, proc, state_root = docked_worker
@@ -183,7 +184,18 @@ async def test_a_docked_worker_survives_backend_shutdown(quiet_startup, registry
     assert _process_is_a_runtime_worker(proc.pid), "后端收摊把停靠中的 worker 杀了"
     assert "terminated" not in event_types(state_root), "收尾段给 worker 发了 terminate"
 
-    # 下一个后端接得回来：socket 回到了 accept 上，注册表行还在。
+    # 放手是被确认过的：worker 摘掉了我们这根连接、只等下一个后端，然后才把连接
+    # 关掉 —— 收尾段等的就是这一下（有界，`_RELEASE_ACK_TIMEOUT_S`）。
+    #
+    # #1253：这条测试以前赶在 shutdown 返回的那一刻就去连，而那时 worker 未必
+    # 处理完这次断开；机器一忙（CI `-n 6`，两次），它的「放手」与新连接的「接手」
+    # 交错，回话被摘进 /dev/null，接回那句 status 等满 10 秒 ——「放开之后接不
+    # 回来」。判据现在挂在一个机制信号上，不挂在时机上。
+    assert session.release_acknowledged is True, (
+        "收尾段放手时 worker 没有回执 —— 不知道它放没放开我们"
+    )
+
+    # 下一个后端接得回来：worker 只等下一个后端，注册表行还在。
     assert await harness_session_manager.adopt_live_worker(
         PROJECT, SESSION, owner_user_id="u1"
     ), "放开之后接不回来 —— 那放开就只是换了一种丢法"
@@ -337,6 +349,94 @@ async def test_the_old_ownership_model_really_did_kill_the_child():
     victim._transport.close()          # `__del__` 做的就是这一步
     assert await asyncio.wait_for(victim.wait(), timeout=10) is not None
     assert not pid_alive(victim.pid), "对照组没死 —— 这条测试钉的危险不存在了？"
+
+
+@pytest.mark.parametrize("transport", [
+    pytest.param("unix", marks=pytest.mark.skipif(
+        not hasattr(socket, "AF_UNIX"), reason="这个平台没有 AF_UNIX（Windows）—— 命令面只有 TCP 环回",
+    )),
+    "tcp",
+])
+@pytest.mark.parametrize("loop_name", sorted(_LOOP_FACTORIES))
+def test_the_release_handshake_holds_on_both_loops(loop_name, transport, request):
+    """放手握手（#1253）：对面关连接 = 回执；对面不关 = 上限内放弃、如实报没确认；
+    我们这头早就断了 = 不握手。三件事在 uvloop 上也必须成立 —— `write_eof` 对一个
+    已关的 transport，asyncio 什么都不做，uvloop 直接抛 RuntimeError。
+
+    两种传输都验：Windows 上命令面是 TCP 环回（半关走的是 proactor 的 `write_eof`），
+    只验 unix socket 等于没验 Windows。
+
+    关机不许被一个不说话的 worker 拖住：等回执是为了把"它放开了"变成确认过的
+    事实，不是为了换一种挂死。
+    """
+    from app.services.harness_sessions import _RELEASE_ACK_TIMEOUT_S, _SocketChannel
+
+    root = request.getfixturevalue("short_root") if transport == "unix" else None
+
+    async def listen(name: str, handler):
+        if transport == "unix":
+            path = str(root / f"{name}.sock")
+            server = await asyncio.start_unix_server(handler, path=path)
+            return server, lambda: asyncio.open_unix_connection(path)
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        return server, lambda: asyncio.open_connection("127.0.0.1", port)
+
+    async def scenario() -> dict:
+        held: list = []
+
+        async def worker_that_lets_go(reader, writer):
+            await reader.read()          # 读到我们的 EOF ……
+            writer.close()               # …… 摘完再关 = 回执
+
+        async def worker_that_never_lets_go(_reader, writer):
+            held.append(writer)          # 攥着不关，也不读
+
+        async def worker_already_gone(_reader, writer):
+            writer.close()
+
+        outcome: dict = {}
+        for name, handler in (
+            ("lets_go", worker_that_lets_go),
+            ("never", worker_that_never_lets_go),
+            ("gone", worker_already_gone),
+        ):
+            server, connect = await listen(name, handler)
+            try:
+                reader, writer = await connect()
+                channel = _SocketChannel(reader, writer)
+                if name == "gone":
+                    assert await reader.read() == b""   # 对面已经走了
+                    channel.close()                     # 我们这头也早关了
+                started = asyncio.get_running_loop().time()
+                acknowledged = await channel.let_go(0.3)
+                elapsed = asyncio.get_running_loop().time() - started
+                outcome[name] = (acknowledged, elapsed, channel.usable)
+            finally:
+                for held_writer in held:
+                    held_writer.close()
+                server.close()
+        return outcome
+
+    loop = _LOOP_FACTORIES[loop_name]()
+    try:
+        outcome = loop.run_until_complete(scenario())
+    finally:
+        loop.close()
+
+    where = f"{loop_name}/{transport}"
+    acknowledged, _elapsed, usable = outcome["lets_go"]
+    assert acknowledged is True, f"{where}: 对面关了连接，却没认出这是回执"
+    assert usable is False, f"{where}: 放手之后我们这头的连接该关掉"
+
+    acknowledged, elapsed, usable = outcome["never"]
+    assert acknowledged is False, f"{where}: 对面根本没关连接，却报了已确认"
+    # 下限留一点余量：Windows 的时钟粒度约 15ms，事件循环会提前一个粒度触发计时器。
+    assert 0.25 <= elapsed < _RELEASE_ACK_TIMEOUT_S, f"{where}: 放手等了 {elapsed:.2f}s —— 上限没生效"
+    assert usable is False
+
+    acknowledged, _elapsed, _usable = outcome["gone"]
+    assert acknowledged is False, f"{where}: 连接早断了，分不清谁关的，不该报已确认"
 
 
 def test_release_touches_no_private_event_loop_state():

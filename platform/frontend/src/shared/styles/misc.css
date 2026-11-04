@@ -19,11 +19,6 @@
   gap: var(--space-2);
   margin-bottom: 6px;
 }
-.memory-topic {
-  font-size: 11px;
-  color: var(--color-fg-subtle);
-  margin-left: auto;
-}
 /* 这里原有一条同名规则，其每一条属性都被 app/globals.css 里的同选择器规则
    覆盖（globals 的 @import 在文件头，自身规则在后，等特异性下 globals 胜）。
    删掉的是死代码：留着只会让人以为改这里有效。globals 那份仍在，渲染不变。 */
@@ -312,3 +307,5 @@
   font-size: 0.7rem;
   color: var(--color-fg-subtle);
 }
+
+.not-found-page { max-width: 640px; margin: 15vh auto; padding: 24px; }

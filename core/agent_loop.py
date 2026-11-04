@@ -626,6 +626,12 @@ async def _run_loop_body(
                 },
             )
 
+        # A child can finish while the user is still talking to the scheduler.
+        # Take the completed dialogue/tool results before the next model call.
+        from core.session_inbox import wait_for_interjection
+
+        await wait_for_interjection(state)
+
         # ── (-0.5) 外部 injected_messages 注入 ────────────────────────
         # 写法：上层 / 主 harness 用 `inject_into_node` 工具往本 run 的
         # state.hook_state['injected_messages'] 追加 {content, source} 字典；
@@ -1676,6 +1682,8 @@ def _persist_messages_checkpoint(state, messages: list[LLMMessage],
         ],
     }
     tmp = path.with_suffix(path.suffix + ".tmp")
+    from core.secrets import redact
+    payload = redact(payload)
     tmp.write_text(json.dumps(payload, ensure_ascii=False),
                     encoding="utf-8")
     tmp.replace(path)
@@ -1929,8 +1937,10 @@ async def resume_loop(ctx: PausedRunContext, response_text: str,
 
     if not found:
         log.warning("resume_loop: 找不到 tool_call_id=%r 的 pending 消息", target_id)
+        # `_max_turns` 是 run_loop 里的局部名，这里从来没有它 —— 这条失败路径自 08-13 起
+        # 一走就是 NameError，「resume 失败」被一个崩溃盖住（#1254 测试里撞出来的）。
         return LoopResult(
-            max_turns=_max_turns,
+            max_turns=int(getattr(ctx.harness, "max_turns", 0) or 0),
             final_text="(resume 失败：找不到 pending tool_call)",
             turns=0,
             messages=ctx.messages,

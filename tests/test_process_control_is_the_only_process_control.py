@@ -21,6 +21,15 @@ SCAN = [
 ]
 THE_ONLY_ANSWER = ROOT / "shared" / "lib" / "process_control.py"
 
+#: 只在 Linux 上、跑在**发行版自己的** python 里的启动器：只能用标准库，import 不了
+#: process_control（它要 psutil）。这道闸防的是 Windows 上的静默失效；登记在这里的文件
+#: 必须自己拒绝在 Windows 上运行（下面那条测试机械地核），那种失效就不存在。登记要带理由。
+LINUX_ONLY_LAUNCHERS = {
+    ROOT / "core" / "isolation" / "_wsl_entry.py":
+        "WSL 执行目标在发行版里的那一层：由 wsl.exe 用发行版的 python3 起，标准库之外什么都没有；"
+        "它自己 setsid 载荷、按进程组与环境标记收尾（RFC_WINDOWS_EXECUTION_TARGETS D9）",
+}
+
 #: `os.<name>(...)` 这些调用只许出现在 process_control 里。
 OS_CALLS = {"killpg", "setsid", "getpgid", "fork", "kill", "getppid"}
 #: `signal.SIGKILL` 在 Windows 上不存在。
@@ -67,8 +76,23 @@ def test_the_scanner_sees_the_one_place_that_may_touch_processes():
     assert _uses(THE_ONLY_ANSWER), "扫描器认不出 process_control.py 里的 os.killpg / setsid，守卫会静默归零"
 
 
+def test_linux_only_launchers_really_refuse_windows():
+    for path, reason in LINUX_ONLY_LAUNCHERS.items():
+        assert reason.strip(), f"{path} 登记了却没写理由"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        refuses = any(
+            isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Attribute) and node.left.attr == "platform"
+            and any(isinstance(c, ast.Constant) and c.value == "win32" for c in node.comparators)
+            for node in ast.walk(tree)
+        )
+        assert refuses, f"{path} 登记成「只在 Linux 上跑」，但文件里没有拒绝 win32 的判断"
+
+
 def test_no_runtime_code_touches_process_groups_outside_process_control():
-    offenders = [hit for path in _runtime_files() if path != THE_ONLY_ANSWER for hit in _uses(path)]
+    offenders = [hit for path in _runtime_files()
+                 if path != THE_ONLY_ANSWER and path not in LINUX_ONLY_LAUNCHERS
+                 for hit in _uses(path)]
     assert not offenders, (
         "进程组 / 信号 / 父进程只能经 shared.lib.process_control"
         "（Group / group_spawn_kwargs / detached_spawn_kwargs / alive / terminate / kill / "

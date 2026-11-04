@@ -237,8 +237,8 @@ async def _ask(request: dict[str, Any], *,
     request = {**request, "projects_home": str(the_projects_home())}
     root = Path(settings.harness_root).expanduser().resolve()
     if not (root / "core" / "api.py").is_file():
-        raise HarnessKBError("HARNESS_ROOT 不是一份当前的 harness checkout",
-                             en="HARNESS_ROOT is not a valid current harness checkout")
+        raise HarnessKBError("HARNESS_ROOT 指向的目录无效",
+                             en="HARNESS_ROOT does not point to a valid harness checkout")
     return await harness_bridge_once.ask_once(
         request,
         expect=expect,

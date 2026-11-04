@@ -2,6 +2,7 @@ import { say, type Language } from "../../../shared/i18n/language.ts";
 import type { ExecutionEvent } from "./execution-event.ts";
 import { belongsToRun } from "./run-scope.ts";
 import { retryProgressLabel } from "./failure-surface.ts";
+import { nodeDisplayName } from "./display-names.ts";
 import { readPayload, type EventPayloadView } from "./payload-view.ts";
 import {
   isVisibleResearchTool,
@@ -88,7 +89,7 @@ export type RunActivitySaid = {
   /** 这句话属于哪一次提交（"这一趟"）。归属，不是应答关系。 */
   submissionId?: string;
   /** 送达回执（机械事实，不是发言）。deferred = 没有活跃子节点，下一轮才读。 */
-  receipt?: { deferred: boolean };
+  receipt?: { deferred: boolean; stage?: "queued" | "read" };
 };
 
 export type RunActivityWorkspaceChange = {
@@ -132,6 +133,13 @@ export type RunActivityDetail = {
   /** 调度器对用户说的话（派发节点前的那一句）。 */
   said: RunActivitySaid[];
   primaryFailure?: RunActivityTool["error"];
+  /**
+   * 自主 / 连续档在这台电脑上打了折扣：后端在执行开始前记一条 `autonomy.downgraded`
+   * （缺沙箱这类边界，这次执行结束后不会自动开始下一次）或 `autonomy.weak_walls`
+   * （放行，但执行失控时没人踩刹车）。`reason` 是后端按发起人的界面语言写好的那句话。
+   * 只取最新的一条。
+   */
+  autonomyNotice?: { kind: "downgraded" | "weak_walls"; reason: string };
   /**
    * agent 每一轮写的人话，按 stepId 归到它所属的那一组。
    *
@@ -222,7 +230,7 @@ function structuredOutput(value: string, lang: Language) {
   if (summary !== undefined) return { text: String(summary), format: "text" as const };
   if (typeof candidate.count === "number") {
     return {
-      text: say({ zh: "记下了 {count} 条结果", en: "{count} recorded results" }, lang, { count: candidate.count }),
+      text: say({ zh: "共 {count} 条结果", en: "{count} results" }, lang, { count: candidate.count }),
       format: "text" as const,
     };
   }
@@ -270,6 +278,16 @@ function warningCodes(events: readonly ExecutionEvent[]) {
   return codes;
 }
 
+function latestAutonomyNotice(events: readonly ExecutionEvent[]): RunActivityDetail["autonomyNotice"] {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.kind !== "autonomy.downgraded" && event.kind !== "autonomy.weak_walls") continue;
+    const reason = typeof event.payload.reason === "string" ? event.payload.reason.trim() : "";
+    if (reason) return { kind: event.kind === "autonomy.downgraded" ? "downgraded" : "weak_walls", reason };
+  }
+  return undefined;
+}
+
 function toolStatus(events: readonly ExecutionEvent[], parentInterrupted: boolean): RunActivityTool["status"] {
   const latest = events.at(-1)?.kind;
   if (latest === "tool.failed") return "failed";
@@ -293,12 +311,13 @@ function currentRunStatus(events: readonly ExecutionEvent[], terminal: boolean, 
       }
       continue;
     }
-    if (event.kind === "tool.completed") return say({ zh: "正在看工具结果", en: "Analyzing tool results" }, lang);
-    if (event.kind === "tool.failed") return say({ zh: "有个研究工具要人看一下", en: "A research tool needs attention" }, lang);
+    if (event.kind === "tool.completed") return say({ zh: "正在分析工具结果", en: "Analyzing tool results" }, lang);
+    // 执行还没结束：这次失败交给助手下一步处理，用户此刻不需要做什么。
+    if (event.kind === "tool.failed") return say({ zh: "工具调用出错，正在处理", en: "A tool call failed; handling it" }, lang);
     if (event.kind === "run.recovering" && event.payload.reason === "void_turn") {
       const attempt = typeof event.payload.attempt === "number" ? event.payload.attempt : undefined;
       const maximum = typeof event.payload.maxAttempts === "number" ? event.payload.maxAttempts : undefined;
-      return `${say({ zh: "模型没给出可用的回复", en: "The model returned no usable response" }, lang)} · ${retryProgressLabel({ attempt, maxAttempts: maximum }, lang)}`;
+      return `${say({ zh: "模型没有返回有效回复", en: "The model returned no usable response" }, lang)} · ${retryProgressLabel({ attempt, maxAttempts: maximum }, lang)}`;
     }
     if (event.kind === "run.retrying") {
       // 事件里本来就带着 attempt / maxAttempts（后端 execution_ingest 建这条
@@ -306,16 +325,18 @@ function currentRunStatus(events: readonly ExecutionEvent[], terminal: boolean, 
       // "第几次、还剩几次"。
       const attempt = typeof event.payload.attempt === "number" ? event.payload.attempt : undefined;
       const maximum = typeof event.payload.maxAttempts === "number" ? event.payload.maxAttempts : undefined;
-      return `${say({ zh: "模型请求失败了", en: "The model request failed" }, lang)} · ${retryProgressLabel({ attempt, maxAttempts: maximum }, lang)}`;
+      return `${say({ zh: "模型请求失败", en: "The model request failed" }, lang)} · ${retryProgressLabel({ attempt, maxAttempts: maximum }, lang)}`;
     }
     // v2.1：节点报的阻塞是一等信号（节点只报事实+证据+需求，调度器决定怎么解）。
     // 此前平台不投影它，用户只能看到 run 莫名 incomplete，毫无线索。
     if (event.kind === "run.blocked") {
-      const node = typeof event.payload.reportingNode === "string" ? event.payload.reportingNode : "";
+      const node = typeof event.payload.reportingNode === "string" && event.payload.reportingNode
+        ? nodeDisplayName(event.payload.reportingNode, lang)
+        : "";
       const summary = typeof event.payload.summary === "string" ? event.payload.summary : "";
       const head = node
-        ? say({ zh: "{node} 卡住了", en: "{node} is blocked" }, lang, { node })
-        : say({ zh: "有一步卡住了", en: "A step is blocked" }, lang);
+        ? say({ zh: "{node} 无法继续", en: "{node} is blocked" }, lang, { node })
+        : say({ zh: "有一步无法继续", en: "A step is blocked" }, lang);
       return summary ? `${head} · ${summary.slice(0, 120)}` : head;
     }
     // 停靠中：worker 活着、只是按退避间隔在等下一次复查（RFC D10）。
@@ -331,36 +352,36 @@ function currentRunStatus(events: readonly ExecutionEvent[], terminal: boolean, 
       const why = typeof event.payload.why === "string" ? event.payload.why : "";
       const minutes = until > 0 ? Math.round((until * 1000 - Date.now()) / 60000) : 0;
       const when = minutes > 60
-        ? say({ zh: "约 {hours} 小时后复查", en: "rechecks in about {hours}h" }, lang, { hours: Math.round(minutes / 60) })
+        ? say({ zh: "约 {hours} 小时后再检查", en: "rechecks in about {hours}h" }, lang, { hours: Math.round(minutes / 60) })
         : minutes > 0
-          ? say({ zh: "约 {minutes} 分钟后复查", en: "rechecks in about {minutes} min" }, lang, { minutes })
-          : say({ zh: "即将复查", en: "rechecking shortly" }, lang);
+          ? say({ zh: "约 {minutes} 分钟后再检查", en: "rechecks in about {minutes} min" }, lang, { minutes })
+          : say({ zh: "即将再检查", en: "rechecking shortly" }, lang);
       // 一句话就能叫醒它 —— 这是 D12 已经落地的能力，用户该知道自己有这个选项。
-      const parked = say({ zh: "停靠中", en: "Parked" }, lang);
-      const wake = say({ zh: "发一句话可立即唤醒", en: "send a message to wake it now" }, lang);
+      const parked = say({ zh: "等待中", en: "Waiting" }, lang);
+      const wake = say({ zh: "发送消息可立即继续", en: "send a message to continue now" }, lang);
       return `${parked} · ${when}${why ? `（${why}）` : ""} · ${wake}`;
     }
-    if (event.kind === "decision.required" || event.kind === "run.paused") return say({ zh: "在等你回话", en: "Waiting for your input" }, lang);
-    if (event.kind === "permission.required") return say({ zh: "在等授权", en: "Waiting for permission" }, lang);
-    if (event.kind === "run.status_unknown" || event.kind === "connection.lost") return say({ zh: "执行状态不明", en: "Execution status is unknown" }, lang);
+    if (event.kind === "decision.required" || event.kind === "run.paused") return say({ zh: "等待你的回复", en: "Waiting for your input" }, lang);
+    if (event.kind === "permission.required") return say({ zh: "等待你授权", en: "Waiting for permission" }, lang);
+    if (event.kind === "run.status_unknown" || event.kind === "connection.lost") return say({ zh: "无法确认执行状态", en: "Execution status is unknown" }, lang);
     if (event.kind === "session.message" && payload.role === "assistant") return say({ zh: "正在生成回复", en: "Generating the response" }, lang);
     if (event.kind === "usage.updated") return say({ zh: "正在生成回复", en: "Generating the response" }, lang);
     if (event.kind === "step.started" && event.source.rawEvent === "subagent_call_start") {
       return payload.title
-        ? say({ zh: "正在跑 {title}", en: "Running {title}" }, lang, { title: payload.title })
-        : say({ zh: "正在跑一步研究", en: "Running a research step" }, lang);
+        ? say({ zh: "正在运行 {title}", en: "Running {title}" }, lang, { title: payload.title })
+        : say({ zh: "正在执行研究步骤", en: "Running a research step" }, lang);
     }
     if (event.kind === "step.started") return payload.title
       ? say({ zh: "正在开始 {title}", en: "Starting {title}" }, lang, { title: payload.title })
-      : say({ zh: "正在开始一步记录在案的动作", en: "Starting a recorded step" }, lang);
+      : say({ zh: "正在开始下一步", en: "Starting the next step" }, lang);
     if (event.kind === "run.started") {
       // 传输细节不是研究状态：模型徽标在 composer 上一直可见，状态行
       // 统一用 thinking（wangd 2026-08-18）。
-      return say({ zh: "在想", en: "Thinking" }, lang);
+      return say({ zh: "正在思考", en: "Thinking" }, lang);
     }
-    if (event.kind === "run.queued") return say({ zh: "在等一个执行位", en: "Waiting for an execution slot" }, lang);
+    if (event.kind === "run.queued") return say({ zh: "正在排队", en: "Waiting for an execution slot" }, lang);
   }
-  return say({ zh: "正在启动项目助手", en: "Starting the Project assistant" }, lang);
+  return say({ zh: "正在启动助手", en: "Starting the assistant" }, lang);
 }
 
 export function projectRunActivity(
@@ -424,12 +445,12 @@ export function projectRunActivity(
       [...codes].some((code) => TRUNCATION_CODES.has(code))
       || containsMarker(start.toolArguments, "[TRUNCATED]")
       || containsMarker(end.summary, "[TRUNCATED]")
-    ) notices.push(say({ zh: "原始载荷在入库时被截断", en: "Source payload truncated during ingest" }, lang));
+    ) notices.push(say({ zh: "原始内容过长，保存时已截断", en: "Source content was truncated when saved" }, lang));
     if (
       [...codes].some((code) => REDACTION_CODES.has(code))
       || containsMarker(start.toolArguments, "[REDACTED]")
-    ) notices.push(say({ zh: "敏感值已打码", en: "Sensitive values redacted" }, lang));
-    if (input?.clipped || code?.clipped || output?.clipped) notices.push(say({ zh: "预览为显示做了截断", en: "Preview shortened for display" }, lang));
+    ) notices.push(say({ zh: "敏感信息已隐藏", en: "Sensitive values redacted" }, lang));
+    if (input?.clipped || code?.clipped || output?.clipped) notices.push(say({ zh: "预览内容已截断", en: "Preview shortened for display" }, lang));
 
     return {
       id,
@@ -621,7 +642,7 @@ export function projectRunActivity(
         title: dispatchedTitle ?? (child || allTools.length > 0
           ? startPayload?.title
           : status === "failed"
-            ? say({ zh: "这一步没做成", en: "Research step failed" }, lang)
+            ? say({ zh: "这一步失败", en: "Research step failed" }, lang)
             : undefined),
         summary: endPayload?.summary,
         status,
@@ -803,22 +824,15 @@ export function projectRunActivity(
     .map((event): RunActivitySaid => {
       const raw = (event.payload ?? {}) as Record<string, unknown>;
       if (event.kind === "interject.queued") {
-        // 平台说「我收下了」。**留痕**而不只是流内提示：断流、刷新、换设备
-        // 之后，"人说了什么"和"平台答了什么"都还在（RFC P1）。
-        //
-        // 与下面的 `interrupt.acknowledged`（worker 说「我读到了」）是两件事：
-        // 收下 ≠ 被读到。合并的话，"入队黑洞"就再也看不出来了。
-        const occupied = raw.occupancy === "occupied";
+        // Delivery remains auditable, but it is message status, not an assistant
+        // reply. This also hides receipts in historical conversations.
         const live = raw.delivery === "delivered_to_live_runtime";
         return {
           id: event.id,
           runId: event.runId,
           sequence: event.sequence,
-          text: live
-            ? say({ zh: "已收下 —— 它会在下一个边界读到这句话", en: "Received — it will be read at the next boundary" }, lang)
-            : occupied
-              ? say({ zh: "已收下并排队 —— 上一轮还占着这个会话", en: "Received and queued — the previous turn still holds this Session" }, lang)
-              : say({ zh: "已收下 —— 会话续跑时会立即处理", en: "Received — it will be handled as soon as the Session resumes" }, lang),
+          text: "",
+          receipt: { deferred: !live, stage: "queued" },
           aboutNodeType: "",
           repliesToMessageId: String(raw.messageId ?? ""),
           submissionId: String(raw.submissionId ?? "") || undefined,
@@ -834,7 +848,7 @@ export function projectRunActivity(
           aboutNodeType: "",
           repliesToMessageId: String(raw.repliesToMessageId ?? ""),
           submissionId: String(raw.submissionId ?? "") || undefined,
-          receipt: { deferred: raw.deferred === true },
+          receipt: { deferred: raw.deferred === true, stage: "read" },
         };
       }
       return {
@@ -861,5 +875,6 @@ export function projectRunActivity(
     artifacts,
     workspaceChanges,
     primaryFailure,
+    autonomyNotice: latestAutonomyNotice(ordered),
   };
 }

@@ -63,3 +63,7 @@ backend/data/project_worktrees/
 
 # Composite local development checkout (the Harness is its own Git repository)
 harness-framework/
+
+# Local browser sessions contain private cookies.
+**/cnki/browser/
+**/cnki/worker.lock

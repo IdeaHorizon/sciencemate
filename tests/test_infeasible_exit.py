@@ -110,7 +110,9 @@ async def test_infeasible_forces_redirect_over_proceed(tmp_path: Path):
         "present_decision_package", state,
         source_node_type="experiment", producing_run_id="r_d2",
         artifact_ids_produced=[log["id"]],
-        review_critique_artifact_id=art["id"])
+        review_critique_artifact_id=art["id"],
+        human_decision_reason="需要负责人确认本次研究取舍。",
+    )
     assert res["status"] == "pause"
     md = res["pause_event"]["metadata"]
     assert md["recommended_action"] == "redirect_upstream"
@@ -131,7 +133,9 @@ async def test_infeasible_fires_even_when_review_failed(tmp_path: Path):
         "present_decision_package", state,
         source_node_type="experiment", producing_run_id="r_d3",
         artifact_ids_produced=[log["id"]],
-        review_failed_reason="reviewer JSON 崩了")
+        review_failed_reason="reviewer JSON 崩了",
+        human_decision_reason="需要负责人确认本次研究取舍。",
+    )
     md = res["pause_event"]["metadata"]
     assert md["recommended_action"] == "redirect_upstream"
     assert md["recommended_target_node"] == "hypothesis"

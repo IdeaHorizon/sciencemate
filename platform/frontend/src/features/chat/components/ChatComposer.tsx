@@ -28,7 +28,7 @@ export function ChatComposer({
   setDraft: (v: string) => void;
   onSend: () => void;
   sending?: boolean;
-  placeholder?: string;
+  placeholder: string;
   disabled?: boolean;
   context?: React.ReactNode;
   disabledReason?: string;
@@ -97,7 +97,7 @@ export function ChatComposer({
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
-        placeholder={placeholder ?? t({ zh: "问点什么…", en: "Ask anything…" })}
+        placeholder={placeholder}
       />
       {action === "stop" ? (
         <button
@@ -105,8 +105,8 @@ export function ChatComposer({
           className="composer-stop"
           disabled={stopping}
           onClick={onStop}
-          aria-label={t({ zh: "停止当前轮", en: "Stop the current turn" })}
-          title={t({ zh: "停止当前轮：立即切断当前生成（约 1–2 秒内停）", en: "Stop this turn: cuts off the current generation, usually within 1–2 seconds" })}
+          aria-label={t({ zh: "停止执行", en: "Stop the run" })}
+          title={t({ zh: "停止当前执行，通常 1–2 秒内生效", en: "Stop the current run; usually takes effect within 1–2 seconds" })}
         >
           {stopping ? <Loader2 className="spin" size={16} /> : <Square size={14} />}
         </button>
@@ -116,7 +116,7 @@ export function ChatComposer({
           disabled={sendDisabled}
           onClick={onSend}
           aria-label={t({ zh: "发送", en: "Send" })}
-          title={canInterject && sending ? t({ zh: "它正在跑 —— 这句话会投给正在干活的调度器", en: "It is running — this message goes to the orchestrator that is working right now" }) : t({ zh: "发送", en: "Send" })}
+          title={canInterject && sending ? t({ zh: "助手正在执行，这条消息会直接发给它", en: "The assistant is working; this message goes straight to it" }) : t({ zh: "发送", en: "Send" })}
         >
           {sending && !canInterject ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
         </button>

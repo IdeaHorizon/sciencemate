@@ -19,8 +19,21 @@ export const PROVIDERS: ProviderPreset[] = [
   { id: "deepseek", label: { zh: "DeepSeek", en: "DeepSeek" }, base_url: "https://api.deepseek.com", model: "deepseek-chat" },
   { id: "openai", label: { zh: "OpenAI", en: "OpenAI" }, base_url: "https://api.openai.com/v1", model: "gpt-4o" },
   { id: "anthropic", label: { zh: "Anthropic", en: "Anthropic" }, base_url: "https://api.anthropic.com", model: "claude-sonnet-4-5" },
-  { id: "custom", label: { zh: "其他（兼容 OpenAI 的地址）", en: "Other (OpenAI-compatible endpoint)" }, base_url: "", model: "" },
+  { id: "custom", label: { zh: "其他（兼容 OpenAI 的服务）", en: "Other (OpenAI-compatible endpoint)" }, base_url: "", model: "" },
 ];
+
+/**
+ * 这条连接可以不填 API 密钥吗 —— 和设置页同一个判据（`credentialIsOptional`：端点是你自己填的）。
+ *
+ * 设置页里官方地址留空，所以「填了地址」就等于「用自己的服务」。引导里三家预设把**官方**地址
+ * 预先填好了，没有密钥连不上；选「其他（兼容 OpenAI 的服务）」，或者把预设的地址改成了自己的，
+ * 才是自建端点 —— 那种通常不鉴权（vLLM、Ollama……），密钥可以留空，保存时会实测一次。
+ * 以前这里一律要密钥，于是一条在设置页能存、能用的自建连接，在引导里过不去（11-04 实测）。
+ */
+export function keyIsOptional(draft: { provider: ProviderPreset; baseUrl: string }): boolean {
+  const address = draft.baseUrl.trim();
+  return address !== "" && (draft.provider.id === "custom" || address !== draft.provider.base_url);
+}
 
 /** 存进库的 provider 名字：预设里的 `custom` 在后端叫 openai_compatible。 */
 export function providerForApi(id: string): string {
@@ -38,12 +51,12 @@ export function providerForApi(id: string): string {
 export function keyStorageLine(storage: string): Phrase {
   switch (storage) {
     case "keychain":
-      return { zh: "key 加密后存在这台机器上，主密钥交给系统钥匙串保管，不会发到别处。", en: "The key is encrypted on this machine, its master key held in the system keychain, and never sent anywhere else." };
+      return { zh: "密钥加密保存在这台电脑上，由系统钥匙串保护。", en: "Your key is encrypted on this computer and protected by the system keychain." };
     case "file":
-      return { zh: "key 加密后存在这台机器上，主密钥放在数据目录里一个仅本人可读的文件中（这台机器没有可用的钥匙串），不会发到别处。", en: "The key is encrypted on this machine, its master key in an owner-only file under the data directory (no keychain is available here), and never sent anywhere else." };
+      return { zh: "密钥加密保存在这台电脑上（系统钥匙串不可用，加密用的主密钥存放在应用数据目录中）。", en: "Your key is encrypted on this computer (no system keychain is available, so the master key is kept in the app's data folder)." };
     case "operator":
-      return { zh: "key 加密后存在服务器上，主密钥由这台服务器的管理员配置。", en: "The key is encrypted on the server; its master key is configured by this server's administrator." };
+      return { zh: "密钥加密保存在服务器上，由服务器管理员管理。", en: "Your key is encrypted on the server and managed by its administrator." };
     default:
-      return { zh: "key 只存在这台机器上，不会发到别处。", en: "The key stays on this machine and is never sent anywhere else." };
+      return { zh: "密钥只保存在这台电脑上。", en: "The key is stored on this computer only." };
   }
 }

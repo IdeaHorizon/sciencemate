@@ -15,6 +15,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
+# 讲的是续轮行为，前提是研究已经开始（见 conftest.research_under_way）。
+pytestmark = pytest.mark.usefixtures("research_under_way")
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.artifact_provenance import forwarded, produced

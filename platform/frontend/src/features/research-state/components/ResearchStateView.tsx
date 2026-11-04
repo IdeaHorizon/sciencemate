@@ -8,13 +8,15 @@ import { Badge, Card, Empty, Skeleton } from "@/shared/ui";
 
 import { useProjectTruthSession } from "../hooks/useProjectTruthSession";
 import {
+  hypothesisStatusLabel,
   parseResearchState,
   researchStateHead,
   statusTone,
   unresolvedHypotheses,
+  verdictLabel,
   verdictTone,
 } from "../lib/research-state";
-import { useT } from "@/shared/i18n";
+import { useLanguage, useT } from "@/shared/i18n";
 
 /**
  * Research State —— Analysis 的裁决总账（v2.1 P3c）。
@@ -28,6 +30,7 @@ import { useT } from "@/shared/i18n";
  */
 export function ResearchStateView({ projectId }: { projectId: string }) {
   const t = useT();
+  const lang = useLanguage();
   // checkpoint 在 session 分支上；不带 sessionId 读到的是 main（publish 前是空的）
   const truth = useProjectTruthSession(projectId);
   const records = useQuery({
@@ -41,8 +44,8 @@ export function ResearchStateView({ projectId }: { projectId: string }) {
   if (records.error) {
     return (
       <Empty
-        title={t({ zh: "读不到研究进展", en: "Research state is unavailable" })}
-        hint={t({ zh: "读不到这个项目的仓库。", en: "The Project repository could not be read." })}
+        title={t({ zh: "无法加载研究进展", en: "Research state is unavailable" })}
+        hint={t({ zh: "请稍后重试。", en: "Please try again later." })}
       />
     );
   }
@@ -51,7 +54,7 @@ export function ResearchStateView({ projectId }: { projectId: string }) {
     return (
       <Empty
         title={t({ zh: "还没有研究进展", en: "No research state yet" })}
-        hint={t({ zh: "预注册冻结之后，分析会写出 research_state。开一个研究会话来生成它。", en: "Analysis writes research_state once the pre-registration is frozen. Start a research session to create it." })}
+        hint={t({ zh: "预注册定稿后，研究进展会显示在这里。开始一个研究会话即可生成。", en: "Research state appears here once the pre-registration is finalized. Start a research session to create it." })}
       />
     );
   }
@@ -60,8 +63,8 @@ export function ResearchStateView({ projectId }: { projectId: string }) {
   if (!state) {
     return (
       <Empty
-        title={t({ zh: "研究进展解析不出来", en: "Research state could not be parsed" })}
-        hint={t({ zh: "{path} 里没有预期的元数据。", en: "{path} does not carry the expected metadata." }, { path: head.path })}
+        title={t({ zh: "无法读取研究进展", en: "Research state could not be read" })}
+        hint={t({ zh: "{path} 中缺少研究进展数据。", en: "{path} is missing research state data." }, { path: head.path })}
       />
     );
   }
@@ -73,7 +76,7 @@ export function ResearchStateView({ projectId }: { projectId: string }) {
       <Card>
         <Card.Body>
           <div className="rs-head">
-            <Badge size="md" kind={verdictTone(state.verdict)}>{state.verdict || "—"}</Badge>
+            <Badge size="md" kind={verdictTone(state.verdict)}>{state.verdict ? verdictLabel(state.verdict, lang) : "—"}</Badge>
             <span className="rs-version">
               v{state.version}
               {state.parentVersion !== null ? ` ← v${state.parentVersion}` : t({ zh: " （首版）", en: " (first version)" })}
@@ -81,13 +84,16 @@ export function ResearchStateView({ projectId }: { projectId: string }) {
           </div>
           <p className="rs-summary">
             {unresolved.length === 0
-              ? t({ zh: "所有假说均已裁决。", en: "Every hypothesis has been adjudicated." })
-              : t({ zh: `${unresolved.length} 条假说尚未裁决：${unresolved.map((h) => h.id).join(", ")}`, en: `${unresolved.length} hypotheses are still open: ${unresolved.map((h) => h.id).join(", ")}` })}
-            {state.planVersion ? ` · plan: ${state.planVersion}` : ""}
+              ? t({ zh: "所有假设都已判定。", en: "All hypotheses are resolved." })
+              : t({ zh: "{n} 个假设尚待判定：{ids}", en: "{n} hypotheses are still open: {ids}" }, {
+                n: unresolved.length,
+                ids: unresolved.map((h) => h.id).join(lang === "zh" ? "、" : ", "),
+              })}
+            {state.planVersion ? t({ zh: " · 计划版本：{v}", en: " · plan: {v}" }, { v: state.planVersion }) : ""}
           </p>
           {state.changeReason && (
             <p className="rs-change">
-              <strong>{t({ zh: "相对上一版：", en: "Since the last version:" })}</strong> {state.changeReason}
+              <strong>{t({ zh: "本版改动原因：", en: "Reason for this version:" })}</strong> {state.changeReason}
             </p>
           )}
         </Card.Body>
@@ -95,7 +101,7 @@ export function ResearchStateView({ projectId }: { projectId: string }) {
 
       <Card>
         <Card.Body>
-          <h2 className="rs-section">{t({ zh: "假说", en: "Hypotheses" })}</h2>
+          <h2 className="rs-section">{t({ zh: "假设", en: "Hypotheses" })}</h2>
           <div className="rs-table-scroll">
             <table className="rs-table">
               <thead>
@@ -105,7 +111,7 @@ export function ResearchStateView({ projectId }: { projectId: string }) {
                 {state.hypotheses.map((row) => (
                   <tr key={row.id}>
                     <td><code>{row.id}</code></td>
-                    <td><Badge size="sm" kind={statusTone(row.status)}>{row.status}</Badge></td>
+                    <td><Badge size="sm" kind={statusTone(row.status)}>{hypothesisStatusLabel(row.status, lang)}</Badge></td>
                     <td>
                       {row.evidence.length === 0
                         ? <span className="rs-dim">—</span>
@@ -127,7 +133,7 @@ export function ResearchStateView({ projectId }: { projectId: string }) {
             <ul className="rs-list">
               {state.completedExperiments.map((row) => (
                 <li key={row.ref}>
-                  <code>{row.ref}</code> — credibility: {row.credibility}
+                  <code>{row.ref}</code>{t({ zh: "：可信度 {v}", en: " — credibility: {v}" }, { v: row.credibility })}
                 </li>
               ))}
             </ul>

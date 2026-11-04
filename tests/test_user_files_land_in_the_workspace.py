@@ -375,13 +375,19 @@ def _upload_endpoints() -> list[tuple[str, str]]:
     return found
 
 
-def test_there_is_exactly_one_upload_entry_point():
+def test_material_uploads_and_skill_imports_have_explicit_entry_points():
     endpoints = _upload_endpoints()
+    # 用户材料仍只走会话上传；skill 包是用户级配置，必须进入不可变技能库，
+    # 不能作为研究材料注入项目。明确枚举三处处理函数，新增其他 UploadFile 路径
+    # 仍会失败；技能库的真实落盘、权限与节点分配由 test_skills_api.py 验证。
     assert endpoints == [
         ("platform/backend/app/api/v1/sessions.py", "add_file_to_session"),
+        ("platform/backend/app/api/v1/skills.py", "_import"),
+        ("platform/backend/app/api/v1/skills.py", "import_skill"),
+        ("platform/backend/app/api/v1/skills.py", "import_for_project"),
     ], (
-        "上传只能有一条落盘路径。老实现有两条（会话附件 + 项目材料），落在两个"
-        f"地方、各覆盖一半场景，用户在会话里传的文件谁都读不到。现在有：{endpoints}"
+        "用户材料只能走会话上传；技能导入必须走技能库。"
+        f"出现了未约定的上传路径：{endpoints}"
     )
 
 

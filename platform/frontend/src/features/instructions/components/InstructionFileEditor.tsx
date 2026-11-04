@@ -48,10 +48,10 @@ export function InstructionFileEditor({
     onSuccess: (saved) => {
       setDraft(saved.content);
       void queryClient.invalidateQueries({ queryKey });
-      pushSuccess(t({ zh: "指令已保存", en: "Instructions saved" }), t({ zh: "下一个新会话会看到它", en: "The next new session will see it" }));
+      pushSuccess(t({ zh: "从下一个新会话开始生效", en: "Takes effect from the next new session" }), t({ zh: "已保存", en: "Saved" }));
     },
     onError: (error) =>
-      pushError(error instanceof Error ? error.message : t({ zh: "没能保存这份指令", en: "This instruction could not be saved" }), t({ zh: "未保存", en: "Unsaved" })),
+      pushError(error instanceof Error ? error.message : t({ zh: "请稍后重试。", en: "Please try again later." }), t({ zh: "保存失败", en: "Save failed" })),
   });
 
   const dirty = draft !== null && file.data !== undefined && draft !== file.data.content;
@@ -65,7 +65,7 @@ export function InstructionFileEditor({
         </div>
       </div>
       {file.isLoading && <Skeleton height={160} />}
-      {file.isError && <p className="instruction-file-error">{t({ zh: "读不到这份指令。", en: "This instruction could not be read." })}</p>}
+      {file.isError && <p className="instruction-file-error">{t({ zh: "无法读取指令文件。", en: "Could not read the instruction file." })}</p>}
       {file.data && (
         <>
           <textarea
@@ -78,7 +78,7 @@ export function InstructionFileEditor({
             aria-label={title}
           />
           <div className="instruction-file-footer">
-            <code title={t({ zh: "agent 读的就是这个文件；用别的编辑器改它也算数", en: "The agent reads this very file; editing it elsewhere counts too" })}>{file.data.path}</code>
+            <code title={t({ zh: "也可以直接用其他编辑器修改这个文件。", en: "You can also edit this file in another editor." })}>{file.data.path}</code>
             {editable && (
               <button
                 type="button"
@@ -99,8 +99,8 @@ export function PersonalInstructionsEditor() {
   const t = useT();
   return (
     <InstructionFileEditor
-      title={t({ zh: "PROFILE.md · 你自己的长期指令", en: "PROFILE.md · your standing instructions" })}
-      description={t({ zh: "跨课题都生效的偏好与要求。新会话开跑时冻结一份，之后再改不影响已经在跑的。", en: "Preferences and requirements that apply across projects. A copy is frozen when a new session starts; later edits do not affect sessions already running." })}
+      title={t({ zh: "长期指令（PROFILE.md）", en: "Standing instructions (PROFILE.md)" })}
+      description={t({ zh: "在所有项目里都生效。修改后从下一个新会话开始生效。", en: "Applies across all projects. Changes take effect from the next new session." })}
       queryKey={["instructions", "personal"]}
       read={instructionsClient.readPersonal}
       write={instructionsClient.writePersonal}
@@ -115,8 +115,8 @@ export function ProjectInstructionsEditor({ projectId, editable = true }: {
   const t = useT();
   return (
     <InstructionFileEditor
-      title={t({ zh: "PROJECT.md · 这个课题的指令", en: "PROJECT.md · instructions for this project" })}
-      description={t({ zh: "只在这个课题里生效。新会话开跑时冻结一份。", en: "Applies inside this project only. A copy is frozen when a new session starts." })}
+      title={t({ zh: "项目指令（PROJECT.md）", en: "Project instructions (PROJECT.md)" })}
+      description={t({ zh: "只在本项目中生效，从下一个新会话开始生效。", en: "Applies in this project only, from the next new session." })}
       queryKey={["instructions", "project", projectId]}
       read={() => instructionsClient.readProject(projectId)}
       write={(content) => instructionsClient.writeProject(projectId, content)}

@@ -99,19 +99,22 @@ def test_auto_without_a_candidate_stops_before_rendering_or_approval(tmp_path, m
     assert result["side_effects"] == "none"
 
 
-def test_local_gpu_error_does_not_send_model_to_a_rejected_remote_submit(tmp_path, monkeypatch):
-    monkeypatch.setattr(rm, "_submission_static_validity_block", lambda *_a: None)
-    state = State.new("experiment", tmp_path)
-    result = asyncio.run(rm._submit_job(state, command="true", scheduler="local", gpus=1, dry_run=True))
-    assert result["error_code"] == "local_gpu_execution_unsupported"
-    assert result["side_effects"] == "none"
-    actions = " ".join(result["next_actions"])
-    assert "改用有 GPU 的调度器" not in actions
-    assert "真实提交" in actions
+@pytest.mark.parametrize("scheduler", ["local", "auto"])
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("gpus", [1, 2])
+def test_unsupported_local_gpu_needs_a_change_before_retry_and_has_no_effects(
+    tmp_path, monkeypatch, scheduler, dry_run, gpus,
+):
+    from nodes.experiment.tools import input_admission
+    from shared.lib import dangerous_commands as danger
 
-
-def test_auto_gpu_request_never_falls_back_to_explicit_slurm(tmp_path, monkeypatch):
     _discovery(monkeypatch)
+    # 能不能分卡是 Core 的回答，与跑测试的机器无关（#893 阶段 1 起 Linux 上可分）。
+    from core import sandbox
+
+    monkeypatch.setattr(sandbox, "gpu_capability", lambda: sandbox.GpuCapability(
+        visible=4, schedulable=False, isolated=False, reason="测试：后端不给 CUDA 开口"))
+    # Even a complete Slurm client set must not turn auto into remote authority.
     monkeypatch.setattr(rm, "_detect_slurm", lambda: {
         "scheduler": "slurm", "available": True,
         "commands": {
@@ -120,17 +123,32 @@ def test_auto_gpu_request_never_falls_back_to_explicit_slurm(tmp_path, monkeypat
         },
     })
     monkeypatch.setattr(rm, "_submission_static_validity_block", lambda *_a: None)
-    monkeypatch.setattr(
-        rm, "_submit_sync", lambda *_a, **_k: pytest.fail("must not render or submit"),
-    )
+    monkeypatch.setattr(input_admission, "check_consumed_input", lambda *_a, **_k: None)
+
+    def forbidden_effect(*_args, **_kwargs):
+        pytest.fail("unsupported GPU request must not render, authorize, record intent, or submit")
+
+    for name in ("_script_for", "_persist_submission_intent", "_submit_sync"):
+        monkeypatch.setattr(rm, name, forbidden_effect)
+    for name in ("is_confirmed", "consume_confirmation", "build_pause_payload"):
+        monkeypatch.setattr(danger, name, forbidden_effect)
     state = State.new("experiment", tmp_path)
 
-    result = asyncio.run(
-        rm._submit_job(state, command="true", scheduler="auto", gpus=1, dry_run=True)
-    )
-
-    assert result["error_code"] == "local_gpu_execution_unsupported", result
-    assert result["side_effects"] == "none"
+    # Repeating the rejected request cannot create a second attempt or consume
+    # approval. A route/capability change is required instead of blind replay.
+    for _ in range(2):
+        result = asyncio.run(rm._submit_job(
+            state, command="true", scheduler=scheduler, gpus=gpus, dry_run=dry_run,
+        ))
+        assert result["error_code"] == "local_gpu_execution_unsupported", result
+        assert result["requested_gpus"] == gpus
+        assert result["side_effects"] == "none"
+        assert result["retryable"] is False
+        assert result["retryable_after_change"] is True
+        assert state.list_artifacts("external_submission_intent") == []
+        actions = " ".join(result["next_actions"])
+        assert "改用有 GPU 的调度器" not in actions
+        assert "真实提交" in actions
 
 
 @pytest.mark.parametrize("scheduler,expected", [("auto", "local"), ("slurm", "slurm"), ("pbs", "pbs")])

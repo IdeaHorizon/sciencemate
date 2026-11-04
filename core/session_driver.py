@@ -117,7 +117,8 @@ async def auto_resume_pauses() -> tuple[str, str] | None:
     开关在 loop 内的 ask_fn 里就生效了 —— 差异不在策略，在 pause 的归宿。
 
     用同一套 drive_pause_chain + auto_approve_answer，不另起一份"挑推荐项"
-    的实现；高风险由 NEVER_AUTO_APPROVE_TYPES 兜底，永远抛回给人。
+    的实现；高风险由 NEVER_AUTO_APPROVE_TYPES 兜底、「只能由人本人答」的由
+    `needs_a_person` 兜底，都抛回给人（判据合在 `must_ask_a_person` 一处）。
     """
     from core import pause_driver
     from core.executor import finalize_run
@@ -129,11 +130,11 @@ async def auto_resume_pauses() -> tuple[str, str] | None:
     pending = get_deepest_paused()
     if pending is None:
         return None
-    if pause_driver._is_high_risk(pending.pause_event):
-        return None      # 批量写入 / 外部作业提交等：永远抛回给人
+    if pause_driver.must_ask_a_person(pending.pause_event):
+        return None      # 批量写入 / 外部作业提交 / 只能由人定的：抛回给人
 
     async def _auto(pause_event) -> str:
-        if pause_driver._is_high_risk(pause_event):
+        if pause_driver.must_ask_a_person(pause_event):
             raise AdditionalPauseRequired
         return pause_driver.auto_approve_answer(pause_event)
 
@@ -212,8 +213,8 @@ def apply_autonomy(state) -> bool:
     mode = autonomy_mode(state)
     continuous = mode == "continuous"
     dc.set_preauthorized_categories(declared)
-    # 三档对「决策卡」的态度：协作每张停；自主与连续都自动放行非高危的（wangd
-    # 2026-09-09 拍板：自主档也自动放行非高危决策卡）；高危确认只有连续档绕行。
+    # 这些开关处理实际产生的 pause。日常研究决定由调度器传 action 自行推进；
+    # 必须由用户回答的问题仍保留 needs_a_person，高危确认沿用类别授权。
     pause_driver.set_auto_approve(mode != "assisted", 0 if continuous else 5)
     dc.set_bypass_mode(continuous)
     return continuous
@@ -258,6 +259,14 @@ async def run_turn(
         raise PausePendingError(
             "answer the pending pause before starting another turn")
 
+    # 「不要修改文件」属于一次请求（#973）。下一条**真实**用户消息就是一次新请求：
+    # 上一次的承诺到此为止；新请求若仍要只读，调度器在派发时再声明。框架自动续轮
+    # 与空轮重放不是新请求 —— 承诺照旧在场。
+    from core.side_effect_contract import append_statement, end_read_only
+
+    if not _chat._is_continuous_turn(user_text):
+        end_read_only(state, reason="new_user_message")
+
     try:
         loop_result = await _chat._run_one_turn_raw(
             state, harness, messages, llm, user_text)
@@ -281,6 +290,11 @@ async def run_turn(
             if get_deepest_paused() is not None:
                 # 等待期间子节点停下来问人了：以 paused 交给操作出口，归宿在那里判。
                 status, reply = "paused", ""
+        # 只读约束在场：回复末尾机械附上三类改动（你的源文件 / 节点证据 /
+        # .research 记账）。那次事故里模型自己写的是「未修改文件」—— 事实
+        # 不能只靠模型复述，这几行它写什么都改不掉。放在等完后台之后：
+        # 后台子节点的改动也要算进去。停在问题上时 reply 为空，原样返回。
+        reply = append_statement(state, reply)
         return TurnOutcome(status=status, reply=reply)
     except BaseException:
         # 异常不是"这轮没发生"：工作区可能已被改了一半。先要一个 failed
@@ -338,6 +352,16 @@ async def next_action(
     if not _chat._continuous_running(state):
         return SessionAction(kind="stop", reason="continuous_not_running")
 
+    # 0) 有没有东西可续。连续档续的是**已经开始的研究**；项目里还什么都没有时，
+    #    研究什么要等用户说 —— 这时续一轮就是替用户开题（2026-10-30 node20：
+    #    一句「你好」被续成了三小时的硬碳储钠课题）。不是停机：阶段不动，用户一给
+    #    目标、调度器一起节点，下一轮照常续。放在最前面：不该为一个不会发生的
+    #    续轮去等后台的 dreaming。判据与 `_continuous_followup` 里的是同一个函数。
+    nothing = _chat._nothing_to_continue(state)
+    if nothing:
+        return SessionAction(kind="stop", reason="no_research_yet",
+                             extra={"phase": "running", "detail": nothing})
+
     # 1) pause 归属
     from core.pause import list_paused
     from core.pause_driver import resolve_orphan_pauses, undriven_now
@@ -346,7 +370,9 @@ async def next_action(
         orphans = undriven_now()
         if not orphans:
             return SessionAction(kind="stop", reason="live_pause_pending")
-        await resolve_orphan_pauses(state, orphans)
+        if not await resolve_orphan_pauses(state, orphans):
+            # 没人管、又只能由人本人答（`needs_a_person`）—— 等人，不续轮。
+            return SessionAction(kind="stop", reason="waiting_for_a_person")
 
     # 2) check-in（本轮声明本轮生效）
     check_in, note = _chat._continuous_check_in(reply)

@@ -16,7 +16,6 @@ const INITIAL_FORM = {
   description: "",
   research_domain: "",
   operation_mode: "assisted",
-  reporting_level: "medium",
   //: 放在哪：空串 = 本机。**默认必须是空的** —— 一个只想在自己电脑上开个课题的人
   //: 不该先回答"你属于哪个组织"。
   home: "",
@@ -65,7 +64,7 @@ export default function ProjectsPage() {
       <header className="page-header">
         <div>
           <h1 className="page-title">{t({ zh: "项目", en: "Projects" })}</h1>
-          <p className="page-subtitle">{t({ zh: "每个项目是一个研究工作区：对话、证据和产出都归它。", en: "Shared research workspaces with governed conversations, evidence and outputs." })}</p>
+          <p className="page-subtitle">{t({ zh: "每个项目是一个独立的研究工作区，包含会话、证据和成果。", en: "Each project is a research workspace that holds its sessions, evidence and outputs." })}</p>
         </div>
         <Button size="sm" iconLeft={<Plus size={13} />} onClick={() => setOpen(true)}>{t({ zh: "新建项目", en: "New project" })}</Button>
       </header>
@@ -87,7 +86,7 @@ export default function ProjectsPage() {
         <div className="project-create-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
           <section className="project-create-panel" role="dialog" aria-modal="true" aria-labelledby="new-project-title">
             <header>
-              <div><span>{t({ zh: "研究工作区", en: "Research workspace" })}</span><h2 id="new-project-title">{t({ zh: "新建项目", en: "New project" })}</h2><p>{t({ zh: "先起个名字就行。研究方向和说明可以在对话里慢慢说清楚。", en: "Start with a clean shared context. You can refine the research brief in chat." })}</p></div>
+              <div><span>{t({ zh: "研究工作区", en: "Research workspace" })}</span><h2 id="new-project-title">{t({ zh: "新建项目", en: "New project" })}</h2><p>{t({ zh: "填好名称就可以创建，研究方向和背景之后也可以在会话里告诉助手。", en: "A name is all you need. You can tell the assistant about the research direction in a session later." })}</p></div>
               <button type="button" onClick={() => setOpen(false)} aria-label={t({ zh: "关闭", en: "Close" })}><X size={16} /></button>
             </header>
             <form className="project-create-form" onSubmit={submit}>
@@ -100,11 +99,10 @@ export default function ProjectsPage() {
               <details className="project-create-advanced">
                 <summary>{t({ zh: "高级", en: "Advanced" })}</summary>
                 <div className="project-create-grid">
-                  <label><span>{t({ zh: "工作档位", en: "Operation mode" })}</span><select value={form.operation_mode} onChange={(e) => setForm({ ...form, operation_mode: e.target.value })}><option value="assisted">{t({ zh: "协助 —— 每一步先问你", en: "Assisted — asks at each step" })}</option><option value="autonomous">{t({ zh: "自主 —— 只在高风险处停下来问", en: "Autonomous — stops only at high-risk points" })}</option><option value="continuous">{t({ zh: "连续 —— 不问，一直做到交付", en: "Continuous — runs hands-off to completion" })}</option></select></label>
-                  <label><span>{t({ zh: "汇报详细度", en: "Reporting detail" })}</span><select value={form.reporting_level} onChange={(e) => setForm({ ...form, reporting_level: e.target.value })}><option value="low">{t({ zh: "简要", en: "Compact" })}</option><option value="medium">{t({ zh: "标准", en: "Standard" })}</option><option value="high">{t({ zh: "详细", en: "Detailed" })}</option></select></label>
+                  <label><span>{t({ zh: "工作模式", en: "Operation mode" })}</span><select value={form.operation_mode} onChange={(e) => setForm({ ...form, operation_mode: e.target.value })}><option value="assisted">{t({ zh: "协作：每一步都先征求你的意见", en: "Assisted: asks you at each step" })}</option><option value="autonomous">{t({ zh: "自主：只在高风险操作前停下来询问", en: "Autonomous: stops only before high-risk actions" })}</option><option value="continuous">{t({ zh: "连续：不再询问，一直执行到完成", en: "Continuous: runs to completion without asking" })}</option></select></label>
                 </div>
               </details>
-              <div className="project-create-actions"><Button type="button" variant="ghost" size="sm" onClick={() => setOpen(false)}>{t({ zh: "取消", en: "Cancel" })}</Button><Button type="submit" variant="primary" size="sm" loading={createProject.isPending}>{t({ zh: "建好就进去", en: "Create and open" })}</Button></div>
+              <div className="project-create-actions"><Button type="button" variant="ghost" size="sm" onClick={() => setOpen(false)}>{t({ zh: "取消", en: "Cancel" })}</Button><Button type="submit" variant="primary" size="sm" loading={createProject.isPending}>{t({ zh: "创建并打开", en: "Create and open" })}</Button></div>
             </form>
           </section>
         </div>

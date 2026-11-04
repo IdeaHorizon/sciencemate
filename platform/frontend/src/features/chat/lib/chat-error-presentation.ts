@@ -63,37 +63,37 @@ export function presentChatFailure(raw: string, lang: Language): ChatFailurePres
 
   if (status === 409) {
     return {
-      title: say({ zh: "请求还没开始，会话已经变了", en: "This Session changed before the request could start" }, lang),
-      message: say({ zh: "没有起新的一轮；你的请求还留在对话里。", en: "No new research run was started; your request remains in the conversation." }, lang),
-      recovery: say({ zh: "刷新会话，再发一次。", en: "Refresh the Session, then send the request again." }, lang),
+      title: say({ zh: "会话状态已变化，请求未执行", en: "This Session changed before the request could start" }, lang),
+      message: say({ zh: "没有开始新的执行，你的消息仍保留在对话中。", en: "No new run was started; your message is still in the conversation." }, lang),
+      recovery: say({ zh: "请刷新页面后重新发送。", en: "Refresh the page, then send it again." }, lang),
     };
   }
   if (status === 401 || status === 403) {
     return {
-      title: say({ zh: "这个请求需要权限", en: "This request needs access" }, lang),
-      message: say({ zh: "以你现在的登录状态或项目角色，起不了这一轮。", en: "Your current sign-in or Project role cannot start this research run." }, lang),
-      recovery: say({ zh: "重新登录，或请项目负责人看一下你的权限。", en: "Sign in again or ask a Project lead to review your access." }, lang),
+      title: say({ zh: "没有权限", en: "Access required" }, lang),
+      message: say({ zh: "你当前的登录状态或项目角色无法开始执行。", en: "Your current sign-in or project role can't start a run." }, lang),
+      recovery: say({ zh: "请重新登录，或联系项目负责人检查你的权限。", en: "Sign in again or ask a Project lead to review your access." }, lang),
     };
   }
   if (status === 429) {
     return {
-      title: say({ zh: "模型这会儿忙不过来", en: "The model is temporarily at capacity" }, lang),
-      message: say({ zh: "这个请求没有产出结果。", en: "No result was produced for this request." }, lang),
-      recovery: say({ zh: "稍等一会儿再发一次。", en: "Wait a moment, then send the request again." }, lang),
+      title: say({ zh: "模型服务繁忙", en: "The model service is busy" }, lang),
+      message: say({ zh: "这次请求没有返回结果。", en: "No result was produced for this request." }, lang),
+      recovery: say({ zh: "请稍后重新发送。", en: "Wait a moment, then send the request again." }, lang),
     };
   }
   if (status !== undefined && status >= 500) {
     return {
-      title: say({ zh: "研究服务不可用", en: "The research service is unavailable" }, lang),
-      message: say({ zh: "平台没能开始或跑完这个请求。", en: "The platform could not start or finish this request." }, lang),
-      recovery: say({ zh: "请求先留着，查一下服务，再发一次。", en: "Keep your request, check the service, then send it again." }, lang),
+      title: say({ zh: "服务暂时不可用", en: "The service is temporarily unavailable" }, lang),
+      message: say({ zh: "这次请求未能完成。", en: "This request could not be completed." }, lang),
+      recovery: say({ zh: "你的消息已保留，请稍后重新发送。", en: "Your message is kept. Please send it again later." }, lang),
     };
   }
   if (/failed to fetch|network|load failed|connection/.test(normalized)) {
     return {
-      title: say({ zh: "和研究服务断开了", en: "Connection to the research service was lost" }, lang),
-      message: say({ zh: "平台确认不了这个请求有没有跑完。", en: "The platform could not confirm whether this request finished." }, lang),
-      recovery: say({ zh: "先刷新会话看看最新状态，再决定要不要重发。", en: "Refresh the Session to check its latest state before sending again." }, lang),
+      title: say({ zh: "连接已断开", en: "Connection lost" }, lang),
+      message: say({ zh: "无法确认这次请求是否已完成。", en: "Could not confirm whether this request finished." }, lang),
+      recovery: say({ zh: "请刷新页面查看最新状态，再决定是否重新发送。", en: "Refresh the page to check the latest state before sending again." }, lang),
     };
   }
   // 认不出 → 不显示。这一轮没产出回复不是错误，也没有要用户做的事。

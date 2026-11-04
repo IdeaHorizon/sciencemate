@@ -15,6 +15,9 @@ from core.bootstrap import bootstrap
 from core.ledger import RecordStore
 from core.state import State
 
+# 讲的是续轮行为，前提是研究已经开始（见 conftest.research_under_way）。
+pytestmark = pytest.mark.usefixtures("research_under_way")
+
 bootstrap()
 
 
@@ -426,6 +429,7 @@ async def test_redirect_ambiguous_becomes_retry_reviewer_not_revise(tmp_path):
         source_node_type="writing",            # 多个上游 → 歧义
         producing_run_id="r_amb",
         review_critique_artifact_id=art["id"],
+        human_decision_reason="需要负责人确认本次研究取舍。",
     )
     md = res["pause_event"]["metadata"]
     assert md["recommended_action"] != "revise", "歧义不得退化成重跑当前节点"
@@ -862,6 +866,7 @@ async def test_string_null_does_not_force_retry_reviewer(tmp_path):
         artifact_ids=["survey_report__s"],
         review_critique_artifact_id="review_critique__c",
         review_failed_reason="null",          # ← 现场传的就是这个
+        human_decision_reason="需要负责人确认本次研究取舍。",
     )
     ctx = _json.dumps(res, ensure_ascii=False)
     assert "PROCEED" in ctx, "review 是 approve，选项集必须含 PROCEED"

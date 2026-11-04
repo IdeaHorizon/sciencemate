@@ -22,10 +22,13 @@ dependencies = [
     # Object storage
     # PDF parsing
     "PyMuPDF>=1.24.0",
+    # Journal-cover decoding and generated fallback covers
+    "pillow>=10.0",
     # Text matching
     "pyahocorasick>=2.0.0",
     # Utilities
     "httpx>=0.27.0",
+    "websockets>=13.0",
     # JWT 与口令散列。`cryptography` / `bcrypt` 从前只是
     # `python-jose[cryptography]` 与 `passlib[bcrypt]` 的传递依赖，可
     # `app.services.model_backends`（Fernet）、`app.services.self_update`

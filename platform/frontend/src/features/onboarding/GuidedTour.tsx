@@ -45,10 +45,10 @@ export function GuidedTour({ stops, onDone }: { stops: TourStop[]; onDone: () =>
       <strong>{t(stop.title)}</strong>
       <p>{t(stop.body)}</p>
       <footer>
-        <button type="button" className="onboarding-skip" onClick={onDone}>{t({ zh: "不用看了", en: "Skip" })}</button>
+        <button type="button" className="onboarding-skip" onClick={onDone}>{t({ zh: "跳过", en: "Skip" })}</button>
         <span className="tour-count">{index + 1} / {stops.length}</span>
         <button type="button" className="tour-next" onClick={() => (last ? onDone() : setIndex(index + 1))}>
-          {last ? t({ zh: "知道了", en: "Done" }) : t({ zh: "下一个", en: "Next" })}
+          {last ? t({ zh: "知道了", en: "Done" }) : t({ zh: "下一步", en: "Next" })}
         </button>
       </footer>
     </div>

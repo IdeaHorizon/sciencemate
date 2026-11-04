@@ -68,6 +68,10 @@ def _orphans_get_reaped() -> bool:
             os.killpg(pgid, 0)
         except ProcessLookupError:
             return True       # sleep 已退出且被收割 → 进程组真的消亡
+        except PermissionError:
+            # macOS may deny probing an orphaned group after launchd adopts it.
+            # Lack of visibility cannot prove that the group was reaped.
+            return False
         _time.sleep(0.05)
     return False              # 僵尸把进程组撑着 —— 没有收割者
 

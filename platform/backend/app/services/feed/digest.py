@@ -185,6 +185,10 @@ async def _ask_harness_for_digest(
         raise DigestUnavailable(
             "没有配资讯挖掘模型 —— 周报由 feed_curation 角色生成"
         )
+    # harness 的模块只能在函数里导入：装出来的包先导入 app，harness 根那时还不在
+    # sys.path 上（tests/test_the_page_must_actually_come_up.py）。
+    from shared.lib.external_content import WITNESS_FIELD
+
     event = await bridge.call(
         op="feed_digest",
         result_type="feed_digest_result",
@@ -196,6 +200,8 @@ async def _ask_harness_for_digest(
                     "title": item.title,
                     "summary": (item.summary or "")[:600],
                     "venue": item.venue or "",
+                    # 入库时落的见证（#730）跟着材料走：简报那一侧在数据框里呈现它。
+                    "witness": (item.extra or {}).get(WITNESS_FIELD),
                 }
                 for item in items
             ],

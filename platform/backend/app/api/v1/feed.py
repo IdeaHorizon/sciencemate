@@ -5,6 +5,7 @@ from __future__ import annotations
 from app.services.feed.profile import journal_display_name
 
 import logging
+import json
 import asyncio
 import mimetypes
 import re
@@ -14,8 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import unquote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import String, cast, func, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,6 +54,7 @@ from app.schemas.feed import (
     SubscriptionsOut,
     SubscriptionsWrite,
     SubscriptionSearchOut,
+    SavedPaperWrite,
     SharedLinkWrite,
     SourceHealthOut,
 )
@@ -69,11 +71,15 @@ from app.services.feed.copy import t
 from app.services.feed import profile as profile_service
 from app.services.feed import thumbnail
 from app.services.feed.image_proxy import ImageUnavailable, fetch as fetch_image
+from app.services.feed import journal_covers
 from app.services.feed.literature_projection import literature_papers_root
 from app.services.feed.link_preview import LinkRejected, fetch_preview
 from app.services.harness_contract import HarnessContractUnavailable
 from app.services import harness_kb
-from app.services.user_interface import Language, language_for, language_on_screen, say
+from app.services import refusals
+from app.services.user_interface import (
+    SCREEN_LANGUAGE_HEADER, Language, language_for, language_on_screen, language_said_by, say,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,13 +110,17 @@ def _local_literature_figure(item: FeedItem) -> Path | None:
     try:
         with sqlite3.connect(catalog) as conn:
             row = conn.execute(
-                "SELECT figure_path FROM papers WHERE lower(doi)=?", (catalog_key,)
+                "SELECT figure_path, metadata_json FROM papers WHERE lower(doi)=?", (catalog_key,)
             ).fetchone()
     except sqlite3.Error:
         return None
     if not row or not row[0]:
         return None
     try:
+        from shared.contrib.paper_image_policy import image_record_rejection_reason
+        metadata = json.loads(row[1] or "{}")
+        if image_record_rejection_reason(metadata.get("image") or {}):
+            return None
         figure = Path(row[0]).resolve()
         # 「标题卡」(title_card) 是 harvester 拿不到真图时生成的自绘占位图：
         # 纯色底 + 描边框 + 标题，和论文插图样式割裂。feed 自己在三级供给里
@@ -156,6 +166,9 @@ def _valid_figure(path: Path) -> bool:
     except ImportError:  # pragma: no cover - 依赖缺失是部署问题，放宽不拦
         return True
     try:
+        from shared.contrib.paper_image_policy import image_bytes_rejection_reason
+        if image_bytes_rejection_reason(path.read_bytes()):
+            return False
         with Image.open(path) as im:
             width, height = im.size
     except Exception:
@@ -197,6 +210,8 @@ def _to_out(
         title=item.title,
         url=item.url,
         summary=item.summary,
+        title_zh=item.title if (item.extra or {}).get("cnki_local") else None,
+        abstract_zh=item.summary if (item.extra or {}).get("cnki_local") else None,
         authors=list(item.authors or []),
         venue=journal_display_name(item.venue) if item.venue else item.venue,
         published_at=item.published_at,
@@ -227,8 +242,8 @@ async def _attach_cached_translations(items: list[FeedItemOut]) -> list[FeedItem
         return items
     records = await asyncio.to_thread(load)
     for item, record in zip(items, records):
-        item.title_zh = record.get("title_zh")
-        item.abstract_zh = record.get("abstract_zh")
+        item.title_zh = item.title_zh or record.get("title_zh")
+        item.abstract_zh = item.abstract_zh or record.get("abstract_zh")
     return items
 
 
@@ -300,27 +315,34 @@ def _visible_clause(user: User):
     ) | (
         (FeedItem.visibility == FeedVisibility.INSTITUTION)
         & (FeedItem.organization_id == user.institution_id)
+    ) | (
+        (FeedItem.visibility == "private") & (FeedItem.author_user_id == user.id)
     )
+
+
+def _recommendation_sources(item: FeedItem, profile, *, why: dict, project_id: str | None) -> list[str]:
+    """这条属于哪几路推荐 —— 按命中了什么判，不读理由的措辞（措辞会随语言和文案变）。
+
+    一路都不沾的（本领域动态、临近截稿）归学科：每张卡至少属于一路，来源筛选和
+    混排都不必再替它猜。
+    """
+    sources = [key for key, matches in (
+        ("domain", bool(ranking._domain_hits(item, profile))),
+        ("journal", ranking.matches_subscribed_journal(item, profile)),
+        ("scholar", ranking.matches_subscribed_scholar(item, profile)),
+        ("project", bool(project_id) or why.get("kind") in ranking.PROJECT_REASONS),
+    ) if matches]
+    return sources or ["domain"]
 
 
 def _mix_recommendation_sources(feed: list[FeedCard]) -> list[FeedCard]:
     """Give domain, journal, scholar and project equal turns on every page."""
-    def source(card: FeedCard) -> str:
-        if card.project_id or "课题" in card.reason or "项目" in card.reason:
-            return "project"
-        if "学者" in card.reason:
-            return "scholar"
-        if "期刊" in card.reason:
-            return "journal"
-        return "domain"
-
     # Preserve within-source ranking, rotating equally among all available
     # sources. Today's pick badge remains, without reserving a source's turns.
     order = ("domain", "journal", "scholar", "project")
     buckets = {key: [] for key in order}
     for card in feed:
-        memberships = getattr(card, "recommendation_sources", None) or [source(card)]
-        for key in memberships:
+        for key in card.recommendation_sources:
             if key in buckets:
                 buckets[key].append(card)
     positions = {key: 0 for key in order}
@@ -338,12 +360,14 @@ def _mix_recommendation_sources(feed: list[FeedCard]) -> list[FeedCard]:
     return result
 
 
-async def _recommendation_progress(db, user, profile, *, recommendable: int) -> FeedProgressOut:
+async def _recommendation_progress(db, user, profile, *, recommendable: int,
+                                   lang: Language | None = None) -> FeedProgressOut:
     """Count this user's relevant indexes before the preparation/recommendation gates."""
     from app.services.literature_harvester import literature_index_harvester
 
     rows = (await db.execute(select(FeedItem).where(
-        _visible_clause(user),
+        or_(_visible_clause(user), (FeedItem.author_user_id == user.id)
+            & FeedItem.canonical_key.like("cnki-user:%")),
         FeedItem.kind.in_([FeedItemKind.PAPER, FeedItemKind.NEWS, FeedItemKind.DIGEST]),
         ranking.publication_window_clause(datetime.now(UTC)),
     ))).scalars().all()
@@ -364,14 +388,16 @@ async def _recommendation_progress(db, user, profile, *, recommendable: int) -> 
             "scholar": ranking.matches_subscribed_scholar(item, profile),
             "project": owned_project,
         }
+        if extra.get("cnki_local"):
+            membership = {key: key in extra.get("cnki_categories", []) for key in membership}
         if any(membership.values()):
             relevant.append(item)
-            waiting = bool(extra.get("literature_catalog")) and extra.get("literature_preparation") != "ready"
+            waiting = bool(extra.get("literature_catalog") or extra.get("cnki_local")) and extra.get("literature_preparation") != "ready"
             for source, hit in membership.items():
                 if hit:
                     source_counts[source]["collected"] += 1
                     source_counts[source]["pending"] += int(waiting)
-    domain_counts = {code: {"domain": code, "label": domain_service.label(code, lang=language_for(user)),
+    domain_counts = {code: {"domain": code, "label": domain_service.label(code, lang=lang or language_for(user)),
                             "collected": 0, "prepared": 0, "pending": 0,
                             "recommendable": 0, "translated": 0, "translation_pending": 0}
                      for code in profile_service.stored_domains(user)}
@@ -384,7 +410,7 @@ async def _recommendation_progress(db, user, profile, *, recommendable: int) -> 
                 row["collected"] += 1
                 waiting = bool((item.extra or {}).get("literature_catalog")) and (item.extra or {}).get("literature_preparation") != "ready"
                 row["pending" if waiting else "prepared"] += 1
-    pending = sum(bool((item.extra or {}).get("literature_catalog"))
+    pending = sum(bool((item.extra or {}).get("literature_catalog") or (item.extra or {}).get("cnki_local"))
                   and (item.extra or {}).get("literature_preparation") != "ready"
                   for item in relevant)
     task_state = discovery.subscription_task_state(user.id)
@@ -399,9 +425,14 @@ async def _recommendation_progress(db, user, profile, *, recommendable: int) -> 
     )
 
 
-async def _build_feed_pool(user: User, db: AsyncSession) -> FeedTodayOut:
-    """打开平台第一眼 —— Top 3 + 几个分区。"""
-    lang = language_for(user)
+async def _build_feed_pool(user: User, db: AsyncSession, lang: Language | None = None) -> FeedTodayOut:
+    """打开平台第一眼 —— Top 3 + 几个分区。
+
+    卡片上的学科名和推荐理由按**这一屏**的语言说（`lang`，由 feed_today 从 X-Interface-Language
+    传进来），不按存下的偏好：换语言时前端立刻带着新语言重取，而偏好那次保存可能还没落地，
+    第一次拉到的学科名和理由就还是旧语言（11-04 实测，要手点「刷新推荐」才对）。
+    """
+    lang = lang or language_for(user)
     from app.services.literature_harvester import literature_index_harvester
     suppressed = await ranking.suppressed_ids(db, user_id=user.id)
     profile = await profile_service.build_profile(
@@ -426,11 +457,11 @@ async def _build_feed_pool(user: User, db: AsyncSession) -> FeedTodayOut:
     # 并立即重算，避免用户换方向后仍看到昨天的三条。
     from app.models.feed import FeedDailyPick
     refresh_picks = False
+    scored_by_id = {str(item.item.id): item for item in rednote_scored}
     cached_picks = await db.get(FeedDailyPick, (user.id, datetime.now(UTC).date()))
     if cached_picks is not None and cached_picks.picks and (
         profile.domains or profile.projects or profile.journals or profile.scholars
     ):
-        scored_by_id = {str(item.item.id): item for item in rednote_scored}
         cached_scored = [
             scored_by_id.get(str(payload.get("item_id")))
             for payload in cached_picks.picks
@@ -464,7 +495,7 @@ async def _build_feed_pool(user: User, db: AsyncSession) -> FeedTodayOut:
     def _card(
         item: FeedItem,
         *,
-        reason: str = "",
+        why: dict | None = None,
         project_id: str | None = None,
         project_name: str | None = None,
         is_today_pick: bool = False,
@@ -474,16 +505,12 @@ async def _build_feed_pool(user: User, db: AsyncSession) -> FeedTodayOut:
                 item, source_names=source_names, author_names=author_names,
                 saved_ids=saved, opened_ids=opened, lang=lang,
             ),
-            reason=reason,
+            reason=ranking.say_why(why, lang),
             project_id=project_id,
             project_name=project_name,
             is_today_pick=is_today_pick,
-            recommendation_sources=[key for key, matches in (
-                ("domain", bool(ranking._domain_hits(item, profile))),
-                ("journal", ranking.matches_subscribed_journal(item, profile)),
-                ("scholar", ranking.matches_subscribed_scholar(item, profile)),
-                ("project", bool(project_id) or "课题" in reason or "项目" in reason),
-            ) if matches],
+            recommendation_sources=_recommendation_sources(
+                item, profile, why=why or {}, project_id=project_id),
         )
 
     # 今日必读：每天替你挑的少数几条，挂角标、排在流最前。
@@ -492,9 +519,15 @@ async def _build_feed_pool(user: User, db: AsyncSession) -> FeedTodayOut:
         item = by_id.get(payload["item_id"])
         if item is None or ranking.is_journal_notice(item) or not ranking.show_in_feed(item):
             continue
+        why = payload.get("why")
+        if not isinstance(why, dict):
+            # 更早的版本只存了一句写好的中文理由（`FeedDailyPick.picks` 的说明）：
+            # 按今天的打分重说，这一屏是英文也说英文。
+            why = (scored_by_id.get(str(item.id))
+                   or ranking.ScoredItem(item=item, score=0.0)).why()
         feed.append(_card(
             item,
-            reason=payload.get("reason") or "",
+            why=why,
             project_id=payload.get("project_id"),
             project_name=project_names.get(payload.get("project_id") or ""),
             is_today_pick=True,
@@ -535,7 +568,7 @@ async def _build_feed_pool(user: User, db: AsyncSession) -> FeedTodayOut:
     for value in for_you:
         feed.append(_card(
             value.item,
-            reason=value.reason(),
+            why=value.why(),
             project_id=value.project_id,
             project_name=value.project_name,
         ))
@@ -545,7 +578,7 @@ async def _build_feed_pool(user: User, db: AsyncSession) -> FeedTodayOut:
             continue
         feed.append(_card(
             value.item,
-            reason=value.reason(),
+            why=value.why(),
             project_id=value.project_id,
             project_name=value.project_name,
         ))
@@ -553,7 +586,7 @@ async def _build_feed_pool(user: User, db: AsyncSession) -> FeedTodayOut:
     for value in deadlines:
         if str(value.item.id) in seen:
             continue
-        feed.append(_card(value.item, reason=""))
+        feed.append(_card(value.item))
 
     empty_reason = ""
     if not candidates:
@@ -570,6 +603,21 @@ async def _build_feed_pool(user: User, db: AsyncSession) -> FeedTodayOut:
         else:
             empty_reason = ""
 
+    # Browser-collected CNKI indexes belong to this user. Their subscription
+    # categories are explicit user choices, not inferred from English labels.
+    cnki_items = (await db.scalars(select(FeedItem).where(
+        FeedItem.visibility == "private", FeedItem.author_user_id == user.id,
+        FeedItem.canonical_key.like("cnki-user:%"), ranking.publication_window_clause(datetime.now(UTC)),
+    ).order_by(ranking.recent_order()))).all()
+    for item in cnki_items:
+        if str(item.id) in suppressed or ranking.is_journal_notice(item):
+            continue
+        extra = item.extra or {}
+        card = _card(item, reason="知网订阅：" + "、".join(extra.get("cnki_queries", [])))
+        card.recommendation_sources = list(extra.get("cnki_categories", []))
+        feed.append(card)
+    if cnki_items and feed:
+        empty_reason = ""
     feed = _mix_recommendation_sources(feed)
     # A DOI may exist in both the public index and this user's school library.
     # Annotate only this user's response; never persist licensed holdings on a
@@ -623,12 +671,11 @@ async def preparing_translation_pool(user: User, db: AsyncSession) -> FeedTodayO
             if not (value.project_id or value.matched_domains or ranking.matches_subscribed_journal(item, profile)
                     or ranking.matches_subscribed_scholar(item, profile)):
                 continue
-            cards.append(FeedCard(item=_to_out(item), project_id=value.project_id, reason=value.reason(),
-                recommendation_sources=[key for key, matches in (
-                    ("domain", bool(ranking._domain_hits(item, profile))),
-                    ("journal", ranking.matches_subscribed_journal(item, profile)),
-                    ("scholar", ranking.matches_subscribed_scholar(item, profile)),
-                    ("project", bool(value.project_id))) if matches]))
+            why = value.why()
+            cards.append(FeedCard(item=_to_out(item), project_id=value.project_id,
+                reason=ranking.say_why(why, language_for(user)),
+                recommendation_sources=_recommendation_sources(
+                    item, profile, why=why, project_id=value.project_id)))
             seen.add(str(item.id))
         return FeedTodayOut(feed=_mix_recommendation_sources(cards))
     result = await get_pool(db, user, build, namespace="translation-preparation")
@@ -636,17 +683,21 @@ async def preparing_translation_pool(user: User, db: AsyncSession) -> FeedTodayO
     return result
 
 
-async def recommendation_pool(user: User, db: AsyncSession, *, allow_stale=True) -> FeedTodayOut:
+async def recommendation_pool(user: User, db: AsyncSession, *, allow_stale=True,
+                              lang: Language | None = None) -> FeedTodayOut:
     from app.services.feed.pool_cache import get_pool
     from app.services.feed.translation import translation_ready
     from app.services.literature_harvester import literature_index_harvester
-    result = await get_pool(db, user, lambda: _build_feed_pool(user, db), allow_stale=allow_stale)
+    lang = lang or language_for(user)
+    # 两种语言的池各存各的：池里存的是已经说成某种语言的卡片。
+    result = await get_pool(db, user, lambda: _build_feed_pool(user, db, lang), allow_stale=allow_stale,
+                            namespace=f"recommendations:{lang}")
     await _attach_cached_translations([card.item for card in result.feed])
     result.progress.translated = sum(translation_ready(card.item) for card in result.feed)
     result.progress.translation_pending = len(result.feed) - result.progress.translated
     groups = {}
     for card in result.feed:
-        sources = tuple(sorted(card.recommendation_sources or ["domain"]))
+        sources = tuple(sorted(card.recommendation_sources))
         group = groups.setdefault(sources, {"sources": list(sources), "total": 0, "translated": 0})
         group["total"] += 1
         group["translated"] += int(translation_ready(card.item))
@@ -656,24 +707,46 @@ async def recommendation_pool(user: User, db: AsyncSession, *, allow_stale=True)
     return result
 
 
+def _language_this_screen_said(request: Request) -> Language | None:
+    """这一问说了自己那一屏是什么语言（X-Interface-Language）就用它；没说 —— 脚本、旧前端、
+    测试 —— 就是 None，由调用方退回这个人存下的偏好。
+
+    不用 `language_on_screen`：那个没说时给默认语言，在这里会盖掉存下的偏好。
+    """
+    said = request.headers.get(SCREEN_LANGUAGE_HEADER)
+    return language_said_by(said) if said else None
+
+
+def _reader_language(screen, user: User) -> Language:
+    """读这一屏的人用什么语言：这一屏说了就按它，没说按存下的偏好。
+
+    直接调用（翻译 worker、测试）不经 FastAPI，`screen` 拿到的是 Depends 本身 —— 当作没说。
+    """
+    return (screen if screen in ("zh", "en") else None) or language_for(user)
+
+
 @router.get("/today", response_model=FeedTodayOut)
 async def feed_today(limit: int = Query(default=FEED_PAGE_SIZE, ge=1, le=100),
                      offset: int = Query(default=0, ge=0),
                      ready_only: bool = Query(default=True), sources: str | None = None,
                      user: User = Depends(get_current_user),
-                     db: AsyncSession = Depends(get_db)) -> FeedTodayOut:
-    result = await recommendation_pool(user, db, allow_stale=bool(ready_only))
+                     db: AsyncSession = Depends(get_db),
+                     screen: Language | None = Depends(_language_this_screen_said)) -> FeedTodayOut:
+    reader = _reader_language(screen, user)
+    result = await recommendation_pool(user, db, allow_stale=bool(ready_only), lang=reader)
     # An older snapshot may survive in another worker. Apply current dismissals
     # before pagination so ignored cards cannot return on refresh or scrolling.
     dismissed = await ranking.suppressed_ids(db, user_id=user.id)
     if dismissed:
         result.feed = [card for card in result.feed if str(card.item.id) not in dismissed]
     from app.services.feed.translation import translation_ready
-    if ready_only:
+    # 「备好」= 读这一屏的人读得了。中文译文只给中文界面：英文读者读原文，卡片不用等中文
+    # 译文出来（11-04 在英文界面点过：前端不再等了，这里还在按中文译文挑卡，推荐页一直空着）。
+    if ready_only and reader != "en":
         result.feed = [card for card in result.feed if translation_ready(card.item)]
     if sources is not None:
         selected = set(sources.split(",")) & {"domain", "journal", "scholar", "project"}
-        result.feed = [card for card in result.feed if selected.intersection(card.recommendation_sources or ["domain"])]
+        result.feed = [card for card in result.feed if selected.intersection(card.recommendation_sources)]
     total = len(result.feed)
     result.feed = result.feed[offset:offset + limit]
     result.has_more = total > offset + limit
@@ -706,10 +779,12 @@ def _attach_domain_progress(progress, pool, user):
 
 
 @router.get("/progress", response_model=FeedProgressOut)
-async def feed_progress(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    pool = await recommendation_pool(user, db, allow_stale=False)
+async def feed_progress(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+                        screen: Language | None = Depends(_language_this_screen_said)):
+    lang = _reader_language(screen, user)
+    pool = await recommendation_pool(user, db, allow_stale=False, lang=lang)
     profile = await profile_service.build_profile(db, user=user)
-    progress = await _recommendation_progress(db, user, profile, recommendable=len(pool.feed))
+    progress = await _recommendation_progress(db, user, profile, recommendable=len(pool.feed), lang=lang)
     progress.translated = pool.progress.translated
     progress.translation_pending = pool.progress.translation_pending
     progress.source_groups = pool.progress.source_groups
@@ -746,9 +821,11 @@ async def list_items(
         query = query.where(FeedItem.id.in_(saved_ids))
     query = query.order_by(ranking.recent_order()).limit(limit).offset(offset)
     items = list((await db.execute(query)).scalars().all())
+    # 「收藏」列的是这个人自己收下的东西：文献投影事后把一条判成不合格（`literature_eligible`
+    # 变 False）时，它照样留在收藏里 —— 不然收藏会悄悄少一条，而他什么都没做。
     items = [
         item for item in items
-        if _eligible_feed_item(item) and (saved or not ranking.is_journal_notice(item))
+        if saved or (_eligible_feed_item(item) and not ranking.is_journal_notice(item))
     ]
 
     if domain:
@@ -786,7 +863,7 @@ async def get_item(
         select(FeedItem).where(FeedItem.id == item_id, _visible_clause(user))
     )
     if item is None or not _eligible_feed_item(item):
-        raise HTTPException(status_code=404, detail="Feed item not found")
+        raise HTTPException(status_code=404, detail=say(refusals.FEED_ITEM_NOT_FOUND, language_for(user)))
     source_names, author_names = await _lookup_names(db, [item])
     saved_ids = await _saved_ids(db, user_id=user.id)
     opened_ids = await _opened_ids(db, user_id=user.id)
@@ -810,12 +887,17 @@ async def record_engagement(
         select(FeedItem).where(FeedItem.id == item_id, _visible_clause(user))
     )
     if item is None or not _eligible_feed_item(item):
-        raise HTTPException(status_code=404, detail="Feed item not found")
+        raise HTTPException(status_code=404, detail=say(refusals.FEED_ITEM_NOT_FOUND, language_for(user)))
+    await _record_engagement(db, user_id=user.id, item_id=item_id, action=data.action)
+
+
+async def _record_engagement(db: AsyncSession, *, user_id: str, item_id: str, action: str) -> None:
+    """记一次互动。幂等：同一个人对同一条做同一个动作只记一次。"""
     already = await db.scalar(
         select(FeedEngagement.id).where(
-            FeedEngagement.user_id == user.id,
+            FeedEngagement.user_id == user_id,
             FeedEngagement.item_id == item_id,
-            FeedEngagement.action == data.action,
+            FeedEngagement.action == action,
         )
     )
     if already is not None:
@@ -826,11 +908,72 @@ async def record_engagement(
         # 那次 commit 会把它再插一遍，于是抛 PendingRollbackError，
         # 一个"幂等重放"变成 500。（真跑一次才现形：新库里没有重复。）
         async with db.begin_nested():
-            db.add(FeedEngagement(user_id=user.id, item_id=item_id, action=data.action))
+            db.add(FeedEngagement(user_id=user_id, item_id=item_id, action=action))
             await db.flush()
     except IntegrityError:
         # 上面查过了还撞上 = 两个请求同时来。这是幂等，不是错误。
         pass
+
+
+@router.post("/saved-papers", response_model=FeedItemOut, status_code=201)
+async def save_a_paper(
+    data: SavedPaperWrite,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> FeedItemOut:
+    """把文献检索里的一篇收进「收藏」。
+
+    检索结果不是资讯条目：它们来自外部检索，没有 `FeedItem` 行。所以先按 DOI / arXiv /
+    链接找到那一条（采集器可能早就收过），没有就建一条论文，再记一次 `save` —— 和资讯卡片上
+    点「收藏」落在同一张表里，「收藏」页签里就看得到。取消收藏走现成的
+    `DELETE /items/{id}/engagement/save`。
+
+    之前检索页上的「收藏」只是页面里的一个状态：刷新就没了，也从来进不了「收藏」页签。
+    """
+    lang = language_for(user)
+    doi = canonical.doi(data.doi or "") or canonical.doi(data.url or "")
+    key = canonical.canonical_key(url=data.url or "", text=doi or "")
+    if not key:
+        raise HTTPException(status_code=422, detail=t("error.paper_has_no_identity", lang))
+
+    item = await db.scalar(select(FeedItem).where(FeedItem.canonical_key == key))
+    if item is None:
+        from app.services.feed.literature_projection import publication_datetime
+
+        item = FeedItem(
+            canonical_key=key,
+            kind=FeedItemKind.PAPER,
+            title=data.title.strip()[:2000],
+            url=(data.url or "").strip() or (f"https://doi.org/{doi}" if doi else None),
+            summary=(data.abstract or "").strip() or None,
+            authors=[str(name) for name in data.authors[:50]],
+            venue=(data.venue or "").strip()[:200] or None,
+            published_at=publication_datetime(data.published, data.year),
+            domains=[],
+            # 书目信息本来就是公开的，和采集来的论文一样全平台可见；`saved_from_search`
+            # 只说明它是怎么进来的。
+            visibility=FeedVisibility.PLATFORM,
+            extra={"saved_from_search": True, **({"doi": doi} if doi else {})},
+        )
+        try:
+            async with db.begin_nested():
+                db.add(item)
+                await db.flush()
+        except IntegrityError:
+            # 同一篇同时被收了两次（或采集器刚好插了这一条）：用已经在的那一条。
+            item = await db.scalar(select(FeedItem).where(FeedItem.canonical_key == key))
+    visible = item is not None and await db.scalar(
+        select(FeedItem.id).where(FeedItem.id == item.id, _visible_clause(user))
+    )
+    if not visible:
+        raise HTTPException(status_code=404, detail=say(refusals.FEED_ITEM_NOT_FOUND, lang))
+
+    await _record_engagement(db, user_id=user.id, item_id=item.id, action=FeedEngagementAction.SAVE)
+    source_names, author_names = await _lookup_names(db, [item])
+    result = _to_out(item, source_names=source_names, author_names=author_names,
+                     saved_ids=frozenset({str(item.id)}), lang=lang)
+    await _attach_cached_translations([result])
+    return result
 
 
 @router.delete("/items/{item_id}/engagement/{action}", status_code=204)
@@ -1068,7 +1211,7 @@ async def search_subscriptions(
     try:
         candidates = await author_identity.search(q, limit=limit)
     except httpx.HTTPError:
-        raise HTTPException(status_code=503, detail=say({"zh": "学者身份检索暂不可用，请稍后重试；不会按同名合并结果。", "en": "Scholar identity lookup is unavailable right now; please retry later. Results are not merged by name."}, lang))
+        raise HTTPException(status_code=503, detail=say({"zh": "暂时无法搜索学者，请稍后重试。", "en": "Scholar search is unavailable right now. Try again later."}, lang))
     return SubscriptionSearchOut(scholars=[ScholarSubscription.model_validate(row) for row in candidates])
 
 
@@ -1081,7 +1224,7 @@ async def subscription_items(
     db: AsyncSession = Depends(get_db),
 ) -> list[FeedCard]:
     if kind not in {"all", "domain", "journal", "scholar"}:
-        raise HTTPException(status_code=422, detail="Unknown subscription kind")
+        raise HTTPException(status_code=422, detail=say(refusals.invalid_request("Unknown subscription kind"), language_for(user)))
     subscriptions = _stored_subscriptions(user)
     scholar_display = {value.name.casefold(): value.name for value in subscriptions.scholars}
     if not subscriptions.journals and not scholar_display and not profile_service.stored_domains(user):
@@ -1115,12 +1258,15 @@ async def subscription_items(
     # 订阅页与推荐页各写一份的话，同一本刊会出现"这边认得出、那边认不出"的
     # 分歧，而这正是"订阅了却没内容"的成因。
     profile = await profile_service.build_profile(db, user=user)
-    matched: list[tuple[FeedItem, str]] = []
+    # 订阅页的理由按请求时这一屏的语言说：它不存库、也不进推荐页的来源筛选。
+    lang = language_for(user)
+    matched: list[tuple[FeedItem, str, str]] = []
     for item in candidates:
         routes = ranking.acquisition_routes(item)
         journal_origin = not routes or "journal" in routes
         if kind in {"all", "journal"} and journal_origin and ranking.matches_subscribed_journal(item, profile):
-            matched.append((item, f"订阅期刊：{item.venue or ''}"))
+            matched.append((item, "journal", say({"zh": "订阅期刊：{venue}", "en": "Subscribed journal: {venue}"},
+                                                 lang, venue=item.venue or "")))
         elif kind in {"all", "scholar"} and ranking.matches_subscribed_scholar(item, profile):
             hit = next(
                 (scholar_display.get(str(author).casefold().strip(), "")
@@ -1128,27 +1274,28 @@ async def subscription_items(
                  if str(author).casefold().strip() in scholar_display),
                 "",
             )
-            matched.append((item, f"订阅学者：{hit}"))
+            matched.append((item, "scholar", say({"zh": "订阅学者：{name}", "en": "Subscribed scholar: {name}"},
+                                                 lang, name=hit)))
         elif kind in {"all", "domain"} and journal_origin and ranking._domain_hits(item, profile):
-            matched.append((item, "订阅学科"))
+            matched.append((item, "domain", say({"zh": "订阅学科", "en": "Fields you follow"}, lang)))
     # 用户明确订阅的期刊即使摘要暂未补齐也要显示；订阅动态本身就是
     # “这本刊最近出了什么”的索引视图，不能被普通推荐的摘要准入挡掉。
     matched = [
-        (item, reason) for item, reason in matched
+        (item, source, reason) for item, source, reason in matched
         if not ranking.is_journal_notice(item)
         and (ranking.show_in_feed(item) or ranking.matches_subscribed_journal(item, profile))
     ]
-    ranked = ranking.rank([item for item, _ in matched], profile)
-    reasons = {str(item.id): reason for item, reason in matched}
+    ranked = ranking.rank([item for item, _, _ in matched], profile)
+    reasons = {str(item.id): (source, reason) for item, source, reason in matched}
     chosen = [value.item for value in ranked[offset:offset + limit]]
     source_names, author_names = await _lookup_names(db, chosen)
     saved = await _saved_ids(db, user_id=user.id)
     opened = await _opened_ids(db, user_id=user.id)
-    lang = language_for(user)
     cards = [FeedCard(
         item=_to_out(item, source_names=source_names, author_names=author_names,
                      saved_ids=saved, opened_ids=opened, lang=lang),
-        reason=reasons.get(str(item.id), ""),
+        reason=reasons[str(item.id)][1],
+        recommendation_sources=[reasons[str(item.id)][0]],
     ) for item in chosen]
     await _attach_cached_translations([card.item for card in cards])
     return cards
@@ -1407,25 +1554,22 @@ async def get_item_image(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """条目的配图 —— **每一条都有**，三级供给（见 `feed/thumbnail.py`）：
+    """条目的配图 —— **每一条都有**，按优先级回退：
 
       1. feed 自带的图（出版商自己选的配图），由后端代取；
       2. 论文 PDF 里裁出来的插图（arXiv / bioRxiv 的 feed 没有图，但论文有）；
-      3. 生成的排版封面（明显是生成的，不冒充任何科学插图）。
+      3. 对应期刊的封面（单独标记，与论文插图区分）；
+      4. 生成的排版封面（明显是生成的，不冒充任何科学插图）。
 
     **由后端代取而不是把外链交给浏览器**：直连外链等于每次打开首页就向出版商
     广播一次"这个用户在读这条"（IP + Referer）。接口收 `item_id` 不收 URL ——
     地址来自我们自己的库，所以这条路上没有 SSRF 面。
     """
-    headers = {
-        "Cache-Control": "private, max-age=86400",
-        "X-Content-Type-Options": "nosniff",
-    }
     item = await db.scalar(
         select(FeedItem).where(FeedItem.id == item_id, _visible_clause(user))
     )
     if item is None or not _eligible_feed_item(item):
-        raise HTTPException(status_code=404, detail="Feed item not found")
+        raise HTTPException(status_code=404, detail=say(refusals.FEED_ITEM_NOT_FOUND, language_for(user)))
 
     headers = {
         # 图不随登录状态变，但它属于某个条目 —— 交给浏览器私有缓存，不给中间
@@ -1433,6 +1577,7 @@ async def get_item_image(
         "Cache-Control": "private, max-age=86400",
         # 我们代取的第三方内容，不该被当成脚本或页面执行。
         "X-Content-Type-Options": "nosniff",
+        "X-Feed-Image-Kind": "paper_figure",
     }
 
     # 0. 共享 literature catalog 中已经由后台采集器准备好的 figure。
@@ -1468,7 +1613,16 @@ async def get_item_image(
         # 连接导致整个 UI 点不动）。本次请求立即回③生成封面，下次刷到即真图。
         thumbnail.ensure_cached_in_background(item_id, pdf_url)
 
-    # ③ 生成的封面。**不缓存到盘**：它是纯函数算出来的，几百字节，
+    # ③ 期刊封面只读共享缓存；首次获取在后台，不阻塞卡片。
+    journal_asset, cover_pending = journal_covers.get_or_schedule(item)
+    if journal_asset:
+        return Response(
+            content=journal_asset[0], media_type=journal_asset[1],
+            headers={**headers, "X-Feed-Image-Kind": "journal_cover",
+                     "Cache-Control": "private, max-age=300"},
+        )
+
+    # ④ 生成的封面。**不缓存到盘**：它是纯函数算出来的，几百字节，
     #    重算比读盘还快，而且改了样式立刻全站生效。
     venue = item.venue
     if not venue and item.source_id:
@@ -1478,4 +1632,8 @@ async def get_item_image(
         venue=venue or "",
         domain=next(iter(item.domains or []), ""),
     )
-    return Response(content=cover, media_type="image/svg+xml", headers=headers)
+    return Response(content=cover, media_type="image/svg+xml", headers={
+        **headers, "X-Feed-Image-Kind": "generated_cover",
+        "Cache-Control": "private, no-store" if cover_pending else "private, max-age=300",
+        **({"X-Feed-Image-Pending": "journal_cover"} if cover_pending else {}),
+    })

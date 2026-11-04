@@ -78,7 +78,7 @@ async def test_a_run_still_going_is_stopped_first(an_organisation_server, monkey
     seen["run_going"] = RunStatus.STALE_UNKNOWN.value
     after_a_restart = await client.post(f"/api/v1/projects/{pid}/archive", headers=me)
 
-    assert blocked.status_code == 409 and "还在跑" in blocked.text
+    assert blocked.status_code == 409 and "正在运行的执行" in blocked.text
     assert after_a_restart.status_code == 200, "重启丢了的那一轮挡住了归档 —— 它永远不会自己结束"
 
 

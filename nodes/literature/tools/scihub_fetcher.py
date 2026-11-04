@@ -108,7 +108,7 @@ def _get_proxy() -> str:
 # 全局代理地址
 HTTP_PROXY = _get_proxy()
 if HTTP_PROXY:
-    print(f"[全文获取] 检测到代理: {HTTP_PROXY}")
+    logger.debug("Full-text proxy configured")
 
 # Unpaywall 邮箱（必须）
 UNPAYWALL_EMAIL = os.environ.get("UNPAYWALL_EMAIL", "").strip()

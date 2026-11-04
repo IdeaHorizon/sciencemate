@@ -8,11 +8,13 @@
 2. 规则模式 - 基于中英文词典的自动关键词提取（兜底）
 """
 
+import asyncio
 import hashlib
 import json
 import os
 import re
 import time
+import unicodedata
 from typing import Optional
 
 import httpx
@@ -70,6 +72,8 @@ def _call_llm(
     diagnostics: dict | None = None,
     max_tokens: int = 1024,
     read_timeout: float = 110.0,
+    stream: bool = False,
+    total_timeout: float | None = None,
 ) -> Optional[str]:
     """调用 LLM 获取回复，并记录 HTTP 阶段诊断。"""
     if not LLM_CONFIG.get("api_base") or not LLM_CONFIG.get("api_key"):
@@ -79,6 +83,14 @@ def _call_llm(
     started = time.perf_counter()
     if diagnostics is not None:
         diagnostics["status"] = "started"
+        diagnostics["message_count"] = 2
+        diagnostics["system_prompt_chars"] = len(system_prompt)
+        diagnostics["user_prompt_chars"] = len(user_prompt)
+        diagnostics["max_tokens_requested"] = max_tokens
+        diagnostics["read_timeout_seconds"] = read_timeout
+        diagnostics["stream_requested"] = stream
+        if total_timeout is not None:
+            diagnostics["total_timeout_seconds"] = total_timeout
 
     def _on_response(response: httpx.Response) -> None:
         if diagnostics is not None:
@@ -86,63 +98,104 @@ def _call_llm(
             diagnostics["http_status"] = response.status_code
 
     try:
-        # read 110s：icompify deepseek-v4-pro（thinking）拆词实测 ~40s，45s 老值
-        # 一半概率压线超时 → 降级 fallback_rules 只出 1 组词，召回池缩 1/6
-        # （2026-09-21 学术搜索偏少根因）。110s 与 bridge 总预算 120s 匹配。
         timeout = httpx.Timeout(connect=10.0, write=10.0, read=read_timeout, pool=5.0)
-        with httpx.Client(timeout=timeout, event_hooks={"response": [_on_response]}) as client:
-            resp = client.post(
+        request_body = {
+            "model": LLM_CONFIG["model"],
+            "messages": [{"role": "system", "content": system_prompt},
+                         {"role": "user", "content": user_prompt}],
+            "temperature": temperature, "max_tokens": max_tokens,
+        }
+        # Keyword planning needs a short structured response. V4 otherwise uses
+        # the entire completion allowance for reasoning and returns no JSON.
+        # This is scoped to this task, not the user's research/chat model config.
+        if re.search(r"deepseek-v4", str(LLM_CONFIG.get("model") or ""), re.I):
+            request_body["thinking"] = {"type": "disabled"}
+            # Compatible gateways may forward reasoning_effort while ignoring
+            # thinking. `low` still enables reasoning; both switches must agree.
+            request_body["reasoning_effort"] = "none"
+            if diagnostics is not None:
+                diagnostics["thinking_mode_requested"] = "disabled"
+                diagnostics["reasoning_effort_requested"] = "none"
+        if stream:
+            from .strategy_transport import request_completion
+            payload = asyncio.run(request_completion(
                 f"{LLM_CONFIG['api_base']}/chat/completions",
-                json={
-                    "model": LLM_CONFIG["model"],
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                },
-                headers={"Authorization": f"Bearer {LLM_CONFIG['api_key']}"}
-                if LLM_CONFIG["api_key"] else {},
-            )
-            if diagnostics is not None:
-                diagnostics["response_read_elapsed"] = round(time.perf_counter() - started, 3)
-                diagnostics["response_bytes"] = len(resp.content)
-            if resp.status_code != 200:
+                {"Authorization": f"Bearer {LLM_CONFIG['api_key']}"}, request_body,
+                diagnostics if diagnostics is not None else {},
+                read_timeout=read_timeout, total_timeout=total_timeout or read_timeout,
+            ))
+        else:
+            with httpx.Client(timeout=timeout, event_hooks={"response": [_on_response]}) as client:
+                resp = client.post(
+                    f"{LLM_CONFIG['api_base']}/chat/completions",
+                    json=request_body,
+                    headers={"Authorization": f"Bearer {LLM_CONFIG['api_key']}"}
+                    if LLM_CONFIG["api_key"] else {},
+                )
                 if diagnostics is not None:
-                    diagnostics["status"] = "http_error"
-                return None
-            if diagnostics is not None:
-                diagnostics["status"] = "ok"
-            payload = resp.json()
-            choice = payload["choices"][0]
-            if diagnostics is not None:
-                diagnostics["finish_reason"] = choice.get("finish_reason")
-                usage = payload.get("usage") or {}
-                diagnostics["completion_tokens"] = usage.get("completion_tokens")
-                token_details = usage.get("completion_tokens_details") or {}
-                diagnostics["reasoning_tokens"] = token_details.get("reasoning_tokens")
-            return choice["message"].get("content") or ""
+                    diagnostics["response_read_elapsed"] = round(time.perf_counter() - started, 3)
+                    diagnostics["response_bytes"] = len(resp.content)
+                if resp.status_code != 200:
+                    if diagnostics is not None:
+                        diagnostics["status"] = "http_error"
+                        diagnostics["http_status"] = resp.status_code
+                        retry_after = resp.headers.get("retry-after", "")
+                        if retry_after.isdigit():
+                            diagnostics["retry_after_seconds"] = min(int(retry_after), 86400)
+                        diagnostics["upstream_error_preview"] = _response_diagnostics(resp.text)["output_preview"]
+                    return None
+                payload = resp.json()
+        choice = payload["choices"][0]
+        if diagnostics is not None:
+            diagnostics["status"] = "ok"
+            diagnostics["response_read_elapsed"] = round(time.perf_counter() - started, 3)
+            diagnostics["finish_reason"] = choice.get("finish_reason")
+            usage = payload.get("usage") or {}
+            diagnostics["prompt_tokens"] = usage.get("prompt_tokens")
+            diagnostics["completion_tokens"] = usage.get("completion_tokens")
+            token_details = usage.get("completion_tokens_details") or {}
+            diagnostics["reasoning_tokens"] = token_details.get("reasoning_tokens")
+            diagnostics["reasoning_chars"] = payload.get("_reasoning_chars", len(choice["message"].get("reasoning_content") or ""))
+        content = choice["message"].get("content") or ""
+        if diagnostics is not None:
+            diagnostics["content_chars"] = len(content)
+            diagnostics["output_truncated"] = choice.get("finish_reason") == "length"
+        return content
+    except httpx.HTTPStatusError as exc:
+        if diagnostics is not None:
+            diagnostics.update(status="http_error", http_status=exc.response.status_code,
+                               upstream_error_preview=_response_diagnostics(exc.response.text)["output_preview"])
+            retry_after = exc.response.headers.get("retry-after", "")
+            if retry_after.isdigit():
+                diagnostics["retry_after_seconds"] = min(int(retry_after), 86400)
+        return None
     except httpx.ConnectTimeout as exc:
         if diagnostics is not None:
-            diagnostics.update({"status": "connect_timeout", "elapsed": round(time.perf_counter() - started, 3), "error": str(exc)})
+            diagnostics.update({"status": "connect_timeout", "error_type": type(exc).__name__})
         return None
     except httpx.ReadTimeout as exc:
         if diagnostics is not None:
-            diagnostics.update({"status": "read_timeout", "elapsed": round(time.perf_counter() - started, 3), "error": str(exc)})
+            diagnostics.update({"status": "read_timeout", "error_type": type(exc).__name__})
         return None
     except httpx.WriteTimeout as exc:
         if diagnostics is not None:
-            diagnostics.update({"status": "write_timeout", "elapsed": round(time.perf_counter() - started, 3), "error": str(exc)})
+            diagnostics.update({"status": "write_timeout", "error_type": type(exc).__name__})
         return None
     except httpx.PoolTimeout as exc:
         if diagnostics is not None:
-            diagnostics.update({"status": "pool_timeout", "elapsed": round(time.perf_counter() - started, 3), "error": str(exc)})
+            diagnostics.update({"status": "pool_timeout", "error_type": type(exc).__name__})
+        return None
+    except httpx.ReadError as exc:
+        if diagnostics is not None:
+            diagnostics.update(status="stream_error", error_type=type(exc).__name__)
         return None
     except Exception as exc:
         if diagnostics is not None:
-            diagnostics.update({"status": "error", "elapsed": round(time.perf_counter() - started, 3), "error_type": type(exc).__name__, "error": str(exc)})
+            diagnostics.update({"status": "error", "error_type": type(exc).__name__})
         return None
+    finally:
+        if diagnostics is not None:
+            diagnostics["elapsed"] = round(time.perf_counter() - started, 3)
 
 
 # ---------- Prompt 模板 ----------
@@ -196,34 +249,143 @@ _QUERY_DIMENSIONS = {
     "boundary_comparison",
 }
 
+# Detect requests and comparisons, not vocabulary from particular disciplines.
+_SHORT_QUERY_REQUEST_CUES = re.compile(
+    r"如何|怎样|怎么|为何|为什么|是否|能否|多少|哪些|哪种|"
+    r"比较|对比|相较|相比|排除|不包括|不要|不纳入|剔除|"
+    r"今天|今日|本日|当天|对.+(?:影响|作用|关系)"
+)
 
-def _english_query_ok(value: object) -> bool:
+def _short_topic_text(source: str) -> str:
+    """Strip presentation text from a standalone term or definition request."""
+    original = source.split("\n\n检索硬约束：", 1)[0]
+    topic = original.strip().strip("“”\"'？?。！!；;，,、 ")
+    topic = re.sub(r"^(?:什么是|何为|请介绍一下|请介绍|介绍一下)", "", topic)
+    return re.sub(r"(?:是什么|指什么)$", "", topic).strip()
+
+
+def is_short_standalone_topic(source: str) -> bool:
+    """A short topic, including acronyms or a definitional question."""
+    original = source.split("\n\n检索硬约束：", 1)[0]
+    topic = _short_topic_text(source)
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", topic))
+    return bool(
+        (1 <= cjk_count <= 10 or (
+            bool(re.search(r"[\u4e00-\u9fff]", original))
+            and re.fullmatch(r"[A-Za-z][A-Za-z0-9.+_/-]{1,20}", topic)
+        ))
+        and len(topic) <= 30
+        and re.fullmatch(r"[\u4e00-\u9fffA-Za-z0-9 .+_/-]+", topic)
+        and not _SHORT_QUERY_REQUEST_CUES.search(original)
+    )
+
+
+def _is_short_simple_question(source: str) -> bool:
+    """A single short request can have a complete two-word English query."""
+    original = source.split("\n\n检索硬约束：", 1)[0].strip()
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", original))
+    return bool(
+        1 <= cjk_count <= 12
+        and len(original) <= 35
+        and re.search(r"如何|怎样|怎么|为何|为什么|是否|能否|哪些|什么", original)
+        and not re.search(r"比较|对比|相较|相比|排除|不包括|不要|不纳入|剔除|今天|今日|本日|当天", original)
+        and not re.search(r"[，,；;。！？!?].", original)
+        and not re.search(r"与|和|及|以及|或|、", original)
+    )
+
+
+def _minimum_query_words(original: str) -> int:
+    """Keep a detail floor for full questions; a bare topic may be one term."""
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", original))
+    if cjk_count > 60:
+        return 8
+    if cjk_count > 30:
+        return 5
+    if is_short_standalone_topic(original):
+        return 1
+    if _is_short_simple_question(original):
+        return 2
+    return 3
+
+
+def _english_query_ok(value: object, *, source: str = "") -> bool:
     """Return whether *value* is usable as an international academic query."""
     text = " ".join(str(value or "").split())
     if not text or re.search(r"[\u4e00-\u9fff]", text):
         return False
     words = re.findall(r"[A-Za-z][A-Za-z0-9-]{1,}", text)
-    return len(words) >= 2
+    return len(words) >= (1 if is_short_standalone_topic(source) else 2)
 
 
-def _query_semantic_issues(source: str, candidate: str) -> list[str]:
-    """Check language-independent evidence that a translation kept key constraints."""
-    issues: list[str] = []
-    if not _english_query_ok(candidate):
-        return ["not_usable_english"]
+def _semantic_anchor_source(source: str) -> str:
+    """Keep research constraints, excluding labelled proposal administration."""
+    clauses = re.split(r"([。！？!?；;\n])", source)
+    for i in range(0, len(clauses), 2):
+        clause = clauses[i]
+        # A proposal's promised papers/reports are deliverables, not keywords
+        # that existing literature must contain. Restrict this to labelled
+        # sections; requests to search SCI papers or scientific values stay intact.
+        clause = re.sub(r"(?:预期成果|预期产出|交付成果|成果形式|验收成果)\s*[:：].*$", "", clause)
+        if re.search(r"(?:可行性|立项依据|研究背景)\s*[:：]", clause):
+            clause = re.sub(r"(?:对应|契合|对接|符合)\s*[A-Za-z][A-Za-z0-9 ._-]*\s*(?:的)?"
+                            r"(?:前沿|资助|规划|重点)方向", "", clause)
+        clauses[i] = clause
+        policy = re.search(r"基金|资助|指南|规划|政策|科协|攻关方向", clause)
+        announcement = re.search(r"发布|列为|列入|提出|指出|明确|重点|优先|资助方向", clause)
+        date_constraint = re.search(r"检索|搜索|查找|发表于|发表的|文献|论文|以来|之后|之前|截至|期间|限定|仅限", clause)
+        if policy and announcement and not date_constraint:
+            clauses[i] = re.sub(r"(?<![A-Za-z0-9])(?:19|20)\d{2}(?=年)", "", clause)
+    return "".join(clauses)
 
-    original = source.split("\n\n检索硬约束：", 1)[0]
-    candidate_lower = candidate.lower()
-    candidate_compact = re.sub(r"[^a-z0-9]", "", candidate_lower)
+
+def _query_ascii_anchors(source: str) -> list[str]:
+    """Share the exact preservation checklist between planning and validation."""
+    original = _semantic_anchor_source(source.split("\n\n检索硬约束：", 1)[0])
+    # Scientific typography must not split N₂ into a standalone N anchor.
+    original = unicodedata.normalize("NFKC", original)
     anchors = re.findall(
         r"[A-Za-z][A-Za-z0-9]*(?:[.-][A-Za-z0-9]+)*|\d+(?:\.\d+)?",
         original,
     )
     ignored_anchors = {"and", "or", "not", "today", "this", "day"}
-    missing_anchors = []
+    required = []
     for anchor in dict.fromkeys(anchors):
         compact = re.sub(r"[^a-z0-9]", "", anchor.lower())
-        if compact in ignored_anchors or len(compact) < 2:
+        if compact in ignored_anchors:
+            continue
+        if len(compact) == 1:
+            # A letter attached to Chinese can be a scientific symbol or a
+            # language name (X射线, C语言). Match it as a token, not inside a word.
+            adjacent_to_chinese = re.search(
+                rf"(?<![A-Za-z0-9]){re.escape(anchor)}\s*[\u4e00-\u9fff]"
+                rf"|[\u4e00-\u9fff]\s*{re.escape(anchor)}(?![A-Za-z0-9])",
+                original,
+            )
+            if adjacent_to_chinese:
+                required.append(anchor)
+            continue
+        if compact:
+            required.append(anchor)
+    return required
+
+
+def _query_semantic_issues(source: str, candidate: str) -> list[str]:
+    """Check language-independent evidence that a translation kept key constraints."""
+    issues: list[str] = []
+    source = unicodedata.normalize("NFKC", source)
+    candidate = unicodedata.normalize("NFKC", candidate)
+    original = _semantic_anchor_source(source.split("\n\n检索硬约束：", 1)[0])
+    if not _english_query_ok(candidate, source=original):
+        return ["not_usable_english"]
+
+    candidate_lower = candidate.lower()
+    candidate_compact = re.sub(r"[^a-z0-9]", "", candidate_lower)
+    missing_anchors = []
+    for anchor in _query_ascii_anchors(source):
+        compact = re.sub(r"[^a-z0-9]", "", anchor.lower())
+        if len(compact) == 1:
+            if not re.search(rf"(?<![A-Za-z0-9]){re.escape(anchor)}(?![A-Za-z0-9])", candidate, re.I):
+                missing_anchors.append(anchor)
             continue
         if compact not in candidate_compact:
             missing_anchors.append(anchor)
@@ -236,14 +398,13 @@ def _query_semantic_issues(source: str, candidate: str) -> list[str]:
         issues.append("missing_exclusion")
 
     if re.search(r"比较|对比|哪种|关系|差异|相比", original) and not re.search(
-        r"\b(?:and|versus|vs|compar\w*|relationship|association|effect|impact)\b",
+        r"\b(?:and|versus|vs|compar\w*|relationship|association|correlation|effect|impact)\b",
         candidate_lower,
     ):
         issues.append("missing_relation")
 
-    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", original))
     content_words = re.findall(r"[A-Za-z][A-Za-z0-9-]{1,}", candidate)
-    minimum_words = 8 if cjk_count > 60 else 5 if cjk_count > 30 else 3
+    minimum_words = _minimum_query_words(original)
     if len(content_words) < minimum_words:
         issues.append(f"insufficient_detail:{len(content_words)}<{minimum_words}")
 
@@ -255,20 +416,40 @@ def _query_semantic_issues(source: str, candidate: str) -> list[str]:
     return issues
 
 
+def _short_query_needs_confirmation(source: str, candidate: str) -> bool:
+    """Recheck unusually terse translations without imposing a word glossary."""
+    original = source.split("\n\n检索硬约束：", 1)[0]
+    topic = _short_topic_text(source)
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", topic))
+    word_count = len(re.findall(r"[A-Za-z][A-Za-z0-9-]{1,}", candidate))
+    if is_short_standalone_topic(source):
+        return (word_count == 1 and (
+            cjk_count >= 4 or (cjk_count >= 1 and bool(re.search(r"[A-Za-z0-9]", topic)))
+        )) or (word_count == 2 and cjk_count >= 6)
+    return bool(
+        _is_short_simple_question(source)
+        and word_count == 2
+        and (cjk_count >= 8 or bool(re.search(r"[A-Za-z0-9]", original)))
+    )
+
+
 def _response_diagnostics(raw: str) -> dict:
     """Keep enough evidence for debugging without retaining a full model reply."""
     normalized = " ".join(str(raw or "").split())
-    preview = re.sub(r"(?i)\bbearer\s+\S+", "Bearer [REDACTED]", normalized[:160])
+    preview = re.sub(r"(?i)\bbearer\s+\S+", "Bearer [REDACTED]", normalized)
     preview = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[REDACTED]", preview)
+    from shared.lib.secret_values import redact_values, secret_values
+
+    preview = redact_values(preview, secret_values([LLM_CONFIG.get("api_key")]))
     return {
         "output_chars": len(raw or ""),
         "output_sha256": hashlib.sha256((raw or "").encode("utf-8")).hexdigest()[:16],
         "output_has_cjk": bool(re.search(r"[\u4e00-\u9fff]", raw or "")),
-        "output_preview": preview,
+        "output_preview": preview[:160],
     }
 
 
-def _extract_english_query(raw: str) -> str:
+def _extract_english_query(raw: str, *, source: str = "") -> str:
     """Extract an English query from JSON, fenced, labelled, or multiline output."""
     text = str(raw or "").strip()
     if not text:
@@ -280,7 +461,7 @@ def _extract_english_query(raw: str) -> str:
         parsed = json.loads(json_text.strip())
         if isinstance(parsed, dict):
             candidate = " ".join(str(parsed.get("english_query") or "").split())
-            if _english_query_ok(candidate):
+            if _english_query_ok(candidate, source=source):
                 return candidate
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
@@ -299,7 +480,7 @@ def _extract_english_query(raw: str) -> str:
         # Detailed Boolean queries can legitimately exceed 40 words. The
         # translation prompt requests one line, so reject only implausibly large
         # prose rather than truncating a valid, constraint-rich query.
-        if not _english_query_ok(candidate) or len(words) > 120 or len(candidate) > 1200:
+        if not _english_query_ok(candidate, source=source) or len(words) > 120 or len(candidate) > 1200:
             continue
         candidates.append((len(words), index, candidate))
     if not candidates:
@@ -369,8 +550,53 @@ def generate_strategy(research_question: str) -> dict:
     return strategy
 
 
-def generate_strategy_detailed(research_question: str) -> tuple[dict, dict]:
+def _structured_concept_query(raw: str) -> tuple[str, list[list[str]]]:
+    """Convert explicit concept groups to Boolean syntax without guessing terms."""
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw or "", re.IGNORECASE)
+    try:
+        data = json.loads(match.group(1) if match else raw)
+    except (TypeError, ValueError):
+        return "", []
+    groups = data.get("concept_groups") if isinstance(data, dict) else None
+    if not isinstance(groups, list) or not 1 <= len(groups) <= 12:
+        return "", []
+    clean = []
+    for group in groups:
+        if not isinstance(group, list) or not 1 <= len(group) <= 6:
+            return "", []
+        values = []
+        for value in group:
+            if (
+                not isinstance(value, str) or not value.strip() or len(value) > 250
+                or re.search(r'[\u4e00-\u9fff"()]|\b(?:AND|OR|NOT)\b', value)
+                or not re.search(r"[A-Za-z]", value)
+            ):
+                return "", []
+            values.append(" ".join(value.split()))
+        clean.append(list(dict.fromkeys(values)))
+    query = " AND ".join(
+        f'({" OR ".join(chr(34) + value + chr(34) for value in group)})'
+        if len(group) > 1 else f'"{group[0]}"' for group in clean
+    )
+    exclusions = data.get("exclude", [])
+    if not isinstance(exclusions, list) or any(
+        not isinstance(value, str) or not value.strip()
+        or re.search(r'[\u4e00-\u9fff"()]|\b(?:AND|OR|NOT)\b', value)
+        for value in exclusions
+    ):
+        return "", []
+    if exclusions:
+        query += " NOT (" + " OR ".join(f'"{value.strip()}"' for value in exclusions) + ")"
+    return query, clean
+
+
+def generate_strategy_detailed(
+    research_question: str, *, require_concepts: bool = False, bilingual_plan: bool = False,
+) -> tuple[dict, dict]:
     """生成策略并返回不影响策略内容的模型请求诊断。"""
+    if bilingual_plan:
+        from .bilingual_strategy import generate
+        return generate(research_question)
     diagnostics: dict = {}
     has_chinese = bool(re.search(r"[\u4e00-\u9fff]", research_question))
     # English input benefits from the full structured strategy. Chinese input goes
@@ -412,7 +638,10 @@ def generate_strategy_detailed(research_question: str) -> tuple[dict, dict]:
                 "quotation marks, or Chinese characters.",
                 research_question,
                 2048,
-                25.0,
+                # The current gateway can wait ~30s before returning its 429.
+                # Leave room to receive that actionable response instead of
+                # timing out first and adding another request to its queue.
+                35.0,
             ),
             (
                 "Produce exactly one English academic database query. Preserve every named "
@@ -433,7 +662,30 @@ def generate_strategy_detailed(research_question: str) -> tuple[dict, dict]:
             ),
         ]
         any_translation_output = False
+        query_to_confirm = ""
+        first_request_status = None
+        transport_failures = 0
         for attempt_number, (system_prompt, user_prompt, max_tokens, read_timeout) in enumerate(attempts, 1):
+            structured = require_concepts and not is_short_standalone_topic(research_question)
+            if structured:
+                system_prompt = (
+                    "Translate the research request into English academic search concepts. "
+                    "Preserve methods, named entities, populations, relationships, comparisons, "
+                    "conditions and exclusions. Return ONLY a JSON object: "
+                    '{"concept_groups":[["English concept","optional synonym"],["next concept"]],'
+                    '"exclude":["explicitly excluded concept"]}. '
+                    "Each inner array describes ONE concept; distinct concepts belong in "
+                    "separate arrays. Use one group for a single-concept request. "
+                    "Put only English phrases inside groups, no Boolean operators. "
+                    "Use an empty exclude array when the user excludes nothing. "
+                    "Do not add topics or constraints the user did not request."
+                )
+            if query_to_confirm:
+                user_prompt += (
+                    "\nPREVIOUS ENGLISH QUERY: " + query_to_confirm
+                    + "\nCheck that every concept in SOURCE TEXT is represented. "
+                    "Correct the query if anything was omitted. Return only the final query."
+                )
             translation_diagnostics: dict = {}
             translation = _call_llm(
                 system_prompt,
@@ -446,35 +698,72 @@ def generate_strategy_detailed(research_question: str) -> tuple[dict, dict]:
             diagnostics[f"translation_attempt_{attempt_number}_request_status"] = (
                 translation_diagnostics.get("status")
             )
-            for key in ("finish_reason", "completion_tokens", "reasoning_tokens"):
+            for key in (
+                "finish_reason", "completion_tokens", "reasoning_tokens", "reasoning_chars",
+                "http_status", "elapsed", "response_headers_elapsed", "response_read_elapsed",
+                "response_bytes", "error_type", "retry_after_seconds", "upstream_error_preview",
+            ):
                 diagnostics[f"translation_attempt_{attempt_number}_{key}"] = (
                     translation_diagnostics.get(key)
                 )
+            diagnostics.update({
+                f"translation_attempt_{attempt_number}_{key}": value
+                for key, value in _response_diagnostics(translation or "").items()
+            })
             if translation:
                 any_translation_output = True
-                candidate = _extract_english_query(translation)
+                concept_query, concept_groups = _structured_concept_query(translation)
+                candidate = concept_query or _extract_english_query(translation, source=research_question)
             else:
                 candidate = ""
-            semantic_issues = _query_semantic_issues(research_question, candidate)
+                concept_groups = []
+            request_status = translation_diagnostics.get("status")
+            # Network/auth/rate-limit failures carry no model answer to validate.
+            semantic_issues = (
+                _query_semantic_issues(research_question, candidate)
+                if translation or request_status == "ok" else []
+            )
+            if structured and candidate and not concept_groups and not re.search(
+                r"\bAND\b", candidate, re.IGNORECASE
+            ):
+                semantic_issues.append("missing_concept_structure")
             diagnostics[f"translation_attempt_{attempt_number}_semantic_issues"] = semantic_issues
-            if candidate and not semantic_issues:
-                diagnostics["status"] = (
-                    "fallback_translated" if attempt_number == 1
-                    else "fallback_translated_recovery"
+            accepted_candidate = candidate if candidate and not semantic_issues else ""
+            if query_to_confirm and attempt_number == 2:
+                diagnostics["short_query_confirmation"] = (
+                    "confirmed" if accepted_candidate else "first_valid_query_retained"
                 )
-                diagnostics["translation_request_status"] = translation_diagnostics.get("status")
-                diagnostics["translation_status"] = "valid"
-                diagnostics["translation_valid"] = True
-                diagnostics["translation_attempts"] = attempt_number
-                return {
-                    "research_question": research_question,
-                    "english_query": candidate,
-                    "search_queries": [{
-                        "dimension": "core_problem", "query": candidate,
-                        "sources": ["crossref", "openalex", "arxiv"], "weight": 1.0,
-                    }],
-                    "filters": {"min_citations": 0, "sort_by": "relevance"},
-                }, diagnostics
+                if not accepted_candidate:
+                    accepted_candidate = query_to_confirm
+                    request_status = first_request_status
+            if accepted_candidate:
+                if attempt_number == 1 and _short_query_needs_confirmation(
+                    research_question, accepted_candidate
+                ):
+                    query_to_confirm = accepted_candidate
+                    first_request_status = request_status
+                    diagnostics["short_query_confirmation"] = "requested"
+                else:
+                    diagnostics["status"] = (
+                        "fallback_translated_confirmation_unavailable"
+                        if diagnostics.get("short_query_confirmation") == "first_valid_query_retained"
+                        else "fallback_translated" if attempt_number == 1
+                        else "fallback_translated_recovery"
+                    )
+                    diagnostics["translation_request_status"] = request_status
+                    diagnostics["translation_status"] = "valid"
+                    diagnostics["translation_valid"] = True
+                    diagnostics["translation_attempts"] = attempt_number
+                    return {
+                        "research_question": research_question,
+                        "english_query": accepted_candidate,
+                        "concept_groups": concept_groups,
+                        "search_queries": [{
+                            "dimension": "core_problem", "query": accepted_candidate,
+                            "sources": ["crossref", "openalex", "arxiv"], "weight": 1.0,
+                        }],
+                        "filters": {"min_citations": 0, "sort_by": "relevance"},
+                    }, diagnostics
             if translation:
                 output_diagnostics = _response_diagnostics(translation)
                 diagnostics.update({
@@ -485,12 +774,23 @@ def generate_strategy_detailed(research_question: str) -> tuple[dict, dict]:
                     f"translation_attempt_{attempt_number}_{key}": value
                     for key, value in output_diagnostics.items()
                 })
+            if request_status not in {None, "ok"}:
+                transport_failures += 1
+                http_status = translation_diagnostics.get("http_status") or 0
+                # Changing the prompt cannot repair credentials or lift a rate
+                # limit. For transient transport failures allow one recovery.
+                if request_status == "fallback_no_credentials" or 400 <= http_status < 500:
+                    diagnostics["retry_stopped_reason"] = "upstream_rejected"
+                    break
+                if transport_failures >= 2:
+                    diagnostics["retry_stopped_reason"] = "transport_recovery_exhausted"
+                    break
         diagnostics["translation_status"] = (
             "invalid_output" if any_translation_output else "request_failed"
         )
         diagnostics["translation_request_status"] = translation_diagnostics.get("status")
         diagnostics["translation_valid"] = False
-        diagnostics["translation_attempts"] = len(attempts)
+        diagnostics["translation_attempts"] = attempt_number
     
     # 2. 无 LLM 时用规则引擎
     if not diagnostics or diagnostics.get("status") in {"started", "ok"}:

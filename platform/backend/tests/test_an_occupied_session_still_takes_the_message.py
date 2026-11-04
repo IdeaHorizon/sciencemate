@@ -193,7 +193,7 @@ async def test_a_parked_worker_gets_the_message_instead_of_an_internal_error(
     assert '"occupancy": "working"' in body or '"occupancy":"working"' in body, (
         f"ack 没带上 worker 自报的占用状态：{body[:400]}"
     )
-    assert "上一轮还占着" in body, "ack 没把「它前面还排着活」这句话说给人听"
+    assert "当前执行仍在进行" in body, "ack 没把「它前面还排着活」这句话说给人听"
 
 
 @pytest.mark.asyncio

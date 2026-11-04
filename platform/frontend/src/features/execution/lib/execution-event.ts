@@ -75,6 +75,8 @@ export const EXECUTION_EVENT_KINDS = [
   "autonomy.weak_walls",
   "material.added",
   "run.rejoined",
+  // 运行时丢了之后开出的接续会话：从哪儿接的、原会话冻结的东西落到了哪里（#1186）。
+  "session.recovered",
   "redaction.warning",
   // 摄取层拒收了一条 transcript 记录（内容不变量被违反）。这是**见证**，
   // 不是故障：turn 还活着，只是这一条没落成正常事件。

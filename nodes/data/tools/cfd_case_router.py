@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from core.state import State
-from .geometry_assets import COORDINATE_PROFILE_KEYS, GEOMETRY_FILE_KEYS, flatten_parameter_groups
+from .geometry_assets import (
+    coordinate_profile_from_params as _provided_profile_geometry,
+    geometry_file_from_params as _provided_geometry_file,
+    flatten_parameter_groups,
+)
 from .human_input_utils import (
     caller_request_text,
     extract_naca_code as _extract_naca_code,
@@ -41,43 +45,6 @@ from .mesh_generator import _generate_computational_mesh, _safe_case_dir_under_s
 _PREPROCESSING_WORKSPACE_DIR = "mesh"
 
 
-def openfoam_required_files_from_context(text: str) -> list[str]:
-    names = [
-        "0/U", "0/p", "constant/transportProperties",
-        "constant/turbulenceProperties", "system/controlDict",
-        "system/fvSchemes", "system/fvSolution",
-    ]
-    if re.search(r"\b(mesh|grid|blockMesh|snappyHexMesh|Gmsh|polyMesh)\b|网格", text, flags=re.I):
-        names.insert(0, "system/blockMeshDict")
-        names.append("constant/polyMesh")
-    if re.search(r"\b(decomposePar|parallel|并行)\b", text, flags=re.I):
-        names.append("system/decomposeParDict")
-    return names
-
-
-def merge_adapter_required_files(existing: list[dict[str, Any]], names: list[str]) -> list[dict[str, Any]]:
-    result = list(existing)
-    seen = {
-        str(item.get("name_or_role") or item.get("id") or "").strip().lower()
-        for item in result if isinstance(item, dict)
-    }
-    for name in names:
-        key = name.strip().lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        result.append({
-            "id": re.sub(r"[^a-z0-9]+", "_", key).strip("_") or "required_file",
-            "name_or_role": name,
-            "format": "OpenFOAM dictionary or mesh asset",
-            "reason": "Required by the registered CFD adapter.",
-            "evidence": [{"source_type": "adapter", "detail": f"CFD adapter requires {name}."}],
-            "confidence": 0.85,
-            "consequences_if_missing": "The CFD preprocessing case cannot be prepared or validated.",
-        })
-    return result
-
-
 def _default_preprocessing_workspace(state: State) -> str:
     """Return the run-local, discipline-neutral preprocessing workspace."""
     return str(Path(str(state.root)) / ".data_node_work" / _PREPROCESSING_WORKSPACE_DIR)
@@ -99,30 +66,10 @@ def _parse_json_object(raw: str) -> tuple[dict[str, Any], str | None]:
     return parsed, None
 
 
-_CAD_GEOMETRY_FIELDS = GEOMETRY_FILE_KEYS
-_PROFILE_GEOMETRY_FIELDS = COORDINATE_PROFILE_KEYS
-
-
 def _needs_custom_geometry(case: dict[str, Any], params: dict[str, Any]) -> bool:
     if case.get("geometry_mode") != "user_file":
         return False
     return not bool(_provided_geometry_file(params) or _provided_profile_geometry(params))
-
-
-def _provided_geometry_file(params: dict[str, Any]) -> str:
-    for key in _CAD_GEOMETRY_FIELDS:
-        value = params.get(key)
-        if value and not is_placeholder_value(value):
-            return str(value)
-    return ""
-
-
-def _provided_profile_geometry(params: dict[str, Any]) -> str:
-    for key in _PROFILE_GEOMETRY_FIELDS:
-        value = params.get(key)
-        if value and not is_placeholder_value(value):
-            return str(value)
-    return ""
 
 
 def _profile_mesh_type(spec: str, params: dict[str, Any]) -> str:

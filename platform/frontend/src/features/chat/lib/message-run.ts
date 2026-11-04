@@ -1,5 +1,24 @@
 import type { ChatMessage } from "../types";
 
+/** Bind the optimistic bubble to the same durable identity used by replies. */
+export function reconcileInterjection(
+  messages: readonly ChatMessage[],
+  optimisticId: string,
+  assistantId: string,
+  receipt: Record<string, unknown>,
+): ChatMessage[] {
+  return messages.filter((message) => message.id !== assistantId).map((message) => {
+    if (message.id !== optimisticId) return message;
+    return {
+      ...message,
+      interjection: true,
+      id: typeof receipt.messageId === "string" && receipt.messageId ? receipt.messageId : message.id,
+      runId: typeof receipt.runId === "string" && receipt.runId ? receipt.runId : message.runId,
+      sequence: typeof receipt.messageSequence === "number" ? receipt.messageSequence : message.sequence,
+    };
+  });
+}
+
 export type MessageRunOwner = {
   messageId: string;
   runId: string;
@@ -124,7 +143,8 @@ export function messageRunSegments(messages: readonly ChatMessage[]): MessageRun
         messageId: message.id,
         runId,
         window: { start, end },
-        interjection: messageIndex !== mounts[0] && mounts.includes(messageIndex),
+        interjection: message.interjection === true
+          || (messageIndex !== mounts[0] && mounts.includes(messageIndex)),
       });
     });
   }

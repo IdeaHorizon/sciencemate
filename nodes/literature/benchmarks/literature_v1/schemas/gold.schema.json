@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LiteratureBench hidden relevance gold",
+  "type": "object",
+  "required": ["benchmark_version", "tasks"],
+  "properties": {
+    "benchmark_version": {"const": "0.3.0"},
+    "tasks": {"type": "object", "additionalProperties": {"type": "object", "required": ["papers"], "properties": {"papers": {"type": "array", "items": {"type": "object", "required": ["relevance"], "properties": {"doi": {"type": "string"}, "title": {"type": "string"}, "relevance": {"type": "integer", "minimum": 0, "maximum": 3}, "core": {"type": "boolean"}}}}}}}
+  }
+}

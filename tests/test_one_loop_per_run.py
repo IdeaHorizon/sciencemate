@@ -187,7 +187,7 @@ async def test_standby_does_not_execute_a_tool_it_was_not_offered(tmp_path, monk
         tool_calls=[_call("run_node", json.dumps(
             {"node_type": "_curator", "user_note": "允许"}))])])
     harness = NodeHarness(node_type="_orchestrator", system_prompt="o",
-                          tools=["runtime_control", "run_node"],
+                          tools=["runtime_control"],
                           max_turns=2, max_output_tokens=2048)
     await chat._handle_interrupt(parent, harness, llm, "允许")
     assert "run_node" not in executed

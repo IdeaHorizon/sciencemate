@@ -123,6 +123,10 @@ _FALLS_TO_GENERIC: dict[str, str] = {
     "invalid_authorized_risk_classes": "前端拼错了",
     "invalid_sandbox_manifest": "后端拼错了",
     "sandbox_authorization_mismatch": "后端与 worker 对不上：部署问题",
+    # 执行目标（本机 / wsl:<发行版>）：值在接口里先核过才存，到 worker 还拼错 = 后端 bug；
+    # 在跑的 attempt 不能原地换目标，前端状态过期时撞到，等这一轮结束再换即可。
+    "invalid_execution_target": "后端拼错了",
+    "sandbox_target_mismatch": "后端与 worker 对不上：在跑的一轮不能原地换执行位置",
     "no_pause_pending": "没有待答的 pause：前端状态过期，重发即可",
     "pause_conflict": "pause 版本冲突：前端状态过期，重发即可",
     "pause_not_addressable": "pause 不可寻址：前端状态过期，重发即可",
@@ -149,26 +153,34 @@ _FALLS_TO_GENERIC: dict[str, str] = {
 #: `execution_failed` 一模一样，那就别加 —— 多一个条目只是多一句同义的话，
 #: 不会让任何人多做对一件事。
 _COPY: dict[str, _Copy] = {
+    "strategy_generation_failed": _Copy(
+        title={"zh": "生成检索计划失败", "en": "Could not create a search plan"},
+        body={"zh": "模型没有返回有效的检索计划，本次检索已停止。",
+              "en": "The model did not return a valid search plan, so the search stopped."},
+        recovery={"zh": "请重试；若持续失败，请检查模型连接和额度，或缩短检索问题。",
+                  "en": "Try again. If it keeps failing, check the model connection and quota, or shorten the search question."},
+        retryable=True,
+    ),
     "strategy_translation_failed": _Copy(
-        title={"zh": "未能生成检索词", "en": "Search terms could not be generated"},
-        body={"zh": "模型没有返回通过校验的英文检索词，本次检索未继续。",
-              "en": "The model did not return valid English search terms, so this search did not continue."},
-        recovery={"zh": "请重试检索；若持续失败，检查学术检索所用模型的连接与额度，也可直接输入英文检索词。",
-                  "en": "Retry the search. If it keeps failing, check the search model connection and quota, or enter English search terms directly."},
+        title={"zh": "生成检索词失败", "en": "Could not generate search terms"},
+        body={"zh": "模型没有返回有效的英文检索词，检索已停止。",
+              "en": "The model did not return valid English search terms, so the search stopped."},
+        recovery={"zh": "请重试。如果仍然失败，请检查模型的连接和额度，或直接输入英文检索词。",
+                  "en": "Try again. If it keeps failing, check the model connection and quota, or enter English search terms directly."},
         retryable=True,
     ),
     "empty_curation": _Copy(
-        title={"zh": "未能生成课题检索词", "en": "Project search terms could not be generated"},
-        body={"zh": "资讯挖掘模型未返回有效的课题检索词。",
-              "en": "The discovery model did not return valid search terms for the project."},
-        recovery={"zh": "请检查课题名称与描述是否具体，并检查资讯挖掘模型的连接与额度后重试。",
-                  "en": "Check that the project title and description are specific, then check the discovery model connection and quota before retrying."},
+        title={"zh": "生成项目检索词失败", "en": "Could not generate search terms for the project"},
+        body={"zh": "资讯挖掘模型没有返回有效的检索词。",
+              "en": "The feed curation model returned no valid search terms."},
+        recovery={"zh": "请确认项目名称和描述足够具体，并检查资讯挖掘模型的连接和额度后重试。",
+                  "en": "Make sure the project title and description are specific, and check the feed curation model's connection and quota, then try again."},
         retryable=True,
     ),
     "execution_failed": _Copy(
         # 「研究停止了」这个说法是错的（wangd 2026-08-18）：停的是**这一轮**，
         # 研究是磁盘上那份记录，它没有"停"这个状态。措辞按事实来。
-        title={"zh": "这一轮没能完成", "en": "This turn did not finish"},
+        title={"zh": "这次执行未完成", "en": "This run did not finish"},
         # ⚠️ 这句话是**兜底**，也就是"我们认不出这次是怎么回事"。原文写的是
         # 「平台在记录这次运行时撞上了内部错误」——它把一句无知说成了一个诊断，
         # 而且诊断还是错的：绝大多数掉进这里的失败既不在记录阶段，也不是平台
@@ -178,21 +190,17 @@ _COPY: dict[str, _Copy] = {
         # 用户不应该看到的」。兜底文案只说**我们确实知道的那部分**：这一轮停了、
         # 记录还在、下一条消息接着跑。归因留给日志（reference 指得到）。
         body={
-            "zh": "这一轮中途停下了，已经记录下来的工作都在。",
-            "en": "This turn stopped partway; everything already recorded is still here.",
+            "zh": "这次执行中途停止了，已记录的内容都还在。",
+            "en": "This run stopped partway. Everything recorded so far is still here.",
         },
         # 「如果连着几次都停在这里，把 reference 报出来」那句删了（RFC_WORKER_START_IS_NOT_A_GATE §5）：
         # 「连着几次」现在是机械判据 —— 同一会话同一 code 连续第二次，后端自动跑 doctor，结果在会话
         # 顶部的条幅里。把人当重试循环的那半句没有读者了。
         recovery={
-            "zh": (
-                "发下一条消息就从断点接着跑。完整技术细节挂在下面那个 reference 上；"
-                "同一个问题连着出现时，会话顶部会出现平台的自动诊断。"
-            ),
+            "zh": "发送新消息即可从中断处继续。如果同样的问题反复出现，会话顶部会显示自动诊断结果。",
             "en": (
-                "Send another message and it continues from where it stopped. The full "
-                "technical detail hangs off the reference below; if the same problem keeps "
-                "recurring, the platform's own diagnosis appears at the top of the session."
+                "Send a new message to continue from where it stopped. If the same problem keeps "
+                "happening, an automatic diagnosis appears at the top of the Session."
             ),
         },
     ),
@@ -206,28 +214,19 @@ _COPY: dict[str, _Copy] = {
         # `_is_transient_upstream` 只认 429/5xx）一个都没接住，掉进兜底 →
         # 用户读到「平台内部错误 / 再发一次即可」，照着点「继续」，5 秒后
         # 又是同一条。错误归因把人按在原地空转。
-        title={"zh": "模型服务拒绝了这次调用", "en": "The model service rejected this call"},
+        title={"zh": "模型服务拒绝了请求", "en": "The model service rejected the request"},
         body={
-            "zh": (
-                "上游账号的额度或凭据挡在了前面（HTTP 401/402/403）——"
-                "不是平台故障，也不是这条请求的内容有问题。"
-                "上游自己那句话在下面的技术细节里。"
-            ),
+            "zh": "模型服务账号的额度不足或密钥无效（HTTP 401/402/403）。服务返回的原始信息见「技术细节」。",
             "en": (
-                "The upstream account's quota or credentials blocked it (HTTP "
-                "401/402/403) — not a platform fault, and not a problem with this "
-                "request. The upstream's own words are in the technical detail below."
+                "The model service account is out of quota or its key is invalid (HTTP "
+                "401/402/403). The service's original message is under Technical details."
             ),
         },
         recovery={
-            "zh": (
-                "在下面的模型徽标处换一个可用的后端接着跑，"
-                "或者把这个后端的额度/密钥处理好再发。已经记录下来的工作都在。"
-            ),
+            "zh": "点输入框下方的模型名称，换一个可用的模型；或处理好额度和密钥后重新发送。已记录的内容都还在。",
             "en": (
-                "Switch to a working backend from the model badge below, or sort out "
-                "this backend's quota or key and send again. Everything already "
-                "recorded is still here."
+                "Click the model name below the message box to switch to a working model, or "
+                "sort out the quota or key and send again. Everything recorded is still here."
             ),
         },
         # 三态里的 False：同一个空额度、同一个密钥，重发一万次都是这个结果。
@@ -235,14 +234,14 @@ _COPY: dict[str, _Copy] = {
         retryable=False,
     ),
     "storage_conflict": _Copy(
-        title={"zh": "这一轮没跑完", "en": "Research stopped before completion"},
+        title={"zh": "这次执行未完成", "en": "This run did not finish"},
         body={
-            "zh": "两个写入方同时在记录这个会话的历史。",
-            "en": "Two writers tried to record this Session's history at the same time.",
+            "zh": "会话记录同时被两处写入，发生了冲突。",
+            "en": "Two processes tried to write this Session's history at the same time.",
         },
         recovery={
-            "zh": "再发一次 —— agent 产出的东西一样都没丢。",
-            "en": "Send the request again — nothing the agent produced was lost.",
+            "zh": "请重新发送，已生成的内容都还在。",
+            "en": "Send it again. Nothing already produced was lost.",
         },
         retryable=True,
     ),
@@ -260,23 +259,16 @@ _COPY: dict[str, _Copy] = {
         # 措辞按事实来：**不承诺"稍等一下"**。攥着它的那个进程可能正在跑一个
         # 几小时的节点，也可能是 unattended 停靠在按小时退避的复查间隔上
         # （8-21 现场：睡 4 小时）。给一个我们没有的时间尺度，比不给更糟。
-        title={"zh": "这一轮没跑完", "en": "This turn did not finish"},
+        title={"zh": "这次执行未完成", "en": "This run did not finish"},
         body={
-            "zh": "另一个进程还攥着这个会话的工作区 —— 它可能正在跑，也可能停在等待中。",
-            "en": (
-                "Another process still holds this Session's workspace — it may be "
-                "running, or parked waiting for something."
-            ),
+            "zh": "这个会话的工作区正被另一次执行占用，它可能正在运行，也可能在等待。",
+            "en": "Another run is still using this Session's workspace. It may be running or waiting.",
         },
         recovery={
-            "zh": (
-                "已经记录下来的工作都在，下面看得到。它放手之后再发一次就会从断点"
-                "接着跑；想立刻收回控制权就点停止。"
-            ),
+            "zh": "已记录的内容都在下方。等它结束后重新发送即可继续；如需立即接管，请点击「停止执行」。",
             "en": (
-                "Everything already recorded is below. Send again once it lets go and "
-                "the work continues from where it stopped; press stop to take control "
-                "back now."
+                "Everything recorded so far is below. Send again once it finishes to continue, "
+                "or click Stop run to take over now."
             ),
         },
         retryable=True,
@@ -285,52 +277,46 @@ _COPY: dict[str, _Copy] = {
     # 调模型之前只剩这几件事能把一轮杀掉；其余持久化前提都降级跑。文案各说各的：
     # 模型不可达说模型，身份冲突说"这个家是别人的"，不说"读不到"。
     "provider_not_configured": _Copy(
-        title={"zh": "模型没有配好", "en": "The model is not configured"},
+        title={"zh": "模型未配置", "en": "The model is not configured"},
         body={
-            "zh": "这一轮没有起跑：当前选的模型后端缺少可用的接入地址或模型名。",
-            "en": "This turn did not start: the selected model backend has no usable endpoint or model name.",
+            "zh": "这次执行没有开始：所选模型缺少地址或模型名称。",
+            "en": "This run did not start: the selected model has no endpoint or model name.",
         },
         recovery={
-            "zh": "到「设置 → 模型」把这个后端的接入地址和模型名补全，再发一次。",
-            "en": "Fill in the endpoint and model name under Settings → Models, then send again.",
+            "zh": "请在「设置 → 模型与密钥」中补全地址和模型名称，然后重新发送。",
+            "en": "Fill in the endpoint and model name under Settings → Models & credentials, then send again.",
         },
         retryable=False,
     ),
     "tenant_home_conflict": _Copy(
-        title={"zh": "这个家是别人的", "en": "This home belongs to someone else"},
+        title={"zh": "数据目录属于其他用户", "en": "This data folder belongs to another user"},
         body={
-            "zh": (
-                "平台给这个会话的数据目录里写着另一个租户的身份。继续用会把两个人的"
-                "知识和记忆写到一起，所以这一轮没有起跑。"
-            ),
+            "zh": "这个会话的数据目录登记的是另一位用户。为避免混入他人的知识和记忆，这次执行没有开始。",
             "en": (
-                "The data directory handed to this session is bound to a different tenant. "
-                "Continuing would mix two people's knowledge and memory, so this turn did not start."
+                "This Session's data folder is registered to another user. To avoid mixing in "
+                "their knowledge and memory, this run did not start."
             ),
         },
         recovery={
-            "zh": "这是部署问题，把下面的 reference 交给管理员；目录和身份的对应在后端日志里。",
-            "en": "This is a deployment problem: hand the reference below to an administrator; the "
-                  "directory and the identity it is bound to are in the backend log.",
+            "zh": "这是部署问题，请把「技术细节」中的参考编号发给管理员。",
+            "en": "This is a deployment problem. Send the reference number under Technical details "
+                  "to your administrator.",
         },
         retryable=False,
     ),
     "runtime_identity_conflict": _Copy(
-        title={"zh": "这个运行目录是别的会话的", "en": "This state directory belongs to another session"},
+        title={"zh": "运行目录属于其他会话", "en": "This run folder belongs to another Session"},
         body={
-            "zh": (
-                "这个会话的运行目录里写着另一个会话的身份。继续用会串两个会话的对话"
-                "与记录，所以这一轮没有起跑。"
-            ),
+            "zh": "这个会话的运行目录登记的是另一个会话。为避免两个会话的对话和记录混在一起，这次执行没有开始。",
             "en": (
-                "This session's state directory is bound to a different session. Continuing would "
-                "mix two sessions' conversations and records, so this turn did not start."
+                "This Session's run folder is registered to another Session. To avoid mixing the "
+                "two conversations and records, this run did not start."
             ),
         },
         recovery={
-            "zh": "新开一个会话继续；把下面的 reference 交给管理员，目录与身份的对应在后端日志里。",
-            "en": "Continue in a new session; hand the reference below to an administrator — the "
-                  "directory and the identity it is bound to are in the backend log.",
+            "zh": "请新建一个会话继续，并把「技术细节」中的参考编号发给管理员。",
+            "en": "Continue in a new Session, and send the reference number under Technical details "
+                  "to your administrator.",
         },
         retryable=False,
     ),
@@ -339,23 +325,23 @@ _COPY: dict[str, _Copy] = {
         # 未知）"，这条是"进程根本起不来，而且我们知道为什么"——执行环境
         # （解释器/依赖/checkout）坏了。给用户的话完全不同：前者重发多半能
         # 接着跑，后者重发一百次都是这个，得先修环境。
-        title={"zh": "平台的执行环境坏了", "en": "The platform's execution environment is broken"},
+        title={"zh": "执行环境异常", "en": "The execution environment is broken"},
         body={
-            "zh": "运行 Agent 的解释器或依赖不在了 —— 这是部署问题，你的研究记录没有受损。",
+            "zh": "运行助手所需的程序或依赖缺失。这是部署问题，你的研究记录不受影响。",
             "en": (
-                "The interpreter or dependencies that run the agent are gone — a "
-                "deployment problem. Your research record is intact."
+                "Programs or dependencies the assistant needs are missing. This is a "
+                "deployment problem; your research records are not affected."
             ),
         },
         recovery={
             "zh": (
-                "需要管理员重建执行环境（在 harness 目录跑 `uv sync --frozen`）"
-                "或重新部署；修好之后再发一次，会从断点接着跑。"
+                "请联系管理员修复执行环境（在 harness 目录运行 `uv sync --frozen`）"
+                "或重新部署。修复后重新发送即可从中断处继续。"
             ),
             "en": (
-                "An administrator needs to rebuild the execution environment (run "
-                "`uv sync --frozen` in the harness directory) or redeploy. Send again "
-                "once it is fixed and the work continues from where it stopped."
+                "Ask an administrator to repair the execution environment (run "
+                "`uv sync --frozen` in the harness directory) or redeploy. Once fixed, "
+                "send again to continue from where it stopped."
             ),
         },
         # 环境修好之前，重发一定还是这个结果 —— 别给假希望。
@@ -365,20 +351,14 @@ _COPY: dict[str, _Copy] = {
         # 与 `harness_process_exited` 分开的理由：那条说的是"运行时自己没了"
         # （原因未知，可能真是研究出了问题）；这条说的是"**我们**把它掐了"。
         # 给用户的话完全不同 —— 前者值得看一眼发生了什么，后者不用看，接着做。
-        title={"zh": "这一轮被平台重启打断了", "en": "A platform restart interrupted this turn"},
+        title={"zh": "平台重启，这次执行被中断", "en": "A platform restart interrupted this run"},
         body={
-            "zh": "研究本身没有失败 —— 重启前记录的一切都在。",
-            "en": "The research itself did not fail — everything recorded before the restart is here.",
+            "zh": "重启前记录的内容都还在。",
+            "en": "Everything recorded before the restart is still here.",
         },
         recovery={
-            "zh": (
-                "发下一条消息就会**从断点接着跑**：同一个节点接上上次的位置，"
-                "不会从头再来。"
-            ),
-            "en": (
-                "Send another message and it **continues from where it stopped**: the "
-                "same node picks up its own position instead of starting over."
-            ),
+            "zh": "发送新消息即可从中断处继续，不会从头开始。",
+            "en": "Send a new message to continue from where it stopped; it will not start over.",
         },
         retryable=True,
     ),
@@ -396,23 +376,17 @@ _COPY: dict[str, _Copy] = {
         # exit 0：这是**可续的**那一种。worker 手上没活、也没人在看，于是按
         # 设计自己退场（`platform_runtime._NO_WATCHER_GRACE_S`）——会话状态在
         # 盘上，下一条消息 respawn 一个接着来。「缓存未命中不是错误」。
-        title={"zh": "执行进程在等不到人之后自己退场了", "en": "The execution process stood down after nobody came back"},
+        title={"zh": "执行进程空闲后已自动退出", "en": "The execution process exited after being idle"},
         body={
-            "zh": "它没有崩 —— 手上没活、也没人在看，就按设计收摊了。已经记录下来的工作都在。",
+            "zh": "进程在没有任务、也无人查看时会自动退出。已记录的内容都还在。",
             "en": (
-                "It did not crash — with no work in hand and nobody watching, it stood "
-                "down by design. Everything already recorded is still here."
+                "The process exits on its own when it has no work and nobody is watching. "
+                "Everything recorded is still here."
             ),
         },
         recovery={
-            "zh": (
-                "发下一条消息就会重新起一个接着跑 —— 被打断的节点会接上它自己的"
-                "上下文，不会从头再来。"
-            ),
-            "en": (
-                "Send another message and a new one starts where this left off — the "
-                "interrupted node picks up its own context instead of starting over."
-            ),
+            "zh": "发送新消息会重新启动，并从中断处继续，不会从头开始。",
+            "en": "Send a new message to restart and continue from where it stopped; it will not start over.",
         },
         retryable=True,
     ),
@@ -421,21 +395,17 @@ _COPY: dict[str, _Copy] = {
         # 自己（部署 / 关机的 `terminate_all`）。与 `app_server_restarted` 的
         # 区别：那条是我们**知道**自己正在关机时说的话；这条是事后从退出码
         # 认出来的，说不出是谁发的信号，所以措辞只说事实。
-        title={"zh": "执行进程被要求停止", "en": "The execution process was asked to stop"},
+        title={"zh": "执行进程被终止", "en": "The execution process was stopped"},
         body={
-            "zh": (
-                "它收到了终止信号（SIGTERM）—— 研究本身没有失败，多半是平台在"
-                "部署或重启。已经记录下来的工作都在。"
-            ),
+            "zh": "进程收到了终止信号（SIGTERM），通常是因为平台正在更新或重启。已记录的内容都还在。",
             "en": (
-                "It received a termination signal (SIGTERM) — the research itself did "
-                "not fail; most often the platform was deploying or restarting. "
-                "Everything already recorded is still here."
+                "The process received a termination signal (SIGTERM), usually because the "
+                "platform was updating or restarting. Everything recorded is still here."
             ),
         },
         recovery={
-            "zh": "发下一条消息就从断点接着跑，不用重来。",
-            "en": "Send another message and it continues from where it stopped.",
+            "zh": "发送新消息即可从中断处继续。",
+            "en": "Send a new message to continue from where it stopped.",
         },
         retryable=True,
     ),
@@ -446,27 +416,23 @@ _COPY: dict[str, _Copy] = {
         # 为什么不跟上面两条共用「发下一条消息接着跑」：普查里 -9 的两条跑了
         # 6663s / 6908s，是内存压力的形状。同一份压力重发一次还是同一个结果 ——
         # 这是三态里的 False，不是"不知道"。
-        title={"zh": "执行进程被系统强制终止了", "en": "The execution process was force-killed by the system"},
+        title={"zh": "执行进程被系统强制终止", "en": "The execution process was force-killed by the system"},
         body={
-            "zh": (
-                "它收到 SIGKILL —— 这种信号拦不住，进程来不及记下任何原因。"
-                "最常见的成因是内存超限（OOM）。已经记录下来的工作都在。"
-            ),
+            "zh": "进程被系统强制结束（SIGKILL），没有留下原因，最常见的原因是内存不足。已记录的内容都还在。",
             "en": (
-                "It received SIGKILL — that signal cannot be caught, so the process had "
-                "no chance to record a reason. The most common cause is running out of "
-                "memory. Everything already recorded is still here."
+                "The process was force-killed by the system (SIGKILL) and left no reason. The "
+                "most common cause is running out of memory. Everything recorded is still here."
             ),
         },
         recovery={
             "zh": (
-                "原样重发多半是同一个结果。把研究拆小一点再跑，或者把下面那个 "
-                "reference 交给管理员看这台机器当时的内存与资源上限。"
+                "直接重发很可能再次失败。请把任务拆小后再试，或把「技术细节」中的参考编号"
+                "发给管理员，检查这台机器的内存和资源限制。"
             ),
             "en": (
-                "Sending the same thing again will most likely end the same way. Break "
-                "the work into smaller steps, or give the reference below to an "
-                "administrator to check this machine's memory and resource limits."
+                "Sending the same request again will likely fail the same way. Split the task "
+                "into smaller steps, or send the reference number under Technical details to "
+                "your administrator to check this machine's memory and resource limits."
             ),
         },
         # 同一份内存压力、同一份工作量，重发不会有别的结果。
@@ -477,20 +443,17 @@ _COPY: dict[str, _Copy] = {
         # "进程起了（或还在），可平台没能和它接上话" —— 连到的是上一代还没退干净
         # 的监听、一个死掉的地址，或者它答不出自己是谁（2026-09-15 node20，
         # respawn 时连进了垂死的上一代）。研究记录一点没动，重发就会重新起一个。
-        title={
-            "zh": "没能和这一轮的执行进程接上话",
-            "en": "The platform could not reach this turn's execution process",
-        },
+        title={"zh": "无法连接执行进程", "en": "Could not connect to the execution process"},
         body={
-            "zh": "平台起了执行进程，但没能和它建立命令连接。已经记录下来的工作都在，下面看得到。",
+            "zh": "执行进程已启动，但平台无法与它建立连接。已记录的内容都在下方。",
             "en": (
-                "The platform started the execution process but could not open a command "
-                "connection to it. Everything already recorded is still here, below."
+                "The execution process started, but the platform could not connect to it. "
+                "Everything recorded so far is below."
             ),
         },
         recovery={
-            "zh": "再发一次就会重新起一个进程，从断点接着跑。",
-            "en": "Send it again and a new process starts where this left off.",
+            "zh": "重新发送会启动新的进程，并从中断处继续。",
+            "en": "Send again to start a new process and continue from where it stopped.",
         },
         retryable=True,
     ),
@@ -498,21 +461,14 @@ _COPY: dict[str, _Copy] = {
         # 这条文案原来长在前端的正则 if-链里（`/Harness session operation
         # timed out/i`）。搬到这里 —— 认领故障的知识只该有一份，而后端是那个
         # **握着异常对象**的一方。
-        title={"zh": "这一轮撞上了平台以前的时限", "en": "Research exceeded the former platform time limit"},
+        title={"zh": "执行超时", "en": "The run timed out"},
         body={
-            "zh": "App Server 在 15 分钟后停掉了这次运行。",
-            "en": "The App Server stopped this run after 15 minutes.",
+            "zh": "这次执行等待响应超时，已停止。",
+            "en": "This run stopped after waiting too long for a response.",
         },
         recovery={
-            "zh": (
-                "中断之前记录下来的工作都在下面。开新的一轮接着做 —— "
-                "长时间的研究运行已经不再受这个时限限制。"
-            ),
-            "en": (
-                "Work recorded before the interruption remains available below. "
-                "Start a new turn to continue — long research runs are no longer "
-                "stopped by this limit."
-            ),
+            "zh": "中断前记录的内容都在下方，发送新消息即可继续。",
+            "en": "Work recorded before the interruption is below. Send a new message to continue.",
         },
     ),
     "upstream_unavailable": _Copy(
@@ -521,36 +477,29 @@ _COPY: dict[str, _Copy] = {
         # 怒火全部指向平台自己 —— 而平台和研究这次一件事都没做错。
         title={"zh": "模型服务不可用", "en": "The model service is unavailable"},
         body={
-            "zh": (
-                "上游模型服务（供应商侧）拒绝或挂断了请求 —— 是模型服务的问题，"
-                "不是平台或研究本身出错。"
-            ),
-            "en": (
-                "The upstream model service (the provider's side) refused or dropped "
-                "the request — that service's problem, not the platform's and not the "
-                "research's."
-            ),
+            "zh": "模型服务商拒绝或中断了这次请求。",
+            "en": "The model provider refused or dropped the request.",
         },
         recovery={
-            "zh": "已记录的工作都在。点重试（或再发一条消息）就从断点接着跑。",
+            "zh": "已记录的内容都还在。点击「继续」或发送新消息即可从中断处继续。",
             "en": (
-                "Everything recorded is still here. Retry (or send another message) "
-                "and it continues from where it stopped."
+                "Everything recorded is still here. Click Continue or send a new message "
+                "to continue from where it stopped."
             ),
         },
         retryable=True,
     ),
     "runtime_protocol_error": _Copy(
-        title={"zh": "这一轮没跑完", "en": "Research stopped before completion"},
+        title={"zh": "这次执行未完成", "en": "This run did not finish"},
         body={
-            "zh": "App Server 和研究运行时对消息格式的理解对不上。",
-            "en": "The App Server and the research runtime disagreed on the message format.",
+            "zh": "平台内部通信出错。",
+            "en": "An internal communication error occurred in the platform.",
         },
         recovery={
-            "zh": "这是平台的缺陷，不是改请求能解决的。报上去时带上下面那个 reference。",
+            "zh": "这是平台的问题，修改请求无法解决。反馈时请附上「技术细节」中的参考编号。",
             "en": (
-                "This is a platform defect, not something the request can fix. "
-                "Quote the reference below when reporting it."
+                "This is a platform problem that changing the request will not fix. "
+                "Include the reference number under Technical details when you report it."
             ),
         },
     ),
@@ -561,17 +510,14 @@ _COPY: dict[str, _Copy] = {
         # 掉进 `execution_failed` 时用户读到的是"平台内部错误 / 请重新发送"，
         # 三样全错：不是内部错误（是流程重入），活儿没丢（已产出且已过审），
         # 重发只会把整件事重跑一遍。
-        title={"zh": "这次运行在等你做决定", "en": "This run is waiting for your decision"},
+        title={"zh": "这次执行在等你做决定", "en": "This run is waiting for your decision"},
         body={
-            "zh": "它停在一个决策点上等人，而有别的东西在它被回答之前又想开一轮。",
-            "en": (
-                "The run reached a decision point and paused; something tried to start "
-                "another turn before it was answered."
-            ),
+            "zh": "有一个问题在等你回答，回答之前无法开始新的执行。",
+            "en": "A question is waiting for your answer; a new run cannot start until you answer it.",
         },
         recovery={
-            "zh": "把停着的那个决策答了就接着跑。agent 产出的东西一样都没丢。",
-            "en": "Answer the pending decision to continue. Nothing the agent produced was lost.",
+            "zh": "回答这个问题后即可继续。",
+            "en": "Answer it to continue.",
         },
         # 不答复就重发，结果一模一样 —— 这是真结论，不是"不知道"。
         retryable=False,
@@ -579,49 +525,40 @@ _COPY: dict[str, _Copy] = {
     "no_pause_to_answer": _Copy(
         # 守卫成功：人点的那张卡背后已经没有停着的 pause（答过了 / 跑起来了 /
         # 后端换过）。不是故障，重发同一个选择只会再撞一次。
-        title={"zh": "这个决策已经不在等回答了", "en": "This decision is no longer waiting for an answer"},
+        title={"zh": "这个问题已无需回答", "en": "This question no longer needs an answer"},
         body={
-            "zh": "这张卡显示之后运行已经往前走了 —— 它对应的那次暂停已经被消费掉。",
-            "en": (
-                "The run has moved on since this card was shown; the pause it belonged "
-                "to has already been consumed."
-            ),
+            "zh": "这张卡片显示后，执行已经继续了。",
+            "en": "The run has moved on since this card was shown.",
         },
         recovery={
-            "zh": "刷新一下就是这个会话当前的样子。如果现在还有卡，回答当前那张。",
-            "en": (
-                "The current state of the Session is shown after refresh. Answer the "
-                "current card if there is one."
-            ),
+            "zh": "请刷新查看会话的最新状态；如果有新的卡片，请回答新的那张。",
+            "en": "Refresh to see the Session's latest state, and answer the new card if there is one.",
         },
         retryable=False,
     ),
     "offer_superseded": _Copy(
         # 守卫成功：答复指向的是上一次呈递，运行时此刻停在一次新的呈递上
         # （2026-09-09 node20：observation 重跑后是新的一张卡，人点的是旧的）。
-        title={"zh": "这张卡已经被新的一张取代了", "en": "This card has been replaced by a newer one"},
+        title={"zh": "这张卡片已过期", "en": "This card is out of date"},
         body={
-            "zh": "你的回答指向的是上一次呈递；在那之后运行又停到了一个新的决策点上。",
-            "en": (
-                "Your answer addressed an earlier presentation; the run reached a new "
-                "decision point since then."
-            ),
+            "zh": "在你回答之前，又出现了一个新的问题。",
+            "en": "A newer question appeared before you answered this one.",
         },
         recovery={
-            "zh": "看当前这张卡，回答它。agent 产出的东西一样都没丢。",
-            "en": "Read the current card and answer that one. Nothing the agent produced was lost.",
+            "zh": "请回答最新的卡片。",
+            "en": "Answer the latest card.",
         },
         retryable=False,
     ),
     "request_too_large": _Copy(
-        title={"zh": "这条请求太大，送不出去", "en": "The request was too large to send"},
+        title={"zh": "请求内容过大", "en": "The request is too large"},
         body={
-            "zh": "这一轮超过了研究运行时单条消息能收的大小。",
-            "en": "This turn exceeded the size the research runtime accepts in one message.",
+            "zh": "这次发送的内容超过了单条消息的大小上限。",
+            "en": "This message exceeds the size limit for a single message.",
         },
         recovery={
-            "zh": "拆成几轮发，或者把长材料作为文件交上去。",
-            "en": "Split it into smaller turns, or attach long material as a file instead.",
+            "zh": "请分成几条发送，或把长内容作为文件上传。",
+            "en": "Split it into several messages, or upload long material as a file.",
         },
         # 同一条请求再发一次必然还是太大 —— 这里的 False 是真结论，不是"不知道"。
         retryable=False,

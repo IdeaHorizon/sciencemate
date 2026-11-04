@@ -14,7 +14,7 @@ test("installing names the version and, after a few seconds, how long it has bee
 });
 
 test("restarting says the window comes back", () => {
-  assert.match(sayWhatIsHappening("restarting", "0.5.7", 0, zh) ?? "", /0\.5\.7 已就绪.*窗口会自动回来/);
+  assert.match(sayWhatIsHappening("restarting", "0.5.7", 0, zh) ?? "", /0\.5\.7 已就绪.*窗口会自动重新打开/);
 });
 
 test("nothing to say when nothing is happening", () => {

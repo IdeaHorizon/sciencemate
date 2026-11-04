@@ -293,17 +293,21 @@ class RecordStore:
     def head(self, artifact_id: str) -> Head | None:
         return self.heads().get(artifact_id)
 
+    def pinned_heads(self) -> list[Head]:
+        """冻结且尚未修订的 head —— `pinned` 的同一判据，带着身份与版本。
+
+        会话恢复要按身份把冻结件带走（#1186），只有 {路径: 哈希} 不够；判据仍只此一处。
+        """
+        return [head for head in self.heads().values()
+                if head.frozen and head.frozen_version == head.version and head.path and head.sha256]
+
     def pinned(self) -> dict[str, str]:
         """{被钉死的相对路径: sha256} —— 冻结且尚未修订的 head。
 
         checkpoint 闸据此拒绝这些路径的改动入库。修订（带 amendment 的 save）
         解除钉死：冻结的字节在 git 历史里，历史改不了。
         """
-        out: dict[str, str] = {}
-        for head in self.heads().values():
-            if head.frozen and head.frozen_version == head.version and head.path and head.sha256:
-                out[head.path] = head.sha256
-        return out
+        return {head.path: head.sha256 for head in self.pinned_heads()}
 
     # ── 读 ──────────────────────────────────────────────────────────────
 
@@ -518,6 +522,35 @@ class RecordStore:
             "metadata_patch": patch,
         })
         return self.record(artifact_id) or {}
+
+    def carry(self, rows: list[dict], **stamp: Any) -> list[dict]:
+        """把**别的账本**里的行接到本账本末尾：行内容一字不改，只按本账本重新接链。
+
+        给平台的会话恢复用（#1186）：恢复出来的会话有自己的 worktree、自己的账本，
+        原会话冻结的产物要连同它们的账一起过来 —— save 行带着原产出方的出处，
+        freeze 行带着冻结补丁 —— 新会话的 State 才认得它们是谁产的、是冻结的。
+        只搬正文不搬账，新会话看到的是一个没有身份的文件，可以被当成新稿随手覆盖。
+
+        `stamp` 的键附在每一行上，说明这一行是怎么到这本账里来的；`prev_row_sha256`
+        是本账本的链，按本账本重算。本账本里已有的同一行（去掉链与 stamp 的键后
+        逐键相等）不重复接 —— 重放一次恢复不会把账记两遍。返回真正接上的行。
+        """
+        local_keys = {"prev_row_sha256", *stamp}
+
+        def identity(row: dict) -> str:
+            return json.dumps({k: v for k, v in row.items() if k not in local_keys},
+                              sort_keys=True, ensure_ascii=False)
+
+        present = {identity(row) for row in self.rows()}
+        carried: list[dict] = []
+        for row in rows:
+            key = identity(row)
+            if key in present:
+                continue
+            present.add(key)
+            body = {k: v for k, v in row.items() if k != "prev_row_sha256"}
+            carried.append(self._append({**body, **stamp}))
+        return carried
 
     def retire(self, artifact_id: str, *, reason: str, by_node: str, by_run: str) -> bool:
         """撤下一个未冻结的身份：文件删掉，账本留一行。冻结的拒绝。"""

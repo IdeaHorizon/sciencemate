@@ -24,9 +24,9 @@
 - **透传**：`HTTPException(...)` 里、以及 `app/api`、`app/pro/api` 里带 `message` /
   `detail` / `error` 键的 dict 里，不许出现 `str(exc)` / `f"{exc}"` / `exc.message` ——
   `exc` 是 `except … as exc` 接住的那个。说给人听的异常用 `exc.said_in(lang)`；不是我们的（httpx、OSError、harness 的技术原话），
-  原话只当证据填进一句两种语言的话里：`say({"zh": "…：{why}", "en": "…: {why}"}, lang, why=exc)`，
-  一个 except 两种都接得住时用 `said_of(exc, lang, otherwise=…)`。说给人听的那种也不许
-  `str()`：它的 `str()` 是中文那句。
+  用 `said_of(exc, lang, otherwise=…)` 说一句两种语言的人话，原话进日志 —— **不拼进那句话**
+  （2026-11-03：toast 里冒出 stderr 尾巴、`UpdateError:` 类名、英文原话）。说给人听的那种也
+  不许 `str()`：它的 `str()` 是中文那句加上查问题用的 `evidence`。
 """
 
 from __future__ import annotations
@@ -294,9 +294,11 @@ def test_an_error_caught_on_the_way_out_is_not_handed_over_in_its_own_words() ->
         + "\n".join(offenders))
 
 
-def test_a_bilingual_error_says_chinese_by_default_and_english_when_asked() -> None:
-    """`SaidToAPerson` 的契约：`str()` 是中文（日志、`match=` 照旧），`en` 必填，`said_of`
-    对别人的异常只把原话当证据。"""
+def test_a_bilingual_error_says_chinese_by_default_and_english_when_asked(caplog) -> None:
+    """`SaidToAPerson` 的契约：`str()` 是中文（日志、`match=` 照旧）加上查问题用的证据，`en`
+    必填；说给人的那句（`said_in`）不带证据。`said_of` 对别人的异常：说人话，原话进日志。"""
+    import logging
+
     import pytest
 
     from app.services.say import SaidToAPerson, in_both_languages, said_of
@@ -306,10 +308,15 @@ def test_a_bilingual_error_says_chinese_by_default_and_english_when_asked() -> N
     refused = SaidToAPerson("没有这个家", en="There is no such home")
     assert str(refused) == refused.said_in("zh") == "没有这个家"
     assert refused.said_in("en") == "There is no such home"
-    otherwise = {"zh": "读不了：{why}", "en": "Cannot read it: {why}"}
+    with_evidence = SaidToAPerson("装不上", en="Could not install", evidence="\n  stderr: denied")
+    assert str(with_evidence) == "装不上\n  stderr: denied", "证据要跟着异常进日志"
+    assert with_evidence.said_in("zh") == "装不上" and with_evidence.said_in("en") == "Could not install"
+    otherwise = {"zh": "读不了，请稍后重试。", "en": "Cannot read it. Try again later."}
     assert said_of(refused, "en", otherwise=otherwise) == "There is no such home"
-    assert said_of(OSError("disk full"), "en", otherwise=otherwise) == "Cannot read it: disk full"
-    assert said_of(OSError("disk full"), "zh", otherwise=otherwise) == "读不了：disk full"
+    with caplog.at_level(logging.WARNING, logger="app.services.say"):
+        assert said_of(OSError("disk full"), "en", otherwise=otherwise) == "Cannot read it. Try again later."
+        assert said_of(OSError("disk full"), "zh", otherwise=otherwise) == "读不了，请稍后重试。"
+    assert "disk full" in caplog.text, "原话没进日志 —— 这条失败没人查得动"
     assert in_both_languages({"zh": "端口 {port} 用不了", "en": "Port {port} cannot be used"}, port=8) \
         == "端口 8 用不了\nPort 8 cannot be used"
 
@@ -396,3 +403,32 @@ def test_what_is_stored_for_a_person_to_read_later_is_written_in_both_languages(
                             and HAN.search(child.value) and id(child) not in done):
                         offenders.append(f"{path.name}:{child.lineno} → {child.value[:50]}")
     assert not offenders, "存下来给人看的话只写了中文：\n" + "\n".join(offenders)
+
+
+#: 这两处的读者不是界面上的人：启动器在任何一屏出现之前往终端说话；资讯源的健康记录
+#: 只进运维日志。别处一律不许把别人的原话拼进说给人听的那句。
+_WHY_IS_FINE_FOR = {"launcher.py", "scheduler.py"}
+#: 把一句两种语言的话说出来的那几个函数（`services/say.py`，部署那边的本地别名 `said`）。
+_SPEAKING = {"say", "said", "in_both_languages", "in_either_language", "said_of"}
+
+
+def test_someone_elses_words_are_not_spliced_into_what_a_person_is_told() -> None:
+    """别人的异常原话（Git 输出、stderr、`ExcType: …`）是查问题的证据，不是说给人听的话。
+
+    扫的是这件事：一句两种语言的话里留着 `{why}` 槽、或者调用时塞了 `why=`。原话该去的
+    地方是日志（`said_of` 会记）或者 `SaidToAPerson(…, evidence=…)`。
+    """
+    found = []
+    for path, tree in _trees().items():
+        if path.name in _WHY_IS_FINE_FOR:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if _called(node) in _SPEAKING and any(keyword.arg == "why" for keyword in node.keywords):
+                found.append(f"{path.relative_to(APP.parent)}:{node.lineno} {_called(node)}(…, why=…)")
+            if _called(node) == "said_of":
+                for keyword in node.keywords:
+                    if keyword.arg == "otherwise" and "{why}" in ast.unparse(keyword.value):
+                        found.append(f"{path.relative_to(APP.parent)}:{node.lineno} said_of 的那句话留着 {{why}}")
+    assert not found, "这些地方把别人的原话拼进了说给人听的那句：\n" + "\n".join(found)

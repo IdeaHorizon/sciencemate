@@ -258,7 +258,7 @@ async def test_two_connections_without_an_endpoint_still_collide(client):
     assert duplicate.status_code == 409, (
         f"两条都没填端点 = 同一条连接，仍然要撞：{duplicate.status_code} {duplicate.text}"
     )
-    assert "the provider's default endpoint" in duplicate.json()["detail"]
+    assert "厂商默认地址" in duplicate.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -424,6 +424,11 @@ async def test_a_failure_that_is_not_about_the_endpoint_is_not_dressed_up_as_one
 #: 所以不设"豁免名单"，设**决定记录**：新加的唯一键只要含可空列就会把这条
 #: 测试打红，来这里写下你判的是哪一种。
 _NULLABLE_ON_PURPOSE = {
+    # NULL = 设备仍在等待配对，没有认证 token。允许多个未配对设备；配对后非空
+    # token_hash 必须唯一，pairing code 的单次领取由条件 UPDATE 保证。
+    ("cnki_devices", "columns:token_hash"): {"token_hash"},
+    # NULL = 配对码已被消费或作废，不能再次领取；多台已配对设备应同时存在。
+    ("cnki_devices", "columns:pair_hash"): {"pair_hash"},
     # NULL = 这个会话不是从别的会话恢复出来的。绝大多数会话都是 NULL，必须
     # 允许多行 —— 折成空串反而会把整张表压成一行。
     ("sessions", "uq_sessions_recovery_source"): {"recovered_from_session_id"},
@@ -458,6 +463,8 @@ def test_a_nullable_column_in_a_unique_key_is_a_decision_not_an_accident():
             if ix.unique
         ]
         for name, columns in keys:
+            # 同表可以有多个未命名唯一键，不能都压成 (table, None)。
+            name = name or "columns:" + ",".join(columns)
             nullable = {c for c in columns if c in table.c and table.c[c].nullable}
             if nullable and _NULLABLE_ON_PURPOSE.get((table.name, name)) != nullable:
                 offenders[(table.name, name)] = sorted(nullable)

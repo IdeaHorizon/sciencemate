@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shlex
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -46,7 +47,7 @@ def source_prefix(env_path: str | Path | None) -> str:
         return ""
     return (
         "if [ -f /etc/profile.d/modules.sh ]; then . /etc/profile.d/modules.sh >/dev/null 2>&1 || true; fi; "
-        f"if [ -f {_quote(env_path)} ]; then . {_quote(env_path)}; fi"
+        f". {_quote(Path(env_path).as_posix())}"
     )
 
 
@@ -58,9 +59,29 @@ def wrap_command(cmd: str, env_path: str | Path | None) -> str:
     stripped = (cmd or "").strip()
     if not stripped:
         return cmd
-    if str(env_path) in stripped and re.search(r"(^|[;&|]\s*)\.?\s*source?\s+", stripped):
-        return cmd
-    return f"{prefix}; {cmd}"
+    return f"{prefix} && {{ {cmd}\n}}"
+
+
+def existing_env_script(state: Any | None) -> dict[str, Any] | None:
+    """Observe this run's existing script without creating or registering one.
+
+    Only an absent file means the caller keeps the inherited environment.
+    Invalid or unreadable selections raise instead of silently using the host.
+    Artifact receipts and process-global variables do not select another run.
+    """
+    if state is None:
+        return None
+    path = env_path_for_state(state)
+    try:
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(mode):
+        raise ValueError("selected build environment is not a regular file")
+    info = env_info(path)
+    if not info["exists"]:
+        raise FileNotFoundError(f"selected build environment disappeared: {path}")
+    return {**info, "created": False}
 
 
 def ensure_env_script(state: Any | None, create_artifact: bool = True) -> dict[str, Any]:
@@ -105,13 +126,14 @@ def ensure_env_script(state: Any | None, create_artifact: bool = True) -> dict[s
 def env_info(path: str | Path) -> dict[str, Any]:
     p = Path(path).expanduser()
     exists = p.exists()
-    text = p.read_text(encoding="utf-8", errors="replace") if exists else ""
+    raw = p.read_bytes() if exists else b""
+    text = raw.decode("utf-8", errors="replace")
     return {
         "schema_version": SCHEMA_VERSION,
         "env_path": str(p.resolve()) if exists else str(p),
         "exists": exists,
-        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-        "size_bytes": len(text.encode("utf-8")),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
         "non_comment_lines": [
             line.strip() for line in text.splitlines()
             if line.strip() and not line.lstrip().startswith("#")

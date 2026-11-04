@@ -40,7 +40,7 @@ export function pastedFileName(now: Date, seq: number): string {
 }
 
 const PENDING: Phrase = {
-  zh: "[粘贴的文本 #{seq}（{lines} 行）上传中…]",
+  zh: "[粘贴的文本 #{seq}（{lines} 行）正在上传…]",
   en: "[Pasted text #{seq} ({lines} lines) uploading…]",
 };
 const SAVED: Phrase = {

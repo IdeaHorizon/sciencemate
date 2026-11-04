@@ -554,7 +554,9 @@ def one_page(state: Any, established: dict[str, Any]) -> str:
         # 恢复 / 跨会话：把模型上次的工作计划带回来，醒目标注它是模型自己写的、非权威（Codex 44）
         lines += ["", "## 你上次写的工作计划（你自己的工作假设，不是框架事实；以下面的事实为准）",
                   board[:4000] + ("\n…（截断）" if len(board) > 4000 else "")]
-    lines += ["", "## 环境", "- " + _scheduler_facts(state)]
+    lines += ["", "## 环境", "- " + _scheduler_facts(state),
+              "- 尊重用户指定的执行位置、软件环境和安装目录；未指定时优先复用已有软件，独立构建与安装目录只是建议，不强制先登记环境或填写计划。",
+              "- 只使用 Core 当前已提供的执行端和授权目录；已有授权不因位置在项目外而重复询问。探测与实际执行使用同一环境，宿主 PATH 未找到不等于所选环境没安装；缺执行能力时说明具体缺口。"]
     env = (established.get("envelope") or {}).get("limits") or {}
     if env:
         lines.append("- 预授权包络：" + "、".join(f"{k}≤{v}" for k, v in sorted(env.items()))

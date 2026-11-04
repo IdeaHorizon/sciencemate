@@ -46,13 +46,15 @@ class FeedCard(FeedModel):
     project_id: str | None = None
     project_name: str | None = None
     is_today_pick: bool = False
-    recommendation_sources: list[str] = Field(default_factory=list)
+    #: 这条属于哪几路推荐（学科 / 期刊 / 学者 / 项目），至少一路。来源筛选只认它，
+    #: 不从理由的措辞里猜 —— 理由按语言现说，措辞也会改。
+    recommendation_sources: list[Literal["domain", "journal", "scholar", "project"]] = Field(min_length=1)
 
 
     @field_validator("reason", mode="before")
     @classmethod
     def decode_reason_entities(cls, value: str) -> str:
-        # Daily picks may still contain reasons generated before name decoding.
+        # 期刊名、来源名是采集时原样存的，可能带 HTML 实体（`&amp;`）。
         from app.services.feed.profile import journal_display_name
         return journal_display_name(value)
 
@@ -185,6 +187,24 @@ class SharedLinkWrite(FeedModel):
     comment: str = Field(default="", max_length=2000)
     domains: list[str] = Field(default_factory=list, max_length=3)
     visibility: Literal["platform", "organization"] = "organization"
+
+
+class SavedPaperWrite(FeedModel):
+    """文献检索里的一篇，收进「收藏」。
+
+    检索结果来自外部检索（OpenAlex、学校馆藏……），没有对应的资讯条目；身份按 DOI /
+    arXiv 编号 / 链接算，和采集来的论文同一把尺（`canonical.canonical_key`）。
+    """
+
+    title: str = Field(min_length=1, max_length=2000)
+    url: str | None = Field(default=None, max_length=2000)
+    doi: str | None = Field(default=None, max_length=300)
+    authors: list[str] = Field(default_factory=list, max_length=200)
+    venue: str | None = Field(default=None, max_length=1000)
+    #: 检索结果给的发表日期（`2024-05-01`、`2024-5`、`2024` 都行）；没有就看 `year`。
+    published: str | None = Field(default=None, max_length=40)
+    year: int | None = Field(default=None, ge=1000, le=3000)
+    abstract: str | None = Field(default=None, max_length=50_000)
 
 
 class CurationOut(FeedModel):

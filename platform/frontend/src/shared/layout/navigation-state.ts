@@ -30,7 +30,7 @@ import { say, type Language } from "../i18n/language.ts";
  */
 export const GLOBAL_NAVIGATION = {
   primary: [
-    { href: "/feed", label: { zh: "资讯", en: "Feed" } as Phrase },
+    { href: "/feed", label: { zh: "科研资讯", en: "Feed" } as Phrase },
     { href: "/projects", label: { zh: "项目", en: "Projects" } as Phrase },
   ],
   more: [

@@ -1,6 +1,8 @@
 """Schema normalization and deterministic quality gates for preprocessing plans."""
 from __future__ import annotations
 
+from graphlib import CycleError, TopologicalSorter
+
 import ast
 import json
 import math
@@ -10,7 +12,9 @@ from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import quote, urlparse
 
-from core.tool_registry import get_tool
+from core.tool_registry import (
+    get_tool, _argument_shape_mismatches, _schema_required_missing, _schema_value_violations,
+)
 from nodes.data.planning.request_contract import (
     caller_request_text,
     validate_preprocessing_request,
@@ -51,6 +55,25 @@ def _list(value: Any) -> list:
 
 def _dict(value: Any) -> dict:
     return dict(value) if isinstance(value, dict) else {}
+
+
+_OUTPUT_PATH_KEYS = ("declared_output_path", "output_path", "relative_path",
+                     "expected_filename", "filename", "file_name", "path")
+
+
+def explicit_output_path(items: list[dict], request: dict) -> str:
+    """Resolve the actual caller spelling, not merely an explicit-path flag."""
+    authority = caller_request_text(request, preprocessing_request=request)
+    authority += "\n" + json.dumps(request.get("requested_assets") or [], ensure_ascii=False)
+    authority += "\n" + json.dumps(request.get("authority_snapshot") or {}, ensure_ascii=False)
+    authority += "\n" + str(request.get("operation_request") or "")
+    for item in items:
+        for key in _OUTPUT_PATH_KEYS:
+            path = str(item.get(key) or "").strip()
+            if path and re.search(r"(?<![A-Za-z0-9_./-])" + re.escape(path)
+                                  + r"(?![A-Za-z0-9_./-])", authority):
+                return path
+    return ""
 
 
 def canonical_filename_identity(value: Any) -> str:
@@ -289,6 +312,10 @@ def missing_binding_constraints(
     """
     mode = str(binding_mode or "").strip().casefold()
     source = str(binding_source or "").strip().casefold()
+    if source == "analyst_inference":
+        # A proposed implementation is reviewed against caller authority, not
+        # enforced by searching for every number in the model's draft map.
+        return []
     if source == "stage_explicit_parameters":
         check_categorical = False
         if mode != "semantic":
@@ -561,6 +588,8 @@ def blocked_placeholder_markers(content: str) -> list[str]:
         "",
         text_without_shebangs,
     )
+    # Prose describing deferred runtime inputs is not an executable stub.
+    # Judge implementation completeness against materialized evidence in review.
     patterns = {
         "placeholder_path": r"(?i)(?:^|[\"'\s])/(?:path|your)/to/",
         "environment_absolute_path": (
@@ -574,11 +603,6 @@ def blocked_placeholder_markers(content: str) -> list[str]:
             r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/])"
         ),
         "placeholder_value": r"(?i)\bPLACEHOLDER_[A-Z0-9_]+\b",
-        "deferred_implementation": (
-            r"(?i)placeholder\s+for\s+actual|actual\s+computation\s+placeholder|"
-            r"synthetic\s*(?:/|-)\s*placeholder|placeholder\s+(?:fields?|data|computation|results?)|"
-            r"\bwould\s+process\b|runtime\s+will\s+(?:execute|fill|provide)"
-        ),
     }
     for name, pattern in patterns.items():
         if re.search(
@@ -642,8 +666,9 @@ def missing_stage_interface_constraints(interface: Any, content: str) -> list[st
 def _normalize_size_estimate(value: Any) -> dict[str, Any]:
     """Normalize a declared dataset size without guessing from its name."""
     if isinstance(value, dict):
-        has_bytes = value.get("bytes") not in (None, "")
-        raw_value = value.get("bytes") if has_bytes else value.get("value", value.get("amount"))
+        byte_value = value.get("bytes", value.get("estimated_bytes"))
+        has_bytes = byte_value not in (None, "")
+        raw_value = byte_value if has_bytes else value.get("value", value.get("amount"))
         unit = "bytes" if has_bytes else str(value.get("unit") or "unknown").strip().lower()
         basis = str(value.get("basis") or value.get("method") or "declared").strip()
     elif isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -759,7 +784,7 @@ def normalize_acquisition_contract(value: Any) -> dict[str, Any]:
     # Earlier Designer drafts used a flat acquisition_contract.  Normalize it
     # here rather than silently discarding its method and locator.
     for key in (
-        "method", "access_method", "locator", "locator_kind", "url", "endpoint",
+        "method", "access_method", "locator", "locator_kind", "url", "access_url", "endpoint",
         "request_template", "request", "request_parameters", "command", "provider",
         "dataset_identifier",
     ):
@@ -771,7 +796,7 @@ def normalize_acquisition_contract(value: Any) -> dict[str, Any]:
         or source.get("source_strategy") or source.get("acquisition_kind") or ""
     ).strip()
     locator_fields = (
-        "locator", "url", "endpoint", "api", "request_template", "request",
+        "locator", "url", "access_url", "endpoint", "api", "request_template", "request",
         "command", "source_location",
     )
     locator = next(
@@ -1206,11 +1231,11 @@ EXTERNAL_ASSET_ROLES = {
     "external_dataset_reference", "restricted_asset_reference",
 }
 EXTERNAL_ASSET_STRATEGIES = {
-    "official_repository", "external_source", "external_download", "download_required",
+    "official_repository", "external_source", "external_download", "external_acquisition", "download_required",
 }
 EXTERNAL_ACQUISITION_KINDS = {
-    "official_file_reference", "external_download", "download_required", "external_dataset",
-    "public_dataset", "dataset",
+    "official_file_reference", "official_file", "reference_file", "external_download", "download_required", "external_dataset",
+    "external_source", "public_dataset", "dataset",
 }
 LOCAL_WORKFLOW_CAPABILITIES = {
     "local_artifact_generation", "configuration_generation", "preprocessing_script_generation",
@@ -1264,6 +1289,7 @@ REFERENCE_PLAN_TOOL_NAMES = frozenset({
     "data_web_download",
 })
 GENERATION_PLAN_TOOL_NAMES = frozenset({
+    "data_web_download",
     "execute_preprocessing_python",
     "execute_python",
     "generate_preprocessing_artifact",
@@ -1297,6 +1323,88 @@ def canonical_workflow_capability(item: dict[str, Any] | str) -> str:
         return "unclassified"
     capability = str(contract.get("workflow_capability") or "").strip().lower()
     return capability if capability in ROUTING_CAPABILITIES else "unclassified"
+
+
+def asset_requires_mesh(item: dict[str, Any], task_scope: dict[str, Any] | None = None) -> bool:
+    """A mesh output or embedded solver mesh, not grid settings in a config."""
+    if item.get("edit_source"):
+        return False
+    bindings = item.get("parameter_bindings")
+    contract = normalize_asset_contract(item)
+    scope = task_scope if isinstance(task_scope, dict) else {}
+    return (
+        item.get("requires_mesh_generation") is True
+        or contract.get("workflow_capability") == "mesh_generation"
+        or bool(
+            contract.get("representation") == "simulation_case"
+            and item.get("requires_mesh_generation") is not False
+            and (
+                # A newly generated self-contained INP case embeds a mesh.
+                # Optional sizing bindings and an Analyst's scope omission
+                # must not turn it into a generic text-generation task.
+                (str(item.get("format") or "").strip().lower().lstrip(".") == "inp"
+                 and contract.get("source_strategy") == "local_generation"
+                 and (scope.get("discipline") in {"csm", "heat_transfer"}
+                      or "abaqus" in str(item.get("scientific_role") or "").lower()
+                      or "abaqus" in str(item.get("target_software") or "").lower()))
+                or
+                isinstance(bindings, dict)
+                and isinstance(bindings.get("geometry"), dict) and bindings["geometry"]
+                and isinstance(bindings.get("mesh"), dict) and bindings["mesh"]
+                or (
+                    "mesh_generation" in (scope.get("allowed_capabilities") or [])
+                    and "mesh_generation" not in (scope.get("excluded_capabilities") or [])
+                    and contract.get("source_strategy") == "local_generation"
+                    and contract.get("workflow_capability") == "local_artifact_generation"
+                    and contract.get("materialization_kind") == "generated_file"
+                )
+            )
+        )
+    )
+
+
+def mesh_dependency_issues(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Check consumed mesh contracts, independently of optional sizing bindings."""
+    if plan.get("plan_kind") == "reference_evidence_only":
+        return []
+    analysis = _dict(plan.get("requirement_analysis"))
+    scope = _dict(analysis.get("task_scope"))
+    mesh_ids = {
+        str(item.get("id") or "")
+        for item in [*_list(analysis.get("required_files")), *_list(plan.get("required_deliverables"))]
+        if isinstance(item, dict) and asset_requires_mesh(item, scope)
+    }
+    steps = {str(item.get("id") or ""): item for item in _list(plan.get("generation_steps"))
+             if isinstance(item, dict)}
+    issues = []
+    for step_id, step in steps.items():
+        # Assemblers consume meshes; native/code producers may construct their
+        # own. Do not force independent producers through another mesher.
+        if (step.get("tool_name") not in {"build_scientific_preprocessing_package", "assemble_preprocessing_package"}
+                or not mesh_ids.intersection(_list(step.get("outputs")))):
+            continue
+        arguments = _dict(step.get("tool_arguments"))
+        parameters = arguments.get("parameters") or {}
+        if isinstance(parameters, str):
+            try:
+                parameters = json.loads(parameters)
+            except ValueError:
+                parameters = {}
+        source = arguments.get("mesh_generation_result") or _dict(parameters).get("mesh_generation_result")
+        # A caller-bound existing mesh needs no newly generated dependency.
+        bound_source = isinstance(source, dict) and any(source.get(key) for key in ("solver_mesh_file", "mesh_file", "polyMesh_dir"))
+        mesh_dependencies = {str(value) for value in _list(step.get("dependencies"))
+                             if _step_workflow_capability(steps.get(str(value), {})) == "mesh_generation"}
+        ref = str(source.get("$ref") or "").split(".", 1)[0] if isinstance(source, dict) else ""
+        if bound_source or mesh_dependencies and (not ref or ref in mesh_dependencies):
+            continue
+        issues.append({
+            "code": "missing_mesh_dependency", "severity": "critical", "step_id": step_id,
+            "tool_name": step.get("tool_name"),
+            "message": f"generation step {step_id} consumes an embedded mesh but has no bound mesh or mesh-producing dependency",
+            "required_change": "Bind the existing mesh or add its producer and dependency to this consumer. Preserve the request and unaffected steps; changing consumer parameters cannot create the missing upstream asset.",
+        })
+    return issues
 
 
 def normalize_task_scope_contract(
@@ -1333,6 +1441,8 @@ def normalize_task_scope_contract(
         for item in (required_files or [])
         if isinstance(item, dict)
     }
+    if any(asset_requires_mesh(item, value) for item in (required_files or []) if isinstance(item, dict)):
+        derived.add("mesh_generation")
     explicit_routes = raw_allowed & ROUTING_CAPABILITIES
     # The analyst's routing list is emitted alongside the AssetContracts. A
     # concrete required asset therefore completes an omitted route; free-form
@@ -1384,11 +1494,9 @@ def normalize_task_scope_contract(
 def _normalize_asset_route_contract(item: dict[str, Any] | str) -> dict[str, Any]:
     """Canonicalize asset acquisition fields before any planning gate runs.
 
-    The explicit source strategy is the routing authority.  Other acquisition
-    fields are aliases supplied by an LLM and are rewritten to that strategy's
-    canonical combination before validation.  This keeps contradictory draft
-    aliases out of a plan without treating a repairable wording error as a
-    planning failure.
+    A concrete byte-acquisition contract owns the download route; derived
+    products and reused inputs retain their generation/reuse contract. Other
+    acquisition aliases follow the explicit source strategy before validation.
     """
     value = item if isinstance(item, dict) else {}
     role = str(value.get("asset_role") or "").strip().lower()
@@ -1421,7 +1529,7 @@ def _normalize_asset_route_contract(item: dict[str, Any] | str) -> dict[str, Any
     if (
         declared_representation in {"runtime_tool", "executable"}
         or scientific_role in RUNTIME_TOOL_SCIENTIFIC_ROLES
-        or bool(role_tokens & {"executable", "binary", "compiler", "interpreter"})
+        or role == "runtime_tool_requirement"
     ):
         return {
             "asset_role": "runtime_tool_requirement",
@@ -1434,7 +1542,9 @@ def _normalize_asset_route_contract(item: dict[str, Any] | str) -> dict[str, Any
             "is_external": False,
             "contradictory_fields": False,
         }
-    if not scientific_role and role and role not in EXTERNAL_ASSET_ROLES:
+    if not scientific_role and role and role not in EXTERNAL_ASSET_ROLES | {
+        "parameter_file", "unclassified_asset", "local_asset_reference",
+    }:
         scientific_role = role
     strategy = str(value.get("source_strategy") or "").strip().lower()
     acquisition = str(value.get("acquisition_kind") or "").strip().lower()
@@ -1446,10 +1556,24 @@ def _normalize_asset_route_contract(item: dict[str, Any] | str) -> dict[str, Any
     if representation == "mesh" and role_tokens & {"definition", "script", "recipe", "source"}:
         representation = "text_artifact"
     structured_text = " ".join(
-        str(value.get(key) or "")
-        for key in ("scientific_role", "format", "type", "representation")
+        str(part or "")
+        for part in (scientific_role, value.get("format"), value.get("type"), representation)
     )
     explicit_generated = bool(re.search(r"\b(?:generated|derived|local)\b|生成|派生|本地", structured_text, flags=re.I))
+    acquisition_details = _dict(value.get("acquisition_contract"))
+    nested_retrieval = _dict(acquisition_details.get("retrieval_instructions"))
+    has_generation_recipe = bool(
+        value.get("generation_recipe") or value.get("generation_method")
+        or value.get("derivation_method")
+    )
+    direct_acquisition = (
+        acquisition_details.get("delivery_mode") == "direct_download"
+        and any(source.get(key) for source in (acquisition_details, nested_retrieval)
+                for key in ("locator", "url", "raw_url", "path"))
+        and not has_generation_recipe and not value.get("edit_source")
+        and role not in {"report", "audit_report", "acquisition_document"}
+        and strategy not in LOCAL_REUSE_STRATEGIES
+    )
     # Strategy names a route; acquisition kind names the object acquired.
     # Prefer the former whenever it is explicit.  In particular, an Analyst
     # may describe a generated file as an ``external_dataset`` while copying
@@ -1463,8 +1587,15 @@ def _normalize_asset_route_contract(item: dict[str, Any] | str) -> dict[str, Any
     generated_manifest = (
         "manifest" in {declared_format, representation}
         and not str(value.get("expected_filename") or "").strip()
+        and not direct_acquisition
     )
-    if generated_manifest:
+    if direct_acquisition:
+        # A byte-acquisition contract is stronger than a copied local-generation
+        # label. Derived products keep their recipe and separate source inputs.
+        local = False
+        strategy = "external_download"
+        acquisition = "external_download"
+    elif generated_manifest:
         local = True
         strategy = "local_generation"
         acquisition = "generated_artifact"
@@ -1478,26 +1609,21 @@ def _normalize_asset_route_contract(item: dict[str, Any] | str) -> dict[str, Any
         local = False
     else:
         local = bool(explicit_generated and role not in EXTERNAL_ASSET_ROLES)
-    # A mapping, lookup, descriptor, catalogue, or vocabulary is reference
-    # material unless the plan supplies an explicit derivation recipe.  This
-    # is an acquisition-semantic rule, not an application/file-name rule: a
-    # text artifact writer cannot safely invent a domain mapping table merely
-    # because a model labelled it "local_generation".
-    reference_material = bool(role_tokens & {
+    # Classify the asset itself, not words describing its contents. A report
+    # containing comparison tables is not an authoritative lookup table.
+    # Keep the derivation guard for structured reference-asset identities.
+    # A representation such as ``table`` describes layout, not authority:
+    # parameter tables with explicit bindings are ordinary configurations.
+    reference_material = bool(_structured_role_tokens(
+        role,
+        scientific_role if re.fullmatch(r"[a-z0-9_-]+", scientific_role) else "",
+    ) & {
         "mapping", "lookup", "table", "descriptor", "catalog", "catalogue",
         "ontology", "vocabulary",
     })
-    has_generation_recipe = bool(
-        value.get("generation_recipe") or value.get("generation_method")
-        or value.get("derivation_method")
-    )
     missing_generation_contract = bool(
         local and reference_material and not has_generation_recipe and not generated_manifest
     )
-    acquisition_details = value.get("acquisition_contract")
-    acquisition_details = acquisition_details if isinstance(acquisition_details, dict) else {}
-    nested_retrieval = acquisition_details.get("retrieval_instructions")
-    nested_retrieval = nested_retrieval if isinstance(nested_retrieval, dict) else {}
     acquisition_method = str(
         acquisition_details.get("method") or nested_retrieval.get("method") or ""
     ).strip().lower()
@@ -1566,10 +1692,36 @@ def _normalize_asset_route_contract(item: dict[str, Any] | str) -> dict[str, Any
     # ``official_file_reference`` and ``external_dataset`` describe the
     # acquired object.  They are compatible aliases, not a conflicting pair.
     # The canonical branch below derives one stable contract from them.
-    if local:
+    representation_external = bool(re.search(
+        r"\b(?:airfoil|aerofoil|coordinates?|geometry|mesh|surface|dataset|netcdf|grib|zarr|hdf5)\b|翼型|坐标|几何|网格|数据集",
+        structured_text,
+        flags=re.I,
+    ))
+    local_format = not external and not representation_external and bool(re.search(
+        r"\b(?:python(?:[_ -]?script)?|shell|bash|script|namelist|incar|kpoints|poscar|potcar|configuration|config|yaml|json|toml|template|dictionary|control|parameter[_ ]file|input[_ ]file|solver[_ ]input|preprocessing[_ ]artifact)\b",
+        structured_text,
+        flags=re.I,
+    ))
+    # Inferred local formats use the same route as explicit local generation.
+    # A second normalization must not turn a generic file into configuration
+    # merely because the first pass supplied the coarse parameter_file role.
+    if local or local_format:
+        # A solver input with physical conditions is a composite case, even
+        # when the Analyst describes its embedded discretization as a mesh.
+        # Keep mesh-only exports on the native mesher route.
+        bindings = value.get("parameter_bindings") or {}
+        if (representation == "mesh" and role in {"solver_input", "solver_input_configuration"}
+                and isinstance(bindings, dict)
+                and any(bindings.get(key) for key in ("material", "materials", "boundary_conditions", "loads"))):
+            representation = "simulation_case"
         expected_capability = (
+            "local_artifact_generation"
+            if value.get("edit_source")
+            else
             "mesh_generation"
             if representation == "mesh"
+            else "atomic_structure_generation"
+            if representation in {"particle_structure", "atomic_structure", "crystal_structure", "molecular_structure"}
             else "preprocessing_script_generation"
             if re.search(r"python|shell|bash|script", structured_text, flags=re.I)
             else "configuration_generation"
@@ -1652,27 +1804,6 @@ def _normalize_asset_route_contract(item: dict[str, Any] | str) -> dict[str, Any
             "is_external": True,
             "contradictory_fields": False,
         }
-    representation_external = bool(re.search(
-        r"\b(?:airfoil|aerofoil|coordinates?|geometry|mesh|surface|dataset|netcdf|grib|zarr|hdf5)\b|翼型|坐标|几何|网格|数据集",
-        structured_text,
-        flags=re.I,
-    ))
-    local_format = not representation_external and bool(re.search(
-        r"\b(?:python(?:[_ -]?script)?|shell|bash|script|namelist|incar|kpoints|poscar|potcar|configuration|config|yaml|json|toml|template|dictionary|control|parameter[_ ]file|input[_ ]file|solver[_ ]input|preprocessing[_ ]artifact)\b",
-        structured_text,
-        flags=re.I,
-    ))
-    if local_format:
-        return {
-            "asset_role": role or "parameter_file",
-            "scientific_role": scientific_role,
-            "representation": representation or "text_artifact",
-            "workflow_capability": "local_artifact_generation",
-            "source_strategy": "local_generation",
-            "acquisition_kind": "generated_artifact",
-            "is_external": False,
-            "contradictory_fields": False,
-        }
     # Ambiguous prose is deliberately left unclassified.  It may be reviewed
     # as a generic requirement, but it cannot grant an external acquisition or
     # geometry route without an explicit acquisition contract.
@@ -1694,8 +1825,8 @@ def normalize_asset_contract(item: dict[str, Any] | str) -> dict[str, Any]:
     """Return the single routing *and delivery* contract for an asset.
 
     Acquisition and materialization are intentionally separate.  An external
-    dataset is fulfilled in the data-node package by an actionable acquisition
-    document, not by downloading its potentially very large payload.  Runtime
+    dataset may require a materialized payload or an acquisition document.
+    The acquisition contract selects that boundary, not its file format. Runtime
     outputs remain dependency contracts and are never fabricated as files.
     """
     value = item if isinstance(item, dict) else {"name_or_role": str(item or "")}
@@ -1713,6 +1844,10 @@ def normalize_asset_contract(item: dict[str, Any] | str) -> dict[str, Any]:
         and contract.get("acquisition_kind") == "official_file_reference"
         and contract.get("workflow_capability") == "official_file_acquisition"
     )
+    acquisition = value.get("acquisition_contract") or {}
+    payload_required = official_file_contract or value.get("requires_local_payload") is True or (
+        isinstance(acquisition, dict) and acquisition.get("delivery_mode") == "direct_download"
+    )
     if official_file_contract and fulfillment in {
         "runtime_output", "runtime_access", "runtime_tool"
     }:
@@ -1724,6 +1859,8 @@ def normalize_asset_contract(item: dict[str, Any] | str) -> dict[str, Any]:
         materialization = fulfillment
     elif contract.get("source_strategy") == "local_reuse":
         materialization = "local_reuse"
+    elif contract.get("is_external") and payload_required:
+        materialization = "acquired_file"
     elif contract.get("is_external"):
         materialization = "acquisition_document"
     else:
@@ -1742,7 +1879,9 @@ def normalize_asset_contract(item: dict[str, Any] | str) -> dict[str, Any]:
         r"[^a-z0-9]+", "_", str(raw_identity).strip().casefold()
     ).strip("_") or "asset"
     consumers = value.get("consumer_stages")
-    if not isinstance(consumers, list):
+    if isinstance(consumers, list):
+        consumers = list(consumers)
+    else:
         consumers = [consumers] if consumers not in (None, "") else []
     owner_stage = str(value.get("stage_id") or value.get("owner_stage") or "").strip()
     if owner_stage and owner_stage not in consumers:
@@ -1768,7 +1907,7 @@ def normalize_asset_contract(item: dict[str, Any] | str) -> dict[str, Any]:
         # payload. Exact official files are the exception: a consuming stage
         # needs the verified file itself in the package.
         "requires_local_payload": (
-            official_file_contract
+            payload_required
             or materialization not in {
                 "acquisition_document", "runtime_output", "runtime_access", "runtime_tool",
             }
@@ -1807,15 +1946,17 @@ def _validate_python_generation_contract(
     """Validate the generic executable-file contract before any subprocess runs."""
     errors: list[str] = []
     code = arguments.get("code")
-    if not isinstance(code, str) or not code.strip():
-        return [f"generation step {step_id} execute_preprocessing_python needs non-empty Python source in tool_arguments.code"]
-    try:
-        tree = ast.parse(code, filename=f"{step_id}.py", mode="exec")
-    except SyntaxError as exc:
-        return [
-            f"generation step {step_id} execute_preprocessing_python code is not valid Python: "
-            f"{exc.msg} (line {exc.lineno})"
-        ]
+    script_asset = arguments.get("script_asset")
+    if script_asset:
+        if code:
+            errors.append(f"generation step {step_id} must select code or script_asset, not both")
+    else:
+        if not isinstance(code, str) or not code.strip():
+            return [f"generation step {step_id} needs Python code or a bound script_asset"]
+        try:
+            ast.parse(code, filename=f"{step_id}.py", mode="exec")
+        except SyntaxError as exc:
+            errors.append(f"generation step {step_id} code is not valid Python: {exc.msg} (line {exc.lineno})")
     errors.extend(_validate_output_paths_contract(step_id, arguments.get("output_paths"), outputs))
     if errors:
         return errors
@@ -1871,6 +2012,11 @@ def _step_workflow_capability(step: dict[str, Any]) -> str:
             return "configuration_generation"
         return "local_artifact_generation"
     if tool_name in {"execute_preprocessing_python", "execute_python"}:
+        # Execution can compute local scientific assets. The generic fallback
+        # label must not reject a more precise, authorized production capability.
+        if explicit in {"atomic_structure_generation", "mesh_generation",
+                        "configuration_generation", "preprocessing_script_generation"}:
+            return explicit
         return "local_artifact_generation"
     if tool_name == "prepare_scientific_mesh":
         return "mesh_generation"
@@ -1902,6 +2048,9 @@ def _step_capability_contract_error(step: dict[str, Any]) -> str:
         return f"tool {step.get('tool_name') or '?'} has no canonical capability"
     if explicit == derived:
         return ""
+    if step.get("tool_name") == "generate_preprocessing_artifact" and explicit == "atomic_structure_generation":
+        return ("cannot write computed coordinates directly with generate_preprocessing_artifact; "
+                "produce a non-delivered Python script, then execute_preprocessing_python to create the structure file")
     return f"workflow_capability {explicit!r} disagrees with tool-derived capability {derived!r}"
 
 
@@ -2007,30 +2156,14 @@ def _registered_tool_argument_errors(step: dict[str, Any]) -> list[str]:
     if definition is None or not isinstance(arguments, dict):
         return []
     schema = definition.parameters_schema if isinstance(definition.parameters_schema, dict) else {}
-    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
-    errors: list[str] = []
-    for name in schema.get("required") or []:
-        if arguments.get(name) in (None, ""):
-            errors.append(f"tool argument {name} is required")
-    expected_types = {
-        "string": str,
-        "object": dict,
-        "array": list,
-        "boolean": bool,
-        "integer": int,
-        "number": (int, float),
-    }
-    for name, value in arguments.items():
-        field = properties.get(name) if isinstance(properties.get(name), dict) else {}
-        declared = field.get("type")
-        allowed = declared if isinstance(declared, list) else [declared]
-        python_types = tuple(
-            value_type for item in allowed
-            if (value_type := expected_types.get(item)) is not None
-        )
-        if python_types and not isinstance(value, python_types):
-            errors.append(f"tool argument {name} must be {' or '.join(map(str, allowed))}")
-    return errors
+    # Use the dispatcher's contract, including enum/range constraints. A plan
+    # accepted here must not fail at dispatch merely because validation differs.
+    return [
+        *(f"tool argument {name} is required" for name in _schema_required_missing(schema, arguments)),
+        *_argument_shape_mismatches(schema, arguments),
+        *_schema_value_violations(schema, arguments),
+    ]
+
 
 
 def normalize_plan(raw: dict[str, Any]) -> dict[str, Any]:
@@ -2091,20 +2224,17 @@ def normalize_plan(raw: dict[str, Any]) -> dict[str, Any]:
             continue
         requirement = analysis_requirements.get(str(item.get("id") or "").casefold()) or {}
         # Analyst-selected names are execution proposals, not caller authority.
-        path_keys = ("declared_output_path", "output_path", "relative_path",
-                     "expected_filename", "filename", "file_name", "path")
-        paths = [str(value) for source in (requirement, item) for key in path_keys
-                 if (value := source.get(key))]
         request = plan["preprocessing_request"]
-        if plan["review_profile"] == "request_bound" and request:
-            authority = caller_request_text(request, preprocessing_request=request)
-            authority += "\n" + json.dumps(request.get("requested_assets") or [], ensure_ascii=False)
-            item["output_path_is_explicit"] = any(
-                re.search(r"(?<![A-Za-z0-9_./-])" + re.escape(path) + r"(?![A-Za-z0-9_./-])", authority)
-                for path in paths
-            )
+        if request and (plan["review_profile"] == "request_bound" or not plan["requirement_analysis"].get("calculation_stages")):
+            explicit_path = explicit_output_path([requirement, item], request)
+            item["output_path_is_explicit"] = bool(explicit_path)
+            if explicit_path:
+                item["declared_output_path"] = explicit_path
         else:
-            item["output_path_is_explicit"] = bool(paths) if requirement else item.get("output_path_is_explicit", True)
+            item["output_path_is_explicit"] = (
+                any(source.get(key) for source in (requirement, item) for key in _OUTPUT_PATH_KEYS)
+                if requirement else item.get("output_path_is_explicit", True)
+            )
         for key in (
             "name", "name_or_role", "reason", "requirement_basis", "format",
             "scientific_role", "representation", "source_strategy", "acquisition_kind",
@@ -2116,13 +2246,25 @@ def normalize_plan(raw: dict[str, Any]) -> dict[str, Any]:
             "stage_id", "declared_output_path", "parameter_bindings",
             "parameter_bindings_required", "parameter_binding_basis", "parameter_binding_source",
             "parameter_binding_mode", "parameter_binding_assertions",
+            "requires_local_payload",
         ):
             if key == "parameter_bindings" and isinstance(item.get(key), dict):
                 continue
             if item.get(key) in (None, "", [], {}) and requirement.get(key) not in (None, "", [], {}):
                 item[key] = deepcopy(requirement[key])
-        contract = normalize_asset_contract(item)
+        # The confirmed requirement owns identity, acquisition and publication
+        # scope. A draft supplies execution details, not a replacement contract.
+        contract = normalize_asset_contract(requirement or item)
         item.update({key: value for key, value in contract.items() if key != "contradictory_fields"})
+        if requirement:
+            item["fulfillment_kind"] = str(requirement.get("fulfillment_kind") or "")
+            item["required"] = requirement.get(
+                "required", contract["delivery_required"] or contract["materialization_kind"] == "acquired_file"
+            )
+            if isinstance(requirement.get("local_match"), dict):
+                item["local_match"] = deepcopy(requirement["local_match"])
+            else:
+                item.pop("local_match", None)
         item["workflow_capability"] = canonical_workflow_capability(item)
         if contract.get("acquisition_kind") == "external_dataset":
             # RequirementAnalysis is the authoritative source for an
@@ -2178,8 +2320,10 @@ def normalize_plan(raw: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(step, dict):
             continue
         _normalize_registered_tool_arguments(step)
-        if plan["review_profile"] == "request_bound" and not str(step.get("work_unit_id") or "").strip():
+        if (plan["review_profile"] == "request_bound" or not plan["requirement_analysis"].get("calculation_stages")) and not str(step.get("work_unit_id") or "").strip():
             first_output = next((str(item) for item in _list(step.get("outputs")) if str(item)), "")
+            if not first_output and is_pipeline_infrastructure_step(step):
+                first_output = str(step.get("id") or "")
             if first_output:
                 step["work_unit_id"] = f"wu_{first_output}"
         if str(step.get("tool_name") or "") == "generate_preprocessing_artifact":
@@ -2321,8 +2465,6 @@ def validate_plan(raw: dict[str, Any]) -> dict[str, Any]:
         errors.append("task_summary is required")
     if review_profile == "plan_bound" and not str(plan["discipline"].get("primary") or "").strip():
         errors.append("discipline.primary is required")
-    if review_profile == "plan_bound" and not str(plan["simulation_software"].get("name") or "").strip():
-        errors.append("simulation_software.name is required")
     analysis = plan["requirement_analysis"]
     if review_profile == "plan_bound" and not str(analysis.get("calculation_type") or "").strip():
         errors.append("requirement_analysis.calculation_type is required")
@@ -2445,11 +2587,10 @@ def validate_plan(raw: dict[str, Any]) -> dict[str, Any]:
         # not by an LLM-selected generation tool.  It remains a required
         # package member, but must not be forced through a fictitious writer
         # step merely to satisfy the generation-DAG schema.
-        reference_status = str(item.get("reference_status") or "").strip().lower()
         if (
             item.get("required", True)
             and str(item.get("source_strategy") or "") != "local_reuse"
-            and reference_status not in {"resolved", "downloaded_verified"}
+            and normalized_asset.get("materialization_kind") not in {"runtime_output", "runtime_access", "runtime_tool"}
             and item_id
         ):
             required_ids.add(item_id)
@@ -2485,7 +2626,7 @@ def validate_plan(raw: dict[str, Any]) -> dict[str, Any]:
         str(item.get("id") or "").strip()
         for item in _list(analysis.get("required_files"))
         if isinstance(item, dict)
-        and item.get("requires_mesh_generation") is True
+        and asset_requires_mesh(item, analysis.get("task_scope"))
         and str(item.get("id") or "").strip()
     }
     declared_stage_ids = {
@@ -2516,7 +2657,7 @@ def validate_plan(raw: dict[str, Any]) -> dict[str, Any]:
             errors.append(f"duplicate generation step id: {step_id}")
         step_ids.add(step_id)
         stage_id = str(item.get("stage_id") or "").strip()
-        if plan["plan_kind"] == "preprocessing_generation" and review_profile == "plan_bound" and not stage_id:
+        if plan["plan_kind"] == "preprocessing_generation" and review_profile == "plan_bound" and declared_stage_ids and not stage_id:
             errors.append(f"generation step {step_id} needs explicit stage_id")
         if plan["plan_kind"] == "preprocessing_generation" and review_profile == "request_bound" and not str(item.get("work_unit_id") or "").strip():
             errors.append(f"generation step {step_id} needs work_unit_id for request_bound execution")
@@ -2554,6 +2695,13 @@ def validate_plan(raw: dict[str, Any]) -> dict[str, Any]:
                 None,
             )
             deliverable_stage = str((deliverable or {}).get("stage_id") or "").strip()
+            if (plan["plan_kind"] == "preprocessing_generation"
+                    and normalize_asset_contract(deliverable or {}).get("materialization_kind")
+                    in {"runtime_output", "runtime_access", "runtime_tool"}):
+                errors.append(
+                    f"generation step {step_id} produces downstream-only contract {output_id}; "
+                    "declare its actual preprocessing outputs explicitly instead"
+                )
             if plan["plan_kind"] == "preprocessing_generation" and review_profile == "plan_bound" and deliverable_stage and deliverable_stage != stage_id:
                 errors.append(
                     f"generation step {step_id} stage_id must match deliverable {output_id} stage_id"
@@ -2569,6 +2717,9 @@ def validate_plan(raw: dict[str, Any]) -> dict[str, Any]:
             None,
         ) if len(outputs) == 1 else None
         if str(item.get("tool_name") or "").strip() == "execute_preprocessing_python":
+            script_asset = (item.get("tool_arguments") or {}).get("script_asset")
+            if script_asset and script_asset not in (item.get("inputs") or []):
+                errors.append(f"generation step {step_id} script_asset must name a declared input")
             errors.extend(_validate_python_generation_contract(
                 step_id,
                 item.get("tool_arguments") if isinstance(item.get("tool_arguments"), dict) else {},
@@ -2712,8 +2863,7 @@ def validate_plan(raw: dict[str, Any]) -> dict[str, Any]:
             errors.extend(_validate_output_paths_contract(step_id, arguments.get("output_paths"), outputs))
         if not _list(item.get("verification")):
             errors.append(f"generation step {step_id} needs verification")
-    if not step_ids:
-        errors.append("at least one generation_step is required")
+    errors.extend(item["message"] for item in mesh_dependency_issues(plan))
     deliverables_by_id = {
         str(item.get("id") or ""): item
         for item in plan["required_deliverables"]
@@ -2734,39 +2884,26 @@ def validate_plan(raw: dict[str, Any]) -> dict[str, Any]:
                 f"acquisition contract {external_id} incompatible with consumer {consumer_step_id}: {error}"
                 for error in consistency_errors
             )
+    # Publication is optional for intermediate inputs, not their production.
+    for step in plan["generation_steps"]:
+        script = (step.get("tool_arguments") or {}).get("script_asset")
+        if script:
+            source = deliverables_by_id.get(str(script)) or {}
+            producer = producer_steps.get(str(script)) or {}
+            if source.get("source_strategy") != "local_reuse" and producer.get("id") not in (step.get("dependencies") or []):
+                errors.append(f"generation step {step['id']} needs the script_asset producer as a dependency")
+        for input_id in _list(step.get("inputs")):
+            source = deliverables_by_id.get(str(input_id))
+            if (source and normalize_asset_contract(source).get("requires_local_payload")
+                  and source.get("source_strategy") != "local_reuse"):
+                required_ids.add(str(input_id))
     missing_outputs = required_ids - generated_outputs
     if missing_outputs:
         errors.append(f"required deliverables lack generation steps: {sorted(missing_outputs)}")
-    if plan.get("plan_kind") == "preprocessing_generation":
-        package_present = any(
-            is_pipeline_infrastructure_step(step)
-            for step in plan.get("generation_steps") or []
-            if isinstance(step, dict)
-        )
-        package_required = any(
-            item_id in required_ids
-            and str((producer_steps.get(item_id) or {}).get("tool_name") or "")
-            != "generate_preprocessing_artifact"
-            for item_id in deliverable_ids
-        )
-        if package_required and not package_present:
-            errors.append(
-                "generated scientific assets require a package assembly step for review and dataset publication"
-            )
-    if plan.get("plan_kind") == "preprocessing_generation" and review_profile == "request_bound":
-        requested_ids = {
-            str(asset_id).strip()
-            for unit in (plan.get("preprocessing_work_order") or {}).get("work_units") or []
-            if isinstance(unit, dict)
-            for asset_id in unit.get("requested_asset_ids") or []
-            if str(asset_id).strip()
-        }
-        missing_requested = requested_ids - deliverable_ids
-        if missing_requested:
-            errors.append(
-                "request-bound work order assets missing from required_deliverables: "
-                f"{sorted(missing_requested)}"
-            )
+    # Caller asset IDs and internal producer IDs are different namespaces: one
+    # producer can materialize several requested files. The existing package
+    # review binds each caller asset to actual files before publication; an ID
+    # spelling comparison here cannot establish that a requested file is absent.
     # Dedicated scientific routes are checked from normalized asset contracts,
     # never by rescanning caller prose. Reference plans have their own tool set.
     if plan.get("plan_kind") == "preprocessing_generation":
@@ -2839,24 +2976,12 @@ def validate_plan(raw: dict[str, Any]) -> dict[str, Any]:
         if unknown:
             errors.append(f"generation step {step_id} has unknown dependencies: {sorted(unknown)}")
 
-    visiting: set[str] = set()
-    visited: set[str] = set()
-
-    def visit(step_id: str) -> bool:
-        if step_id in visiting:
-            return True
-        if step_id in visited:
-            return False
-        visiting.add(step_id)
-        for dep in dependencies.get(step_id, []):
-            if dep in dependencies and visit(dep):
-                return True
-        visiting.remove(step_id)
-        visited.add(step_id)
-        return False
-
-    if any(visit(step_id) for step_id in dependencies):
-        errors.append("generation_steps dependency graph contains a cycle")
+    try:
+        TopologicalSorter(dependencies).prepare()
+    except CycleError as exc:
+        errors.append("generation_steps dependency graph contains a cycle: "
+                      + " -> ".join(exc.args[1])
+                      + ". Correct these producer/input dependencies; preserve the required outputs.")
 
     authorized_tools: set[str] = set()
     for index, item in enumerate(plan["tool_requirements"]):
@@ -2917,18 +3042,25 @@ def normalize_critique(
         critical.extend(f"Schema gate: {item}" for item in validation.get("errors") or [])
     major = [str(v) for v in _list(critique.get("major_concerns")) if str(v).strip()]
     changes = [str(v) for v in _list(critique.get("recommended_changes")) if str(v).strip()]
-    min_score = min(scores.values()) if scores else 0.0
-    approved = weighted >= overall_score_min and min_score >= 7.0 and not critical and validation.get("valid", False)
+    contract = critique.get("revision_contract") or None
+    # Scores in older receipts remain readable, but are not another truth
+    # source or an execution gate. Only concrete unresolved defects matter.
+    issues = (contract or {}).get("issues") or []
+    major = list(dict.fromkeys([*major, *[str(item.get("message") or item.get("required_change"))
+                                         for item in issues if isinstance(item, dict)]]))
+    if not isinstance(contract, dict) and not scores_in:
+        critical.append("Critic returned no revision contract.")
+    approved = bool(validation.get("valid") and not critical and not major and not issues)
     return {
-        "overall_score": round(weighted, 2),
-        "dimension_scores": scores,
+        "overall_score": round(weighted, 2) if scores_in else None,
+        "dimension_scores": scores if scores_in else {},
         "critical_concerns": critical,
         "major_concerns": major,
         "recommended_changes": changes,
+        "revision_contract": contract,
         "decision": "approve" if approved else "revise",
         "approval_requirements": {
-            "overall_score_min": overall_score_min,
-            "dimension_score_min": 7.0,
+            "validation_mode": "actionable_defects",
             "critical_concerns_allowed": 0,
             "schema_must_be_valid": True,
         },

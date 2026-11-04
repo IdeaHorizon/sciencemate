@@ -41,7 +41,9 @@ import { GitDiffViewer, type GitDiffStat } from "@/shared/ui";
 import { RichText } from "./RichText";
 import { canonicalRunAttention, canonicalRunPause } from "../lib/canonical-run-activity";
 import { PausedRecord } from "./PausedRecord";
-import { useT, useLanguage, type Phrase } from "@/shared/i18n";
+import { nodeDisplayName } from "@/features/execution/lib/display-names";
+import { ARTIFACT_KIND_LABEL } from "@/features/catalog/lib/kind-label";
+import { useT, useLanguage, say, type Language, type Phrase } from "@/shared/i18n";
 
 const NODE_STATUS_LABELS: Record<RunActivityStep["status"], Phrase> = {
   running: { zh: "进行中", en: "In progress" },
@@ -50,12 +52,26 @@ const NODE_STATUS_LABELS: Record<RunActivityStep["status"], Phrase> = {
   interrupted: { zh: "已中断", en: "Interrupted" },
 };
 
-function toolStatusLabel(tool: RunActivityTool) {
-  if (tool.status === "failed") return tool.declined ? "Declined" : "Failed";
-  if (tool.status === "completed") return "Completed";
-  if (tool.status === "interrupted") return "Interrupted";
-  if (tool.status === "retrying") return "Retrying";
-  return "Running";
+// 被框架驳回的调用（参数不对、时机不对……）没有执行，助手下一步会自己改 ——
+// 叫它「未执行」，与失败卡标题「{动作}：未执行」同一个说法。
+function toolStatusLabel(tool: RunActivityTool): Phrase {
+  if (tool.status === "failed") {
+    return tool.declined ? { zh: "未执行", en: "Not run" } : { zh: "失败", en: "Failed" };
+  }
+  if (tool.status === "completed") return { zh: "已完成", en: "Completed" };
+  if (tool.status === "interrupted") return { zh: "已中断", en: "Interrupted" };
+  if (tool.status === "retrying") return { zh: "正在重试", en: "Retrying" };
+  return { zh: "运行中", en: "Running" };
+}
+
+/** 「N 个操作」：英文按单复数，中文用量词。 */
+function actionCount(count: number, lang: Language) {
+  return say({ zh: "{count} 个操作", en: "{count} action{s}" }, lang, { count, s: count === 1 ? "" : "s" });
+}
+
+/** 步骤卡的标题：子节点那一类记的是节点 id（`literature`），换成节点的显示名；别的标题原样。 */
+function stepDisplayTitle(title: string | undefined, lang: Language) {
+  return title ? nodeDisplayName(title, lang) : undefined;
 }
 
 function ToolRecord({ tool, trace }: { tool: RunActivityTool; trace: boolean }) {
@@ -75,12 +91,12 @@ function ToolRecord({ tool, trace }: { tool: RunActivityTool; trace: boolean }) 
         <span className="chat-run-tool-heading">
           <strong>{tool.title}</strong>
           {trace && tool.technicalName && <code>{tool.technicalName}</code>}
-          {tool.status !== "completed" && <em>{toolStatusLabel(tool)}</em>}
+          {tool.status !== "completed" && <em>{t(toolStatusLabel(tool))}</em>}
         </span>
         <ChevronRight className="chat-run-tool-chevron" size={11} />
       </summary>
       <div className="chat-run-tool-body">
-        {tool.input && <p><b>{t({ zh: "输入", en: "Prompt" })}</b><span>{tool.input}</span></p>}
+        {tool.input && <p><b>{t({ zh: "输入", en: "Input" })}</b><span>{tool.input}</span></p>}
         {tool.code && (
           <div className="chat-run-tool-code">
             <b>{t({ zh: "代码", en: "Code" })}</b>
@@ -89,7 +105,7 @@ function ToolRecord({ tool, trace }: { tool: RunActivityTool; trace: boolean }) 
         )}
         {tool.output && (
           <div className={`chat-run-tool-output ${tool.outputFormat === "terminal" ? "terminal" : "text"}`}>
-            <b>{t({ zh: "输出", en: "Completion" })}</b>
+            <b>{t({ zh: "输出", en: "Output" })}</b>
             {tool.outputFormat === "terminal"
               ? <pre>{tool.output}</pre>
               : <span>{tool.output}</span>}
@@ -104,7 +120,7 @@ function ToolRecord({ tool, trace }: { tool: RunActivityTool; trace: boolean }) 
         )}
         {(tool.retryCount > 0 || tool.notices.length > 0) && (
           <div className="chat-run-tool-notices">
-            {tool.retryCount > 0 && <span><RotateCw size={9} /> {tool.retryCount} recorded {tool.retryCount === 1 ? "retry" : "retries"}</span>}
+            {tool.retryCount > 0 && <span><RotateCw size={9} /> {t({ zh: "已重试 {count} 次", en: "Retried {count} time{s}" }, { count: tool.retryCount, s: tool.retryCount === 1 ? "" : "s" })}</span>}
             {tool.notices.map((notice) => <span key={notice}>{notice}</span>)}
           </div>
         )}
@@ -128,12 +144,12 @@ function Narration({ items }: { items: RunActivityNarration[] }) {
     <div className="chat-run-narration">
       {items.map((item) => (
         <div key={item.id}>
-          {item.turn > 0 && <span className="chat-run-narration-turn">{t({ zh: "第 {turn} 轮", en: "Turn {turn}" }, { turn: item.turn })}</span>}
+          {item.turn > 0 && <span className="chat-run-narration-turn">{t({ zh: "第 {turn} 步", en: "Step {turn}" }, { turn: item.turn })}</span>}
           <RichText text={item.text} />
           {item.previewOnly && (
             /* 老 transcript 只存了硬截 500 字的预览且不留截断标记 —— 完不完整
                我们不知道，就如实说"预览"，不加假省略号。 */
-            <span className="chat-run-narration-preview" title={t({ zh: "来自旧版 transcript 的截断预览，可能不完整", en: "Truncated preview from an older transcript; may be incomplete" })}>{t({ zh: "预览", en: "Preview" })}</span>
+            <span className="chat-run-narration-preview" title={t({ zh: "旧版记录只保存了部分内容，可能不完整", en: "Older records kept only part of this text; it may be incomplete" })}>{t({ zh: "预览", en: "Preview" })}</span>
           )}
         </div>
       ))}
@@ -141,11 +157,12 @@ function Narration({ items }: { items: RunActivityNarration[] }) {
   );
 }
 
-const CHANGE_VERBS: Record<string, string> = {
-  added: "Created",
-  deleted: "Deleted",
-  renamed: "Renamed",
+const CHANGE_VERBS: Record<string, Phrase> = {
+  added: { zh: "新建", en: "Created" },
+  deleted: { zh: "删除", en: "Deleted" },
+  renamed: { zh: "重命名", en: "Renamed" },
 };
+const EDITED: Phrase = { zh: "修改", en: "Edited" };
 
 /**
  * "Edited research_state.py +19 -4" —— 一次工具调用对 Project 文件的改动，
@@ -173,6 +190,8 @@ function OrchestratorSaid({ said, repeats, child, onOpen }: {
   onOpen?: (target: { nodeType: string; stepId?: string }) => void;
 }) {
   const t = useT();
+  const lang = useLanguage();
+  const nodeName = nodeDisplayName(said.aboutNodeType, lang);
   // 两种话共用一个事件 kind，但**不是一种东西**：派发旁注（accent 竖线）vs
   // 对插话的答复（对话消息样式）。2026-08-18 用户看着同一条蓝边问"为什么有个
   // 蓝边" —— 答复套旁注的皮，读起来就不像在回答他。
@@ -197,24 +216,22 @@ function OrchestratorSaid({ said, repeats, child, onOpen }: {
           // 带上**这一次**派发的 step —— 只给 nodeType 的话，右栏会滚到
           // 最后一张同类卡（同一个节点派三次时，点第一个箭头也跳到第三张）。
           onClick={() => onOpen({ nodeType: said.aboutNodeType!, stepId: child.id })}
-          aria-label={t({ zh: `查看 ${said.aboutNodeType} 的运行细节`, en: `See the run detail for ${said.aboutNodeType}` })}
+          aria-label={t({ zh: "查看 {node} 的执行详情", en: "See details for {node}" }, { node: nodeName })}
         >
           {/* 静态点，不是转圈 —— 一段里唯一该动的是那条实时状态行。 */}
           {child.status === "running" ? <i className="chat-said-node-dot" aria-hidden /> : null}
-          → {said.aboutNodeType}
+          → {nodeName}
           <small>
-            {child.resumed ? t({ zh: "续跑 · ", en: "Resumed · " }) : ""}
+            {child.resumed ? t({ zh: "继续执行 · ", en: "Resumed · " }) : ""}
             {t(NODE_STATUS_LABELS[child.status])}
-            {child.tools.length > 0
-              ? ` · ${child.tools.length} ${child.tools.length === 1 ? "action" : "actions"}`
-              : ""}
+            {child.tools.length > 0 ? ` · ${actionCount(child.tools.length, lang)}` : ""}
           </small>
           <ChevronRight size={10} />
         </button>
       ) : (
         /* 子节点还没折进时间线（刚派发那一瞬 / 历史窗口）：同一个形状，
            只是点不动。 */
-        <span className="chat-said-node is-static">→ {said.aboutNodeType}</span>
+        <span className="chat-said-node is-static">→ {nodeName}</span>
       ))
     : null;
   return (
@@ -243,7 +260,7 @@ function OrchestratorSaid({ said, repeats, child, onOpen }: {
 function InterjectThinking() {
   const t = useT();
   return (
-    <p className="chat-interject-receipt" role="status" aria-label={t({ zh: "调度器正在处理", en: "The orchestrator is working on it" })}>
+    <p className="chat-interject-receipt" role="status" aria-label={t({ zh: "助手正在处理", en: "The assistant is working on it" })}>
       <span className="chat-thinking-dots" aria-hidden="true">
         <i /><i /><i />
       </span>
@@ -256,7 +273,7 @@ function InterjectDeferred() {
   const t = useT();
   return (
     <p className="chat-interject-receipt" role="status">
-      <Check size={12} />{t({ zh: "已送达 —— 调度器此刻在自己干活，下一轮开始就会读到这句话", en: "Delivered — the orchestrator is working right now and will read this at the next turn" })}</p>
+      <Check size={12} />{t({ zh: "已发送", en: "Sent" })}</p>
   );
 }
 
@@ -268,6 +285,7 @@ function InterjectDeferred() {
  * 自己的标题比 "Ran 1 commands" 信息多。
  */
 function RanCommands({ tools, trace }: { tools: RunActivityTool[]; trace: boolean }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   return (
     <details
@@ -276,7 +294,8 @@ function RanCommands({ tools, trace }: { tools: RunActivityTool[]; trace: boolea
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary>
-        <span>Ran {tools.length} commands</span>
+        {/* 收起来的是所有已完成的工具调用，不只是命令 —— 叫「操作」。 */}
+        <span>{t({ zh: "执行了 {count} 个操作", en: "Ran {count} actions" }, { count: tools.length })}</span>
         <ChevronRight className="chat-run-tool-chevron" size={11} />
       </summary>
       <div className="chat-run-commands-body">
@@ -326,13 +345,13 @@ function WorkspaceChangeRecord({ change }: { change: RunActivityWorkspaceChange 
   const single = change.files.length === 1 ? change.files[0] : undefined;
   const headline = single ? (
     <span>
-      {CHANGE_VERBS[single.status ?? ""] ?? "Edited"}{" "}
+      {t(CHANGE_VERBS[single.status ?? ""] ?? EDITED)}{" "}
       {fileName(single.path, single.status)}
       {counts(single.additions ?? change.additions, single.deletions ?? change.deletions)}
     </span>
   ) : (
     <span>
-      Edited {change.filesChanged} files
+      {t({ zh: "修改了 {count} 个文件", en: "Edited {count} file{s}" }, { count: change.filesChanged, s: change.filesChanged === 1 ? "" : "s" })}
       {counts(change.additions, change.deletions)}
     </span>
   );
@@ -374,6 +393,7 @@ function WorkspaceChangeRecord({ change }: { change: RunActivityWorkspaceChange 
 
 export function ToolGroup({ step, trace, narration = [], workspaceChanges = [] }: { step: RunActivityStep; trace: boolean; narration?: RunActivityNarration[]; workspaceChanges?: RunActivityWorkspaceChange[] }) {
   const t = useT();
+  const lang = useLanguage();
   const { settings } = useInterfaceSettings();
   // 在跑的子节点**也默认收起**（2026-08-17）。原来 running 强制展开，本意是
   // "让人看见进展"，实际后果是长任务期间满屏都是节点内部独白 —— 实测一次
@@ -384,12 +404,12 @@ export function ToolGroup({ step, trace, narration = [], workspaceChanges = [] }
   const [open, setOpen] = useState(shouldOpen);
   useEffect(() => setOpen(shouldOpen), [shouldOpen]);
   const recordedTitle = step.title && !step.title.toLowerCase().endsWith(" activity")
-    ? step.title
+    ? stepDisplayTitle(step.title, lang)
     : undefined;
   const title = recordedTitle
     ?? (step.kind === "child"
-      ? t({ zh: "一步研究", en: "Research step" })
-      : "Research activity");
+      ? t({ zh: "研究步骤", en: "Research step" })
+      : t({ zh: "研究活动", en: "Research activity" }));
   // 组内也按发生顺序交错：这句话解释的就是紧随其后的那次调用，隔开就白说了。
   const timeline = buildChildTimeline(step, narration, workspaceChanges);
   return (
@@ -406,7 +426,7 @@ export function ToolGroup({ step, trace, narration = [], workspaceChanges = [] }
             {/* 「完成 · Interrupted」自相矛盾 —— 被打断就是被打断，用同一张
                 状态词表说话（2026-08-18 实测右栏显示成「完成 · Interrupted」）。*/}
             {t(NODE_STATUS_LABELS[step.status])}
-            {` · ${step.tools.length} ${step.tools.length === 1 ? "action" : "actions"}`}
+            {` · ${actionCount(step.tools.length, lang)}`}
           </small>
         </span>
         <ChevronRight className="chat-run-tool-chevron" size={11} />
@@ -425,18 +445,19 @@ export function ToolGroup({ step, trace, narration = [], workspaceChanges = [] }
 
 function StepSummaryRecord({ step }: { step: RunActivityStep }) {
   const t = useT();
+  const lang = useLanguage();
   const recordedTitle = step.title && !step.title.toLowerCase().endsWith(" activity")
-    ? step.title
+    ? stepDisplayTitle(step.title, lang)
     : undefined;
   return (
     <div className={`chat-run-step-summary state-${step.status}`}>
       {step.status === "running" && <Loader2 className="spin" size={10} />}
       {step.status === "failed" && <AlertCircle size={10} />}
       <span>
-        <strong>{recordedTitle ?? (step.kind === "child" ? t({ zh: "一步研究", en: "Research step" }) : t({ zh: "研究活动", en: "Research activity" }))}</strong>
+        <strong>{recordedTitle ?? (step.kind === "child" ? t({ zh: "研究步骤", en: "Research step" }) : t({ zh: "研究活动", en: "Research activity" }))}</strong>
         <small>{step.summary ?? (step.status === "completed"
-          ? t({ zh: "记下了 {count} 个动作，已完成", en: "{count} recorded action{s} completed" }, { count: step.tools.length, s: step.tools.length === 1 ? "" : "s" })
-          : t({ zh: "记下了 {count} 个动作", en: "{count} recorded action{s}" }, { count: step.tools.length, s: step.tools.length === 1 ? "" : "s" }))}</small>
+          ? t({ zh: "{count} 个操作，已完成", en: "{count} action{s}, completed" }, { count: step.tools.length, s: step.tools.length === 1 ? "" : "s" })
+          : actionCount(step.tools.length, lang))}</small>
       </span>
     </div>
   );
@@ -462,11 +483,12 @@ function FailedToolHistory({
   failure?: { detail?: string; reference?: string };
 }) {
   const t = useT();
+  const lang = useLanguage();
   const count = tools.length + steps.length;
   if (count === 0 && !failure?.detail) return null;
   const label = count > 0
-    ? t({ zh: "{count} 个动作没成", en: "{count} failed action{s}" }, { count, s: count === 1 ? "" : "s" })
-    : t({ zh: "这一轮没跑成", en: "run failure" });
+    ? t({ zh: "{count} 个操作失败", en: "{count} failed action{s}" }, { count, s: count === 1 ? "" : "s" })
+    : t({ zh: "执行失败", en: "Run failed" });
   return (
     <details className="chat-run-failure-history">
       <summary>
@@ -476,9 +498,9 @@ function FailedToolHistory({
       <div>
         {failure?.detail && (
           <article className="chat-run-failure-raw">
-            <strong>{t({ zh: "这一轮失败了", en: "Run failure" })}</strong>
+            <strong>{t({ zh: "失败原因", en: "Failure reason" })}</strong>
             <pre>{failure.detail}</pre>
-            {failure.reference && <small>Reference: <code>{failure.reference}</code></small>}
+            {failure.reference && <small>{t({ zh: "参考编号：", en: "Reference: " })}<code>{failure.reference}</code></small>}
           </article>
         )}
         {tools.map((tool) => (
@@ -489,11 +511,11 @@ function FailedToolHistory({
         ))}
         {steps.map((step) => (
           <article key={step.id}>
-            <strong>{step.title ?? t({ zh: "一步研究", en: "Research step" })}</strong>
-            <p>{t({ zh: "这一步还没产出可用结果就结束了。", en: "This research step ended before producing a usable result." })}</p>
+            <strong>{stepDisplayTitle(step.title, lang) ?? t({ zh: "研究步骤", en: "Research step" })}</strong>
+            <p>{t({ zh: "这一步在产生可用结果前就结束了。", en: "This research step ended before producing a usable result." })}</p>
           </article>
         ))}
-        <a href="?view=execution">{t({ zh: "去执行历史看原始记录", en: "Open Execution history for the raw trace" })}</a>
+        <a href="?view=execution">{t({ zh: "在执行历史中查看原始记录", en: "View the raw record in Execution history" })}</a>
       </div>
     </details>
   );
@@ -511,17 +533,19 @@ function NodeStatusCard({ step, onOpen }: {
   onOpen?: (target: { nodeType: string; stepId?: string }) => void;
 }) {
   const t = useT();
+  const lang = useLanguage();
   const nodeType = (step.runId && parseRunLineage(step.runId)?.nodeType) || step.title || "research";
+  const nodeName = nodeDisplayName(nodeType, lang);
   const openThisRun = onOpen ? () => onOpen({ nodeType, stepId: step.id }) : undefined;
   const body = (
     <>
       {step.status === "running" ? <Loader2 className="spin" size={11} /> : step.status === "failed" ? <AlertCircle size={11} /> : null}
-      <strong>{step.title ?? nodeType}</strong>
+      <strong>{stepDisplayTitle(step.title, lang) ?? nodeName}</strong>
       <small>
         {/* 续跑：如实说它接着上次跑，别让人以为又新开了一条。 */}
-        {step.resumed ? t({ zh: "续跑 · ", en: "Resumed · " }) : ""}
+        {step.resumed ? t({ zh: "继续执行 · ", en: "Resumed · " }) : ""}
         {t(NODE_STATUS_LABELS[step.status])}
-        {step.tools.length > 0 ? ` · ${step.tools.length} ${step.tools.length === 1 ? "action" : "actions"}` : ""}
+        {step.tools.length > 0 ? ` · ${actionCount(step.tools.length, lang)}` : ""}
       </small>
       {onOpen && <ChevronRight className="chat-run-tool-chevron" size={11} />}
     </>
@@ -534,7 +558,7 @@ function NodeStatusCard({ step, onOpen }: {
       type="button"
       className={`chat-run-node-card state-${step.status}`}
       onClick={openThisRun}
-      aria-label={t({ zh: `查看 ${nodeType} 的运行细节`, en: `See the run detail for ${nodeType}` })}
+      aria-label={t({ zh: "查看 {node} 的执行详情", en: "See details for {node}" }, { node: nodeName })}
     >
       {body}
     </button>
@@ -609,8 +633,8 @@ export function CanonicalRunActivity({
     ? (
       <>
         {anchored.replies.map((item) => <OrchestratorSaid key={item.id} said={item} />)}
-        {anchored.receipt?.receipt?.deferred && <InterjectDeferred />}
-        {anchored.receipt && !anchored.receipt.receipt?.deferred && runActive && <InterjectThinking />}
+        {(anchored.receipt?.receipt?.deferred || anchored.receipt?.receipt?.stage === "queued") && <InterjectDeferred />}
+        {anchored.receipt && !anchored.receipt.receipt?.deferred && anchored.receipt.receipt?.stage !== "queued" && runActive && <InterjectThinking />}
       </>
     )
     : null;
@@ -629,7 +653,7 @@ export function CanonicalRunActivity({
   if (error || !detail) {
     return (
       <div className="chat-run-canonical-state failed" role="alert">
-        <AlertCircle size={13} />{t({ zh: "读不到执行记录", en: "Execution record unavailable" })}</div>
+        <AlertCircle size={13} />{t({ zh: "无法加载执行记录", en: "Could not load the execution record" })}</div>
     );
   }
 
@@ -684,16 +708,20 @@ export function CanonicalRunActivity({
   }
   // eventMismatch / retryCount 不再有对应的可见内容，就别再靠它们把一个
   // 空壳留在页面上。
-  if (completed && activity && !hasTools && !hasResults && !anchoredBlock) return null;
+  // 无人值守被降级的那句话：降级（不会自动开始下一次）一直挂在这次执行下面 —— 人会
+  // 奇怪它为什么停了；资源限制弱只是提醒留意占用，执行结束后就不再重复。
+  const autonomyNotice = activity?.autonomyNotice
+    && (activity.autonomyNotice.kind === "downgraded" || runActive) ? activity.autonomyNotice : undefined;
+  if (completed && activity && !hasTools && !hasResults && !anchoredBlock && !autonomyNotice) return null;
 
   return (
     <div className="chat-transcript-run">
       {anchoredBlock}
       {isTailWindow && eventsQuery.isLoading && (
-        <div className="chat-run-detail-state"><Loader2 className="spin" size={11} /> {t({ zh: "正在读已记录的活动…", en: "Reading recorded activity…" })}</div>
+        <div className="chat-run-detail-state"><Loader2 className="spin" size={11} /> {t({ zh: "正在加载执行活动…", en: "Loading activity…" })}</div>
       )}
       {isTailWindow && eventsQuery.isError && (
-        <div className="chat-run-detail-state failed" role="alert"><AlertCircle size={11} />{t({ zh: "读不到执行细节", en: "Execution details unavailable" })}</div>
+        <div className="chat-run-detail-state failed" role="alert"><AlertCircle size={11} />{t({ zh: "无法加载执行详情", en: "Could not load execution details" })}</div>
       )}
       {/* 等人做决定时，被等的那个东西必须排在最前面。
           原来它跟在全部活动记录之后 —— E2E 实测一次 run 有 75~105 条记录，
@@ -770,7 +798,12 @@ export function CanonicalRunActivity({
         </p>
       )}
       {isTailWindow && activity?.artifacts.map((artifact) => {
-        const content = <><FileText size={11} /><span><strong>{artifact.name}</strong><small>{artifact.mediaType ? artifact.mediaType.replaceAll("_", " ") : t({ zh: "研究产出", en: "Research output" })}{artifact.version !== undefined ? ` · v${artifact.version}` : ""}</small></span></>;
+        // 成果类型用同一张中英对照表（catalog/lib/kind-label）；表里没有的照原样显示。
+        const kindLabel = artifact.mediaType ? ARTIFACT_KIND_LABEL[artifact.mediaType] : undefined;
+        const kind = kindLabel
+          ? t(kindLabel)
+          : artifact.mediaType ? artifact.mediaType.replaceAll("_", " ") : t({ zh: "研究成果", en: "Research output" });
+        const content = <><FileText size={11} /><span><strong>{artifact.name}</strong><small>{kind}{artifact.version !== undefined ? ` · v${artifact.version}` : ""}</small></span></>;
         return artifact.linkable ? (
           <Link
             className="chat-run-result"
@@ -786,8 +819,9 @@ export function CanonicalRunActivity({
           下一条接着跑"，是在为平台的问题吓用户（wangd 2026-08-18）。 */}
       {isTailWindow && runAttention && !persistedPause && runAttention.tone === "continue" && (
         <p className="chat-run-continue-note" role="status">
-          {runAttention.title}
-          {runAttention.recovery ? ` —— ${runAttention.recovery}` : ""}
+          {runAttention.recovery
+            ? t({ zh: "{title}。{recovery}", en: "{title}. {recovery}" }, { title: runAttention.title, recovery: runAttention.recovery })
+            : runAttention.title}
         </p>
       )}
       {isTailWindow && runAttention && !persistedPause && runAttention.tone !== "continue" && (
@@ -799,7 +833,7 @@ export function CanonicalRunActivity({
             {runAttention.recovery && <em>{runAttention.recovery}</em>}
             {/* 只在**真失败**的横幅里出现，而且说成一句话：一个裸计数
                 （「1 recorded retry」）回答不了"它试过没有、还有没有救"。 */}
-            {retryCount > 0 && <i>{t({ zh: "平台已自动重试 {count} 次，仍未成功", en: "The platform retried {count} times; it still failed" }, { count: retryCount })}</i>}
+            {retryCount > 0 && <i>{t({ zh: "已自动重试 {count} 次，仍未成功", en: "Retried automatically {count} times; still failed" }, { count: retryCount })}</i>}
             {/* 技术细节不在这里 —— 它和"失败的动作"一起进下面那个唯一的
                 「技术细节」抽屉。正文只回答"出了什么事 / 现在能做
                 什么"，用户不该被一条 SQL 转储劈头盖脸砸一脸。 */}
@@ -813,7 +847,10 @@ export function CanonicalRunActivity({
         <FailedToolHistory tools={failedTools} steps={failedSteps} failure={runAttention} />
       )}
       {isTailWindow && detail.run.view.outcome === "cancelled" && (
-        <div className="chat-transcript-status state-interrupted" role="status">{t({ zh: "这一轮被取消了，没做完的研究活动中断在这里。", en: "This run was cancelled. Unfinished research activity was interrupted." })}</div>
+        <div className="chat-transcript-status state-interrupted" role="status">{t({ zh: "这次执行已取消，未完成的操作已停止。", en: "This run was cancelled. Unfinished work was stopped." })}</div>
+      )}
+      {isTailWindow && autonomyNotice && (
+        <p className="chat-run-continue-note" role="status">{autonomyNotice.reason}</p>
       )}
       {isTailWindow && !completed && !attention && activity?.currentStatus && (
         <div className="chat-transcript-status" role="status" aria-live="polite"><Loader2 className="spin" size={11} /> {activity.currentStatus}</div>

@@ -25,8 +25,10 @@ from shared.lib.filelock import exclusive
 
 try:
     from . import ledger as _ledger
+    from . import persistence as _persistence
 except ImportError:  # pragma: no cover - standalone node bootstrap
     from tools import ledger as _ledger  # type: ignore
+    from tools import persistence as _persistence  # type: ignore
 
 DELIVERY_SCHEMA = "ExperimentDeliveryV1"
 MANIFEST_SCHEMA = "ExperimentClosureManifestV3"
@@ -183,16 +185,12 @@ def _lock_path(state: Any) -> Path:
 
 def _fsync_dir(path: Path) -> None:
     try:
-        fd = os.open(str(path), os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        _persistence.fsync_directory(path)
     except OSError as exc:
         raise DeliveryTransactionError(
             "closure_durability_unavailable",
             f"cannot durably sync delivery directory {path}: {exc}",
-            path=str(path),
+            path=str(path), retryable=_persistence.retryable_io_error(exc),
         ) from exc
 
 
@@ -218,13 +216,22 @@ def _atomic_write_manifest(state: Any, manifest: dict[str, Any], *, path: Path |
         replace_completed = True
         stage = "manifest_dir_fsync"
         _fsync_dir(path.parent)
+        stage = "manifest_readback"
+        if canonical_digest(json.loads(path.read_text(encoding="utf-8"))) != canonical_digest(manifest):
+            raise DeliveryTransactionError(
+                "closure_manifest_readback_mismatch",
+                "persisted delivery manifest does not match the planned bytes",
+                path=str(path), retryable=False,
+            )
     except DeliveryTransactionError as exc:
         raise DeliveryTransactionError(
             exc.code, exc.detail,
             closure_id=manifest.get("closure_id"), checkpoint=stage,
             path=str(path), failed_path=exc.facts.get("path"), tmp_path=str(tmp),
             replace_completed=replace_completed, canonical_visible=path.exists(),
-            durability="unknown", retryable=True, owner="finish",
+            durability="unknown", retryable=exc.facts.get("retryable", False),
+            retryable_after_change=True, owner="experiment_runtime",
+            next_step="Preserve computed outputs; resolve the storage/runtime error, then resume finish on this run. Do not rerun computation.",
         ) from exc
     except (OSError, TypeError, ValueError) as exc:
         raise DeliveryTransactionError(
@@ -233,7 +240,9 @@ def _atomic_write_manifest(state: Any, manifest: dict[str, Any], *, path: Path |
             closure_id=manifest.get("closure_id"), checkpoint=stage,
             path=str(path), tmp_path=str(tmp), replace_completed=replace_completed,
             canonical_visible=path.exists(), durability="unknown",
-            retryable=True, owner="finish",
+            retryable=_persistence.retryable_io_error(exc),
+            retryable_after_change=True, owner="experiment_runtime",
+            next_step="Preserve computed outputs; resolve the storage/runtime error, then resume finish on this run. Do not rerun computation.",
         ) from exc
 
 
@@ -890,7 +899,21 @@ def settle_delivery(
             validate_manifest(state, manifest)
         _prepare(state, manifest)
         _freeze(state, manifest)
-        commit = _commit(led, manifest)
+        try:
+            commit = _commit(led, manifest)
+        except OSError as exc:
+            # An append may already be visible even if its fsync failed.
+            # Preserve the frozen trio and recover through append_once.
+            raise DeliveryTransactionError(
+                "closure_ledger_persist_failed",
+                f"cannot confirm the delivery ledger commit: {exc}",
+                closure_id=manifest["closure_id"], checkpoint="ledger_commit",
+                path=str(led.root / "events.jsonl"), commit_visibility="unknown",
+                frozen_artifacts_preserved=True, durability="unknown",
+                retryable=_persistence.retryable_io_error(exc),
+                retryable_after_change=True, owner="experiment_runtime",
+                next_step="Preserve the frozen outputs; resolve the storage/runtime error, then resume finish on this run. The commit may already exist; append_once will reconcile it. Do not rerun computation.",
+            ) from exc
         commit_view = {"idempotency_key": commit.get("idempotency_key"),
                        "seq": commit.get("seq")}
         if manifest.get("commit") not in (None, commit_view):

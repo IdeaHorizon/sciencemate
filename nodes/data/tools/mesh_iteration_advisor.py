@@ -21,10 +21,12 @@ from core.state import State
 from nodes.data.pipeline_contract import needs_input_result
 from .geometry_assets import GEOMETRY_INPUT_KEYS, flatten_parameter_groups
 from .human_input_utils import (
+    AIRFOIL_INTENT_PATTERN,
     apply_mesh_density_from_text,
     has_mesh_density_parameters,
     mesh_density_requested,
     mesh_density_requires_confirmation,
+    looks_like_airfoil_or_naca_request,
     original_intent_allows_airfoil_mesh,
     original_user_request_text_from_state,
     surrogate_geometry_explicitly_approved,
@@ -104,13 +106,13 @@ _TURBOMACHINERY_PATTERN = (
 )
 
 CANONICAL_CFD_MESH_INTENT_PATTERNS: dict[str, str] = {
-    "airfoil_gmsh": r"\b(?:airfoil|aerofoil|naca\s*[-_ ]?\d{4,5})\b|(?:翼型|机翼)",
-    "cylinder_flow": r"\b(?:cylinder|circular\s+cylinder)\b|(?:圆柱|圆柱绕流)",
-    "cylinder_gmsh": r"\b(?:cylinder|circular\s+cylinder)\b|(?:圆柱|圆柱绕流)",
-    "sphere": r"\bsphere\b|(?:球体|球绕流)",
-    "pipe_flow": r"\b(?:pipe|pipe\s+flow)\b|(?:管道|管流)",
-    "converging_diverging_nozzle": r"\bnozzle\b|(?:喷管|收敛[- ]?扩张)",
-    "structured_rect": r"\b(?:structured_rect|rectangle|rectangular|channel|cavity)\b|(?:方腔|槽道|矩形)",
+    "airfoil_gmsh": AIRFOIL_INTENT_PATTERN,
+    "cylinder_flow": r"(?<![a-z0-9_])(?:cylinder|circular\s+cylinder)(?![a-z0-9_])|(?:圆柱|圆柱绕流)",
+    "cylinder_gmsh": r"(?<![a-z0-9_])(?:cylinder|circular\s+cylinder)(?![a-z0-9_])|(?:圆柱|圆柱绕流)",
+    "sphere": r"(?<![a-z0-9_])sphere(?![a-z0-9_])|(?:球体|球绕流)",
+    "pipe_flow": r"(?<![a-z0-9_])(?:pipe|pipe\s+flow)(?![a-z0-9_])|(?:管道|管流)",
+    "converging_diverging_nozzle": r"(?<![a-z0-9_])nozzle(?![a-z0-9_])|(?:喷管|收敛[- ]?扩张)",
+    "structured_rect": r"(?<![a-z0-9_])(?:structured_rect|rectangle|rectangular|channel|cavity)(?![a-z0-9_])|(?:方腔|槽道|矩形)",
 }
 
 
@@ -176,6 +178,9 @@ def _text_blob(spec: str, params: dict[str, Any], case_type: str = "") -> str:
         if key not in {
             "reference_evidence", "reference_notes", "search_queries", "search_policy",
             "recent_tool_results", "review_feedback", "requirement_analysis", "source_trace",
+            # Delivery criteria may name forbidden geometries ("not an
+            # airfoil"). They are review constraints, not geometry intent.
+            "preprocessing_request", "preprocessing_work_order", "authority_snapshot",
         }
     }
     payload = {
@@ -229,18 +234,6 @@ def explicit_mesh_contract(
     }
 
 
-def _profile_is_airfoil_like(profile: dict[str, Any] | None) -> bool:
-    if not profile:
-        return False
-    values = {
-        str(profile.get("case_type") or "").strip().lower(),
-        str(profile.get("mesh_type") or "").strip().lower(),
-        str(profile.get("case_family") or "").strip().lower(),
-    }
-    values.update(str(alias).strip().lower() for alias in profile.get("aliases", []) if alias)
-    return bool(values & _AIRFOIL_CASE_VALUES)
-
-
 def _geometry_value_is_naca_or_airfoil(value: Any) -> bool:
     if isinstance(value, dict):
         geometry_type = str(value.get("type") or "").strip().lower()
@@ -248,7 +241,9 @@ def _geometry_value_is_naca_or_airfoil(value: Any) -> bool:
             return True
         return any(value.get(key) not in (None, "", [], {}) for key in ("naca_code", "airfoil_name"))
     if isinstance(value, str):
-        return bool(re.search(r"(\bnaca\b|\bairfoil\b|\baerofoil\b|\bwing\b|翼型|机翼)", value, re.IGNORECASE))
+        return looks_like_airfoil_or_naca_request(value) or bool(
+            re.search(r"(?<![a-z0-9_])naca(?![a-z0-9_])", value, re.IGNORECASE)
+        )
     return False
 
 
@@ -256,16 +251,15 @@ def _attempts_airfoil_resolution(
     case_type: str,
     params: dict[str, Any],
     local_case: dict[str, Any] | None = None,
-    public_case: dict[str, Any] | None = None,
 ) -> bool:
     values = {
         str(case_type or "").strip().lower(),
         str(params.get("case_type") or "").strip().lower(),
         str(params.get("mesh_type") or "").strip().lower(),
+        str((local_case or {}).get("case_type") or "").strip().lower(),
+        str((local_case or {}).get("mesh_type") or "").strip().lower(),
     }
     if values & _AIRFOIL_CASE_VALUES:
-        return True
-    if _profile_is_airfoil_like(local_case) or _profile_is_airfoil_like(public_case):
         return True
     if any(params.get(field) not in (None, "", [], {}) for field in ("naca_code", "airfoil")):
         return True
@@ -299,9 +293,8 @@ def _disallowed_airfoil_resolution_request(
     case_type: str,
     params: dict[str, Any],
     local_case: dict[str, Any] | None = None,
-    public_case: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    if not _attempts_airfoil_resolution(case_type, params, local_case, public_case):
+    if not _attempts_airfoil_resolution(case_type, params, local_case):
         return None
     current_text = "\n".join(
         text
@@ -329,7 +322,6 @@ def _disallowed_airfoil_resolution_request(
         "attempted_case_type": case_type or params.get("case_type"),
         "attempted_mesh_type": params.get("mesh_type"),
         "attempted_local_profile": (local_case or {}).get("case_type"),
-        "attempted_public_profile": (public_case or {}).get("case_type"),
     }
     result.setdefault("source_trace", []).append({
         "source": "original_intent_guard",
@@ -344,7 +336,6 @@ def _disallowed_canonical_resolution_request(
     case_type: str,
     params: dict[str, Any],
     local_case: dict[str, Any] | None = None,
-    public_case: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if surrogate_geometry_explicitly_approved(params):
         return None
@@ -354,8 +345,6 @@ def _disallowed_canonical_resolution_request(
         str(params.get("mesh_type") or "").strip().lower(),
         str((local_case or {}).get("case_type") or "").strip().lower(),
         str((local_case or {}).get("mesh_type") or "").strip().lower(),
-        str((public_case or {}).get("case_type") or "").strip().lower(),
-        str((public_case or {}).get("mesh_type") or "").strip().lower(),
     ]
     matched_value = next((value for value in values if value in CANONICAL_CFD_MESH_INTENT_PATTERNS), "")
     if not matched_value:
@@ -1050,19 +1039,12 @@ def _build_missing_parameter_reference_request(
 def _required_user_fields(
     spec: str,
     params: dict[str, Any],
-    case_profile: dict[str, Any] | None,
-    public_profile: dict[str, Any] | None,
 ) -> list[dict[str, str]]:
     fields: list[dict[str, str]] = []
     if _looks_like_private_or_custom_geometry(spec, params) and not _has_any(params, _PRIVATE_GEOMETRY_FIELDS):
         fields.append({
             "field": "geometry_file 或几何坐标/尺寸参数",
             "why": "真实/复杂几何无法从公开资料可靠推断，猜测会改变计算对象。",
-        })
-    if case_profile and case_profile.get("geometry_mode") == "user_file" and not _has_any(params, _PRIVATE_GEOMETRY_FIELDS):
-        fields.append({
-            "field": "geometry_file",
-            "why": "该模板声明几何必须由用户提供，支持 .step/.stp/.iges/.stl/.brep/.geo。",
         })
     require_boundary_confirmation = str(params.get("require_boundary_confirmation") or "").lower() in {"1", "true", "yes"}
     require_unit_confirmation = str(params.get("require_unit_confirmation") or "").lower() in {"1", "true", "yes"}
@@ -1332,7 +1314,7 @@ async def _resolve_mesh_iteration_inputs(
             },
         )
 
-    user_fields = _required_user_fields(spec, params, local_case, None)
+    user_fields = _required_user_fields(spec, params)
 
     if user_fields and require_user_confirmation:
         if _has_any(params, _PRIVATE_GEOMETRY_FIELDS):

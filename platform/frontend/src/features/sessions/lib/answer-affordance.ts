@@ -4,7 +4,7 @@ import type { Language } from "../../../shared/i18n/language.ts";
 import { toChatPause } from "./session-presentation.ts";
 
 /**
- * 「这个会话此刻把输入交给谁」—— **一个纯函数**，组件照着渲染，不再自己判断。
+ * 决策卡与聊天输入框的呈现由同一个纯函数决定，组件照着渲染。
  *
  * ## 为什么这件事必须是纯函数（2026-09-01 的第二半）
  *
@@ -28,12 +28,16 @@ import { toChatPause } from "./session-presentation.ts";
 type OfferBearingMessage = { id: string; offerId?: string | null };
 
 export type SessionInputPlan =
-  /** 卡片是入口。`pause` 已经是能直接渲染的形状，组件不再做第二次转换。 */
+  /** 显示快捷选项，同时保留聊天。`pause` 已可直接渲染。 */
   | { kind: "prompt"; pause: ChatPause; anchorMessageId: string | null }
-  /** 输入框是入口。`degraded` 有值时说明本该是卡片，如实告诉用户。 */
+  /** 只显示聊天。`degraded` 有值时说明卡片无法呈现，如实告诉用户。 */
   | { kind: "composer"; degraded?: string }
   /** 谁都不能动。`recheckAt` 是这个判断自己会过期的时刻。 */
   | { kind: "locked"; reason: string; recheckAt: string | null };
+
+export function canUseComposer(plan: SessionInputPlan | null): boolean {
+  return plan !== null && plan.kind !== "locked";
+}
 
 export function sessionInputPlan(input: {
   session: ResearchSession;

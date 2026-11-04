@@ -30,6 +30,8 @@ from app.models.model_backend import ModelBackendConfig
 from app.models.project import Project
 from app.models.user import User
 from app.services.user_interface import language_for as _language_for
+from app.services import refusals as _refusals
+from app.services.say import say as _say
 from app.policies import PROJECT_ROLE_CAPABILITIES, has_project_capability
 from app.services.model_backends import effective_backend, get_visible_backend
 from app.services.research_settings import (
@@ -39,8 +41,12 @@ from app.services.research_settings import (
 
 logger = logging.getLogger(__name__)
 
+#: 新建会话时的占位标题。前端按界面语言起（`t({ zh: "新的研究", en: "New research" })`），所以两种
+#: 语言都得在这里 —— 以前只有英文，中文界面新建的会话标题是「新的研究」，被当成人挑过的名字：
+#: 既不换成第一句话，也不自动命名（11-04 点出来的）。`test_session_title_is_a_name_not_a_prefix`
+#: 扫前端新建会话用的标题，少一个就红。
 PLACEHOLDER_SESSION_TITLES = frozenset(
-    {"New conversation", "New research", "New research Session"}
+    {"New conversation", "New research", "New research Session", "新的研究"}
 )
 
 # 跨进程线协议：harness 把「这一次呈递」整份挂在 pause 事件的这个键下
@@ -192,9 +198,10 @@ async def require_capability(
 ) -> Project:
     project = await db.get(Project, project_id)
     if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
+        raise HTTPException(status_code=404, detail=_say(_refusals.PROJECT_NOT_FOUND, _language_for(user)))
     if not await has_project_capability(db, user, project, capability):
-        raise HTTPException(status_code=403, detail=f"Missing project capability: {capability}")
+        raise HTTPException(status_code=403, detail=_say(_refusals.missing_capability(capability),
+                                                         _language_for(user)))
     return project
 
 
@@ -209,7 +216,7 @@ async def get_session(
         )
     )
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail=_say(_refusals.SESSION_NOT_FOUND, _language_for(user)))
     return project, session
 
 
@@ -247,7 +254,8 @@ async def create_session(
     model_backend_id: str | None,
 ) -> SessionProjection:
     if not await has_project_capability(db, user, project, "drive_session"):
-        raise HTTPException(status_code=403, detail="Missing project capability: drive_session")
+        raise HTTPException(status_code=403, detail=_say(_refusals.missing_capability("drive_session"),
+                                                         _language_for(user)))
     backend = (
         await get_visible_backend(db, user, model_backend_id)
         if model_backend_id
@@ -363,7 +371,8 @@ async def resume_stale_session(
     from datetime import UTC, datetime
 
     if not await has_project_capability(db, user, project, "drive_session"):
-        raise HTTPException(status_code=403, detail="Missing project capability: drive_session")
+        raise HTTPException(status_code=403, detail=_say(_refusals.missing_capability("drive_session"),
+                                                         _language_for(user)))
 
     session = await db.scalar(
         select(SessionProjection).where(
@@ -372,7 +381,7 @@ async def resume_stale_session(
         )
     )
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail=_say(_refusals.SESSION_NOT_FOUND, _language_for(user)))
 
     from app.services.harness_sessions import (
         HarnessSessionStaleError,
@@ -396,7 +405,9 @@ async def resume_stale_session(
             status_code=409,
             detail={
                 "code": "session_runtime_alive",
-                "message": "This Session is still live — send your message directly.",
+                "message": _say({"zh": "会话仍在运行，请直接发送消息。",
+                                 "en": "This Session is still live. Send your message directly."},
+                                _language_for(user)),
             },
         )
 
@@ -446,11 +457,19 @@ async def recover_stale_session(
 
     This deliberately does not claim to resume a Python process or an in-flight
     tool call.  It preserves the source Session's frozen execution context and
-    starts a fresh worktree branch from the same base commit.  The unique lineage
-    constraint makes retries idempotent.
+    starts a fresh worktree branch where the source Session stopped: its branch
+    head, once that head is verified against the source's record ledger (every
+    frozen artifact present with the pinned sha256).  When there is no head, or
+    the head disagrees with the ledger (a worker killed half-way), the branch
+    starts from the source Session's *base* commit instead and every frozen
+    artifact is carried over explicitly, ledger rows included; anything that can
+    no longer be found is recorded as unrecoverable, never dropped silently.  See
+    ``GitProjectRepository.recover_session_workspace`` (#1186).  The unique
+    lineage constraint makes retries idempotent.
     """
     if not await has_project_capability(db, user, project, "drive_session"):
-        raise HTTPException(status_code=403, detail="Missing project capability: drive_session")
+        raise HTTPException(status_code=403, detail=_say(_refusals.missing_capability("drive_session"),
+                                                         _language_for(user)))
 
     source = await db.scalar(
         select(SessionProjection)
@@ -461,7 +480,7 @@ async def recover_stale_session(
         .with_for_update()
     )
     if not source:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail=_say(_refusals.SESSION_NOT_FOUND, _language_for(user)))
 
     # ── 两个问题，两个答案（2026-08-21）──────────────────────────────────
     #
@@ -657,8 +676,8 @@ async def recover_stale_session(
             },
         )
     if not source.git_base_commit_sha:
-        # 恢复出来的会话要从**同一个基线**分出去。源会话连 git 基线都没有，
-        # 说明它从没真正建起工作区 —— 接着它跑没有意义。
+        # 分支头对不上账本时，恢复要退回源会话的**基线**分出去。源会话连 git
+        # 基线都没有，说明它从没真正建起工作区 —— 接着它跑没有意义。
         # （从前这一条问的是 base_revision_id：同一件事的第二份记法。）
         raise HTTPException(
             status_code=409,
@@ -703,10 +722,14 @@ async def recover_stale_session(
     )
     db.add(recovered)
     await db.flush()
-    from app.services.project_repository import get_project_repository, run_in_repository_thread
+    from app.services.project_repository import (
+        RecoveryBaselineMissing,
+        get_project_repository,
+        run_in_repository_thread,
+    )
 
     repository = get_project_repository()
-    repository_status = await run_in_repository_thread(
+    await run_in_repository_thread(
         repository.initialize_project,
         project_id=str(project.id),
         name=project.name,
@@ -714,34 +737,58 @@ async def recover_stale_session(
         research_domain=project.research_domain,
         owner_id=project.owner_id,
     )
-    project_base_commit = repository_status.head_commit
-    # ── 从**死会话的 head** 开分支，不是从项目基线 ─────────────────────────
+    # ── 从**死会话停下的地方**开分支，不是从项目基线 ───────────────────────
     #
-    # 原来这里用的是 base_revision（源会话当初的起点）。后果：一个跑了几小时、
-    # 已经 checkpoint 出十几个产物的会话，运行时一死，接续会话从**零**开始 ——
-    # 那些提交还在源分支上，但没有任何人再读它们。
+    # 更早这里用的是源会话当初的起点。后果：一个跑了几小时、已经 checkpoint 出
+    # 十几个产物的会话，运行时一死，接续会话从**零**开始（2026-08-10）。08-10 改成
+    # 从源会话的 head 开 —— 但只带过来了正文：冻结的事实记在工作区账本里，而账本
+    # 从不进分支，于是接续会话看得到文件、看不到"它已冻结"（#1186，现场 Q1）。
     #
-    # 而 checkpoint 机制的原话是"让有用的半成品、blocker 报告、失败的尝试留在
-    # Session 分支上，而不是被隐藏或删除"。存了，而唯一的续跑入口不读 ——
-    # 又一次"机制存在但没接到路径"，且是最贵的一次：丢的是几小时的真实研究。
-    #
-    # 接续会话按定义是**同一份工作的继续**，不是项目的另一条分支，所以它的起点
-    # 就该是源会话停下的地方。源分支保持原样不动（证据留痕），新分支从它长出去。
-    source_head = (source.git_head_commit_sha or "").strip()
-    base_commit = source_head or project_base_commit
-    workspace = await run_in_repository_thread(
-        repository.ensure_session_workspace,
-        project_id=str(project.id),
-        session_id=recovered.session_id,
-        base_commit=base_commit,
-        title=recovered.title,
-        created_by=user.id,
-    )
+    # 现在按 wangd 2026-10-21 的裁决：先核分支头与账本，一致才从分支头接；没有
+    # 分支头或对不上（worker 被杀在半截）就从源会话的 **base** 开，把冻结件连账
+    # 一件件带过来。源会话连 head 都没有时退回的是**它自己的 base**，不是项目
+    # 当前的 main —— main 上是别人后来的工作，不是这份工作停下的地方。
+    # 源分支保持原样不动（证据留痕），新分支从它长出去。
+    try:
+        recovery = await run_in_repository_thread(
+            repository.recover_session_workspace,
+            project_id=str(project.id),
+            source_session_id=source.session_id,
+            source_base_commit=source.git_base_commit_sha,
+            source_head_commit=source.git_head_commit_sha,
+            session_id=recovered.session_id,
+            title=recovered.title,
+            created_by=user.id,
+        )
+    except RecoveryBaselineMissing as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "recovery_context_incomplete",
+                "message": _say({"zh": "原会话的起点已不在项目历史里，无法从它接着做。",
+                                 "en": "The original Session's starting point is no longer "
+                                       "in the Project history, so it cannot be continued."},
+                                _language_for(user)),
+            },
+        ) from exc
+    workspace = recovery.workspace
     recovered.git_branch = workspace.branch
     recovered.git_base_commit_sha = workspace.base_commit
     recovered.git_head_commit_sha = workspace.head_commit
     recovered.git_worktree_path = workspace.path
     await db.flush()
+    # 这次恢复做了什么，要在新会话的事实流里留一笔：从哪儿接的、为什么、原会话
+    # 冻结的每一件落到了哪里 —— 找不回的那几件尤其要说出来。同一份记录也写在
+    # 新分支的 manifest（`recovery:`）和恢复提交的 trailer 里。
+    from app.services.app_events import record_app_event
+
+    await record_app_event(
+        db,
+        session_id=recovered.session_id,
+        kind="session.recovered",
+        payload=recovery.record,
+        dedupe_key=f"recovered-from:{source.session_id}",
+    )
     await db.refresh(recovered)
     return recovered, lost_run, True
 
@@ -782,7 +829,8 @@ async def require_drive_access(
     session_id: str,
 ) -> SessionProjection:
     if not await has_project_capability(db, user, project, "drive_session"):
-        raise HTTPException(status_code=403, detail="Missing project capability: drive_session")
+        raise HTTPException(status_code=403, detail=_say(_refusals.missing_capability("drive_session"),
+                                                         _language_for(user)))
     session = await db.scalar(
         select(SessionProjection)
         .where(
@@ -792,10 +840,12 @@ async def require_drive_access(
         .with_for_update()
     )
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail=_say(_refusals.SESSION_NOT_FOUND, _language_for(user)))
     if session.lifecycle_status != "active":
         raise HTTPException(
-            status_code=409, detail="Archived or completed Session cannot be driven"
+            status_code=409, detail=_say({"zh": "这个会话已归档或已结束，无法继续操作",
+                                          "en": "Archived or completed Session cannot be driven"},
+                                         _language_for(user))
         )
     return session
 
@@ -1176,7 +1226,8 @@ class DriveAccess(NamedTuple):
     """
 
     may_drive: bool
-    reason: str | None = None
+    #: 显示在锁住的输入框上，两种语言并排写；`build_session_view` 按这一屏的语言说。
+    reason: dict[str, str] | None = None
     until: datetime | None = None
 
 
@@ -1189,11 +1240,14 @@ async def drive_access_for(
     永远不会改变局面的事。
     """
     if session.archived_at is not None or session.lifecycle_status == "archived":
-        return DriveAccess(False, "Archived sessions are read-only.")
+        return DriveAccess(False, {"zh": "已归档的会话只能查看。", "en": "Archived Sessions are read-only."})
     # 问能力源本身，不比对**别名**列表（api_names=True 会把 `drive_session`
     # 改写成 `drive`，比对内部名就永远为假，而那种错法没有任何红色）。
     if not await has_project_capability(db, user, project, "drive_session"):
-        return DriveAccess(False, "You can view this Session, but cannot drive it.")
+        return DriveAccess(False, {
+            "zh": "你可以查看这个会话，但没有权限在其中操作。",
+            "en": "You can view this Session but do not have permission to work in it.",
+        })
     # 「别人正在开」这一条随租约一起删了（2026-09-05）。有能力就能开：说话的
     # 那个人就成为当前驾驶者（current_driver_id 现算）。真正会互相踩到的是
     # **同一轮在飞时另一个人再发一条**，那由占用判据在跑轮那一刻挡住 ——
@@ -1286,23 +1340,31 @@ async def _reap_orphaned_runs_of(
 
     观察永不打断主流程：对账失败就照旧返回当前状态（会退回旧行为，即"要等
     下次重启"），不会让一次 GET 挂掉。
+
+    **对账放在保存点（SAVEPOINT）里。** 只 `except` 不回滚是不够的：它改了 run 行之后下一条
+    查询触发 autoflush，flush 一失败，SQLAlchemy 就把**整个请求的事务**标成已回滚，后面每一条
+    查询都是 `PendingRollbackError` —— 异常吞掉了，会话页照样 500（#1254：0.5.6 Windows，界面
+    每 1–2 秒轮询一次、每次 GET 都在这里写库，几个请求一起抢 SQLite 的写锁，等满 5 秒报
+    `database is locked`，重开会话连着五次 500）。保存点把失败关在这一段里：回滚的只是这次
+    对账，读会话的那个事务照常往下走；没收成的 run 下一次轮询再收。
     """
     try:
         from app.services.harness_sessions import mark_orphaned_harness_runs
         from app.models.execution import REQUIRES_LIVE_RUNTIME_STATUSES
 
-        rows = (
-            await db.execute(
-                select(Run.id).where(
-                    Run.project_id == project_id,
-                    Run.session_id == session_id,
-                    Run.status.in_(REQUIRES_LIVE_RUNTIME_STATUSES),
+        async with db.begin_nested():
+            rows = (
+                await db.execute(
+                    select(Run.id).where(
+                        Run.project_id == project_id,
+                        Run.session_id == session_id,
+                        Run.status.in_(REQUIRES_LIVE_RUNTIME_STATUSES),
+                    )
                 )
-            )
-        ).scalars().all()
-        if not rows:
-            return
-        await mark_orphaned_harness_runs(db, run_ids=set(rows))
+            ).scalars().all()
+            if not rows:
+                return
+            await mark_orphaned_harness_runs(db, run_ids=set(rows))
     except Exception:
         logger.exception("Could not reconcile orphaned Runs for session %s", session_id)
 

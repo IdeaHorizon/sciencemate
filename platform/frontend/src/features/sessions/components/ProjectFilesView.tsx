@@ -7,6 +7,7 @@ import { useWorkspacePanel } from "@/stores/workspace-panel";
 
 import { useProjectSessions } from "../hooks/useSessions";
 import { ProjectFileTree } from "./ProjectFileTree";
+import { useT } from "@/shared/i18n";
 
 /**
  * 项目级的「一共有哪些文件」。
@@ -28,6 +29,7 @@ import { ProjectFileTree } from "./ProjectFileTree";
  * 正在进行的工作只在会话分支上看得到。没有会话时后端回落到项目主干。
  */
 export function ProjectFilesView({ projectId }: { projectId: string }) {
+  const t = useT();
   const sessionsQuery = useProjectSessions(projectId);
   const sessionId = useMemo(() => {
     const rows = sessionsQuery.data ?? [];
@@ -39,7 +41,7 @@ export function ProjectFilesView({ projectId }: { projectId: string }) {
   return (
     <WorkspacePanelHost projectId={projectId} mainClassName="project-files-main">
       {sessionsQuery.isLoading ? (
-        <p className="muted">Loading…</p>
+        <p className="muted">{t({ zh: "正在加载…", en: "Loading…" })}</p>
       ) : (
         <ProjectFileTree
           projectId={projectId}

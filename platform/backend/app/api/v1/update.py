@@ -62,8 +62,8 @@ async def install_update(user=Depends(get_current_user),
                          lang: Language = Depends(language_on_screen)) -> dict:
     if not _may_install(user):
         raise HTTPException(status_code=403, detail=say(
-            {"zh": "装更新会换掉这台服务器的 harness，只有机构管理员能做",
-             "en": "Installing an update replaces this server's harness; only an institution administrator can"},
+            {"zh": "只有组织管理员可以安装更新。",
+             "en": "Only an organisation administrator can install updates."},
             lang))
 
     def _install():
@@ -100,14 +100,14 @@ async def restart_for_update(user=Depends(get_current_user),
                              lang: Language = Depends(language_on_screen)) -> dict:
     if not _may_install(user):
         raise HTTPException(status_code=403, detail=say(
-            {"zh": "只有机构管理员能重启服务器", "en": "Only an institution administrator can restart the server"},
+            {"zh": "只有组织管理员可以重启服务器。", "en": "Only an organisation administrator can restart the server."},
             lang))
     staged = su.staged_version(the_data_root())
     # 两种「重启才生效」：暂存的更新，和开发者模式的声明改了（设了 / 撤了 / 换了目录）。
     if staged is None and not _describe(lang)["restart_needed"]:
         raise HTTPException(status_code=409, detail=say(
-            {"zh": "没有暂存的更新，也没有改过开发者模式，不需要重启",
-             "en": "No update is staged and developer mode has not changed, so there is nothing to restart for"},
+            {"zh": "目前不需要重启：没有待安装的更新，开发者模式也没有改动。",
+             "en": "No restart is needed: there is no pending update and developer mode has not changed."},
             lang))
     su.schedule_restart()
     return {"restarting": True, "staged_version": staged, "exit_code": su.RESTART_EXIT_CODE}
@@ -133,8 +133,8 @@ def _only_on_the_desktop(lang: Language) -> None:
     """组织服务器没有「我自己的 checkout」—— 它是部署出来的，版本归 server_update 管。"""
     if assembly.profile_name() != "personal":
         raise HTTPException(status_code=403, detail=say(
-            {"zh": "开发者模式只有桌面版有；组织服务器的版本由升级流程管",
-             "en": "Developer mode exists only on the desktop; an organisation server's version is managed by its upgrade flow"},
+            {"zh": "开发者模式仅适用于桌面版。",
+             "en": "Developer mode is only available in the desktop app."},
             lang))
 
 

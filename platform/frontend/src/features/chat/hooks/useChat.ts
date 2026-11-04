@@ -12,6 +12,7 @@ import { say, useLanguage, useT, type Language, type Phrase } from "@/shared/i18
 import type { ChatMessage } from "../types";
 import type { ChatActivity } from "../types";
 import { authoritativeReplyText } from "../lib/authoritative-reply";
+import { reconcileInterjection } from "../lib/message-run";
 import {
   presentChatFailure,
   presentStructuredChatFailure,
@@ -66,14 +67,11 @@ export function useChat({
   scope,
   conversationId,
   initialMessages = [],
-  onProjectCreated,
   onStreamDone,
 }: {
   scope: { kind: "global" } | { kind: "project"; projectId: string };
   conversationId: string | null;
   initialMessages?: ChatMessage[];
-  /** For global chat: callback when LLM creates a new project as a side-effect. */
-  onProjectCreated?: (info: Record<string, unknown>) => void;
   /** Called only after the server emits a successful SSE `done` event. */
   onStreamDone?: (terminal: ChatTerminalState, meta: Record<string, unknown>) => void;
 }) {
@@ -203,8 +201,8 @@ export function useChat({
           setMessages((c) => c.filter((m) => m.id !== assistantId));
           if (presented) pushError(`${presented.message} ${presented.recovery}`, presented.title);
           else pushError(
-            t({ zh: "这句话没能送进去，正在跑的那一轮不受影响。", en: "This message could not be delivered; the running turn is unaffected." }),
-            t({ zh: "插话失败", en: "Interjection failed" }),
+            t({ zh: "消息发送失败，当前执行不受影响。", en: "The message could not be sent. The current run is unaffected." }),
+            t({ zh: "发送失败", en: "Message not sent" }),
           );
           return;
         }
@@ -216,16 +214,17 @@ export function useChat({
         setSending(false);
         abortRef.current = null;
         if (structured) {
-          // 小弹窗把原因说完整；重发无用（retryable=false）时不给重试按钮，
-          // 免得按钮本身撒谎。重试 = 发一条「继续」——平台的既有语义就是
-          // "下一条消息从断点接着跑"。
+          // 小弹窗把原因说完整；重发无用（retryable=false）时不给这个按钮，
+          // 免得按钮本身撒谎。它做的是替你发一条「继续」——平台的既有语义就是
+          // "下一条消息从断点接着跑"——所以按钮就叫「继续」，不叫「重试」
+          // （重试会让人以为是重发上一条）。
           pushFailure(
             structured.message + (structured.recovery ? ` ${structured.recovery}` : ""),
             structured.title,
             structured.retryable === false
               ? undefined
               : {
-                label: t({ zh: "重试", en: "Retry" }),
+                label: t({ zh: "继续", en: "Continue" }),
                 onClick: () => { sendRef.current(composeText(say(CONTINUE_ANSWER, lang)) as Answer); },
               },
           );
@@ -237,13 +236,7 @@ export function useChat({
           // （单一入口的机械分流）。这一轮**没有**新的 assistant 回复 ——
           // 撤掉占位气泡；user 消息归属到正在跑的 run，让它挂进正确的
           // 时序窗口。回应稍后以时间线事件的形式出现（决策轮的答复）。
-          setMessages((current) => current
-            .filter((m) => m.id !== assistantId)
-            .map((m) => (
-              m.id === userMsg.id && typeof meta.runId === "string" && meta.runId
-                ? { ...m, runId: meta.runId }
-                : m
-            )));
+          setMessages((current) => reconcileInterjection(current, userMsg.id, assistantId, meta));
           if (!secondary) {
             setTerminal(EMPTY_CHAT_TERMINAL);
             setSending(false);
@@ -254,7 +247,7 @@ export function useChat({
           // 事实 —— 那一支留着。
           if (meta.liveness === "unbound") {
             pushInfo(
-              t({ zh: "执行进程当前不在线：这句话已排队，会话续跑时才会被处理。", en: "The execution process is offline: this message is queued and will be handled when the Session resumes." }),
+              t({ zh: "消息已排队，会话恢复执行后会处理。", en: "Message queued. It will be handled when the session resumes." }),
               t({ zh: "已排队", en: "Queued" }),
             );
           }
@@ -301,7 +294,7 @@ export function useChat({
         if (doneView?.waitingOn?.kind === "human" && notificationSettings.data?.decision_required) {
           pushInfo(
             t({ zh: "这个会话在等你回答。", en: "This Session is waiting for your response." }),
-            t({ zh: "需要你拍板", en: "Research decision required" }),
+            t({ zh: "需要你做决定", en: "Decision needed" }),
           );
         } else if (
           (doneView?.phase === "interrupted"
@@ -310,29 +303,13 @@ export function useChat({
           && notificationSettings.data?.run_failed
         ) {
           pushError(
-            t({ zh: "打开会话看失败记录和恢复办法。", en: "Open the Session to inspect the recorded failure and recovery options." }),
-            t({ zh: "这一轮没跑完", en: "Run needs attention" }),
+            t({ zh: "原因和处理方法见对话中的记录。", en: "See the conversation for the reason and what to do next." }),
+            t({ zh: "执行未完成", en: "Run did not finish" }),
           );
         }
         // 跑完了不弹（wangd 2026-10-20 删掉「执行完成」）：这条流只活在这个会话页上，
         // 它收尾的那一刻你正看着回复落下来 —— 弹一句"跑完了"是在复述屏幕。
         // 人不在跟前时该有的提醒是系统通知，不是这里。
-        if (
-          scope.kind === "global" &&
-          meta.created_project &&
-          onProjectCreated
-        ) {
-          onProjectCreated(meta.created_project as Record<string, unknown>);
-          // Append a confirmation suffix to the assistant message
-          const cp = meta.created_project as Record<string, unknown>;
-          const suffix = `\n\n${t({ zh: "已创建项目：{name}（{node}）。", en: "Created project: {name} ({node}). " }, {
-            name: String(cp.name), node: String(cp.start_node_type),
-          })}${cp.auto_started
-            ? t({ zh: "调度器已启动。", en: "Scheduler started." })
-            : t({ zh: "可以开始了。", en: "Ready to start." })}`;
-          appendToken(suffix);
-          queryClient.invalidateQueries({ queryKey: qk.projects() });
-        }
       };
 
       let abort: () => void;
@@ -352,7 +329,7 @@ export function useChat({
       if (!secondary) abortRef.current = abort;
       return { kind: secondary ? "interjecting" : "streaming" };
     },
-    [conversationId, messages, scope, sending, queryClient, onProjectCreated, onStreamDone, notificationSettings.data, t, lang],
+    [conversationId, messages, scope, sending, queryClient, onStreamDone, notificationSettings.data, t, lang],
   );
   sendRef.current = send;
 

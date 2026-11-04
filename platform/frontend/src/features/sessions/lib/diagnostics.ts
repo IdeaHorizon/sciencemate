@@ -31,7 +31,7 @@ export function diagnosticsFailureMessage(status: number, detail: unknown, lang:
     }, lang);
   }
   if (typeof detail === "string" && detail) {
-    return say({ zh: "诊断包没能生成：{detail}", en: "The diagnostics could not be prepared: {detail}" }, lang, { detail });
+    return say({ zh: "生成诊断包失败：{detail}", en: "Could not create the diagnostics package: {detail}" }, lang, { detail });
   }
-  return say({ zh: "诊断包没能生成（HTTP {status}）", en: "The diagnostics could not be prepared (HTTP {status})" }, lang, { status });
+  return say({ zh: "生成诊断包失败（HTTP {status}）", en: "Could not create the diagnostics package (HTTP {status})" }, lang, { status });
 }

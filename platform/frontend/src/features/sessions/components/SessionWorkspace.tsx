@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Archive, Eraser, FileArchive, GitPullRequestArrow, Info, Square, Check, ChevronLeft, History, MoreHorizontal, Pencil, Route, Undo2 } from "lucide-react";
+import { Archive, Eraser, FileArchive, Info, Square, Check, ChevronLeft, History, MoreHorizontal, Pencil, Route, Undo2 } from "lucide-react";
 import {
   useAuth,
 } from "@/features/auth";
@@ -56,12 +56,11 @@ import { inspectorRunIds } from "../lib/inspector-run-ids";
 import { sessionUnpublishedCount } from "../lib/session-change-projection";
 import {
   sessionHasActiveDriver,
-  sessionHasAdvancedBase,
   sessionIsDrivenBy,
   sessionAboutFacts,
 } from "../lib/session-presentation";
 import type { ResearchSession } from "../types";
-import { sessionInputPlan } from "../lib/answer-affordance";
+import { canUseComposer, sessionInputPlan } from "../lib/answer-affordance";
 import { latestContextWindow } from "../lib/context-window";
 import { runFreshSessionPublish } from "../lib/publish-error-policy";
 import { WorkspacePanelHost } from "@/features/file-preview/components/WorkspacePanelHost";
@@ -80,7 +79,7 @@ import {
   replaceToken,
 } from "@/features/chat/lib/long-paste";
 import type { SendDispatch } from "@/features/chat/hooks/useChat";
-import { useT, useLanguage } from "@/shared/i18n";
+import { useT, useLanguage, say, type Language } from "@/shared/i18n";
 import { SessionEnvironmentBanner } from "./SessionEnvironmentBanner";
 
 /**
@@ -135,10 +134,10 @@ function SessionCanonicalRunAccessory({
   );
 }
 
-function sessionStateLabel(session: ResearchSession) {
+function sessionStateLabel(session: ResearchSession, lang: Language) {
   // 冲突是前端从 changeSet 才知道的事，压过局面标签；其余一律用后端给的
   // `label` —— 它与徽章、停止按钮、输入框出自同一次现算，不会互相打架。
-  if (session.conflictCount > 0) return "Conflict";
+  if (session.conflictCount > 0) return say({ zh: "有冲突", en: "Conflict" }, lang);
   return session.execution.label;
 }
 
@@ -294,7 +293,23 @@ export function SessionWorkspace({
         autonomous_authorized_risk_classes: next === "continuous" ? ["*"] : [],
       }),
     onError: (error) =>
-      pushError(error instanceof Error ? error.message : t({ zh: "档位没能切换", en: "The operation mode could not be switched" })),
+      pushError(error instanceof Error ? error.message : t({ zh: "切换模式失败", en: "Could not switch the mode" })),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: qk.project(projectId) }),
+  });
+  // 执行位置（项目级）：本机 / WSL 发行版。可选项由这台机器答（只有 Windows 上会多出 WSL）。
+  const executionTargetsQuery = useQuery({
+    queryKey: qk.executionTargets(),
+    queryFn: () => api.listExecutionTargets(),
+    enabled: mode === "api",
+    staleTime: 60_000,
+  });
+  const storedTarget = typeof projectConfig?.execution_target === "string"
+    ? (projectConfig.execution_target as string)
+    : "local";
+  const targetMutation = useMutation({
+    mutationFn: (next: string) => api.updateProjectConfig(projectId, { execution_target: next }),
+    onError: (error) =>
+      pushError(error instanceof Error ? error.message : t({ zh: "切换执行位置失败", en: "Could not change where commands run" })),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: qk.project(projectId) }),
   });
   // 模型可换（PATCH …/sessions/{id}）。锁死会话挡不住配错的后端，只挡住修正：
@@ -353,13 +368,12 @@ export function SessionWorkspace({
        */
       if (turnInFlightRef.current) {
         pushInfo(modelSwitchNotice({
-          turnInFlight: true,
           modelLabel: chosen ? modelBackendDisplayName(chosen, lang) : null,
         }, lang));
       }
       void queryClient.invalidateQueries({ queryKey: qk.sessionsPrefix(projectId) });
     },
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "换模型失败", en: "The model could not be switched" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "切换模型失败", en: "Could not switch the model" })),
   });
   // 会话附件（不是资料库上传）：文件进本会话工作区，附件行写进草稿 ——
   // 你看到什么，模型就看到什么，不走隐藏注入通道。
@@ -382,7 +396,7 @@ export function SessionWorkspace({
       // 从「运行中」消失。再弹一句"已投递"是拿 toast 复述屏幕上的事。
     },
     onError: (error) => {
-      pushError(error instanceof Error ? error.message : t({ zh: "停止请求未能投递", en: "The stop request could not be delivered" }));
+      pushError(error instanceof Error ? error.message : t({ zh: "停止失败", en: "Could not stop the run" }));
     },
   });
   // CLI 里一直有、UI 上一直没有的三件：撤销上一次写 / 清对话 / 跳过 dreaming。
@@ -403,20 +417,31 @@ export function SessionWorkspace({
     onSuccess: ({ blob, filename }) => {
       saveBlobAs(blob, filename);
       pushSuccess(t({
-        zh: "诊断包已生成。里面有这个会话的完整对话，发给别人之前请确认可以分享。",
-        en: "Diagnostics ready. They include this session's full conversation; check before sharing.",
+        zh: "诊断包已下载，其中包含这个会话的完整对话，分享前请确认。",
+        en: "Diagnostics downloaded. They include this session's full conversation; check before sharing.",
       }));
     },
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "诊断包没能生成", en: "The diagnostics could not be prepared" })),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "生成诊断包失败", en: "Could not create the diagnostics package" })),
   });
+  // 清的是助手的上下文（执行进程里的对话记忆），界面上的消息不动。
+  // 执行进程不在时后端什么都没清（`no_live_runtime`）：进程下次起来会从磁盘
+  // 把原来的对话读回来 —— 所以那一支如实说「没有清空」，不报成功。
   const resetMutation = useMutation({
     mutationFn: () => resetSessionConversation(projectId, sessionId),
-    onSuccess: (result) => pushSuccess(
-      result.status === "no_live_runtime"
-        ? t({ zh: "这个 Session 当前没有活着的运行时，下次打开就是干净的对话", en: "This session has no live runtime right now; next time you open it the conversation starts clean" })
-        : t({ zh: "对话已重置（memory / KB / 产物都保留）", en: "Conversation reset (memory, KB and outputs are all kept)" }),
-    ),
-    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "重置失败", en: "The reset failed" })),
+    onSuccess: (result) => {
+      if (result.status === "no_live_runtime") {
+        pushInfo(t({
+          zh: "上下文未清空：助手当前没有在运行。下次执行结束后可以再试。",
+          en: "Context not cleared: the assistant isn't running right now. Try again after the next run finishes.",
+        }));
+        return;
+      }
+      pushSuccess(t({
+        zh: "上下文已清空，记忆、知识库和成果都已保留",
+        en: "Context cleared. Memory, knowledge base and outputs are kept.",
+      }));
+    },
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "清空上下文失败", en: "Could not clear the context" })),
   });
   // 「跳过本次 KB 整理」不在这里了 —— 它调的是 `skipProjectDreaming(projectId)`，
   // 是**项目级**动作，挂在会话菜单里意味着从任何一个会话点它都会影响别的会话。
@@ -434,14 +459,14 @@ export function SessionWorkspace({
       void queryClient.invalidateQueries({ queryKey: qk.projectFileTree(projectId) });
       pushSuccess(
         result.committed
-          ? t({ zh: `「${result.name}」已在工作区 ${result.path} —— agent 下一轮就能读它`, en: `"${result.name}" is in the workspace at ${result.path} — the agent can read it next turn` })
-          : t({ zh: `「${result.name}」已经在工作区里了（内容相同，没有重复入库）`, en: `"${result.name}" is already in the workspace (same content, not stored twice)` }),
+          ? t({ zh: "「{name}」已上传到 {path}，助手可以直接读取", en: "\"{name}\" was uploaded to {path}. The assistant can read it." }, { name: result.name, path: result.path })
+          : t({ zh: "「{name}」已在工作区中，内容相同，未重复上传", en: "\"{name}\" is already in the workspace (same content, not uploaded twice)" }, { name: result.name }),
       );
     },
     // 失败必须吵。这里原先只有 onSuccess —— 2026-09-04 同事传一个 800MB 的包，
     // 后端 413 拒了，界面一声不响，于是他以为传上去了，agent 找了半天。
     onError: (error) =>
-      pushError(error instanceof Error ? error.message : t({ zh: "文件没能交上去", en: "The file could not be handed over" })),
+      pushError(error instanceof Error ? error.message : t({ zh: "上传失败", en: "Upload failed" })),
   });
   const mutations = useSessionMutations(projectId);
   const refreshAfterTerminal = useSessionTerminalRefresh(projectId, sessionId);
@@ -459,9 +484,9 @@ export function SessionWorkspace({
     const maxBytes = session?.materialMaxBytes;
     if (maxBytes && file.size > maxBytes) {
       pushError(t({
-        zh: `贴进来的文本有 ${Math.round(file.size / 1024 / 1024)} MB，超过单份文件上限，没有贴进去。请把它存成文件后按数据集的方式交给项目。`,
-        en: `The pasted text is ${Math.round(file.size / 1024 / 1024)} MB, over the per-file limit, so it was not pasted. Save it as a file and hand it to the project as a dataset instead.`,
-      }));
+        zh: "粘贴的文本有 {size} MB，超过单个文件的上限，未能粘贴。",
+        en: "The pasted text is {size} MB, over the per-file limit, so it was not pasted.",
+      }, { size: Math.round(file.size / 1024 / 1024) }));
       return;
     }
     const token = pendingPasteToken(seq, lines, lang);
@@ -470,7 +495,7 @@ export function SessionWorkspace({
       projectId,
       sessionId,
       file,
-      t({ zh: "用户在输入框里粘贴的长文本，界面自动存成了文件", en: "Long text the user pasted into the message box, saved as a file automatically" }),
+      t({ zh: "从输入框粘贴的长文本，已自动保存为文件", en: "Long text pasted into the message box, saved as a file automatically" }),
       lang,
     ).then(
       (result) => {
@@ -480,9 +505,9 @@ export function SessionWorkspace({
       (error) => {
         setDraft((current) => replaceToken(current, token, text));
         pushError(t({
-          zh: `长文本没能存成文件，已原样放回输入框：${error instanceof Error ? error.message : String(error)}`,
-          en: `The long text could not be saved as a file, so it was put back into the message box: ${error instanceof Error ? error.message : String(error)}`,
-        }));
+          zh: "长文本保存为文件失败，已放回输入框：{why}",
+          en: "The long text could not be saved as a file, so it was put back into the message box: {why}",
+        }, { why: error instanceof Error ? error.message : String(error) }));
       },
     );
   };
@@ -672,10 +697,9 @@ export function SessionWorkspace({
     const problem = sessionQuery.error ?? messageQuery.error;
     return (
       <div className="session-workspace-error" role="alert">
-        <span>{t({ zh: "打不开这条会话", en: "Session unavailable" })}</span>
-        <h1>{t({ zh: "这份研究记录读不出来。", en: "This research record could not be opened." })}</h1>
+        <h1>{t({ zh: "无法加载会话", en: "Could not load this session" })}</h1>
         {/* 对面违约（ContractViolation）的 message 是写给排查的人的诊断，不照念。 */}
-        <p>{problem instanceof Error && !(problem instanceof ContractViolation) ? problem.message : t({ zh: "平台没有返回一条能用的会话。", en: "The platform did not return a valid Session." })}</p>
+        <p>{problem instanceof Error && !(problem instanceof ContractViolation) ? problem.message : t({ zh: "请稍后重试。", en: "Please try again later." })}</p>
         <Link href={`/projects/${encodeURIComponent(projectId)}/research`}><ChevronLeft size={13} />{t({ zh: "回到研究列表", en: "Back to research" })}</Link>
       </div>
     );
@@ -748,17 +772,16 @@ export function SessionWorkspace({
     && changeSet.worktreeClean
     && openConflicts.length === 0;
   const canResolve = mode === "api" && session.capabilities.includes("resolve") && openConflicts.length > 0;
-  const projectAdvanced = sessionHasAdvancedBase(session);
   const disabledReason = mode === "fixture"
-    ? t({ zh: "界面演示只能看。", en: "UI demonstration is read-only." })
+    ? t({ zh: "演示数据，只能查看。", en: "Demo data is read-only." })
     : isArchived
-      ? t({ zh: "归档的会话只能看，不能续。", en: "Archived sessions are read-only." })
+      ? t({ zh: "会话已归档，只能查看。", en: "This session is archived and read-only." })
       : !canDrive
-        ? t({ zh: "你能看这个会话，但不能往里发研究指令。", en: "You can view this session, but cannot append research commands." })
+        ? t({ zh: "你只能查看这个会话，不能发送消息。", en: "You can view this session but cannot send messages." })
         : !isDriver
           ? activeDriver
             // 原文还写着「或租约到期」—— 驾驶权租约 2026-09-05 已删，开车的是最近发话的人。
-            ? t({ zh: "{name} 正在推进这个会话，你这边只能看。", en: "{name} is driving this Session, so it is view-only for you." }, { name: session.driverLabel })
+            ? t({ zh: "{name} 正在使用这个会话，你只能查看。", en: "{name} is working in this session; you can only view it." }, { name: session.driverLabel })
             : undefined
           : undefined;
 
@@ -803,12 +826,12 @@ export function SessionWorkspace({
     }
     const outcome = await dispatch(composed);
     if (outcome.kind === "sent") setDraft("");
-    else if (outcome.kind === "locked") pushError(t({ zh: "这个会话此刻不接受输入。", en: "This session is not accepting input right now." }), t({ zh: "未发送", en: "Not sent" }));
+    else if (outcome.kind === "locked") pushError(t({ zh: "当前无法向这个会话发送消息。", en: "This session can't receive messages right now." }), t({ zh: "未发送", en: "Not sent" }));
   };
 
   const answerHuman = async (answer: Answer) => {
     const outcome = await dispatch(answer);
-    if (outcome.kind === "locked") pushError(t({ zh: "这个会话此刻不接受输入。", en: "This session is not accepting input right now." }), t({ zh: "未发送", en: "Not sent" }));
+    if (outcome.kind === "locked") pushError(t({ zh: "当前无法向这个会话发送消息。", en: "This session can't receive messages right now." }), t({ zh: "未发送", en: "Not sent" }));
   };
 
   /**
@@ -851,7 +874,7 @@ export function SessionWorkspace({
             editable={canOperate}
             onRename={(title) => withDriver(() => mutations.rename.mutateAsync({ sessionId, title }))}
           />
-          <span className={`session-state session-meta-state state-${view.phase}`}><i /> {sessionStateLabel(session)}</span>
+          <span className={`session-state session-meta-state state-${view.phase}`}><i /> {sessionStateLabel(session, lang)}</span>
         </div>
         <div className="session-header-actions">
           {mode === "api" && (
@@ -864,12 +887,7 @@ export function SessionWorkspace({
               <Route size={13} />{t({ zh: "研究进程", en: "Research progress" })}</button>
           )}
           <details>
-            {/* 项目往前走了要有人知道，但它不值一个常驻按钮：⋯ 上一个点，
-                菜单里那一项自己说清楚是什么。 */}
-            <summary
-              aria-label={t({ zh: "会话操作", en: "Session actions" })}
-              className={projectAdvanced ? "has-badge" : undefined}
-            ><MoreHorizontal size={15} /></summary>
+            <summary aria-label={t({ zh: "会话操作", en: "Session actions" })}><MoreHorizontal size={15} /></summary>
             <div>
               <Link href={`?${mode === "fixture" ? "mode=demo&" : ""}view=execution`}><History size={13} />{t({ zh: "执行历史", en: "Execution history" })}</Link>
               <button type="button" onClick={() => setAboutOpen(true)}>
@@ -881,7 +899,7 @@ export function SessionWorkspace({
                   type="button"
                   disabled={diagnosticsMutation.isPending}
                   onClick={() => diagnosticsMutation.mutate()}
-                  title={t({ zh: "全部运行记录和同时段的后端日志，打成一个 zip；密钥已抹掉", en: "Every run record and the backend log from the same period, in one zip; keys removed" })}
+                  title={t({ zh: "包含全部执行记录和同时段的后端日志（已去除密钥），打包为 zip", en: "All run records and backend logs from the same period, as a zip (keys removed)" })}
                 >
                   <FileArchive size={13} />
                   {diagnosticsMutation.isPending
@@ -889,18 +907,9 @@ export function SessionWorkspace({
                     : t({ zh: "下载诊断包", en: "Download diagnostics" })}
                 </button>
               )}
-              {/* 「项目往前走了」值得说一声，而能对它做点什么的地方就在本页的
-                  改动面板里。从前这里链到 /projects/<id>/activity —— 那一页只是
-                  把 runs 又列了一遍，看完还得回来。 */}
-              {projectAdvanced && (
-                <button
-                  type="button"
-                  className="session-review-updates"
-                  onClick={() => setChangesOpen(true)}
-                >
-                  <GitPullRequestArrow size={13} />{t({ zh: "看改动", en: "See changes" })}<i />
-                </button>
-              )}
+              {/* 「项目有更新」不在菜单里：它曾打开本会话自己的改动面板，那里既看不到
+                  项目新提交了什么，也没有可做的操作。项目有新提交这件事写在「会话信息」
+                  的「项目更新」一行。 */}
               {/* 后端的 POST /runs/{id}/cancel 一直都在，前端从未调过 —— 研究员
                   看着 agent 往错误方向跑（E2E v18：冻结协议里有 1000x 量纲错误）
                   除了等它跑完或关浏览器什么都做不了。只在真有可停的 run 时出现。*/}
@@ -911,7 +920,7 @@ export function SessionWorkspace({
                   disabled={stopMutation.isPending}
                   onClick={() => void withDriver(() => stopMutation.mutate()).catch(() => {})}
                 >
-                  <Square size={13} />{t({ zh: "停止这一轮", en: "Stop this run" })}</button>
+                  <Square size={13} />{t({ zh: "停止执行", en: "Stop run" })}</button>
               )}
               {canOperate && (
                 <button
@@ -919,16 +928,19 @@ export function SessionWorkspace({
                   className={stoppableRunId ? undefined : "session-menu-sectioned"}
                   disabled={undoMutation.isPending}
                   onClick={() => void withDriver(() => undoMutation.mutate()).catch(() => {})}
-                  title={t({ zh: "用 Git revert 撤销，历史留痕；冻结产物不许回滚", en: "Undone with git revert so history keeps the trace; frozen outputs cannot be rolled back" })}
-                ><Undo2 size={13} />{t({ zh: "撤销上一次写", en: "Undo the last write" })}</button>
+                  title={t({ zh: "撤销会记录在历史中，已定稿的成果无法撤销", en: "The undo is kept in history. Finalized outputs can't be undone." })}
+                ><Undo2 size={13} />{t({ zh: "撤销上次文件改动", en: "Undo last file change" })}</button>
               )}
               {canOperate && (
                 <button
                   type="button"
                   disabled={resetMutation.isPending || backgroundRunActive}
                   onClick={() => void withDriver(() => resetMutation.mutate()).catch(() => {})}
-                  title={backgroundRunActive ? t({ zh: "跑轮中不能重置对话", en: "The conversation cannot be reset while a turn is running" }) : t({ zh: "memory / KB / 产物都保留", en: "memory, KB and outputs are all kept" })}
-                ><Eraser size={13} />{t({ zh: "清空对话历史", en: "Clear the conversation" })}</button>
+                  // 清的是助手的上下文，界面上的消息不会消失 —— 所以叫「清空上下文」。
+                  title={backgroundRunActive
+                    ? t({ zh: "执行中无法清空上下文", en: "Can't clear the context while a run is in progress" })
+                    : t({ zh: "助手将不再参考之前的对话；记忆、知识库和成果都会保留", en: "The assistant stops using the earlier conversation. Memory, knowledge base and outputs are kept." })}
+                ><Eraser size={13} />{t({ zh: "清空上下文", en: "Clear context" })}</button>
               )}
               {/* 收起不需要持有 driver：后端 archive 只要 drive_session 能力。
                   前端原来跟着 canEdit（= 你是当前 driver）走，于是"没有活跃
@@ -964,7 +976,7 @@ export function SessionWorkspace({
         facts={sessionAboutFacts(session, lang)}
       />
 
-      {mode === "fixture" && <p className="session-fixture-provenance">{t({ zh: "界面演示数据 · 不是真实的项目历史", en: "UI demonstration data · not canonical project history" })}</p>}
+      {mode === "fixture" && <p className="session-fixture-provenance">{t({ zh: "演示数据，不是真实的项目记录", en: "Demo data · not real project history" })}</p>}
 
       <WorkspacePanelHost
         projectId={projectId}
@@ -987,15 +999,14 @@ export function SessionWorkspace({
           setDraft={setDraft}
           onSend={() => void send()}
           sending={chat.sending || false}
-          greeting={t({ zh: "这条会话要达成什么？", en: "What should this research session accomplish?" })}
+          greeting={t({ zh: "这个会话要研究什么？", en: "What should this research session accomplish?" })}
           emptyDescription={turnRunning
-            ? t({ zh: "这个会话正在后台继续跑，记录下来的活动会自动更新到这里。", en: "This Session is continuing in the background. Recorded activity will update here automatically." })
+            ? t({ zh: "这个会话正在后台运行，进展会自动显示在这里。", en: "This session is running in the background. Progress will appear here automatically." })
             : undefined}
           placeholder={turnRunning
-            ? t({ zh: "它正在跑 —— 在这里插话（调整方向 / 问进度 / 让它停下某个子任务）", en: "It is running — interject here to steer it, ask about progress, or stop one sub-task" })
-            : t({ zh: "说下一步做什么，或者问它一个问题", en: "Describe the next research task or ask a question" })}
+            ? t({ zh: "正在执行，可以继续发消息调整方向或询问进度", en: "Running. Send a message to steer it or ask about progress" })
+            : t({ zh: "描述下一步研究任务，或提一个问题", en: "Describe the next research task or ask a question" })}
           error={chat.error}
-          centerEmpty={false}
           onStop={turnRunning && canCompose
             ? () => stopMutation.mutate()
             : undefined}
@@ -1006,13 +1017,11 @@ export function SessionWorkspace({
           canInterject={mode === "api" && canCompose}
           onLongPaste={mode === "api" && canCompose ? pasteAsFile : undefined}
           // 输入框开不开、为什么不开：同一个 plan，一个答案。
-          composerDisabled={inputPlan?.kind !== "composer"}
+          composerDisabled={!canUseComposer(inputPlan)}
           composerDisabledReason={
             inputPlan?.kind === "locked"
               ? inputPlan.reason
-              : inputPlan?.kind === "prompt"
-                ? t({ zh: "先回答上面那个问题，这一轮才能继续。", en: "Answer the paused question above to continue this Run." })
-                : undefined
+              : undefined
           }
           bodyOwnedByAccessory={(message) => message.id === pauseAnchorMessageId}
           renderMessageAccessory={(message) => {
@@ -1074,6 +1083,10 @@ export function SessionWorkspace({
               onModelChange={(backendId) => modelMutation.mutate(backendId)}
               modelBusy={modelMutation.isPending || modelBackendsQuery.isLoading}
               contextWindow={contextWindow}
+              target={storedTarget}
+              targets={executionTargetsQuery.data?.targets ?? []}
+              onTargetChange={(value) => targetMutation.mutate(value)}
+              targetBusy={targetMutation.isPending}
               branch={session.gitBranch ?? null}
               // 与面板同一个答案（见 sessionUnpublishedCount）：session 字段只数
               // ChangeItem，而研究产出是直接提交进 session 分支的，那个数常年为

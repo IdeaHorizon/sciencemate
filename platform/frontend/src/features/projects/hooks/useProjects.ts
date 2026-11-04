@@ -39,7 +39,7 @@ export function useCreateProject() {
         return [created, ...current];
       });
     },
-    onError: (err) => pushError(err instanceof Error ? err.message : t({ zh: "项目没能建成", en: "Project creation failed" })),
+    onError: (err) => pushError(err instanceof Error ? err.message : t({ zh: "创建项目失败", en: "Project creation failed" })),
   });
 }
 

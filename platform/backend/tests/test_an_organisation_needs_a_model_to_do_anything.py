@@ -5,8 +5,8 @@
 不起来，而服务器答的是一句英文 `No ready model backend is available for role 'reasoning'`。
 成员读不出"这要组织管理员去配"，也不知道去哪配。
 
-判据：同一个空局面，在组织服务器上说「请组织管理员在『组织 → 设置 → 模型』里加一个」，
-在个人版本机上说「去『设置 → 模型与密钥』配一个」。走的是真的建会话那条路。
+判据：同一个空局面，在组织服务器上说「请联系组织管理员在『组织 → 设置 → 组织提供的模型』中添加」，
+在个人版本机上说「请在『设置 → 模型与密钥』中添加」。走的是真的建会话那条路。
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ async def test_on_an_organisation_server_it_names_the_administrator(runtime_clie
 
     assert refused.status_code == 503
     said = refused.json()["detail"]
-    assert "组织管理员" in said and "组织 → 设置 → 模型" in said, (
+    assert "组织管理员" in said and "组织 → 设置 → 组织提供的模型" in said, (
         f"组织服务器上没模型时没说谁来补、去哪补：{said}")
     assert "No ready model backend" not in said
 

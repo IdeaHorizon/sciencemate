@@ -190,7 +190,7 @@ def extract_mesh_features(
     far_field = _as_float(grid.get("far_field", requested.get("far_field")))
     wake_length = _as_float(grid.get("wake_length", requested.get("wake_length")))
     domain_type = str(grid.get("domain_type") or requested.get("domain_type") or "").lower()
-    return {
+    features = {
         "patches": patches,
         "has_inlet": "inlet" in patch_text,
         "has_outlet": "outlet" in patch_text,
@@ -216,6 +216,10 @@ def extract_mesh_features(
         "has_phase_domain": has("phase_boundary", "free_surface_region", "initial_water_level", "interface_location"),
         "has_open_boundary": has("atmosphere_patch", "pressure_outlet_patch", "open_boundary_patch")
         or any(token in patch_text for token in ("atmosphere", "pressureoutlet", "open")),
+        "domain_shape": domain_shape,
+        "pitch_relative_error": pitch_error,
+    }
+    assessments = {
         "farfield_extent_ok": far_field >= 10.0,
         "wake_extent_ok": domain_type != "c" or wake_length >= max(15.0, far_field),
         "surface_resolution_ok": _as_int(grid.get("n_surface", requested.get("n_surface"))) >= 121,
@@ -232,9 +236,16 @@ def extract_mesh_features(
         ),
         "periodic_pitch_consistent": requested_pitch <= 0
         or pitch_error <= _as_float(requested.get("max_pitch_relative_error"), 0.05),
-        "domain_shape": domain_shape,
-        "pitch_relative_error": pitch_error,
     }
+    # A role's criteria are not observations about every other geometry.
+    # For example, absent airfoil n_surface/far_field inputs cannot establish
+    # failed cylinder resolution/extents. Keep general presence facts above;
+    # publish only assessments that the selected role actually evaluates.
+    rule = _ROLE_RULES.get(str(role), _ROLE_RULES["generic_geometry"])
+    applicable = {name for field in ("required_features", "recommended_features", "reject_if")
+                  for name in rule.get(field) or []}
+    features.update({name: value for name, value in assessments.items() if name in applicable})
+    return features
 
 
 def semantic_mesh_review(result: dict[str, Any], requested: dict[str, Any]) -> dict[str, Any]:

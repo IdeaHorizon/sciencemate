@@ -2,7 +2,7 @@
 
 import { FileDiff } from "lucide-react";
 import { parseGitDiff } from "@/shared/format/git-diff";
-import { useT } from "@/shared/i18n";
+import { useT, type Phrase } from "@/shared/i18n";
 
 /** 每文件的权威统计 —— 由产出方给，不从 patch 数。
  *
@@ -14,10 +14,10 @@ export type GitDiffStat = {
   status?: "added" | "modified" | "deleted" | "renamed" | string;
 };
 
-const statusLabels: Record<string, string> = {
-  added: "Created",
-  deleted: "Deleted",
-  renamed: "Renamed",
+const statusLabels: Record<string, Phrase> = {
+  added: { zh: "新建", en: "Created" },
+  deleted: { zh: "已删除", en: "Deleted" },
+  renamed: { zh: "重命名", en: "Renamed" },
 };
 
 export function GitDiffViewer({
@@ -59,7 +59,7 @@ export function GitDiffViewer({
               <FileDiff size={13} />
               <code>{file.displayPath}</code>
               {stat?.status && statusLabels[stat.status] && (
-                <em className="git-diff-file-status">{statusLabels[stat.status]}</em>
+                <em className="git-diff-file-status">{t(statusLabels[stat.status])}</em>
               )}
               {typeof stat?.additions === "number" && (
                 <em className="git-diff-file-add">+{stat.additions}</em>
@@ -80,7 +80,7 @@ export function GitDiffViewer({
           </section>
         );
       })}
-      {truncated && <p className="git-diff-truncated">{t({ zh: "服务端截断了 diff。Git 提交本身是完整的。", en: "Diff truncated by the server. The Git commit remains complete." })}</p>}
+      {truncated && <p className="git-diff-truncated">{t({ zh: "改动内容过长，未完整显示。", en: "The diff is too long to show in full." })}</p>}
     </div>
   );
 }

@@ -634,7 +634,10 @@ async def test_serve_answer_uses_pause_cas_and_rejects_request_replay(tmp_path: 
                     "type": "function",
                     "function": {
                         "name": "request_human_input",
-                        "arguments": json.dumps({"question": question}),
+                        "arguments": json.dumps({
+                            "question": question, "options": ["第一答复", "第二答复"],
+                            "recommended_option_index": 0,
+                        }),
                     },
                 }
             ],
@@ -716,6 +719,78 @@ async def test_serve_answer_uses_pause_cas_and_rejects_request_replay(tmp_path: 
     assert results["answer-two"]["status"] == "completed"
     assert results["answer-two"]["final_text"] == "两个问题都已处理。"
     assert len(llm.seen) == 3
+
+
+@pytest.mark.asyncio
+async def test_pending_question_can_be_discussed_then_answered_in_natural_language(tmp_path):
+    from core.pause import get_deepest_paused
+
+    class DialogueModel(_FakeLLM):
+        async def chat(self, messages, **kwargs):
+            self.seen.append((list(messages), kwargs))
+            turn = len(self.seen)
+            if turn == 1:
+                return LLMResponse(content=None, finish_reason="tool_calls", usage={}, tool_calls=[{
+                    "id": "research-choice", "type": "function", "function": {
+                        "name": "request_human_input", "arguments": json.dumps({
+                            "question": "下一步如何修改？", "options": ["维持原样", "重新修改"],
+                            "recommended_option_index": 1,
+                        }),
+                    },
+                }])
+            if turn == 2:
+                return LLMResponse(content="建议修改，因为两个条件的计量单位不一致。",
+                                   tool_calls=[], finish_reason="stop", usage={})
+            if turn == 3:
+                pause = get_deepest_paused().pause_event
+                assert pause.offer_id in "\n".join(m.content or "" for m in messages)
+                return LLMResponse(content="好，先统一单位，再重新修改。",
+                                   finish_reason="tool_calls", usage={}, tool_calls=[{
+                    "id": "natural-choice", "type": "function", "function": {
+                        "name": "runtime_control", "arguments": json.dumps({
+                            "action": "answer", "child_run_id": pause.asking_run_id,
+                            "offer_id": pause.offer_id, "choice_id": "option_2",
+                        }),
+                    },
+                }])
+            assert turn == 4
+            assert "先统一单位" in "\n".join(m.content or "" for m in messages)
+            return LLMResponse(content="已接到修改决定和补充要求，继续执行。",
+                               tool_calls=[], finish_reason="stop", usage={})
+
+    requests = [
+        {"op": "init", "request_id": "init", "tenant_id": "tenant-test",
+         "project_id": "p-dialogue", "session_id": "s-dialogue",
+         "home_dir": str(tmp_path / "home")},
+        {"op": "turn", "request_id": "start", "message": "继续研究"},
+        {"op": "answer", "request_id": "why", "pause_id": "research-choice",
+         "answer": "为什么建议重新修改？"},
+        {"op": "answer", "request_id": "decide", "pause_id": "research-choice",
+         "answer": "按你的建议重新改，但先统一单位"},
+        {"op": "terminate", "request_id": "close"},
+    ]
+    events = []
+    llm = DialogueModel([])
+    await serve_jsonl(
+        io.StringIO("".join(json.dumps(request) + "\n" for request in requests)),
+        lambda kind, **payload: events.append({"type": kind, **payload}), llm=llm,
+    )
+    assert not [e for e in events if e["type"] == "error"]
+    results = {e["request_id"]: e["data"] for e in events if e["type"] == "result"}
+    assert results["why"]["status"] == "paused" and results["why"]["dialogue_only"] is True
+    assert results["why"]["pause_id"] == results["start"]["pause_id"]
+    assert "计量单位不一致" in results["why"]["final_text"]
+    assert (
+        results["why"]["pause_event"]["offer"]["offer_id"]
+        == results["start"]["pause_event"]["offer"]["offer_id"]
+    )
+    assert results["decide"]["status"] == "completed"
+    records = [
+        json.loads(line)
+        for line in Path(results["decide"]["transcript_path"]).read_text().splitlines()
+    ]
+    assert sum(r["event"] == "loop_resume" for r in records) == 1
+    assert len(llm.seen) == 4
 
 
 @pytest.mark.asyncio

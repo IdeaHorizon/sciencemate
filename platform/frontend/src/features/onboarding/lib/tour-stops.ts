@@ -17,18 +17,18 @@ export type TourStop = { anchor: string; title: Phrase; body: Phrase };
 export const WORKSPACE_STOPS: TourStop[] = [
   {
     anchor: '[data-tour="feed"]',
-    title: { zh: "资讯", en: "Feed" },
-    body: { zh: "每天按你选的方向和在跑的课题，替你把值得看的挑出来。没配挖掘模型也能用 —— 那时是按方向排序，不替你推断。", en: "Each day it picks what is worth reading from the fields you chose and the work you have running. It works without a curation model too — then it sorts by your fields instead of inferring them." },
+    title: { zh: "科研资讯", en: "Feed" },
+    body: { zh: "每天根据你订阅的学科和进行中的项目，挑出值得看的内容。", en: "Each day it picks what is worth reading based on the fields you follow and your active projects." },
   },
   {
     anchor: '[data-tour="projects"]',
     title: { zh: "项目", en: "Projects" },
-    body: { zh: "研究在这里发生：一个课题一个项目，里面是会话、证据和产出。想开工就从这儿新建一个。", en: "This is where the research happens: one project per line of work, holding its sessions, evidence and outputs. Start a new one here." },
+    body: { zh: "每项研究对应一个项目，项目里有会话、证据和成果。从这里新建项目开始研究。", en: "Each line of research is a project, holding its sessions, evidence and outputs. Create one here to get started." },
   },
   {
     anchor: '[data-tour="compute"]',
     title: { zh: "算力", en: "Compute" },
-    body: { zh: "会话能用到的机器和调度器都摆在这儿 —— 谁在跑、还剩多少，出了事先看这一页。", en: "The machines and schedulers your sessions can reach: what is running and what is left. When something stalls, look here first." },
+    body: { zh: "查看可供会话使用的 CPU、内存、存储和 GPU，以及正在运行的会话数。", en: "See the CPU, memory, storage and GPUs available to your sessions, and how many sessions are running." },
   },
 ];
 
@@ -44,21 +44,21 @@ export const PROJECT_STOPS: TourStop[] = [
   {
     anchor: '[data-tour="research"]',
     title: { zh: "研究", en: "Research" },
-    body: { zh: "干活的地方。在这儿开一轮会话，把想法交给 agent —— 它去查文献、跑计算、写稿，每一步都摆在你眼前，随时能插话、能停。", en: "Where the work happens. Start a session here and hand the agent a question — it searches the literature, runs computations and writes, with every step in front of you, interruptible at any time." },
+    body: { zh: "在这里新建会话，把研究问题交给助手。助手会检索文献、运行计算、撰写文稿，每一步都实时显示，你可以随时补充说明或让它停下。", en: "Start a session here and hand your question to the assistant. It searches the literature, runs computations and writes, showing every step as it goes; you can add instructions or stop it at any time." },
   },
   {
     anchor: '[data-tour="outputs"]',
-    title: { zh: "研究产出", en: "Research outputs" },
-    body: { zh: "做出来的东西在这儿：稿子、图、数据集。每一件都带着它是怎么来的 —— 哪一轮、用了哪些证据。", en: "What the work produced: drafts, figures, datasets. Each carries where it came from — which run, and on what evidence." },
+    title: { zh: "研究成果", en: "Research outputs" },
+    body: { zh: "项目的成果都在这里：文稿、图表、数据集等，点一下就能打开。", en: "The project's outputs live here: drafts, figures, datasets and more, each one click away." },
   },
   {
     anchor: '[data-tour="files"]',
     title: { zh: "项目文件", en: "Project files" },
-    body: { zh: "你交给它的数据和它产生的文件，都在这一棵树里。拖进来的东西 agent 就能用 —— 不用另外说在哪。", en: "Your data and everything it produces live in one tree. Anything you drop in is available to the agent — you do not have to tell it where things are." },
+    body: { zh: "你添加的资料和助手生成的文件都在这里。在会话里用「添加文件」上传的资料，助手可以直接使用。", en: "Your files and everything the assistant produces are here. Files you add with Add a file in a session are available to the assistant right away." },
   },
   {
     anchor: '[data-tour="research-state"]',
     title: { zh: "研究进展", en: "Research progress" },
-    body: { zh: "这个课题现在推到哪了：哪些问题有答案了、哪些还悬着、下一步卡在什么上。隔几天回来先看这一页。", en: "Where this line of work stands: what is answered, what is still open, and what the next step is waiting on. Come back after a few days and start here." },
+    body: { zh: "这个项目目前的进展：哪些问题已有结论、哪些还待验证，以及下一步计划。", en: "Where this project stands: what has been settled, what is still open, and what comes next." },
   },
 ];

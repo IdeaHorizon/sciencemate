@@ -26,8 +26,8 @@ from app.config import settings
 class HarnessContractUnavailable(RuntimeError):
     """harness checkout 不可用 —— 契约模块拿不到，不许猜。
 
-    消息是**技术原话**（英文），不是说给人听的那句：调用方把它当证据 `{why}` 填进一句
-    两种语言都写的话里（`say({"zh": "…：{why}", "en": "…: {why}"}, lang, why=exc)`）。
+    消息是**技术原话**（英文），不是说给人听的那句：调用方用 `said_of(exc, lang, otherwise=…)`
+    说一句两种语言的人话，原话进日志。
     所以这里不写中文 —— 写了，英文界面上那句话的尾巴就是中文。
     """
 
@@ -129,6 +129,16 @@ def sandbox_module() -> ModuleType:
 def isolation_module() -> ModuleType:
     """执行器分档：哪个后端守 attempt、守到了哪几条不变量（core.isolation）。"""
     return _contract_module("isolation", "执行器后端选择与不变量记账")
+
+
+def execution_target_module() -> ModuleType:
+    """``core.execution_target`` —— 执行目标的写法（本机 / ``wsl:<发行版>``）只在 harness 这一处定义。"""
+    return _contract_module("execution_target", "执行目标的写法与校验")
+
+
+def wsl_module() -> ModuleType:
+    """``core.isolation.wsl`` —— 这台 Windows 上注册了哪些 WSL 发行版。"""
+    return _contract_module("isolation.wsl", "WSL 执行目标的发行版清单")
 
 
 def event_blobs() -> ModuleType:

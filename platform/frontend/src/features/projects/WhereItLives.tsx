@@ -52,9 +52,9 @@ export function WhereItLives({
 
   return (
     <div className="project-home">
-      <span className="project-home-label">{t({ zh: "放在哪", en: "Where" })}</span>
+      <span className="project-home-label">{t({ zh: "保存位置", en: "Location" })}</span>
       <div className="project-home-choices" role="radiogroup"
-           aria-label={t({ zh: "放在哪", en: "Where" })}>
+           aria-label={t({ zh: "保存位置", en: "Location" })}>
         <button type="button" role="radio" aria-checked={value === ""}
                 className={cn("project-home-choice", value === "" && "is-chosen")}
                 onClick={() => onChange("")}>
@@ -65,8 +65,8 @@ export function WhereItLives({
                   className={cn("project-home-choice", value === one.id && "is-chosen")}
                   disabled={one.needsSignIn}
                   title={one.needsSignIn
-                    ? t({ zh: "要先重新登录一下 —— 在「组织」那一页",
-                          en: "Sign in again first — on the Organisations page" })
+                    ? t({ zh: "需要重新登录，请前往「组织」页面",
+                          en: "Sign in again on the Organisations page first" })
                     : one.url}
                   onClick={() => onChange(one.id)}>
             <Building2 size={13} />{one.name}
@@ -74,16 +74,16 @@ export function WhereItLives({
         ))}
         {onAddOne && otherHomes.Adder && (
           <button type="button" className="project-home-choice project-home-add" onClick={onAddOne}>
-            <Plus size={13} />{t({ zh: "加一个组织", en: "Add an organisation" })}
+            <Plus size={13} />{t({ zh: "添加组织", en: "Add an organisation" })}
           </button>
         )}
       </div>
       <small className="project-home-note">
         {value === ""
-          ? t({ zh: "只在这台电脑上，不属于任何组织。",
-                en: "On this computer only, in no organisation." })
-          : t({ zh: "建在那台服务器上，组里的人看得到；本机这份研究不受影响。",
-                en: "Created on that server and visible to the group; your local work is unaffected." })}
+          ? t({ zh: "项目只保存在这台电脑上。",
+                en: "Stored on this computer only." })
+          : t({ zh: "项目保存在组织服务器上，组织成员默认可以看到。",
+                en: "Stored on the organisation's server; members can see it by default." })}
       </small>
     </div>
   );

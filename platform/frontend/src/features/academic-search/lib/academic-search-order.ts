@@ -7,6 +7,7 @@ type AcademicPaperOrderFields = {
   score_breakdown: Record<string, unknown>;
   pub_date: string | null;
   year: number | string | null;
+  relevance_assessment?: {tier: string};
 };
 
 function relevanceScore(paper: AcademicPaperOrderFields): number {
@@ -29,6 +30,10 @@ export function compareAcademicPapers(
   right: AcademicPaperOrderFields,
   mode: AcademicSortMode,
 ): number {
+  if (mode === "recommendation") {
+    const backgroundDiff = Number(left.relevance_assessment?.tier === "background") - Number(right.relevance_assessment?.tier === "background");
+    if (backgroundDiff) return backgroundDiff;
+  }
   if (mode === "recommendation" && left.federated_rank != null && right.federated_rank != null) {
     return left.federated_rank - right.federated_rank;
   }

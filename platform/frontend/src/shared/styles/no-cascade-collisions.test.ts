@@ -38,7 +38,7 @@ function parse(css: string, file: string): Rule[] {
 const KNOWN = new Set([
   ".checkpoint-choice-btn", ".checkpoint-choices", ".conversation-item", ".conversation-list",
   ".conversation-sidebar", ".conversation-sidebar-header", ".event-content-preview",
-  ".event-meta-line", ".event-readable p", ".memory-topic", ".page", ".page-header",
+  ".event-meta-line", ".event-readable p", ".page", ".page-header",
   ".settings-field select", ".timeline", ".timeline-content", ".timeline-detail",
   ".timeline-dot", ".timeline-header", ".timeline-item", ".timeline-summary",
 ]);

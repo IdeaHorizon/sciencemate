@@ -134,3 +134,11 @@ test("bare string options still normalize (legacy pauses)", () => {
   assert.equal(pause.options.length, 2);
   assert.equal(pause.options[0].recommended, false);
 });
+
+test("older empty Offer context preserves the full outer review report", () => {
+  const pause = normalizeChatPause({
+    context: "完整审查报告",
+    offer: { kind: "decision_package", question: "q", context: "", options: ["REVISE"] },
+  });
+  assert.equal(pause?.context, "完整审查报告");
+});

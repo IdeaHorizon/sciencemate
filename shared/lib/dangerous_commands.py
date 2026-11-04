@@ -20,6 +20,7 @@ import os
 import re
 import time
 from collections.abc import Iterable
+from pathlib import Path
 
 log = logging.getLogger("dangerous_commands")
 
@@ -396,17 +397,20 @@ BOUNDARY_DENY_MESSAGE = _BoundaryDenyMessage(boundary_deny_message("{category}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# shell 探查专用模式（v3.3，2026-07-09）—— harness.shell_probe_only 节点的
-# run_bash 只许真·只读探查。角色边界机械化：实测 orchestrator（"协调者不做研究"）
-# 被 write_file 白名单弹回后，直接绕道 run_bash heredoc 替 producing 节点写代码
-# 跑实验 —— "run_bash 只用于只读探查"当时是纯 prompt 文字，零机械后果。
+# 只读探查 shell（harness.shell_probe_only；今天只有调度器）
 #
-# 拦两类（各自独立成因）：
-#   ① 文件系统写（任意路径，比 boundary 的"框架状态"更宽）：探查不需要写盘。
-#      放行只读惯用法：`2>/dev/null`、`>/dev/null`、`2>&1`。
-#   ② 内联解释器 / 环境变更：heredoc、python -c、bash -c、pip/conda install ——
-#      "写个脚本跑实验"正是实测逃逸路径；合法探查（which/pip show/nproc/
-#      nvidia-smi/git status/cat/grep）不需要这些。
+# 实测起因（v3.3，2026-07-09）：orchestrator（"协调者不做研究"）被 write_file 白名单
+# 弹回后，直接绕道 run_bash heredoc 替 producing 节点写代码跑实验。
+#
+# **墙在 core/sandbox.model_tool_wall**（#1187，wangd 10-21 裁决）：run_bash /
+# execute_python 的写边界为空、无网络、后台进程随命令结束收掉 —— 有副作用的命令
+# 做不成，由操作系统说了算。本段只管两件「说」的事：
+#   ① 见证：按命令文本认出写文件 / 内联解释器 / 装软件的形状，记
+#      `probe_only_shell_violation` 进 transcript 与返回值。只记账、从不拦 ——
+#      v3.3 曾按这份名单硬拒，判决拆除第三波降成见证；如今墙在 spawn 层，文本猜测
+#      不承担任何拦截职责，它留下的是「调度器起过这个念头」这笔账。
+#   ② 撞墙之后怎么说：输出里有操作系统拒绝的说法 → 说清这条 shell 为什么写不进、
+#      该派谁（read_only_shell_refusal）。
 # ─────────────────────────────────────────────────────────────────────────────
 
 _PROBE_ONLY_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
@@ -445,15 +449,113 @@ def match_probe_only_violation(text: str) -> str | None:
     return None
 
 
-PROBE_ONLY_DENY_MESSAGE = (
-    "⛔ 探查专用 shell（{category}）：本节点的 run_bash 只用于**只读探查**"
-    "（ls/grep/which/nproc/nvidia-smi/git status/pip show…），不能写文件、"
-    "跑内联脚本或装软件。\n"
-    "你是协调者：真研究/计算/产出 → `run_node` 起对应节点（它们有完整的"
-    "执行环境、质量检查和 review 把关）；替 producing 节点干活 = 绕过全套"
-    "质量体系，产出的 provenance 也会在 review 被红线否决。\n"
-    "此拦截**不受 /bypass 影响**（角色边界，不是环境安全确认）。"
+#: 操作系统拒绝一次写时，程序转述的那句话 —— 按后端各一种（全小写比对）。
+_WALL_REFUSAL_SHAPES = (
+    "operation not permitted",    # EPERM：darwin seatbelt
+    "read-only file system",      # EROFS：linux bwrap 的只读挂载
+    "permission denied",          # EACCES：linux Landlock；Windows 上的 MSYS 程序
+    "access is denied",           # Windows 原生程序
 )
+
+#: 墙把没声明的路径**藏起来**时，写不会被「拒」，而是「父目录不存在」。linux bwrap 在
+#: /tmp、/run 上铺一层空 tmpfs、只把声明过的根挂回来；只读探查一个可写根都没有，于是
+#: 住在 /tmp 下的 run 目录、缓存在墙里根本不存在（node20 真机，11-04）：
+#: ``/bin/sh: 1: cannot create /tmp/…/runtime/smuggled.json: Directory nonexistent``。
+#: 只认**创建**语境的说法（重定向、touch / mkdir / cp / ln、tee、Python 打开写）——
+#: ``ls: cannot access`` / ``cat: X: No such file`` 是探查本身（「X 在不在」），不能算撞墙。
+_HIDDEN_PARENT_FORMS: tuple[tuple[re.Pattern, bool], ...] = (
+    # (说法, 是否可能是执行一个不存在的程序 —— 是的话 rc 126/127 时不算)
+    (re.compile(r"cannot create (?P<path>/[^\n]*?): Directory nonexistent"), False),  # dash 重定向
+    (re.compile(r"cannot (?:touch|create (?:directory|regular file|symbolic link|hard link|fifo"
+                r"|special file)) ['‘\"]?(?P<path>/[^'’\"\n]*?)['’\"]?: No such file or directory"),
+     False),                                                                    # coreutils
+    (re.compile(r"^tee: (?P<path>/[^\n]*?): No such file or directory$", re.M), False),
+    (re.compile(r"^\S*sh: (?:line \d+: )?(?P<path>/[^\n]*?): No such file or directory$", re.M),
+     True),                                                                     # bash 作 /bin/sh 的重定向
+    (re.compile(r"FileNotFoundError: \[Errno 2\] No such file or directory: "
+                r"(?P<q>['\"])(?P<path>/.*?)(?P=q)"), False),                    # Python open(…, 'w')
+)
+
+#: 调度器的 shell 能做什么、不能做什么、不能做的归谁 —— 撞墙时原样交给模型。
+READ_ONLY_SHELL_MESSAGE = (
+    "⛔ 这条 shell 是只读探查（调度器，#1187）：写边界为空 —— 项目、你的 notes/、"
+    "run 目录、缓存都写不进；唯一能写的是 $TMPDIR，命令一结束就删。没有网络；"
+    "后台进程随命令结束整组收掉。\n"
+    "想留下东西的一步（写文件、装软件、起作业、落盘数据）就是科学执行，不归这条 shell：\n"
+    "  · 计算 / 模拟 / 装软件 / 起作业 / 取外部资源 → `run_node` 派 experiment\n"
+    "  · 数据清洗、转换、整理成数据集 → `run_node` 派 data\n"
+    "  把要做的事、输入路径和验收要求写进 node_inputs —— 它们带着契约和证据链做。\n"
+    "只读的事照常：查环境、看目录、读文件、算个数打到 stdout。"
+    "要交给用户的文字用 `write_file(project/notes/<文件>)`。"
+)
+
+
+def read_only_shell_facts() -> dict:
+    """撞墙时随说明一起放进返回值的结构化事实（模型与界面按值读，不必解析文案）。"""
+    return {
+        "read_only_shell": True,
+        "write_boundary": "none",
+        "recommended_nodes": ["experiment", "data"],
+    }
+
+
+def _hidden_by_the_wall(text: str, returncode: int | None,
+                       shown: Iterable[Path | str]) -> str | None:
+    """创建语境里「不存在」的那条路径，若是被墙藏起来的（而不是真的没有）就返回它。
+
+    判据：路径的父目录**在宿主上存在**（墙里却没有 → 是墙藏的），且不在墙明确给命令看的
+    根里（项目 worktree 只读挂回来了，在那里「不存在」就是真不存在 —— 比如读一份缺失的
+    CSV）。父目录在宿主上也没有 = 命令自己写错了路径，照旧是普通失败。相对路径不认：
+    墙里的 cwd 可能已被换掉（bwrap 进不去原 cwd 时退到 $HOME），对不回宿主上的哪个目录。
+    """
+    roots = [Path(os.path.realpath(r)) for r in shown]
+    for form, may_be_exec in _HIDDEN_PARENT_FORMS:
+        if may_be_exec and returncode in (126, 127):
+            continue                      # 「程序不存在」不是写
+        for match in form.finditer(text):
+            path = Path(match.group("path"))
+            parent = Path(os.path.realpath(path.parent))
+            if not parent.is_dir():
+                continue
+            if any(parent == r or parent.is_relative_to(r) for r in roots):
+                continue
+            return str(path)
+    return None
+
+
+def read_only_shell_refusal(out: str, err: str, returncode: int | None, *,
+                            shown: Iterable[Path | str] = ()) -> dict | None:
+    """只读探查 shell 里这条命令撞上写墙没有 —— 撞了交回说明与合法下一步，否则 None。
+
+    判据是**操作系统说了「不」**，不是猜命令文本：这堵墙后面一个可写根都没有，想留下
+    东西的那一步只能是被它拒的。「不」有两种说法：
+
+    * 拒（:data:`_WALL_REFUSAL_SHAPES`）：seatbelt / bwrap 只读挂载 / Landlock / Windows。
+    * 藏（:data:`_HIDDEN_PARENT_FORMS`）：bwrap 把没声明的 /tmp 路径整片换成空 tmpfs，写
+      撞上的是「父目录不存在」。只在父目录在宿主上存在、又不在 ``shown``（墙给命令看的
+      只读根）里时才算 —— 见 :func:`_hidden_by_the_wall`。
+
+    看哪里：失败的命令 stdout / stderr 都看（``2>&1`` 是常用写法）；成功的命令只看
+    stderr —— 它的 stdout 是读到的数据，``cat`` 一份写着 "Permission denied" 的日志不等于
+    这条命令被拒（``echo x > f; echo done`` 这种写失败了、命令仍 0 退出的，拒绝在 stderr）。
+    权限位本来就不让读（``ls /root``）也会说 "Permission denied" —— 那时这段说明多余
+    但不误导：它讲的是这条 shell 能做什么，不断言这条命令做了什么。
+    """
+    text = f"{out}\n{err}" if returncode != 0 else err
+    lowered = text.lower()
+    facts: dict | None = None
+    shape = next((s for s in _WALL_REFUSAL_SHAPES if s in lowered), None)
+    if shape is not None:
+        facts = {"os_refusal": shape}
+    else:
+        hidden = _hidden_by_the_wall(text, returncode, shown)
+        if hidden is not None:
+            facts = {"os_refusal": "no such file or directory (hidden by the wall)",
+                     "hidden_path": hidden}
+    if facts is None:
+        return None
+    return {**read_only_shell_facts(), **facts,
+            "read_only_shell_note": READ_ONLY_SHELL_MESSAGE}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

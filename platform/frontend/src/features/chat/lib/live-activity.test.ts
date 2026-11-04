@@ -19,7 +19,7 @@ test("internal Harness events collapse into one human-readable live status", () 
   const projection = projectLiveActivity(activities, { running: true, lang: "en" });
 
   assert.deepEqual(projection, {
-    statusText: "Thinking through the research task",
+    statusText: "Thinking",
     tone: "working",
   });
   for (const hidden of ["platform_context_bound", "platform_session_start", "loop_start", "hook_injection", "llm_request"]) {
@@ -52,7 +52,7 @@ test("scratchpad and transport wrappers never become visible labels", () => {
     activity("2", { event: "tool_start", tool: "write_scratchpad", detail: "private note" }),
   ], { running: true, lang: "en" });
 
-  assert.equal(projection.statusText, "Starting the Project assistant");
+  assert.equal(projection.statusText, "Starting the assistant");
   assert.equal(projection.statusText.includes("scratchpad"), false);
   assert.equal(projection.statusText.includes("harness"), false);
 });
@@ -76,7 +76,7 @@ test("waiting, permission, and failure states remain explicit", () => {
   });
   assert.equal(projectLiveActivity([
     activity("1", { event: "run.waiting_compute" }),
-  ], { running: true, lang: "en" }).statusText, "Waiting for background research");
+  ], { running: true, lang: "en" }).statusText, "Waiting for background tasks");
   assert.equal(projectLiveActivity([
     activity("1", { event: "run.paused" }),
   ], { running: true, lang: "en" }).statusText, "Waiting for your input");

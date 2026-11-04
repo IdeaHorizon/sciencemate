@@ -104,7 +104,8 @@ class SlurmAdapter:
 
         返回 ``{"status": "found"|"absent"|"cannot_query", "jobs": [...]}``。
         **cannot_query 不等于 absent**：查不了就留 unknown，不重提。
-        只有两条路径都能查、且都没查到，才敢说 absent。
+        两条查询均未匹配也不能证明 absence：accounting 可能延迟、保留期有限，
+        Comment 可缺失。只有正向、唯一的精确匹配才能恢复身份。
         """
         caps = self.capabilities()
         if not caps.reconnect_by_correlation_key:
@@ -124,10 +125,8 @@ class SlurmAdapter:
             parts = [p.strip() for p in line.split("|")]
             parts.extend([""] * (4 - len(parts)))
             job_id, job_name, comment, state = parts[:4]
-            if job_id and needle in comment:
+            if job_id and comment == needle and not any(j["job_id"] == job_id for j in jobs):
                 jobs.append({"job_id": job_id, "job_name": job_name, "state": state, "source": "squeue"})
-
-        accounting_conclusive = False
         if caps.terminal_facts:
             acct_argv = ["sacct", "-n", "-P", "-u", self.user, "-S", since or _default_since(),
                          "-o", "JobIDRaw,JobName,Comment,State,ExitCode"]
@@ -135,30 +134,27 @@ class SlurmAdapter:
             probes.append({"argv": acct_argv, "ok": bool(acct.get("ok"))})
             if acct.get("ok"):
                 rows = [l for l in str(acct.get("stdout") or "").splitlines() if l.strip()]
-                # 站点没开 job_comment 时整列为空——那样的 sacct 结果不能当"查过了"。
-                accounting_conclusive = any(
-                    len(l.split("|")) > 2 and l.split("|")[2].strip() for l in rows)
                 for line in rows:
                     parts = [p.strip() for p in line.split("|")]
                     parts.extend([""] * (5 - len(parts)))
                     job_id, job_name, comment, state, exit_code = parts[:5]
-                    if "." in job_id or needle not in comment:
+                    if not job_id or "." in job_id or comment != needle:
                         continue
                     if any(j["job_id"] == job_id for j in jobs):
                         continue
                     jobs.append({"job_id": job_id, "job_name": job_name, "state": state,
                                  "exit_code": exit_code, "source": "sacct"})
-        if jobs:
+        if len(jobs) == 1:
             return {"status": "found", "scheduler": "slurm", "jobs": jobs,
                     "correlation_key": correlation_key, "probes": probes}
-        if accounting_conclusive:
-            return {"status": "absent", "scheduler": "slurm", "jobs": [],
+        if jobs:
+            return {"status": "cannot_query", "scheduler": "slurm", "jobs": jobs,
                     "correlation_key": correlation_key, "probes": probes,
-                    "basis": "队列里没有，accounting 里 Comment 列有内容且不含这个 key"}
+                    "reason": "同一 correlation key 匹配多个作业；保留候选身份供核对，不认领首条、不重提。"}
         return {"status": "cannot_query", "scheduler": "slurm", "jobs": [], "probes": probes,
-                "reason": ("队列里没查到，而 accounting 的 Comment 列为空——站点很可能没开 "
-                           "AccountingStoreFlags=job_comment。这种情况下查不到不等于没有，"
-                           "状态保持 unknown 等接管。")}
+                "reason": ("未查到精确匹配，但查询不能证明作业不存在：accounting 可能延迟、"
+                           "已超保留期，或未设置 AccountingStoreFlags=job_comment。"
+                           "保留同一 correlation key 继续对账或交接，不重提。")}
 
 
 @dataclass
@@ -246,12 +242,18 @@ def resolve_lost_ack(state: Any, *, scheduler: str, correlation_key: str) -> dic
     status = str(probe.get("status") or "cannot_query")
     if status == "found":
         jobs = probe.get("jobs") or []
-        external_id = str(jobs[0].get("job_id")) if jobs else None
-        _ledger.try_record(state, "job_reconciled", nonce=correlation_key, scheduler=scheduler,
-                           external_id=external_id, state="submitted" if external_id else "unknown",
-                           found=len(jobs), raw=probe.get("raw"))
-        return {"decision": "adopted", "external_id": external_id, "jobs": jobs, "probe": probe,
-                "resubmit_allowed": False}
+        # A positive adapter result still needs one complete identity. Never
+        # adopt an arbitrary first candidate after duplicate submissions or a
+        # malformed adapter response; keep the existing recovery lifecycle open.
+        if (isinstance(jobs, list) and len(jobs) == 1
+                and isinstance(jobs[0], dict) and str(jobs[0].get("job_id") or "").strip()):
+            external_id = str(jobs[0]["job_id"])
+            _ledger.try_record(state, "job_reconciled", nonce=correlation_key, scheduler=scheduler,
+                               external_id=external_id, state="submitted",
+                               found=1, raw=probe.get("raw"))
+            return {"decision": "adopted", "external_id": external_id, "jobs": jobs, "probe": probe,
+                    "resubmit_allowed": False}
+        probe = {**probe, "reason": "adapter 未返回唯一且完整的作业身份；核对候选作业后继续对账，不重提。"}
     if status == "absent":
         _ledger.try_record(state, "job_absent", nonce=correlation_key, scheduler=scheduler,
                            argv=probe.get("argv"), reason="adapter 按 correlation key 确认这次提交没有进队列")

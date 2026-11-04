@@ -99,7 +99,7 @@ def test_deferral_does_not_leak_into_other_decision_states():
 
 
 @pytest.mark.asyncio
-async def test_failed_review_still_pauses_for_human(monkeypatch, tmp_path):
+async def test_failed_review_still_requires_a_scheduler_decision(monkeypatch, tmp_path):
     """review 没有有效 critique 时，必须照旧出 REVIEW-FAILED 决策包。
 
     顺延的前提是"有一份可信的独立审查"；没有审查就没有可顺延的东西。
@@ -121,7 +121,7 @@ async def test_failed_review_still_pauses_for_human(monkeypatch, tmp_path):
         artifact_ids_produced=["experiment_log__x"],
         review_failed_reason="reviewer crashed",
     )
-    assert result["status"] == "pause"
+    assert result["status"] == "success" and result["decision_required"] is True
     entry = state.hook_state["pending_post_node_flow"][0]
     assert entry["review_state"] == "failed_awaiting_human"
     assert entry["decision_state"] != "deferred_to_analysis"
@@ -162,7 +162,7 @@ async def test_successful_review_defers_without_pausing(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_full_flow_node_still_pauses(tmp_path):
+async def test_full_flow_node_returns_the_decision_to_the_scheduler(tmp_path):
     """hypothesis 是 full —— 它的决策照旧问人。"""
     from core.state import State
     from shared.tools.library import decision_package as dp
@@ -187,7 +187,7 @@ async def test_full_flow_node_still_pauses(tmp_path):
         artifact_ids_produced=["pre_registration__x"],
         review_critique_artifact_id="review_critique__y",
     )
-    assert result["status"] == "pause"
+    assert result["status"] == "success" and result["decision_required"] is True
 
 
 # ── 顺延的 flow 必须关得掉（2026-08-17 死锁回放）────────────────────────

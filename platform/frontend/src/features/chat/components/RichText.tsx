@@ -215,7 +215,7 @@ export function RichText(props: RichTextProps) {
         return (
           <li key={key}>
             {typeof node.checked === "boolean" && (
-              <input type="checkbox" checked={node.checked} readOnly aria-label={node.checked ? say({ zh: "已完成", en: "Completed" }, lang) : say({ zh: "没完成", en: "Not completed" }, lang)} />
+              <input type="checkbox" checked={node.checked} readOnly aria-label={node.checked ? say({ zh: "已完成", en: "Completed" }, lang) : say({ zh: "未完成", en: "Not completed" }, lang)} />
             )}
             {children}
           </li>

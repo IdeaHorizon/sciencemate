@@ -1,0 +1,43 @@
+.skill-import { display: grid; gap: 8px; margin: 18px 0; }
+.skill-import > small, .skill-card > small { color: var(--color-fg-subtle); font-size: 12px; }
+.skill-actions, .skill-card-heading, .skill-assignment-options { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.skill-actions { justify-content: flex-start; gap: 8px; }
+.skill-search { display: grid; gap: 6px; margin: 20px 0 14px; color: var(--color-fg-muted); font-size: 12px; }
+.skill-search input, .skill-file-select select, .skill-project-link select { min-width: 0; padding: 7px 9px; color: var(--color-fg); border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-bg-input); font: inherit; }
+.skills-library-grid { display: grid; grid-template-columns: minmax(220px, .8fr) minmax(0, 1.3fr); gap: 20px; align-items: start; }
+.skill-list { display: grid; gap: 10px; min-width: 0; }
+.skill-card { min-width: 0; padding: 15px; border: 1px solid var(--color-border); border-radius: 9px; background: var(--color-bg); }
+.skill-card.is-selected, .skill-card.is-assigned { border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-border)); }
+.skill-card-heading > button:first-child { padding: 0; color: var(--color-fg); border: 0; background: transparent; font-size: 14px; font-weight: 600; text-align: left; overflow-wrap: anywhere; }
+.skill-card-heading > button:first-child:hover { color: var(--color-accent); }
+.skill-card > p, .skill-preview > p { margin: 9px 0; color: var(--color-fg-muted); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.skill-enabled, .skill-choice, .skill-node-choices label { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; }
+.skill-enabled { color: var(--color-fg-muted); }
+.skill-enabled input, .skill-choice input, .skill-node-choices input { width: 15px; height: 15px; accent-color: var(--color-accent); }
+.skill-choice { font-size: 14px; min-width: 0; overflow-wrap: anywhere; }
+.skill-empty { padding: 22px 0; color: var(--color-fg-subtle); font-size: 13px; line-height: 1.6; }
+.skill-preview { min-width: 0; padding: 16px; border: 1px solid var(--color-border); border-radius: 9px; }
+.skill-preview header { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.skill-preview h3 { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
+.skill-preview header code { color: var(--color-fg-subtle); font-size: 11px; }
+.skill-file-select { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 12px 0; color: var(--color-fg-muted); font-size: 12px; }
+.skill-file-select select { max-width: 100%; flex: 1; }
+.skill-preview-content { max-height: 530px; overflow: auto; margin-top: 16px; }
+.skill-preview-content pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.7 var(--font-mono); }
+.skill-preview .message-rich-text { font-size: 13px; }
+.skill-preview-content table { display: block; max-width: 100%; overflow-x: auto; }
+.skill-detail { display: grid; gap: 12px; min-width: 0; }
+.skill-project-link { display: grid; gap: 12px; padding: 15px; border: 1px solid var(--color-border); border-radius: 9px; }
+.skill-project-link label { display: grid; gap: 8px; font-size: 12px; color: var(--color-fg-muted); }
+.skill-project-link a { justify-self: start; }
+.skill-assignment { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--color-border); }
+.skill-assignment fieldset { min-width: 0; margin: 8px 0 0; padding: 10px 0 0; border: 0; }
+.skill-assignment legend { padding: 0; color: var(--color-fg-muted); font-size: 12px; }
+.skill-node-choices { display: flex; flex-wrap: wrap; gap: 12px 20px; padding: 4px 0; }
+.skill-assignment fieldset:disabled, .skill-enabled:has(input:disabled), .skill-choice:has(input:disabled) { opacity: .55; }
+.skill-card .skill-warning, .skill-warning { margin: 10px 0 0; color: var(--color-warning); font-size: 12px; line-height: 1.6; }
+.skill-card > .skill-preview { margin-top: 16px; }
+.skill-saved { color: var(--color-success); font-size: 12px; }
+.project-skills { scroll-margin-top: 24px; }
+.project-skills .settings-inline-error > button { margin-left: 10px; text-decoration: underline; }
+@media (max-width: 900px) { .skills-library-grid { grid-template-columns: 1fr; } }

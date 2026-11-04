@@ -89,9 +89,29 @@ def test_reasoning_role_from_env_complete(monkeypatch):
     assert p.api_key_env == model_roles.require("reasoning").secret_name
 
 
-def test_reasoning_role_missing_key_yields_no_provider(monkeypatch):
+def test_reasoning_role_without_a_key_is_a_keyless_endpoint(monkeypatch):
+    # 有地址和模型、没有 key = 不鉴权的自建端点（和交付通道同一条规则），不是"没配"。
     monkeypatch.delenv("LLM_API_KEY", raising=False)
-    monkeypatch.setenv("LLM_BASE_URL", "https://x")
+    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("LLM_MODEL", "m")
+    assert [(p.name, p.base_url) for p in _role_providers()] == [("reasoning", "http://127.0.0.1:8000")]
+
+
+@pytest.mark.parametrize("base_url", ["https://api.deepseek.com", "https://api.openai.com/v1"])
+def test_reasoning_role_on_an_official_endpoint_without_a_key_is_not_configured(monkeypatch, caplog, base_url):
+    # 官方托管端点不带 key 只会被拒：那是 key 忘了填，不是不鉴权的自建端点 —— 说"没配"，并点名缺什么。
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_BASE_URL", base_url)
+    monkeypatch.setenv("LLM_MODEL", "m")
+    assert _role_providers() == []
+    assert any("LLM_API_KEY" in r.getMessage() for r in caplog.records)
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    assert [p.name for p in _role_providers()] == ["reasoning"]
+
+
+def test_reasoning_role_missing_address_yields_no_provider(monkeypatch):
+    monkeypatch.setenv("LLM_API_KEY", "k")
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
     monkeypatch.setenv("LLM_MODEL", "m")
     assert _role_providers() == []
 

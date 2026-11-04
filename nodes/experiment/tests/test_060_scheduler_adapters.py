@@ -96,13 +96,14 @@ def test_an_empty_accounting_comment_column_is_inconclusive_not_an_absence(tmp_p
     assert ledger.open_ledger(state).records()[-1]["kind"] == "job_unknown"
 
 
-def test_only_a_conclusive_absence_allows_a_resubmit(tmp_path, monkeypatch):
+def test_an_unrelated_accounting_comment_does_not_prove_absence(tmp_path, monkeypatch):
     state = _state(tmp_path)
-    # accounting 的 Comment 列有内容（别的作业带 key），说明站点开了 flag：这时查不到才算没有
+    # Another job's comment proves neither this submission's visibility nor
+    # accounting completeness: delayed/missing records must not trigger resubmission.
     _fake_run(monkeypatch, squeue="", sacct="4242|hello|ai4s:another-run|COMPLETED|0:0")
     out = sa.resolve_lost_ack(state, scheduler="slurm", correlation_key="nonce-4")
-    assert out["decision"] == "absent" and out["resubmit_allowed"] is True
-    assert ledger.open_ledger(state).records()[-1]["kind"] == "job_absent"
+    assert out["decision"] == "unknown" and out["resubmit_allowed"] is False
+    assert ledger.open_ledger(state).records()[-1]["kind"] == "job_unknown"
 
 
 def test_a_failing_squeue_is_cannot_query_not_absent(tmp_path, monkeypatch):

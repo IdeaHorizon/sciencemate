@@ -1,4 +1,5 @@
 import { say, type Language, type Phrase } from "../../../shared/i18n/language.ts";
+import { toolArgumentLabel } from "./display-names.ts";
 
 const INTERNAL_TOOL_PATTERNS = [
   /(^|_)scratchpad($|_)/,
@@ -27,7 +28,6 @@ const OBJECT_KEYS = [
 const PRIVATE_OR_BULK_ARGUMENT = /(^|_)(content|code|script|body|payload|json|schema|config|headers?|tokens?|secret|password|prompt|messages?|classification|papers_json)($|_)/i;
 
 export type ResearchActivityKind =
-  | "question"
   | "research"
   | "figure"
   | "pdf"
@@ -36,58 +36,22 @@ export type ResearchActivityKind =
   | "deployment"
   | "general";
 
-export type ResearchActivityAcceptance = {
-  running: string;
-  completed: string;
-  recovery: string;
-};
-
-const ACCEPTANCE: Record<ResearchActivityKind, Record<keyof ResearchActivityAcceptance, Phrase>> = {
-  question: {
-    running: { zh: "正在组织答案", en: "Formulating an answer" },
-    completed: { zh: "答案已经进了对话", en: "Answer added to the conversation" },
-    recovery: { zh: "把问题说清楚一点再发一次。", en: "Clarify the question, then send it again." },
-  },
-  research: {
-    running: { zh: "正在看研究资料", en: "Reviewing research sources" },
-    completed: { zh: "调研报告或资料集", en: "Research report or source set" },
-    recovery: { zh: "调整范围或资料权限，然后让 agent 接着做。", en: "Adjust the scope or source access, then ask the agent to continue." },
-  },
-  figure: {
-    running: { zh: "正在生成图", en: "Creating the figure" },
-    completed: { zh: "图或图表", en: "Figure or chart" },
-    recovery: { zh: "检查原始数据和作图要求，然后让 agent 重新生成。", en: "Check the source data and figure request, then ask the agent to create it again." },
-  },
-  pdf: {
-    running: { zh: "正在生成 PDF", en: "Building the PDF" },
-    completed: { zh: "PDF 文档", en: "PDF document" },
-    recovery: { zh: "检查文档源码，然后让 agent 重新编译。", en: "Review the document source, then ask the agent to rebuild the PDF." },
-  },
-  experiment: {
-    running: { zh: "正在跑实验", en: "Running the experiment" },
-    completed: { zh: "实验结果和日志", en: "Experiment results and log" },
-    recovery: { zh: "检查实验输入和可用资源，然后再跑一次。", en: "Review the experiment inputs and available resources before running it again." },
-  },
-  compute: {
-    running: { zh: "正在算", en: "Running the computation" },
-    completed: { zh: "计算结果或分析", en: "Computed result or analysis" },
-    recovery: { zh: "检查输入和算力是否可用，然后再跑一次。", en: "Review the inputs and compute availability before running it again." },
-  },
-  deployment: {
-    running: { zh: "正在部署应用", en: "Deploying the application" },
-    completed: { zh: "部署记录或应用地址", en: "Deployment record or application link" },
-    recovery: { zh: "检查部署目标和凭据，然后让 agent 再部署一次。", en: "Review the target and credentials, then ask the agent to deploy again." },
-  },
-  general: {
-    running: { zh: "正在用一个研究工具", en: "Using a research tool" },
-    completed: { zh: "工具结果已记录", en: "Recorded tool result" },
-    recovery: { zh: "检查这次请求，然后让 agent 再试一次这个动作。", en: "Review the request, then ask the agent to try this action again." },
-  },
+/**
+ * 工具失败时的「下一步」，按工具类别给一句兜底（上游自己写了下一步时用上游的）。
+ */
+const RECOVERY: Record<ResearchActivityKind, Phrase> = {
+  research: { zh: "调整检索范围或资料访问权限后，让助手继续。", en: "Adjust the scope or source access, then ask the assistant to continue." },
+  figure: { zh: "检查原始数据和作图要求后，让助手重新生成。", en: "Check the source data and figure request, then ask the assistant to create it again." },
+  pdf: { zh: "检查文档源文件后，让助手重新生成 PDF。", en: "Review the document source, then ask the assistant to rebuild the PDF." },
+  experiment: { zh: "检查实验输入和可用资源后，重新运行。", en: "Review the experiment inputs and available resources before running it again." },
+  compute: { zh: "检查输入数据和算力是否可用，然后重新运行。", en: "Review the inputs and compute availability before running it again." },
+  deployment: { zh: "检查部署目标和密钥后，让助手重新部署。", en: "Review the target and API keys, then ask the assistant to deploy again." },
+  general: { zh: "检查请求内容后，让助手重试。", en: "Review the request, then ask the assistant to try again." },
 };
 
 function humanize(value: string) {
   const words = value.replace(/[_-]+/g, " ").trim();
-  return words ? words[0].toUpperCase() + words.slice(1) : "Use research tool";
+  return words ? words[0].toUpperCase() + words.slice(1) : "";
 }
 
 function clip(value: string, limit = 92) {
@@ -130,51 +94,117 @@ const TOOL_ACTIONS: readonly { match: RegExp; copy: ToolAction }[] = [
   },
   {
     match: /experiment|simulation|benchmark|lammps/,
-    copy: { action: { zh: "跑实验", en: "Run experiment" }, running: { zh: "正在跑实验", en: "Running experiment" } },
+    copy: { action: { zh: "运行实验", en: "Run experiment" }, running: { zh: "正在运行实验", en: "Running experiment" } },
   },
   {
     match: /semantic_scholar|arxiv|literature|search_sources|search_papers/,
-    copy: { action: { zh: "查文献", en: "Search literature" }, running: { zh: "正在查文献", en: "Searching literature" } },
+    copy: { action: { zh: "检索文献", en: "Search literature" }, running: { zh: "正在检索文献", en: "Searching literature" } },
   },
   {
     match: /classify_papers|archive_papers|kb_ingest|create_claim/,
     copy: { action: { zh: "整理研究证据", en: "Organize research evidence" }, running: { zh: "正在整理研究证据", en: "Organizing research evidence" } },
   },
+  // ── 常用的通用工具（搜网页、读写文件、运行命令……）。要排在下面
+  // `_search$` / `^read_` 这两条宽的之前，否则 web_search 会被说成「检索研究记录」。
   {
-    match: /^search_|_search$|kb_search/,
-    copy: { action: { zh: "查研究记录", en: "Search research records" }, running: { zh: "正在查研究记录", en: "Searching research records" } },
+    match: /web_search/,
+    copy: { action: { zh: "搜索网页", en: "Search the web" }, running: { zh: "正在搜索网页", en: "Searching the web" } },
+  },
+  {
+    match: /web_fetch/,
+    copy: { action: { zh: "读取网页", en: "Read web page" }, running: { zh: "正在读取网页", en: "Reading web page" } },
+  },
+  {
+    match: /web_download/,
+    copy: { action: { zh: "下载数据", en: "Download data" }, running: { zh: "正在下载数据", en: "Downloading data" } },
+  },
+  {
+    match: /^search_files$/,
+    copy: { action: { zh: "搜索文件", en: "Search files" }, running: { zh: "正在搜索文件", en: "Searching files" } },
+  },
+  {
+    match: /^search_kb$|kb_search|get_kb_record/,
+    copy: { action: { zh: "检索知识库", en: "Search knowledge base" }, running: { zh: "正在检索知识库", en: "Searching knowledge base" } },
+  },
+  {
+    match: /^read_file$/,
+    copy: { action: { zh: "读取文件", en: "Read file" }, running: { zh: "正在读取文件", en: "Reading file" } },
+  },
+  {
+    match: /(^|_)write_file$/,
+    copy: { action: { zh: "写入文件", en: "Write file" }, running: { zh: "正在写入文件", en: "Writing file" } },
+  },
+  {
+    match: /^edit_file$/,
+    copy: { action: { zh: "修改文件", en: "Edit file" }, running: { zh: "正在修改文件", en: "Editing file" } },
+  },
+  {
+    match: /(^|_)run_bash$/,
+    copy: { action: { zh: "运行命令", en: "Run command" }, running: { zh: "正在运行命令", en: "Running command" } },
+  },
+  {
+    match: /^list_files$/,
+    copy: { action: { zh: "查看文件列表", en: "List files" }, running: { zh: "正在查看文件列表", en: "Listing files" } },
+  },
+  {
+    match: /^freeze_artifact$/,
+    copy: { action: { zh: "定稿成果", en: "Finalize output" }, running: { zh: "正在定稿成果", en: "Finalizing output" } },
+  },
+  {
+    match: /^memory_(note|write|maintain)$/,
+    copy: { action: { zh: "更新项目记忆", en: "Update project memory" }, running: { zh: "正在更新项目记忆", en: "Updating project memory" } },
+  },
+  {
+    match: /^memory_recall$/,
+    copy: { action: { zh: "查阅项目记忆", en: "Recall project memory" }, running: { zh: "正在查阅项目记忆", en: "Recalling project memory" } },
+  },
+  {
+    match: /^report_blocker$/,
+    copy: { action: { zh: "报告阻碍", en: "Report a blocker" }, running: { zh: "正在报告阻碍", en: "Reporting a blocker" } },
+  },
+  {
+    match: /^draft_section$/,
+    copy: { action: { zh: "撰写章节", en: "Draft section" }, running: { zh: "正在撰写章节", en: "Drafting section" } },
+  },
+  {
+    match: /^revise_section$/,
+    copy: { action: { zh: "修改章节", en: "Revise section" }, running: { zh: "正在修改章节", en: "Revising section" } },
+  },
+  {
+    match: /^search_|_search$/,
+    copy: { action: { zh: "检索研究记录", en: "Search research records" }, running: { zh: "正在检索研究记录", en: "Searching research records" } },
   },
   {
     match: /^read_|^fetch_|get_source|load_artifact/,
-    copy: { action: { zh: "读原始材料", en: "Read source material" }, running: { zh: "正在读原始材料", en: "Reading source material" } },
+    copy: { action: { zh: "读取资料", en: "Read source material" }, running: { zh: "正在读取资料", en: "Reading source material" } },
   },
   {
     match: /save_artifact|write_artifact|create_artifact/,
-    copy: { action: { zh: "保存研究产物", en: "Save research output" }, running: { zh: "正在保存研究产物", en: "Saving research output" } },
+    copy: { action: { zh: "保存成果", en: "Save research output" }, running: { zh: "正在保存成果", en: "Saving research output" } },
   },
   {
     match: /run_node|start_node|subagent/,
-    copy: { action: { zh: "启动研究 agent", en: "Start research agent" }, running: { zh: "正在启动研究 agent", en: "Starting research agent" } },
+    copy: { action: { zh: "启动研究子任务", en: "Start research sub-task" }, running: { zh: "正在启动研究子任务", en: "Starting research sub-task" } },
   },
   {
     match: /execute_python|run_python|analy[sz]e|postprocess|compute|calculate|train|inference/,
-    copy: { action: { zh: "跑计算", en: "Run computation" }, running: { zh: "正在算", en: "Running computation" } },
+    copy: { action: { zh: "运行计算", en: "Run computation" }, running: { zh: "正在计算", en: "Running computation" } },
   },
   {
     match: /evidence_chain/,
-    copy: { action: { zh: "搭证据链", en: "Build evidence chain" }, running: { zh: "正在搭证据链", en: "Building evidence chain" } },
+    copy: { action: { zh: "构建证据链", en: "Build evidence chain" }, running: { zh: "正在构建证据链", en: "Building evidence chain" } },
   },
   {
     match: /query_project_status|runtime_control/,
-    copy: { action: { zh: "查项目状态", en: "Check project status" }, running: { zh: "正在查项目状态", en: "Checking project status" } },
+    copy: { action: { zh: "查看项目状态", en: "Check project status" }, running: { zh: "正在查看项目状态", en: "Checking project status" } },
   },
   {
     match: /list_artifacts|list_sources/,
-    copy: { action: { zh: "列研究产物", en: "List research outputs" }, running: { zh: "正在列研究产物", en: "Listing research outputs" } },
+    copy: { action: { zh: "列出成果", en: "List research outputs" }, running: { zh: "正在列出成果", en: "Listing research outputs" } },
   },
   {
     match: /decision_package|human_input/,
-    copy: { action: { zh: "准备一个待定决策", en: "Prepare a research decision" }, running: { zh: "正在准备一个待定决策", en: "Preparing a research decision" } },
+    copy: { action: { zh: "整理决策选项", en: "Prepare a research decision" }, running: { zh: "正在整理决策选项", en: "Preparing a research decision" } },
   },
 ];
 
@@ -183,11 +213,12 @@ function actionFor(name: string): ToolAction {
   for (const entry of TOOL_ACTIONS) {
     if (entry.match.test(normalized)) return entry.copy;
   }
-  // 兜底用的是工具自己的名字（一个标识符），两种语言里长一样。
+  // 兜底：英文界面用工具自己的名字（一个英文标识符，读得懂）；中文界面不露
+  // 英文标识符，只说「使用工具」—— 后面 researchToolTitle 会接上它作用的对象。
   const humanized = humanize(name);
   return {
-    action: { zh: humanized, en: humanized },
-    running: { zh: `正在用 ${humanized}`, en: `Using ${humanized.toLowerCase()}` },
+    action: { zh: "使用工具", en: humanized || "Use research tool" },
+    running: { zh: "正在使用工具", en: humanized ? `Using ${humanized.toLowerCase()}` : "Using a research tool" },
   };
 }
 
@@ -202,13 +233,8 @@ export function researchActivityKindForTool(name?: string): ResearchActivityKind
   return "general";
 }
 
-export function researchActivityAcceptance(kind: ResearchActivityKind, lang: Language): ResearchActivityAcceptance {
-  const copy = ACCEPTANCE[kind];
-  return {
-    running: say(copy.running, lang),
-    completed: say(copy.completed, lang),
-    recovery: say(copy.recovery, lang),
-  };
+export function researchActivityRecovery(kind: ResearchActivityKind, lang: Language): string {
+  return say(RECOVERY[kind], lang);
 }
 
 function readableArgumentValue(value: unknown, lang: Language) {
@@ -218,6 +244,16 @@ function readableArgumentValue(value: unknown, lang: Language) {
   return undefined;
 }
 
+/**
+ * 预览里的一项参数。常用参数名（检索词、路径……）按表翻成人话；表里没有的参数，
+ * 中文界面只显示值（参数名是英文标识符），英文界面照旧把参数名写成词。
+ */
+function argumentPart(key: string, value: string, lang: Language) {
+  const label = toolArgumentLabel(key, lang);
+  if (label) return lang === "zh" ? `${label}：${value}` : `${label}: ${value}`;
+  return lang === "zh" ? value : `${humanize(key)}: ${value}`;
+}
+
 export function researchToolInputPreview(argumentsValue: Record<string, unknown> | undefined, lang: Language) {
   if (!argumentsValue) return undefined;
   const parts: string[] = [];
@@ -225,7 +261,7 @@ export function researchToolInputPreview(argumentsValue: Record<string, unknown>
   for (const key of OBJECT_KEYS) {
     const value = readableArgumentValue(argumentsValue[key], lang);
     if (value) {
-      parts.push(`${humanize(key)}: ${value}`);
+      parts.push(argumentPart(key, value, lang));
       usedKeys.add(key);
       break;
     }
@@ -234,7 +270,7 @@ export function researchToolInputPreview(argumentsValue: Record<string, unknown>
     .filter(([key]) => !usedKeys.has(key) && !PRIVATE_OR_BULK_ARGUMENT.test(key))
     .flatMap(([key, value]) => {
       const readable = readableArgumentValue(value, lang);
-      return readable ? [`${humanize(key)}: ${readable}`] : [];
+      return readable ? [argumentPart(key, readable, lang)] : [];
     })
     .slice(0, 3));
   return parts.length ? parts.join(" · ") : undefined;
@@ -294,8 +330,12 @@ export function researchToolFailurePresentation(
 ) {
   const raw = (error?.message ?? "").trim();
   const normalized = raw.toLowerCase();
-  const acceptance = researchActivityAcceptance(researchActivityKindForTool(name), lang);
   const loopLevel = isLoopLevelFailure(error?.code);
+  // 驳回（参数不对、时机不对……）由助手下一步自己改，用户不需要做什么；
+  // 其余按工具类别给一句兜底。上游自己写了下一步时仍用上游的原话（safeRecovery）。
+  const fallbackRecovery = loopLevel
+    ? say({ zh: "助手会自动调整，无需处理。", en: "The assistant will adjust on its own; nothing to do." }, lang)
+    : researchActivityRecovery(researchActivityKindForTool(name), lang);
   // ── 错误正文照原样给 ────────────────────────────────────────────────
   //
   // 上一版在这里按**长相**判断"像不像技术细节"：含 `_[a-z]`（任何 snake_case
@@ -312,15 +352,15 @@ export function researchToolFailurePresentation(
   // 的原话。分不分得清"是谁的锅"看 `error.code` —— harness 在产生失败的那
   // 一层盖的章，不再猜字符串长相。
   const message = exceptionSafe(raw, error?.code)
-    || say({ zh: "这次失败工具没给出原因。", en: "The tool reported no reason for this failure." }, lang);
+    || say({ zh: "工具没有返回失败原因。", en: "The tool reported no reason for this failure." }, lang);
   if (
     /classify_papers|archive_papers/.test(name?.toLowerCase() ?? "")
     && /classification[_ ]?json|papers[_ ]?json|json.*(parse|decode)|extra data/.test(normalized)
   ) {
     return {
-      title: say({ zh: "论文分类没有存下来", en: "Paper classification was not saved" }, lang),
+      title: say({ zh: "论文分类保存失败", en: "Paper classification was not saved" }, lang),
       message,
-      recovery: safeRecovery(error?.recovery, say({ zh: "让 agent 重新生成一次分类并保存。", en: "Ask the agent to regenerate and save the classification." }, lang)),
+      recovery: safeRecovery(error?.recovery, say({ zh: "让助手重新生成分类并保存。", en: "Ask the assistant to regenerate and save the classification." }, lang)),
       loopLevel,
     };
   }
@@ -328,21 +368,21 @@ export function researchToolFailurePresentation(
     return {
       // 外部命令跑了但没成（或压根没起来）。既不是模型调错、也不一定是我们的
       // bug —— 正文里的 stderr 才是唯一有用的东西，标题只负责别误导。
-      title: say({ zh: "{action}：跑的命令失败了", en: "{action} ran a command that failed" }, lang,
+      title: say({ zh: "{action}：命令执行失败", en: "{action} ran a command that failed" }, lang,
         { action: say(actionFor(name ?? "research_tool").action, lang) }),
       message,
       recovery: safeRecovery(error?.recovery,
-        say({ zh: "看上面的命令输出，失败的是什么它写了。", en: "Read the command output above; it names what failed." }, lang)),
+        say({ zh: "失败原因见上方的命令输出。", en: "Read the command output above; it names what failed." }, lang)),
       loopLevel,
     };
   }
   if (error?.code === "non_dict_result") {
     return {
       // 工具返回值不合规范 = 我们的 bug，不是环境、更不是用户的输入。
-      title: say({ zh: "一个工具返回了不合规范的结果", en: "A tool returned a malformed result" }, lang),
+      title: say({ zh: "工具返回的结果格式有误", en: "A tool returned a malformed result" }, lang),
       message,
       recovery: safeRecovery(error?.recovery,
-        say({ zh: "这是工具本身的缺陷 —— 报上去；重试没用。", en: "This is a defect in the tool itself — report it; retrying will not help." }, lang)),
+        say({ zh: "这是工具本身的问题，重试无法解决。", en: "This is a problem with the tool itself; retrying won't help." }, lang)),
       loopLevel,
     };
   }
@@ -351,10 +391,10 @@ export function researchToolFailurePresentation(
       // 这台机器缺外部程序（编译器/求解器）。跟 provider_error 同一个道理：
       // 标题必须说清是**环境**缺东西，否则读者会去查自己的稿子——实测那次
       // 界面说的是 "Review the document source"，而源码一个字都没错。
-      title: say({ zh: "这台机器缺了这一步要用的程序", en: "This machine is missing a tool this step needs" }, lang),
+      title: say({ zh: "缺少这一步需要的程序", en: "This machine is missing a tool this step needs" }, lang),
       message,
       recovery: safeRecovery(error?.recovery,
-        say({ zh: "在跑 harness 的那台机器上装上缺的程序，然后重跑这一步。", en: "Install the missing program on the machine running the harness, then run this step again." }, lang)),
+        say({ zh: "在执行这次任务的电脑上安装缺少的程序，然后重新运行这一步。", en: "Install the missing program on the machine running this task, then run this step again." }, lang)),
       loopLevel,
     };
   }
@@ -362,38 +402,38 @@ export function researchToolFailurePresentation(
     return {
       // 模型服务挂了/限额了：要人看，但**不是研究出问题，也不是我们的 bug**。
       // 标题说清是谁的锅，否则读者会去查自己的输入（[[项目-模型服务故障的归属]]）。
-      title: say({ zh: "模型服务没能完成这次请求", en: "The model service could not complete this request" }, lang),
+      title: say({ zh: "模型服务请求失败", en: "The model service could not complete this request" }, lang),
       message,
       recovery: safeRecovery(error?.recovery,
-        say({ zh: "等服务恢复后再试；如果是上下文长度超了，把活拆小一点。", en: "Retry once the provider recovers; if it is a context-length limit, split the work into smaller steps." }, lang)),
+        say({ zh: "请稍后重试。如果超出了上下文长度，请把任务拆小一些。", en: "Retry once the provider recovers; if it is a context-length limit, split the work into smaller steps." }, lang)),
       loopLevel,
     };
   }
   if (/timeout|timed out|deadline|超时/.test(normalized)) {
     return {
-      title: say({ zh: "这个研究工具超时了", en: "The research tool timed out" }, lang),
+      title: say({ zh: "工具执行超时", en: "The research tool timed out" }, lang),
       message,
-      recovery: safeRecovery(error?.recovery, acceptance.recovery),
+      recovery: safeRecovery(error?.recovery, fallbackRecovery),
       loopLevel,
     };
   }
   if (/permission|forbidden|unauthori[sz]ed|credential|api key/.test(normalized)) {
     return {
-      title: say({ zh: "这个研究工具需要授权", en: "The research tool needs access" }, lang),
+      title: say({ zh: "工具需要访问权限", en: "The research tool needs access" }, lang),
       message,
-      recovery: safeRecovery(error?.recovery, say({ zh: "去设置里检查权限，然后把请求再发一次。", en: "Review access in Settings, then send the request again." }, lang)),
+      recovery: safeRecovery(error?.recovery, say({ zh: "请在设置中检查权限，然后重新发送请求。", en: "Review access in Settings, then send the request again." }, lang)),
       loopLevel,
     };
   }
   return {
     title: loopLevel
-      // 驳回不是事故：说清是"框架按设计拦下的"，人就知道循环会自己接着走。
-      ? say({ zh: "{action}：被框架拦下了", en: "{action} was declined by the framework" }, lang,
+      // 驳回不是事故：只说这一步没执行，下一步说明助手会自己调整。
+      ? say({ zh: "{action}：未执行", en: "{action} was not run" }, lang,
         { action: say(actionFor(name ?? "research_tool").action, lang) })
-      : say({ zh: "{action}：没做完", en: "{action} did not complete" }, lang,
+      : say({ zh: "{action}失败", en: "{action} did not complete" }, lang,
         { action: say(actionFor(name ?? "research_tool").action, lang) }),
     message,
-    recovery: safeRecovery(error?.recovery, acceptance.recovery),
+    recovery: safeRecovery(error?.recovery, fallbackRecovery),
     loopLevel,
   };
 }
@@ -410,7 +450,7 @@ export function researchToolTitle(
   detail: string | undefined,
   lang: Language,
 ) {
-  if (!name) return objectFrom(undefined, detail) ?? say({ zh: "用一个研究工具", en: "Use research tool" }, lang);
+  if (!name) return objectFrom(undefined, detail) ?? say({ zh: "使用研究工具", en: "Use research tool" }, lang);
   const action = say(actionFor(name).action, lang);
   const candidate = objectFrom(argumentsValue, detail);
   const object = candidate?.toLowerCase() === humanize(name).toLowerCase() ? undefined : candidate;
@@ -425,7 +465,7 @@ export function researchToolRunningStatus(
   detail: string | undefined,
   lang: Language,
 ) {
-  if (!name) return objectFrom(undefined, detail) ?? say({ zh: "正在用一个研究工具", en: "Using a research tool" }, lang);
+  if (!name) return objectFrom(undefined, detail) ?? say({ zh: "正在使用研究工具", en: "Using a research tool" }, lang);
   const action = say(actionFor(name).running, lang);
   const candidate = objectFrom(argumentsValue, detail);
   const object = candidate?.toLowerCase() === humanize(name).toLowerCase() ? undefined : candidate;

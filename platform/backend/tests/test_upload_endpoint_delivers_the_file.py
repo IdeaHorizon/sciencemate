@@ -136,7 +136,8 @@ async def test_too_large_says_the_limit_and_where_to_go_instead(runtime_client) 
     detail = response.json()["detail"]
     assert detail["maxBytes"] == 1_024, "报错要带上限那个数字"
     assert detail["sizeBytes"] >= 8_192, "也要说这份文件到底多大"
-    assert "data 节点" in detail["message"], "还要说清超了该走哪条路"
+    assert "挂载" in detail["message"], "还要说清超了该走哪条路"
+    assert "1 KB" in detail["message"], "上限要写成人读的大小"
 
     tree = await client.get(
         f"/api/v1/projects/{project_id}/repository/tree",

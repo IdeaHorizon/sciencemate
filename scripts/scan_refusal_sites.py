@@ -165,7 +165,7 @@ def scan() -> dict[str, int]:
     out: dict[str, int] = {}
     for d in SCAN_DIRS:
         for f in sorted((ROOT / d).rglob("*.py")):
-            rel = str(f.relative_to(ROOT))
+            rel = f.relative_to(ROOT).as_posix()
             if "/tests/" in rel or rel.startswith("tests/"):
                 continue
             n = scan_file(f)

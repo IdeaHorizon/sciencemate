@@ -139,7 +139,7 @@ function UserContext() {
         <strong>{user.display_name}</strong>
         <small>{roleLabel(user.role, lang)}</small>
       </span>
-      <button type="button" onClick={() => void logout()} aria-label={t({ zh: "登出", en: "Sign out" })} title={t({ zh: "登出", en: "Sign out" })}>
+      <button type="button" onClick={() => void logout()} aria-label={t({ zh: "退出登录", en: "Sign out" })} title={t({ zh: "退出登录", en: "Sign out" })}>
         <LogOut size={14} />
       </button>
     </div>
@@ -242,7 +242,7 @@ function ProjectNavigation({ pathname, projectId }: { pathname: string; projectI
     // 「研究产出」问的是"这个项目做出了什么"，一个问题一个入口。Artifacts 面
     // 读的是后端 artifacts 表（只有 publish 过的才有行），和它各说各话 ——
     // 同一篇论文可能这边有那边没有，而且分叉不报错。
-    { href: `${root}/outputs`, label: { zh: "研究产出", en: "Research outputs" }, icon: Archive, match: (path) => path.startsWith(`${root}/outputs`) },
+    { href: `${root}/outputs`, label: { zh: "研究成果", en: "Research outputs" }, icon: Archive, match: (path) => path.startsWith(`${root}/outputs`) },
     { href: `${root}/files`, label: { zh: "项目文件", en: "Project files" }, icon: FolderTree, match: (path) => path.startsWith(`${root}/files`) },
     { href: `${root}/research-state`, label: { zh: "研究进展", en: "Research progress" }, icon: Target, match: (path) => path.startsWith(`${root}/research-state`) },
     { href: `${root}/memory`, label: { zh: "项目记忆", en: "Project memory" }, icon: BookMarked, match: (path) => path.startsWith(`${root}/memory`) },
@@ -261,8 +261,8 @@ function ProjectNavigation({ pathname, projectId }: { pathname: string; projectI
       </nav>
       <div className="app-nav-section app-project-recents">
         <span>{t({ zh: "最近会话", en: "Recent sessions" })}</span>
-        {sessions.isLoading && !sessions.data && <small className="app-recent-empty">{t({ zh: "载入中…", en: "Loading…" })}</small>}
-        {sessions.isError && <small className="app-recent-empty">{t({ zh: "读不到会话", en: "Sessions unavailable" })}</small>}
+        {sessions.isLoading && !sessions.data && <small className="app-recent-empty">{t({ zh: "正在加载…", en: "Loading…" })}</small>}
+        {sessions.isError && <small className="app-recent-empty">{t({ zh: "无法加载会话", en: "Could not load sessions" })}</small>}
         {sessions.data && recentSessions.length === 0 && <small className="app-recent-empty">{t({ zh: "还没有会话", en: "No sessions yet" })}</small>}
         {recentSessions.map((session) => (
           <SessionRecentItem
@@ -317,7 +317,7 @@ function SessionRecentItem({ session, root, projectId }: {
           // 别承诺一件它不做的事。
           label: t({ zh: "归档 / 删除会话", en: "Archive or delete session" }),
           danger: true,
-          confirm: t({ zh: `确定归档或删除「${session.title}」吗？空会话会被直接删除，有内容的会归档。`, en: `Archive or delete "${session.title}"? An empty session is deleted outright; one with content is archived.` }),
+          confirm: t({ zh: `归档或删除「${session.title}」？有内容的会话会被归档，空会话会被直接删除。`, en: `Archive or delete "${session.title}"? An empty session is deleted outright; one with content is archived.` }),
           onSelect: () => mutations.archive.mutate(session.id),
         }]}
       />

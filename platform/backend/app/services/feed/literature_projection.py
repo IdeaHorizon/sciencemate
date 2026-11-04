@@ -176,6 +176,8 @@ async def project_literature_catalog(
     from nodes.literature.tools.journal_policy import JournalDecision, decide
     from nodes.literature.tools.journal_scope import current_domains
 
+    from app.services.feed.ingest import extra_with_witness, neutralise_author_written
+
     prepared: list[tuple] = []
     for row in rows:
         catalog_key, title, source, year, article_dir, raw, published_at, updated_at = row
@@ -342,6 +344,11 @@ async def project_literature_catalog(
             "visibility": FeedVisibility.PLATFORM,
             "extra": extra,
         }
+        # 这是 feed_items 的第二条落库路（#730）：标题、摘要都是外部作者写的，而
+        # `_plain_text` 先剥标签再 unescape —— 摘要里的 `&lt;/framework-notice&gt;`
+        # 恰好在这一步变成活标签。和 `ingest_items` 过同一道闸，规则只在 ingest 那一处。
+        values, witness = neutralise_author_written(values, via="feed.literature_projection")
+        values["extra"] = extra_with_witness(values["extra"], witness)
         if item is None:
             new_values = {
                 "id": str(uuid.uuid5(uuid.NAMESPACE_URL, "literature:" + str(catalog_key).lower())),

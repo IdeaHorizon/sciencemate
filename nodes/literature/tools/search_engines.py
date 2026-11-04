@@ -19,6 +19,7 @@ from dataclasses import dataclass, field, asdict
 import httpx
 
 from .config import SEARCH_ENGINES, DEFAULT_RESULTS_PER_SOURCE, PER_SOURCE_LIMITS
+from .crossref_http import crossref_list_get
 
 
 @dataclass
@@ -961,24 +962,10 @@ class CrossrefSearch:
             ),
         }
         headers = {"User-Agent": "SurveyHarness/1.0"}
-        # 标题通道和随后多源检索可能相邻；尊重 Retry-After，避免一次短暂
-        # 429 让本来可精确命中的老文献消失。
-        for attempt in range(2):
-            resp = await self.client.get(
-                self.cfg["base_url"],
-                params=params,
-                headers=headers,
-                timeout=30,
-            )
-            if resp.status_code != 429:
-                resp.raise_for_status()
-                return self._parse(resp.json())
-            retry_after = resp.headers.get("Retry-After")
-            await asyncio.sleep(
-                float(retry_after) if retry_after else 1.5 * (attempt + 1)
-            )
-        resp.raise_for_status()
-        return []
+        resp = await crossref_list_get(
+            self.client, self.cfg["base_url"], params=params, headers=headers, timeout=30,
+        )
+        return self._parse(resp.json())
 
     async def search(
         self,
@@ -1027,7 +1014,7 @@ class CrossrefSearch:
             params["filter"] += ",until-pub-date:" + datetime.now(UTC).date().isoformat()
         headers = {"User-Agent": "SurveyHarness/1.0"}
         try:
-            resp = await self.client.get(self.cfg["base_url"], params=params, headers=headers, timeout=30)
+            resp = await crossref_list_get(self.client, self.cfg["base_url"], params=params, headers=headers, timeout=30)
             resp.raise_for_status()
             return self._parse(resp.json())
         except Exception:
@@ -1062,8 +1049,8 @@ class CrossrefSearch:
             if cursor in seen_cursors:
                 raise RuntimeError("Crossref repeated a pagination cursor")
             seen_cursors.add(cursor)
-            resp = await self.client.get(
-                self.cfg["base_url"], params=params,
+            resp = await crossref_list_get(
+                self.client, self.cfg["base_url"], params=params,
                 headers={"User-Agent": "SurveyHarness/1.0"}, timeout=45,
             )
             resp.raise_for_status()
@@ -1159,13 +1146,16 @@ class OpenAlexSearch:
                 unique[key] = paper
             return list(unique.values())
         core_query = query.strip()
-        # OpenAlex 的 `search=` 全文检索是 Premium 计费功能（每请求 $0.001，需余额）；
-        # 免费/余额为 0 的 key 会被 429 "Insufficient budget" 拒绝。改用免费的
-        # `filter=title_and_abstract.search`：带引号做短语精确匹配（AND 分词会严重跑偏，
-        # 如 synthetic+control+method 会混入 8 万篇无关论文），并按被引降序——
-        # 既避开计费，又把被引最高的奠基论文排进候选（文献调研要抓的开山作）。
-        phrase = '"' + core_query.replace('"', '') + '"'
-        params = {"filter": f"title_and_abstract.search:{phrase}",
+        # Preserve Boolean operators and phrase boundaries. Quoting the entire
+        # multi-concept expression makes it an impossible verbatim phrase.
+        # Keep the existing phrase behavior for short standalone topics.
+        expression = core_query
+        if (
+            not re.search(r"\b(?:AND|OR|NOT)\b|[\"()]", core_query)
+            and len(core_query.split()) <= 3
+        ):
+            expression = f'"{core_query}"'
+        params = {"filter": f"title_and_abstract.search:{expression}",
                   "per-page": min(per_page, 200), "sort": "cited_by_count:desc"}
         # OpenAlex supports source ISSN filtering; use it for journal-scoped harvests.
         if core_query.lower().startswith("issn:"):
@@ -1993,6 +1983,8 @@ class SearchManager:
             else:
                 detail = f"{type(e).__name__}: {str(e)[:200]}"
             elapsed = round(time.time() - t0, 2)
+            if response is not None:
+                diag["http_status"] = response.status_code
             diag.update({"status": "error", "error": detail, "elapsed_seconds": elapsed})
             self._last_search_diagnostics[name] = diag
             print(f"  [Timing] {name}: {elapsed}s (失败: {detail})")
@@ -2200,7 +2192,10 @@ class SearchManager:
                 elif diag.get("status") in {"error", "timeout"}:
                     audit_warnings.append({"code": "source_request_failed", "sources": [src],
                                            "reason": diag.get("status"),
-                                           "detail": diag.get("error", "")})
+                                           "http_status": diag.get("http_status"),
+                                           "detail": (f"{src} 请求受到限流（HTTP 429），本轮结果可能不完整。"
+                                                      if diag.get("http_status") == 429 else
+                                                      f"{src}：{diag.get('error', '')}")})
             for src, count in source_counts.items():
                 diagnostics.setdefault(src, {}).update({"deduped_count": count})
             return deduped, {

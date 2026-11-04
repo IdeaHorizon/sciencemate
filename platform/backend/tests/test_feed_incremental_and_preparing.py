@@ -9,6 +9,7 @@ from app.models.feed import FeedItem
 from app.models.user import User
 from app.services.feed import pool_cache, profile, ranking
 from nodes.literature.tools.local_index import LocalPaperIndex
+from tests._clock import just_now
 
 
 def test_incremental_window_survives_restart_and_weekly_backfill(tmp_path):
@@ -38,7 +39,7 @@ async def test_early_translation_pool_never_exposes_pending_or_unselected_articl
     monkeypatch.setattr(literature_projection, 'literature_papers_root', lambda: tmp_path)
     def paper(title, venue='Acta Geotechnica', eligible=True):
         return FeedItem(canonical_key=f'preparing:{title}', title=title, summary='A source abstract.',
-                        kind='paper', venue=venue, published_at=datetime.now(UTC), authors=[], domains=[],
+                        kind='paper', venue=venue, published_at=just_now(), authors=[], domains=[],
                         extra={'literature_catalog': True, 'literature_eligible': eligible, 'literature_preparation': 'pending',
                                'feed_acquisition_routes': ['journal'], 'cas_quartile': 1})
     wanted = paper('Early particle study')

@@ -3,7 +3,7 @@ import type { Language } from "../../../shared/i18n/language.ts";
 import { fc } from "./feed-copy.ts";
 
 /**
- * 把一条资讯交给一个课题时，输入框里预置什么。
+ * 把一条资讯带进一个项目时，输入框里预置什么。
  *
  * ## 为什么这条路径存在
  *

@@ -74,7 +74,7 @@ class RequestBodyCapMiddleware:
         from starlette.datastructures import Headers
         from starlette.exceptions import HTTPException
 
-        from app.services.user_interface import SCREEN_LANGUAGE_HEADER, language_said_by, say
+        from app.services.user_interface import SCREEN_LANGUAGE_HEADER, language_said_by, readable_size, say
 
         maximum = settings.material_max_bytes + _MULTIPART_ENVELOPE_ALLOWANCE
         headers = Headers(scope=scope)
@@ -85,12 +85,10 @@ class RequestBodyCapMiddleware:
             return {
                 "code": "request_body_too_large",
                 "message": say({
-                    "zh": "请求体超过本部署上限 {limit} 字节。更大的数据集别走上传："
-                          "让 data 节点在计算侧就地取用，或在部署上给这个项目挂一个数据集绑定。",
-                    "en": "The request body is over this deployment's limit of {limit} bytes. Do not upload "
-                          "larger datasets: let the data node read them in place on the compute side, or "
-                          "bind a dataset to this project on the deployment.",
-                }, lang, limit=maximum),
+                    "zh": "上传的内容太大，上限为 {limit}。更大的数据集无需上传，请联系管理员把数据集挂载到这个项目。",
+                    "en": "The upload is too large; the limit is {limit}. Larger datasets do not need "
+                          "uploading: ask your administrator to mount the dataset for this project.",
+                }, lang, limit=readable_size(maximum)),
                 "sizeBytes": size,
                 "maxBytes": maximum,
             }

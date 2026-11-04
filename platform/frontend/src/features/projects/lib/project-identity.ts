@@ -18,7 +18,7 @@ const STATUS_LABELS: Record<string, Phrase> = {
   archived: { zh: "已归档", en: "Archived" },
 };
 
-function humanizeStatus(status: string, lang: Language) {
+export function humanizeStatus(status: string, lang: Language) {
   const phrase = STATUS_LABELS[status];
   return phrase ? say(phrase, lang) : status;
 }
@@ -29,7 +29,7 @@ export function projectIdentity(
   lang: Language,
 ): ProjectIdentity {
   if (state.loading) {
-    return { name: say({ zh: "载入中…", en: "Loading project…" }, lang), meta: say({ zh: "正在解析工作区", en: "Resolving workspace" }, lang), state: "loading" };
+    return { name: say({ zh: "正在加载…", en: "Loading…" }, lang), meta: "", state: "loading" };
   }
   if (project) {
     const status = humanizeStatus(project.status, lang);
@@ -40,7 +40,7 @@ export function projectIdentity(
     };
   }
   if (state.error) {
-    return { name: say({ zh: "读不到这个项目", en: "Project unavailable" }, lang), meta: say({ zh: "项目信息没读出来", en: "Could not load project metadata" }, lang), state: "error" };
+    return { name: say({ zh: "无法加载项目", en: "Project unavailable" }, lang), meta: say({ zh: "请稍后重试。", en: "Please try again later." }, lang), state: "error" };
   }
   return { name: say({ zh: "研究项目", en: "Research project" }, lang), meta: say({ zh: "项目工作区", en: "Project workspace" }, lang), state: "fallback" };
 }

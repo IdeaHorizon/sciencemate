@@ -38,7 +38,7 @@ from app.services.harness_runtime import (
     harness_subprocess_env,
     the_interpreter_that_runs_the_harness,
 )
-from app.services.model_backends import resolved_api_key, select_effective_backend
+from app.services.model_backends import credential_is_optional, resolved_api_key, select_effective_backend
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,8 @@ LITERATURE_ENV_KEYS = frozenset({
     "HARNESS_ARXIV_TIMEOUT_SECONDS", "HARNESS_ARXIV_MIN_INTERVAL_SECONDS",
     "CNKI_COOKIE_PATH",
     "OPENALEX_API_KEY",
+    "ACADEMIC_INDEX_TRANSLATOR", "ACADEMIC_LOCAL_TRANSLATOR_URL",
+    "ACADEMIC_LOCAL_TRANSLATOR_MODEL", "ACADEMIC_TRANSLATORS_REGION",
 })
 
 #: 内层（模型调用）必须严格小于外层（子进程），否则永远是子进程先被杀掉，
@@ -94,9 +96,12 @@ async def call(
     """跑一次 `op`，返回它的结果事件。"""
     if not settings.harness_bridge_enabled:
         raise BridgeUnavailable("harness bridge is disabled")
-    api_key = resolved_api_key(backend)
+    api_key = resolved_api_key(backend) or ""
     base_url = _provider_base_url(backend)
-    if not api_key or not base_url:
+    # 自建端点（用户自己填了 base_url）大多不鉴权，没有 key 是正常形态 —— 和会话那条路同一个判据
+    # （`credential_is_optional`，PR#1019）。这里以前照旧要 key：一条「已校验、可用」的自建连接
+    # 做不了文献检索和翻译，界面只说一句「无法处理检索结果」（11-04 点检索页时发现）。
+    if not base_url or (not api_key and not credential_is_optional(backend)):
         raise BridgeUnavailable("model backend has no usable credentials")
 
     root = Path(settings.harness_root).expanduser().resolve()

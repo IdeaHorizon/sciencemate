@@ -47,8 +47,8 @@ export function FilePreview({
             type="button"
             onClick={() => void query.refetch()}
             disabled={query.isFetching}
-            aria-label={t({ zh: "重新读取这个文件", en: "Re-read this file" })}
-            title={t({ zh: "重新读取（节点重跑之后用）", en: "Re-read (after a node runs again)" })}
+            aria-label={t({ zh: "刷新", en: "Refresh" })}
+            title={t({ zh: "刷新", en: "Refresh" })}
           >
             <RefreshCw size={12} className={query.isFetching ? "is-spinning" : ""} />
           </button>
@@ -56,7 +56,7 @@ export function FilePreview({
         </div>
       </div>
       <div className="file-preview-body">
-        {query.isLoading && <p className="muted">{t({ zh: "正在读取…", en: "Reading…" })}</p>}
+        {query.isLoading && <p className="muted">{t({ zh: "正在加载…", en: "Loading…" })}</p>}
         {query.error && <PreviewError error={query.error} />}
         {query.data && <PreviewBody payload={query.data} />}
       </div>
@@ -132,8 +132,8 @@ function PreviewBody({ payload }: { payload: FilePreviewPayload }) {
 
   return (
     <div className="file-preview-fallback">
-      <p>{t({ zh: "这个格式没法在浏览器里直接看（{type}）。", en: "This format cannot be shown in the browser ({type})." }, { type: payload.mediaType })}</p>
-      <p className="muted">{t({ zh: "下载下来用本机的程序打开。", en: "Download it and open with an app on this machine." })}</p>
+      <p>{t({ zh: "无法预览这种格式（{type}）。", en: "This format can't be previewed ({type})." }, { type: payload.mediaType })}</p>
+      <p className="muted">{t({ zh: "请下载后用本机应用打开。", en: "Download it and open with an app on this machine." })}</p>
     </div>
   );
 }
@@ -143,11 +143,11 @@ function PreviewError({ error }: { error: unknown }) {
   if (error instanceof FileTooLargeError) {
     return (
       <div className="file-preview-fallback">
-        <p>{t({ zh: "文件太大，不在浏览器里打开（{size}，上限 {max}）。", en: "The file is too large to open in the browser ({size}; the limit is {max})." }, { size: formatBytes(error.sizeBytes), max: formatBytes(error.maxBytes) })}</p>
+        <p>{t({ zh: "文件太大，无法预览（{size}，上限 {max}）。", en: "The file is too large to preview ({size}; the limit is {max})." }, { size: formatBytes(error.sizeBytes), max: formatBytes(error.maxBytes) })}</p>
       </div>
     );
   }
-  return <p className="file-preview-error">{error instanceof Error ? error.message : t({ zh: "打不开这个文件", en: "This file cannot be opened" })}</p>;
+  return <p className="file-preview-error">{error instanceof Error ? error.message : t({ zh: "无法打开这个文件", en: "This file cannot be opened" })}</p>;
 }
 
 function DownloadLink({ payload }: { payload: FilePreviewPayload }) {

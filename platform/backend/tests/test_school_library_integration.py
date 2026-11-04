@@ -242,7 +242,7 @@ async def test_scheduled_school_feed_is_idempotent_and_institution_scoped(
         for item in await candidate_items(db_session, profile=outsider)
         if item.visibility == FeedVisibility.INSTITUTION
     ]
-    outsider_user = SimpleNamespace(group_id=None, institution_id="other-school")
+    outsider_user = SimpleNamespace(id="u2", group_id=None, institution_id="other-school")
     assert (
         not (await db_session.execute(select(FeedItem).where(_visible_clause(outsider_user))))
         .scalars()

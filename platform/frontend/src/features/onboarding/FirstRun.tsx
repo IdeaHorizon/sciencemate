@@ -40,13 +40,13 @@ import { LanguageSwitch } from "@/features/settings/components/LanguageSwitch";
 import { GuidedTour } from "./GuidedTour";
 import { WORKSPACE_STOPS } from "./lib/tour-stops";
 import { ModelConnectionFields, draftIsComplete, emptyDraft, type ConnectionDraft } from "./ModelConnectionFields";
-import { keyStorageLine, providerForApi } from "./lib/providers";
+import { keyIsOptional, keyStorageLine, providerForApi } from "./lib/providers";
 import { coversTheMainRole, stepsToShow, type OnboardingFacts, type OnboardingStep } from "./lib/steps";
 
 const STEP_TITLE: Record<OnboardingStep, Phrase> = {
-  model: { zh: "用哪个模型", en: "Which model" },
-  interests: { zh: "你关心哪些方向", en: "Which fields do you follow" },
-  landing: { zh: "打开时先看什么", en: "What to open first" },
+  model: { zh: "配置模型", en: "Set up a model" },
+  interests: { zh: "订阅学科", en: "Fields to follow" },
+  landing: { zh: "启动时显示", en: "Start page" },
 };
 
 const STEP_ICON: Record<OnboardingStep, typeof Cpu> = {
@@ -117,7 +117,7 @@ export function FirstRun() {
   if (!open) return null;
   const step = steps[Math.min(index, steps.length - 1)];
   const last = index >= steps.length - 1;
-  // 卡片走完不直接收工，接着走那三个气泡。中途按 X / Esc 是「以后再说」，
+  // 卡片走完不直接收工，接着走那三个气泡。中途按 X / Esc 是关掉新手引导，
   // 气泡也一并不看 —— 他说的是"现在别教我"。
   const advance = () => (last ? setTourStarted(true) : setIndex(index + 1));
   const Icon = STEP_ICON[step];
@@ -131,7 +131,7 @@ export function FirstRun() {
             <h2 id="onboarding-title"><Icon size={17} aria-hidden="true" />{t(STEP_TITLE[step])}</h2>
           </div>
           <button type="button" className="onboarding-close" onClick={remember}
-            aria-label={t({ zh: "以后再说", en: "Later" })} title={t({ zh: "以后再说", en: "Later" })}>
+            aria-label={t({ zh: "关闭", en: "Close" })} title={t({ zh: "关闭", en: "Close" })}>
             <X size={16} />
           </button>
         </header>
@@ -150,7 +150,7 @@ export function FirstRun() {
         )}
         {step === "interests" && (
           <div className="onboarding-body">
-            <p className="onboarding-lead">{t({ zh: "挑几个方向，资讯页就按它们给你挑今天值得看的。以后随时能改。", en: "Pick a few fields and the feed will use them to choose what is worth your time today. You can change them any time." })}</p>
+            <p className="onboarding-lead">{t({ zh: "选择你关注的学科，科研资讯会据此挑选每天值得看的内容。之后可以随时修改。", en: "Pick the fields you follow and the research feed will use them to choose what is worth reading each day. You can change them any time." })}</p>
             <div className="onboarding-interests"><InterestPicker showSkip={false} onDone={advance} /></div>
             <footer className="onboarding-actions">
               <button type="button" className="onboarding-skip" onClick={advance}>{t({ zh: "先跳过", en: "Skip for now" })}</button>
@@ -159,7 +159,7 @@ export function FirstRun() {
         )}
         {step === "landing" && <LandingStep onDone={advance} lastStep={last} />}
 
-        <p className="onboarding-foot">{t({ zh: "每一步都能跳过 —— 跳过的东西以后在「设置」里随时能补。", en: "Every step can be skipped; anything you skip is waiting for you in Settings." })}</p>
+        <p className="onboarding-foot">{t({ zh: "每一步都可以跳过，之后随时可以补上。", en: "Every step can be skipped and filled in later." })}</p>
       </section>
     </div>
   );
@@ -210,7 +210,9 @@ function ModelStep({
   const save = async () => {
     setError(null);
     if (!draftIsComplete(main)) {
-      setError(t({ zh: "地址、模型、API 密钥三样都要填。", en: "Address, model and API key are all required." }));
+      setError(keyIsOptional(main)
+        ? t({ zh: "请填写地址和模型。", en: "Please fill in the address and model." })
+        : t({ zh: "请填写地址、模型和 API 密钥。", en: "Please fill in the address, model and API key." }));
       return;
     }
     setSaving(true);
@@ -220,7 +222,8 @@ function ModelStep({
         display_name: `${t(main.provider.label)} · ${main.model.trim()}`,
         model: main.model.trim(),
         base_url: main.baseUrl.trim(),
-        api_key: main.apiKey.trim(),
+        // 没填就不带这个字段（和设置页一样）：后端不收空串，一个空的密钥框会变成一次 422。
+        api_key: main.apiKey.trim() || undefined,
         ...(required ? { roles: [required.id] } : {}),
       });
       // 「被授权服务这个角色」和「是这个角色的默认」是两件事，各有各的端点。
@@ -237,18 +240,18 @@ function ModelStep({
             display_name: `${role ? role.title : roleId} · ${draft.model.trim()}`,
             model: draft.model.trim(),
             base_url: draft.baseUrl.trim(),
-            api_key: draft.apiKey.trim(),
+            api_key: draft.apiKey.trim() || undefined,
             roles: [roleId],
           });
           if (extra?.id) await api.setRoleDefaultBackend(extra.id, roleId);
         } catch (cause) {
           pushError(cause instanceof Error ? cause.message
-            : t({ zh: "这个可选模型没能保存", en: "That optional model could not be saved" }));
+            : t({ zh: "可选模型保存失败", en: "That optional model could not be saved" }));
         }
       }
       onSaved();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : t({ zh: "没能保存这个模型连接。", en: "This model connection could not be saved." }));
+      setError(cause instanceof Error ? cause.message : t({ zh: "保存失败。", en: "Save failed." }));
     } finally {
       setSaving(false);
     }
@@ -257,17 +260,17 @@ function ModelStep({
   return (
     <div className="onboarding-body">
       <p className="onboarding-lead">
-        {required?.description || t({ zh: "会话和每个节点用的主模型。", en: "The main model used by sessions and every node." })}
+        {required?.description || t({ zh: "会话使用的主模型。", en: "The main model your sessions use." })}
         {" "}{t(keyStorageLine(credentialKeyStorage))}
       </p>
       {sharedWithOthers && (
-        <p className="onboarding-lead">{t({ zh: "这条连接归你自己用。机构统一的那些由管理员配，不受这里影响。", en: "This connection is yours alone. Institution-wide ones are configured by an administrator and are unaffected by this." })}</p>
+        <p className="onboarding-lead">{t({ zh: "这里添加的模型只供你自己使用；机构共享的模型由管理员配置。", en: "The model you add here is for you only; institution-wide models are configured by an administrator." })}</p>
       )}
       <ModelConnectionFields draft={main} onChange={setMain} idPrefix="onboarding-main" />
 
       {optional.length > 0 && (
         <details className="onboarding-optional">
-          <summary>{t({ zh: `还可以配 ${optional.length} 个可选模型（跳过不影响开工）`, en: `${optional.length} optional models (skipping them does not block you)` })}</summary>
+          <summary>{t({ zh: `可选模型（${optional.length} 个，可以跳过）`, en: `Optional models (${optional.length}, can be skipped)` })}</summary>
           {optional.map((role) => {
             const draft = extras[role.id];
             return (
@@ -281,7 +284,7 @@ function ModelStep({
                       onChange={(next) => setExtras({ ...extras, [role.id]: next })} />
                   : <button type="button" className="onboarding-skip"
                       onClick={() => setExtras({ ...extras, [role.id]: emptyDraft() })}>
-                      {t({ zh: "配一个", en: "Add one" })}
+                      {t({ zh: "添加", en: "Add one" })}
                     </button>}
               </div>
             );
@@ -292,42 +295,42 @@ function ModelStep({
       {error && <p className="onboarding-error" role="alert">{error}</p>}
       <footer className="onboarding-actions">
         <button type="button" className="onboarding-skip" onClick={onSkip}>
-          {t({ zh: "先跳过 —— 没有模型开不了会话", en: "Skip — without a model you cannot start a session" })}
+          {t({ zh: "跳过（没有模型将无法开始会话）", en: "Skip (sessions cannot start without a model)" })}
         </button>
         <Button size="sm" variant="primary" loading={saving} onClick={() => void save()}
           iconRight={<ArrowRight size={14} />}>
-          {lastStep ? t({ zh: "存好，开始用", en: "Save and start" }) : t({ zh: "存好，继续", en: "Save and continue" })}
+          {lastStep ? t({ zh: "保存并开始", en: "Save and start" }) : t({ zh: "保存并继续", en: "Save and continue" })}
         </Button>
       </footer>
     </div>
   );
 }
 
-/** 最后一步：打开时先看什么。纯偏好，没有"没配好"这回事，所以它不单独构成开场。 */
+/** 最后一步：启动时显示哪一页。纯偏好，没有"没配好"这回事，所以它不单独构成新手引导。 */
 function LandingStep({ onDone, lastStep }: { onDone: () => void; lastStep: boolean }) {
   const t = useT();
   const preference = useInterfaceSettings();
   const [choice, setChoice] = useState<DefaultLanding>(preference.settings.default_landing);
   return (
     <div className="onboarding-body">
-      <p className="onboarding-lead">{t({ zh: "每次打开这个应用先落在哪一页。随时能在「设置 → 通用」里改。", en: "Where this app lands each time you open it. Change it any time in Settings → General." })}</p>
+      <p className="onboarding-lead">{t({ zh: "选择每次打开应用时显示的页面，之后可以在「设置 → 通用」里修改。", en: "Choose the page shown each time you open the app. You can change it later in Settings → General." })}</p>
       <div className="onboarding-landing">
         {LANDING_OPTIONS.map((option) => (
           <label key={option.value} className={choice === option.value ? "is-chosen" : undefined}>
             <input type="radio" name="onboarding-landing" value={option.value} checked={choice === option.value}
               onChange={() => setChoice(option.value)} />
-            <span>{t(option.label)}</span>
+            <span>{t(option.label)}{option.hint && <small>{t(option.hint)}</small>}</span>
           </label>
         ))}
       </div>
       <footer className="onboarding-actions">
-        <button type="button" className="onboarding-skip" onClick={onDone}>{t({ zh: "用默认的", en: "Keep the default" })}</button>
+        <button type="button" className="onboarding-skip" onClick={onDone}>{t({ zh: "使用默认设置", en: "Keep the default" })}</button>
         <Button size="sm" variant="primary" onClick={() => {
           if (choice !== preference.settings.default_landing) {
             void preference.save({ ...preference.settings, default_landing: choice });
           }
           onDone();
-        }} iconRight={<ArrowRight size={14} />}>{t({ zh: "开始用", en: "Start" })}</Button>
+        }} iconRight={<ArrowRight size={14} />}>{t({ zh: "开始使用", en: "Start" })}</Button>
       </footer>
     </div>
   );

@@ -1081,3 +1081,23 @@ def test_a_directory_over_the_checkpoint_budget_is_excluded_whole_and_reported(
     assert f"{prefix}/small/note.md" in checkpoint.paths, "没超预算的子目录照常入库"
     assert not any(p.startswith(f"{prefix}/extracted/") for p in checkpoint.paths)
     assert checkpoint.commit_sha, "其余文件必须照常提交，不许全损"
+
+
+@pytest.mark.parametrize(("lang", "memory_title", "objective"), [
+    ("zh", "# 项目记忆", "## 研究目标"),
+    ("en", "# Project memory", "## Research objective"),
+])
+def test_a_new_project_opens_in_the_language_it_was_created_in(
+    tmp_path: Path, lang: str, memory_title: str, objective: str
+) -> None:
+    """打开新项目第一眼就是 PROJECT.md / MEMORY.md：中文界面建的，就不该是一页英文模板。"""
+    root = Path(_repository(tmp_path).initialize_project(
+        project_id="project-lang", name="界面语言", description=None,
+        research_domain=None, owner_id="user-1", lang=lang,
+    ).path)
+    memory = (root / "MEMORY.md").read_text(encoding="utf-8")
+    project = (root / "PROJECT.md").read_text(encoding="utf-8")
+    assert memory.startswith(memory_title)
+    assert project.startswith("# 界面语言") and objective in project
+    han = any("一" <= ch <= "鿿" for ch in memory)
+    assert han is (lang == "zh"), f"{lang} 项目的 MEMORY.md 语言不对：{memory[:80]!r}"

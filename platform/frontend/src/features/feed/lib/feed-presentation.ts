@@ -66,10 +66,10 @@ export function feedDate(item: FeedItem, lang: Language): string {
   if (typeof discovered === "string") {
     const date = new Date(discovered);
     if (!Number.isNaN(date.getTime())) {
-      return say({ zh: "发现于 {date}", en: "Found {date}" }, lang, { date: date.toISOString().slice(0, 10) });
+      return say({ zh: "收录于 {date}", en: "Added {date}" }, lang, { date: date.toISOString().slice(0, 10) });
     }
   }
-  return say({ zh: "日期未提供", en: "Date unavailable" }, lang);
+  return say({ zh: "日期不详", en: "Date unknown" }, lang);
 }
 
 /**

@@ -19,10 +19,10 @@ export default function UsageSettingsPage() {
 
   return (
     <div className="settings-page usage-settings-page">
-      <header className="settings-page-header"><h1>{t({ zh: "用量", en: "Usage" })}</h1><p>{t({ zh: "这个账号记录在案的会话、执行、token、重试与已知模型费用。", en: "Recorded Sessions, Runs, tokens, retries, and known model cost for your account." })}</p></header>
+      <header className="settings-page-header"><h1>{t({ zh: "用量", en: "Usage" })}</h1><p>{t({ zh: "你的会话用了多少 token、花了多少钱。", en: "How many tokens your sessions used and what they cost." })}</p></header>
 
       {usage.isLoading && !usage.data && <div className="settings-page-loading"><Skeleton height={110} /><Skeleton height={180} /><Skeleton height={220} /></div>}
-      {usage.isError && <Empty title={t({ zh: "读不到用量", en: "Usage unavailable" })} hint={t({ zh: "服务端没有返回用量账本。", en: "The server did not return the recorded usage ledger." })} />}
+      {usage.isError && <Empty title={t({ zh: "无法加载用量", en: "Couldn't load usage" })} hint={t({ zh: "请稍后重试。", en: "Please try again later." })} />}
 
       {usage.data && (
         <>
@@ -36,7 +36,7 @@ export default function UsageSettingsPage() {
           </section>
 
           <section className="settings-compact-section">
-            <div className="settings-compact-heading"><div><h2>{t({ zh: "近 365 天", en: "365-day activity" })}</h2><p>{t({ zh: "一个方块是一天，颜色深浅按当天记录的 token 算。", en: "Each square is one calendar day; intensity is based on recorded tokens." })}</p></div><small>{t({ zh: "最长连续 {count} 天", en: "{count} day longest streak" }, { count: usage.data.longest_streak })}</small></div>
+            <div className="settings-compact-heading"><div><h2>{t({ zh: "近 365 天", en: "365-day activity" })}</h2><p>{t({ zh: "每格是一天，颜色越深 token 用得越多。", en: "Each square is one day; darker means more tokens." })}</p></div><small>{t({ zh: "最长连续 {count} 天", en: "{count} day longest streak" }, { count: usage.data.longest_streak })}</small></div>
             <div className="usage-heatmap-wrap">
               <div className="usage-heatmap" aria-label={t({ zh: "近 365 天 token 活动", en: "365-day token activity" })}>
                 {heatmap.map((day) => <span key={day.date} className={`level-${usageIntensity(day.total_tokens, heatmapMax)}`} title={t({ zh: "{date} · {tokens} token · {runs} 次执行", en: "{date} · {tokens} tokens · {runs} Runs" }, { date: day.date, tokens: day.total_tokens.toLocaleString(), runs: day.run_count })} />)}
@@ -46,18 +46,18 @@ export default function UsageSettingsPage() {
           </section>
 
           <section className="settings-compact-section">
-            <div className="settings-compact-heading"><div><h2>{t({ zh: "近 90 天", en: "Recent 90 days" })}</h2><p>{t({ zh: "每天记录的 token 量，悬停看准确数值。", en: "Daily recorded token volume; hover a bar for exact values." })}</p></div></div>
+            <div className="settings-compact-heading"><div><h2>{t({ zh: "近 90 天", en: "Recent 90 days" })}</h2><p>{t({ zh: "每天的 token 用量，鼠标悬停可看具体数值。", en: "Daily token usage; hover a bar for exact values." })}</p></div></div>
             <div className="usage-bar-chart" aria-label={t({ zh: "近 90 天 token 历史", en: "90-day token history" })}>
               {recent.map((day) => <span key={day.date} title={t({ zh: "{date} · {tokens} token · {runs} 次执行", en: "{date} · {tokens} tokens · {runs} Runs" }, { date: day.date, tokens: day.total_tokens.toLocaleString(), runs: day.run_count })} style={{ height: `${recentMax && day.total_tokens ? Math.max(2, (day.total_tokens / recentMax) * 100) : 0}%` }} />)}
             </div>
           </section>
 
           <section className="settings-compact-section">
-            <div className="settings-compact-heading"><div><h2>{t({ zh: "token 与费用覆盖", en: "Tokens and cost coverage" })}</h2><p>{t({ zh: "只有那一轮真的记下了金额和币种，这里才显示费用。", en: "Cost is shown only where the Run recorded a value and currency." })}</p></div></div>
+            <div className="settings-compact-heading"><div><h2>{t({ zh: "token 与费用", en: "Tokens and cost" })}</h2><p>{t({ zh: "费用只统计记录了金额的执行。", en: "Cost counts only runs that recorded an amount." })}</p></div></div>
             <dl className="settings-row-group settings-account-group">
-              <div className="settings-row"><dt><strong>{t({ zh: "输入 token", en: "Prompt tokens" })}</strong><small>{t({ zh: "模型调用记录的输入量", en: "Input recorded by model calls" })}</small></dt><dd>{usage.data.prompt_tokens.toLocaleString()}</dd></div>
-              <div className="settings-row"><dt><strong>{t({ zh: "输出 token", en: "Completion tokens" })}</strong><small>{t({ zh: "模型调用记录的输出量", en: "Output recorded by model calls" })}</small></dt><dd>{usage.data.completion_tokens.toLocaleString()}</dd></div>
-              <div className="settings-row"><dt><strong>{t({ zh: "已知费用", en: "Known cost" })}</strong><small>{t({ zh: "{known} 次运行带着费用，{unknown} 次没有。", en: "{known} Runs include cost; {unknown} do not." }, { known: usage.data.cost_known_runs, unknown: usage.data.cost_unknown_runs })}</small></dt><dd>{cost ?? t({ zh: "读不到 · 没有记录币种", en: "Unavailable · currency not recorded" })}</dd></div>
+              <div className="settings-row"><dt><strong>{t({ zh: "输入 token", en: "Prompt tokens" })}</strong></dt><dd>{usage.data.prompt_tokens.toLocaleString()}</dd></div>
+              <div className="settings-row"><dt><strong>{t({ zh: "输出 token", en: "Completion tokens" })}</strong></dt><dd>{usage.data.completion_tokens.toLocaleString()}</dd></div>
+              <div className="settings-row"><dt><strong>{t({ zh: "已知费用", en: "Known cost" })}</strong><small>{t({ zh: "{known} 次执行有费用记录，{unknown} 次没有。", en: "{known} Runs include cost; {unknown} do not." }, { known: usage.data.cost_known_runs, unknown: usage.data.cost_unknown_runs })}</small></dt><dd>{cost ?? t({ zh: "无数据（未记录币种）", en: "No data (currency not recorded)" })}</dd></div>
             </dl>
           </section>
         </>

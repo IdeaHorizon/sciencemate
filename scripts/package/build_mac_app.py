@@ -82,6 +82,11 @@ BACKEND = REPO / "platform" / "backend"
 FRONTEND = REPO / "platform" / "frontend"
 SHELL = REPO / "platform" / "desktop" / "mac"
 DIST = REPO / "dist"
+#: 打出来的 `.app` 放这里，不放 `DIST` 根上。Spotlight 把磁盘上每个 `.app` 都当成"装好的应用"
+#: 列出来，于是打包机上搜一下 ScienceMate 是十几份新旧不一的构建产物（2026-11-03：16 份，只有
+#: /Applications 那份是装的）。目录名以 `.noindex` 结尾 Spotlight 就不进去；目录里放
+#: `.metadata_never_index` 在 macOS 26.3 上实测**不管用**（探针 app 照样被收录）。
+APP_DIR = DIST / "app.noindex"
 
 APP_NAME = "ScienceMate"
 BINARY_NAME = "ScienceMate"
@@ -542,20 +547,24 @@ def verify_the_signature(app: Path) -> None:
 
 def make_the_dmg(app: Path, edition: str = "personal") -> Path:
     step("打 dmg")
-    staging = DIST / "dmg"
-    shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True)
-    # `ditto` 而不是 `cp -R`：**cp 不保留硬链接**。git 的 libexec 里 143 个命令
-    # 是同一个 inode，`cp -R` 会把它们展开成 143 份实体副本 —— 实测 dmg 因此
-    # 从 213 MB 涨到 499 MB，比它装的那个 .app（409 MB）还大。
-    run(["ditto", str(app), str(staging / app.name)])
-    os.symlink("/Applications", staging / "Applications")
+    # 暂存目录只活到 hdiutil 打完：它里面是一整份 .app，留下来就是每次打包多一份装得起来的
+    # 副本（原来固定在 `dist/dmg/`，从没删过）。名字带 `.noindex`，活着的那几分钟 Spotlight 也不收。
+    DIST.mkdir(exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix="dmg-", suffix=".noindex", dir=DIST))
     # 专业版的 dmg 名带 -Pro：两种发行的桌面包内容几乎一样，名字是人分得清它们的唯一办法。
     suffix = "-Pro" if edition == "pro" else ""
     dmg = DIST / f"{APP_NAME.replace(' ', '-')}{suffix}-{payload_release.the_version()}-arm64.dmg"
-    dmg.unlink(missing_ok=True)
-    run(["hdiutil", "create", "-volname", APP_NAME, "-srcfolder", str(staging),
-         "-ov", "-format", "UDZO", str(dmg)], capture_output=True)
+    try:
+        # `ditto` 而不是 `cp -R`：**cp 不保留硬链接**。git 的 libexec 里 143 个命令
+        # 是同一个 inode，`cp -R` 会把它们展开成 143 份实体副本 —— 实测 dmg 因此
+        # 从 213 MB 涨到 499 MB，比它装的那个 .app（409 MB）还大。
+        run(["ditto", str(app), str(staging / app.name)])
+        os.symlink("/Applications", staging / "Applications")
+        dmg.unlink(missing_ok=True)
+        run(["hdiutil", "create", "-volname", APP_NAME, "-srcfolder", str(staging),
+             "-ov", "-format", "UDZO", str(dmg)], capture_output=True)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     print(f"  {dmg}（{dmg.stat().st_size // 1024 // 1024} MB）")
     return dmg
 
@@ -955,8 +964,8 @@ def main(argv: list[str] | None = None) -> int:
                 "  要么：用后端的 venv 跑这个脚本（它本来就带）"
             )
 
-    DIST.mkdir(exist_ok=True)
-    app = DIST / f"{APP_NAME}.app"
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    app = APP_DIR / f"{APP_NAME}.app"
     shutil.rmtree(app, ignore_errors=True)
     (app / "Contents" / "Resources").mkdir(parents=True)
 

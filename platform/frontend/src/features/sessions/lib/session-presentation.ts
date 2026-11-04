@@ -11,7 +11,7 @@ import type { ResearchSession, SessionPendingApproval } from "../types";
  */
 export function sessionRevisionLabel(session: ResearchSession, lang: Language) {
   return session.headCommitSha === null
-    ? say({ zh: "读不到版本信息", en: "Revision data unavailable" }, lang)
+    ? say({ zh: "无法获取版本信息", en: "Revision unavailable" }, lang)
     : `main · ${session.headCommitSha.slice(0, 8)}`;
 }
 
@@ -51,10 +51,14 @@ export function sessionIsDrivenBy(
  * 不是"我能不能开"，那是另一个问题。
  */
 
-export function sessionDriverLabel(session: ResearchSession, lang: Language) {
+/**
+ * 最近使用者的名字（最近一条用户消息的作者）。没有人发过言、或会话已归档时
+ * 不占一格 —— 返回 null。条目名「最近使用者」由调用方给，值里不再重复。
+ */
+export function sessionDriverLabel(session: ResearchSession) {
   if (session.lifecycleStatus === "archived") return null;
-  if (!sessionHasActiveDriver(session)) return say({ zh: "没人在开车", en: "No active driver" }, lang);
-  return `${session.driverLabel} · ${say({ zh: "驾驶者", en: "driver" }, lang)}`;
+  if (!sessionHasActiveDriver(session)) return null;
+  return session.driverLabel;
 }
 
 /**
@@ -75,19 +79,13 @@ export function sessionAboutFacts(
   }];
   if (sessionHasAdvancedBase(session)) {
     facts.push({
-      term: say({ zh: "基线", en: "Baseline" }, lang),
-      value: say({ zh: "项目已往前走了 {count} 个提交", en: "The Project has moved ahead by {count} commits" }, lang, { count: session.behindBy }),
+      term: say({ zh: "项目更新", en: "Project updates" }, lang),
+      value: say({ zh: "项目有 {count} 个新提交尚未合入这个会话", en: "The project has {count} new commit{s} not yet in this session" }, lang, { count: session.behindBy, s: session.behindBy === 1 ? "" : "s" }),
     });
   }
-  const driver = sessionDriverLabel(session, lang);
-  if (driver) facts.push({ term: say({ zh: "驾驶者", en: "Driver" }, lang), value: driver });
+  const driver = sessionDriverLabel(session);
+  if (driver) facts.push({ term: say({ zh: "最近使用者", en: "Last used by" }, lang), value: driver });
   return facts;
-}
-
-export function sessionFrozenModelLabel(modelBackendName: string | null | undefined, lang: Language) {
-  const name = modelBackendName?.replace(/\s*\(environment\)\s*$/i, "").trim()
-    || say({ zh: "项目模型", en: "Project model" }, lang);
-  return say({ zh: "{name} · 这个会话固定用它", en: "{name} · fixed for this Session" }, lang, { name });
 }
 
 /**
@@ -128,7 +126,7 @@ export function toChatPause(
   }));
   const offer = pending.offer;
   return {
-    question: pending.prompt ?? say({ zh: "这一轮在等你回答。", en: "This Run is waiting for your answer." }, lang),
+    question: pending.prompt ?? say({ zh: "正在等你回答。", en: "Waiting for your answer." }, lang),
     // 逐字的待执行内容。批准一个看不见内容的高危操作等于没有审批 ——
     // 这一段丢了，审批 UI 就退化成一个"确定/取消"弹窗。
     context: pending.context ?? undefined,

@@ -320,7 +320,9 @@ def _validated_roles(requested: list[str] | None, lang: Language) -> list[str]:
     if unknown:
         raise HTTPException(
             status_code=422,
-            detail=f"Unknown model roles {unknown}; valid roles are {sorted(known)}",
+            detail=say({"zh": "请求无效：未知的模型角色 {unknown}（可用的角色：{known}）",
+                        "en": "Invalid request: unknown model roles {unknown}; valid roles are {known}"},
+                       lang, unknown=unknown, known=sorted(known)),
         )
     # 去重保序：同一个角色写两遍不是错误，但存两份就会在别处被数两次。
     return list(dict.fromkeys(requested))
@@ -421,7 +423,9 @@ async def make_model_backend_role_default(
     if model_role_spec(role) is None:
         raise HTTPException(
             status_code=422,
-            detail=f"Unknown model role {role!r}; valid roles are {sorted(model_role_ids())}",
+            detail=say({"zh": "请求无效：未知的模型角色 {role}（可用的角色：{known}）",
+                        "en": "Invalid request: unknown model role {role}; valid roles are {known}"},
+                       language_for(user), role=repr(role), known=sorted(model_role_ids())),
         )
     config = await get_visible_backend(db, user, backend_id)
     # 设默认是全场最高风险的一次声明，先重探再判 —— 不吃可能过期的旧观测。
@@ -444,19 +448,31 @@ async def get_model_backends(
     ]
 
 
+def _role_titles(roles: list[str], lang: Language) -> str:
+    """几个角色给人看的名字（「主推理模型」「资讯挖掘模型」），不显示角色 id。目录读不到就说 id。"""
+    try:
+        titles = {spec.id: (spec.title_en if lang == "en" else "") or spec.title for spec in model_role_catalog()}
+    except ModelRoleCatalogError:
+        titles = {}
+    names = [titles.get(role, role) for role in roles]
+    if lang == "en":
+        return ", ".join(f"“{name}”" for name in names)
+    return "、".join(f"「{name}」" for name in names)
+
+
 def _not_yours_to_change(config: ModelBackendConfig, lang: Language) -> HTTPException:
     source = where_it_comes_from(config)
     if source:
         return HTTPException(status_code=403, detail=say(
-            {"zh": "「{name}」是「{organisation}」提供的，由那个组织的管理员维护。不想用它，就在模型角色里换一条。",
-             "en": "\"{name}\" is provided by \"{organisation}\" and maintained by that organisation's "
-                   "administrators. If you do not want it, pick another connection for the model role."},
+            {"zh": "「{name}」由「{organisation}」提供，只有该组织的管理员可以修改。如不想使用，请在「模型角色」中换一个连接。",
+             "en": "“{name}” is provided by “{organisation}”, and only its administrators can change it. "
+                   "To stop using it, choose another connection under Model roles."},
             lang, name=config.display_name, organisation=source["organisation_name"]))
     return HTTPException(status_code=403, detail=say(
-        {"zh": "这条连接不归你改", "en": "Not allowed to modify this backend scope"}, lang))
+        {"zh": "你没有权限修改这个连接", "en": "You do not have permission to change this connection"}, lang))
 
 
-def _endpoint_taken(existing: ModelBackendConfig) -> HTTPException:
+def _endpoint_taken(existing: ModelBackendConfig, lang: Language) -> HTTPException:
     """撞了唯一键要说的话。
 
     在此之前这里什么都不说：`IntegrityError` 一路冒到顶，FastAPI 交回
@@ -467,14 +483,14 @@ def _endpoint_taken(existing: ModelBackendConfig) -> HTTPException:
     所以这条 409 必须点名**是哪一条**：display_name 让他在列表里找得到它，
     base_url 让他判断自己是想改那条、还是真要新建一条指向别处的。
     """
-    at = existing.base_url or "the provider's default endpoint"
+    at = existing.base_url or say({"zh": "厂商默认地址", "en": "the provider's default endpoint"}, lang)
     return HTTPException(
         status_code=409,
-        detail=(
-            f"This scope already has a connection to {existing.provider}/{existing.model} "
-            f"at {at} — “{existing.display_name}”. Edit that connection, or point this "
-            "one at a different endpoint."
-        ),
+        detail=say({
+            "zh": "已有一个连接指向 {target}（{at}）：「{name}」。请编辑那个连接，或改用其他地址。",
+            "en": "A connection to {target} at {at} already exists: “{name}”. Edit that connection, "
+                  "or use a different endpoint.",
+        }, lang, target=f"{existing.provider}/{existing.model}", at=at, name=existing.display_name),
     )
 
 
@@ -487,6 +503,7 @@ async def _endpoint_clash(
     model: str,
     base_url: str | None,
     exclude_id: str | None = None,
+    lang: Language = "zh",
 ) -> HTTPException | None:
     """写入撞了唯一键之后：查出到底是谁占着。查不到就返回 None。
 
@@ -510,7 +527,7 @@ async def _endpoint_clash(
         base_url=base_url,
         exclude_id=exclude_id,
     )
-    return _endpoint_taken(raced) if raced is not None else None
+    return _endpoint_taken(raced, lang) if raced is not None else None
 
 
 @router.post("/model-backends", status_code=201)
@@ -524,7 +541,8 @@ async def create_model_backend(
     if data.provider == "demo":
         source = "none"
     if source == "encrypted" and not data.api_key:
-        raise HTTPException(status_code=422, detail="api_key is required for encrypted credentials")
+        raise HTTPException(status_code=422, detail=say(
+            {"zh": "请填写 API 密钥", "en": "Enter an API key"}, lang))
     identity = dict(
         scope_kind=scope_kind,
         scope_id=scope_id,
@@ -549,7 +567,7 @@ async def create_model_backend(
             db.add(config)
             await db.flush()
     except IntegrityError as exc:
-        clash = await _endpoint_clash(db, **identity)
+        clash = await _endpoint_clash(db, **identity, lang=lang)
         if clash is None:
             raise
         raise clash from exc
@@ -606,7 +624,7 @@ async def update_model_backend(
                 config.credential_source = "encrypted"
             await db.flush()
     except IntegrityError as exc:
-        clash = await _endpoint_clash(db, **identity, exclude_id=backend_id_value)
+        clash = await _endpoint_clash(db, **identity, exclude_id=backend_id_value, lang=lang)
         if clash is None:
             raise
         raise clash from exc
@@ -681,10 +699,11 @@ async def delete_model_backend(
     if config.default_for_roles:
         raise HTTPException(
             status_code=409,
-            detail=(
-                "Cannot delete a backend that is the scope default for roles "
-                f"{sorted(config.default_for_roles)}"
-            ),
+            detail=say({
+                "zh": "这个连接是{roles}的默认连接，请先换一个连接再删除。",
+                "en": "This connection is the default for {roles}. Choose another connection first, "
+                      "then delete it.",
+            }, lang, roles=_role_titles(sorted(config.default_for_roles), lang)),
         )
     await db.delete(config)
     await db.flush()

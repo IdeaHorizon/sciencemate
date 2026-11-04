@@ -123,3 +123,29 @@ def test_设置页上的说明不带_markdown_记号():
     for spec in catalog():
         for text in (spec.description, spec.description_en):
             assert "**" not in text, f"角色 {spec.id!r} 的说明里有 ** —— 设置页上会原样显示：{text!r}"
+
+
+#: 中文界面上这几句里允许出现的英文：缩写和专名。其余英文单词（run、figure、draft、
+#: transcript、visual_review_capability……）都是写给开发者的。
+_ALLOWED_ASCII_IN_CHINESE = {"VLM", "arXiv"}
+#: 英文那几句里同样不许出现的内部说法。
+_INTERNAL_IN_ENGLISH = ("orchestrator", "producing node", "slot", "transcript", "visual_review_capability",
+                        "blast radius", "system prompt", "KB")
+
+
+def test_写给人的说明不带内部说法():
+    """11-04 在设置页和首次引导里读到的原话：「调度器与全部 producing 节点的对话/推理主模型」
+    「这个槽空着，任何 run 都开不了工」「产物标记 visual_review_capability=absent」「爆炸半径」。
+    这些字直接摆在设置页和新手引导上，读者是科研人员。"""
+    for spec in catalog():
+        for field in ("title", "description", "absence_impact"):
+            text = getattr(spec, field)
+            ascii_words = set(re.findall(r"[A-Za-z_][A-Za-z_=.]*", text)) - _ALLOWED_ASCII_IN_CHINESE
+            assert not ascii_words, f"角色 {spec.id!r} 的 {field} 里有英文内部词 {sorted(ascii_words)}：{text!r}"
+            for word in ("调度器", "节点", "槽", "爆炸半径", "工具面"):
+                assert word not in text, f"角色 {spec.id!r} 的 {field} 里有「{word}」：{text!r}"
+        for field in ("title_en", "description_en", "absence_impact_en"):
+            text = getattr(spec, field)
+            for word in _INTERNAL_IN_ENGLISH:
+                assert word.lower() not in text.lower(), f"角色 {spec.id!r} 的 {field} 里有 {word!r}：{text!r}"
+

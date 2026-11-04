@@ -1,9 +1,45 @@
 # Experiment 节点路线图
 
+2026-11-04 维护者整合：#1258 的已有环境与 SSH Slurm 增量按当前用户授权进行合并验收。执行协议的实测、修复和范围见 [交接说明](docs/flexible_execution_handoff.md) 与 [证据摘要](docs/acceptance-20261104.json)。以下历史 060 整体科研就绪状态不因这个协议验收自动变为通过。
+
+
 这是唯一的当前开发看板，记录当前主线而非全量功能/缺陷清单，不是运行时契约或模型填写的表格。长期规则见
 [AGENTS.md](AGENTS.md)，正式架构见 [governing document](docs/experiment_governing_v3.md)。
 信箱只保留讨论与交接，报告保存详细证据；本页维护目标、取舍、进度和下一步，避免复制规则。
 代码、测试数量和历史“已完成”标记不自动成为规范或就绪证明。
+
+## Windows → SSH → Slurm 最小增量（评审候选）
+
+分支 `lujy/experiment-flexible-environments`，接续 `352cce8f`，已合入 main
+`51de3cd2`（合并提交 `b5efcc0b`）。本轮自主修改仅位于 `nodes/experiment/**`，
+已有构建环境灵活性改动保留。按用户要求提交到个人远端分支并以 WIP PR 申请评审；
+依赖尚未合并的 #1252，当前相对 main 的差异包含该 PR 的持久化修复，待其合并后
+再同步主线。未部署，也未运行真实集群作业；不宣称已具备正式合并条件。
+
+在原提交/监控/取消/恢复工具上增加可选 SSH 目标，复用 OpenSSH 配置、既有授权及
+intent/job/nonce。输入上传、Linux 路径处理、原作业身份核对、断线恢复与结果回传
+接入同一协议；取消响应不替代物理终态，下载不替代计算。原终态冻结后，回传重试
+只追加同一账本中的传输事实，不重投、不改过去的生产证据。
+
+不新增环境登记、服务部署、安装流程、WSL 后端、MPI/array 或第二个作业状态机。
+仍限现有单任务 CPU/单 GPU 请求；通用 WSL/SSH 隔离及 exe 凭据/网络能力由 Core
+负责。开发回归与 POSIX 文件原语验证不等于 exe 或真实 Slurm 全链验收。
+接口、回传预算及真实性边界见 [执行环境交接](docs/flexible_execution_handoff.md)。
+
+本地定向验证：Windows 162 项通过、0 跳过（SSH 传输、生命周期、恢复、
+文件回传、事实投影、ACK 和唯一终态）；真实 POSIX 文件系统上的 helper 8 项通过。
+Windows 子进程隐藏启动，标准输入输出显式传递。文件收据保留同一文件实例与
+内容哈希检查，ctime 仅在同类 stat API 内比较，避免 Windows API 语义差异误拒。
+此前五组既有回归与 HEAD 对照均为 298 通过、35 失败、4 跳过，失败集合一致；
+这项基线对照不表示全套回归已绿。尚须 exe 内 SSH 能力与真实集群最终树验收。
+
+合入 `51de3cd2` 后复验仍为 Windows 162 通过、POSIX helper 8 通过；
+框架的裸 shell 工具面检查 3 项通过。拒绝点分类登记检查未通过：POSIX 上
+`resource_manager.py` 为 122/96、`safe_bash.py` 为 34/27、`slurm_ssh.py`
+为 7/0（现值/历史基线，已有 registry 额度不足）。需框架 owner 协同核对并更新
+共享登记；本轮遵守用户仅修改 Experiment 的范围，不修改根 registry 或基线。
+Windows 扫描器还把相对路径转为反斜杠，与登记键不一致；不能把这项全仓误报
+当作节点新增问题。#1252 的 `docs-html/tools/finish.html` 同步亦仍需框架侧收尾。
 
 ## 本轮最小改进：合法恢复、记忆减法、事实投影（本地候选）
 

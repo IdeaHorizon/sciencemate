@@ -35,9 +35,9 @@ export function UpdateBanner() {
     <div className="update-banner" role="status">
       {needsReinstall && phase === "idle" ? (
         <>
-          <span>{t({ zh: "有新版本 {version}，这次改动了应用本体，需要重新安装才能拿到。", en: "Version {version} is out; it changes the app itself, so it needs a fresh install." }, { version: available ?? "" })}</span>
+          <span>{t({ zh: "有新版本 {version}，这次需要重新安装。", en: "Version {version} is available and needs a fresh install." }, { version: available ?? "" })}</span>
           {status?.reinstall_url ? (
-            <a href={status.reinstall_url} target="_blank" rel="noreferrer">{t({ zh: "去下载安装包", en: "Get the installer" })}</a>
+            <a href={status.reinstall_url} target="_blank" rel="noreferrer">{t({ zh: "下载安装包", en: "Download the installer" })}</a>
           ) : null}
         </>
       ) : phase === "installing" || phase === "restarting" ? (
@@ -46,19 +46,19 @@ export function UpdateBanner() {
         <>
           <span>{sayItWasUpdated(justUpdated.from, justUpdated.to, t)}</span>
           {justUpdated.notes_url ? (
-            <a href={justUpdated.notes_url} target="_blank" rel="noreferrer">{t({ zh: "看看改了什么", en: "What changed" })}</a>
+            <a href={justUpdated.notes_url} target="_blank" rel="noreferrer">{t({ zh: "查看更新内容", en: "What's new" })}</a>
           ) : null}
           <button type="button" onClick={() => void acknowledge()}>{t({ zh: "知道了", en: "Got it" })}</button>
         </>
       ) : staged && !available ? (
         <>
           <span>{t({ zh: "更新 {version} 已就绪，重启后生效。", en: "Update {version} is ready; it takes effect after a restart." }, { version: staged ?? "" })}</span>
-          <button type="button" onClick={() => void restart()}>{t({ zh: "现在重启", en: "Restart now" })}</button>
+          <button type="button" onClick={() => void restart()}>{t({ zh: "立即重启", en: "Restart now" })}</button>
         </>
       ) : (
         <>
           <span>{t({ zh: "有新版本 {version}", en: "Version {version} is available" }, { version: available ?? "" })}{status?.installed_version ? t({ zh: `（当前 ${status.installed_version}）`, en: `(currently ${status.installed_version})` }) : ""}</span>
-          <button type="button" onClick={() => void install(t({ zh: "没有可装的版本", en: "No version available to install" }))}>{t({ zh: "现在更新", en: "Update now" })}</button>
+          <button type="button" onClick={() => void install(t({ zh: "没有可安装的版本", en: "No version available to install" }))}>{t({ zh: "立即更新", en: "Update now" })}</button>
         </>
       )}
       {phase === "failed" && problem ? <em className="update-banner-problem">{problem}</em> : null}
