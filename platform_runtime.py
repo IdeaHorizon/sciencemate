@@ -48,6 +48,7 @@ import tempfile
 import time
 import threading
 import uuid
+from functools import lru_cache
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -97,12 +98,13 @@ def _diagnose(text: str) -> None:
         stream.flush()
 
 
+@lru_cache(maxsize=1)
 def _code_version() -> str:
-    """worker 实际跑的代码版本（git sha），进注册表。
+    """Worker 启动时的版本：源码用 git sha，打包版用已有 PAYLOAD_VERSION。
 
     活 run 与部署目录的版本从此可对账 ——「跑的哪版」看进程注册表，不看
-    HEAD（"别在活的 run 底下换分支"的判据来源）。拿不到就空串：这是
-    增强字段，不是前提，没有 git 的部署形态（打包分发）不该因此起不来。
+    HEAD（"别在活的 run 底下换分支"的判据来源）。结果在进程内固定，
+    不把磁盘后续的版本变化冒充为这个 Worker 已加载的版本。
     """
     import subprocess
 
@@ -112,8 +114,13 @@ def _code_version() -> str:
             capture_output=True, text=True, timeout=5,
             cwd=str(Path(__file__).resolve().parent),
         )
-        return out.stdout.strip() if out.returncode == 0 else ""
+        if out.returncode == 0:
+            return out.stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        return (Path(__file__).resolve().parent / "PAYLOAD_VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
         return ""
 
 

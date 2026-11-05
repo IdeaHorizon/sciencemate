@@ -854,6 +854,8 @@ register_tool(
             "DNS 解析得开，TCP 连接会被隔离层拒绝 —— 所以 `curl` / `wget` / "
             "`pip install` / `git clone|fetch|ls-remote` 远端仓库在这里**一定失败**，"
             "而且失败长得像「这台机器断网了」。它不是：宿主有网，是这条通道没有。"
+            "\n· SSH 连接与远程命令 → 用 `resource(action='connect')` 登记，"
+            "再用 `remote_exec` / `remote_job`；不要在此运行 ssh 或 socket 探测。"
             "\n· 只想读网页内容 → 用 `web_fetch`。"
             "\n· 要把源码 / 数据 / 权重 / 二进制**落盘** → 起 experiment 节点，由它走"
             "`describe_acquisition_capabilities` → `fetch_resource`（那条路在一次性边界里"

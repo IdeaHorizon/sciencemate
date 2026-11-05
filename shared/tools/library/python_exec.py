@@ -439,6 +439,8 @@ register_tool(
         description=(
             "在强制容器沙盒里执行 Python 代码字符串；默认无网络、宿主文件仅挂载本节点"
             "工作区和 run 目录，并强制内存/CPU/PID/时间/输出上限。"
+            "SSH 连接请用 `resource(action='connect')`，远程命令用 `remote_exec` / "
+            "`remote_job`；本工具的 socket 受限不能证明服务器不可达。"
             "默认 cwd = state.root/workspace/，timeout=300s。"
             "同一 RunAttempt 内与 Bash 共用严格 FIFO 队列；每次解释器都是全新进程，"
             "不会继承上一条命令的 cwd、环境变量或后台进程。"

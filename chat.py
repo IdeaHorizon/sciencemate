@@ -104,7 +104,7 @@ from core import closure as _closure  # noqa: E402
 from core import run_history
 from core.agent_loop import run_loop  # noqa: E402
 from core.bootstrap import bootstrap  # noqa: E402
-from core.context_engine import build_messages  # noqa: E402
+from core.context_engine import build_messages, _build_system_prompt  # noqa: E402
 from core.harness import DEFAULT_MAX_CONTEXT_TOKENS  # noqa: E402
 from core.llm import (  # noqa: E402
     LLMClient, LLMMessage, framework_notice, opening_system_prompt,
@@ -2191,6 +2191,13 @@ async def _run_one_turn_raw(state: State, harness,
         state.append_transcript("void_replay_turn")
         return await run_loop(harness, state, messages, llm)
 
+    # Saved messages are history; the opening instructions belong to this runtime.
+    # This is the shared CLI / App Server turn boundary, before any model call.
+    opening = opening_system_prompt(_build_system_prompt(harness, state))
+    if messages and messages[0].role == "system":
+        messages[0] = opening
+    else:
+        messages.insert(0, opening)
     await _inject_status_snapshot(state, messages)
     user_text = _preprocess_user_input(state, messages, user_text)
     # v3.7 L2 不可变锚：项目第一条真实用户输入逐字存盘（已存在则进 amendments，

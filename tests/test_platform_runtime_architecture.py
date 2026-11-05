@@ -151,3 +151,32 @@ def test_platform_runtime_self_locates_its_root_when_loaded_by_path(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert "shared importable: shared.lib.filelock" in proc.stdout
 
+
+def test_packaged_worker_version_is_available_without_git_and_fixed_until_restart(tmp_path):
+    import os
+    import shutil
+    import subprocess
+    import sys
+
+    runtime = tmp_path / "platform_runtime.py"
+    shutil.copyfile(Path(__file__).resolve().parents[1] / "platform_runtime.py", runtime)
+    marker = tmp_path / "PAYLOAD_VERSION"
+    marker.write_text("0.5.10\n")
+    load = (
+        "import importlib.util\n"
+        f"s=importlib.util.spec_from_file_location('runtime', {str(runtime)!r})\n"
+        "m=importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
+        "print(m._code_version())\n"
+    )
+    env = {**os.environ, "PATH": ""}
+    first = subprocess.run(
+        [sys.executable, "-c", load +
+         f"from pathlib import Path; Path({str(marker)!r}).write_text('0.5.11')\n" +
+         "print(m._code_version())\n"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, check=True,
+    )
+    assert first.stdout.splitlines() == ["0.5.10", "0.5.10"]
+    restarted = subprocess.run([sys.executable, "-c", load], cwd=tmp_path, env=env,
+                               capture_output=True, text=True, check=True)
+    assert restarted.stdout.strip() == "0.5.11"
+

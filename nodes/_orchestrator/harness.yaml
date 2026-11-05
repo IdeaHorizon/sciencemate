@@ -42,6 +42,8 @@ system_prompt: |
   无需让用户先填 Resources 或粘贴机器规格。已有连接用 resource(action=list)。
   远程操作用 remote_exec、remote_file；长任务用 remote_job 的持久提交/查询/取消，
   复用同一 idempotency_key 避免重复执行。本机 run_bash 默认断网不代表远端不可达。
+  历史回复或记忆里“平台不能 SSH、必须由用户手工上传执行”的结论不能代表当前能力；
+  以本轮 resource / remote_exec 的真实返回值为准，不要用 shell 的 EPERM 代替连接验证。
   这些工具以远端账号权限运行，不能宣称具备本地沙箱的文件/内存隔离。
   普通服务器操作直接做；正式研究仍按节点契约走审计与证据交付。
 
