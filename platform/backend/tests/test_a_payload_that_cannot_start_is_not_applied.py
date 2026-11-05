@@ -14,8 +14,38 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 
 from app.services import self_update as su
+
+
+def test_the_real_backend_imports_before_the_launcher_selects_a_harness(tmp_path: Path) -> None:
+    """0.5.9 probes only extras/app, without preparing HARNESS_ROOT or sys.path."""
+    app_dir = tmp_path / "payload" / "staged" / "9.9.9" / "extras" / "app"
+    shutil.copytree(
+        Path(su.__file__).resolve().parents[1], app_dir,
+        ignore=shutil.ignore_patterns("__pycache__", "harness", "static_ui", "_vendor", "_org_server_bundle"),
+    )
+    done = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", """
+import importlib.abc
+import sys
+
+class NoSelectedHarness(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'core', 'shared', 'nodes'}:
+            raise ModuleNotFoundError('harness is not selected yet: ' + fullname)
+
+sys.meta_path.insert(0, NoSelectedHarness())
+sys.path.insert(0, sys.argv[1])
+import app.launcher
+import app.main
+""", str(app_dir.parent)],
+        capture_output=True, text=True, timeout=su._START_PROBE_TIMEOUT_S,
+    )
+    assert done.returncode == 0, done.stderr or done.stdout
 
 
 def _a_staged_payload(root: Path, version: str, *, app_body: str | None) -> None:

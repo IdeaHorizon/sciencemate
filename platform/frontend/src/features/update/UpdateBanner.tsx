@@ -62,6 +62,9 @@ export function UpdateBanner() {
         </>
       )}
       {phase === "failed" && problem ? <em className="update-banner-problem">{problem}</em> : null}
+      {phase === "idle" && status?.apply_error ? (
+        <em className="update-banner-problem">{t({ zh: "上次更新未生效：", en: "The last update did not take effect: " })}{status.apply_error}</em>
+      ) : null}
     </div>
   );
 }
