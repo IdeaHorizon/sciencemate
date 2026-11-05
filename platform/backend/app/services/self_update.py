@@ -67,13 +67,8 @@ from app.services.say import SaidToAPerson, say
 #: 后端用这个码退出 = 「壳，请重新拉起我」。Swift / C# 壳都认它。
 RESTART_EXIT_CODE = 3
 
-#: 内置的更新来源：**公开的发布件仓库**（只放 dmg/载荷/清单，不含源码）。
-#:
-#: 指公开仓库而不是源码仓库，是因为源码仓库是私有的 —— release 资产跟仓库同一个
-#: 可见性，装了应用的同事没有 token 就 404，而"更新拉不到"这件事在界面上什么都不
-#: 显示（更新是方便不是提醒），于是没有人会发现自己再也收不到更新了。
-#: 用 settings.update_source 覆盖；私有源另配 update_source_token。
-DEFAULT_UPDATE_SOURCE = "https://desktop-9el2944.taile9f15e.ts.net/wangd/sciencemate"
+#: 个人版公开发行。专业版由发行配置指定私有更新源。
+DEFAULT_UPDATE_SOURCE = "https://github.com/IdeaHorizon/sciencemate"
 
 UNIT = ("harness", "static_ui")
 #: 第二个归档（`manifest.extras`）里允许的顶层目录。和 `UNIT` 分开是**兼容**的需要：

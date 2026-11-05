@@ -431,6 +431,7 @@ def _child_environment(
     # deployment configuration privately; the worker consumes it before models
     # or model-controlled subprocesses start.
     from app.services import ssh_resources
+    child_env["HARNESS_ROOT"] = str(root)
     child_env["PYTHONPATH"] = os.pathsep.join((str(root), str(Path(ssh_resources.__file__).resolve().parents[2])))
     child_env["HARNESS_RESOURCE_RUNTIME"] = json.dumps({
         key: getattr(settings, key) for key in (

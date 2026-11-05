@@ -577,7 +577,7 @@ def make_the_dmg(app: Path, edition: str = "personal") -> Path:
 HOW_TO_INSTALL = """
 发布目录已装配好（dmg + SHA256SUMS + install.sh + 可自更新的载荷 + manifest）：
   {release}
-发到 Forgejo：  FORGEJO_TOKEN=user:token python3 scripts/package/publish_release.py
+发到 Forgejo：  FORGEJO_TOKEN=user:token python3 scripts/package/publish_release.py --repo <owner/repo>
 （或整个目录放内网 HTTP / 共享盘）。**安装和自更新读的是同一个地址。**
 
 同事怎么装（第一条没有任何提示）：

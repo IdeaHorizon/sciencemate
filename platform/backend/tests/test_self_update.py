@@ -628,12 +628,4 @@ def test_a_private_update_source_gets_the_token_on_every_request(monkeypatch) ->
 
 
 def test_the_default_update_source_is_a_public_repo() -> None:
-    """默认更新源指公开发布仓库。
-
-    指私有源码仓库的后果是隐形的：release 资产跟仓库同可见性 → 没 token 就 404 →
-    而"更新拉不到"在界面上什么都不显示（更新是方便不是提醒）→ 没有人会发现自己
-    再也收不到更新了。
-    """
-    assert su.DEFAULT_UPDATE_SOURCE.endswith("/wangd/sciencemate")
-    assert "harness-framework" not in su.DEFAULT_UPDATE_SOURCE, "默认更新源指着私有源码仓库"
-    assert "agent-for-science" not in su.DEFAULT_UPDATE_SOURCE, "还指着改名前的发布仓库"
+    assert su.DEFAULT_UPDATE_SOURCE == "https://github.com/IdeaHorizon/sciencemate"

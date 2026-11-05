@@ -1,7 +1,7 @@
 """把 `dist/release/` 发成 Forgejo release —— 安装脚本和自更新从此有了地址。
 
     FORGEJO_TOKEN=<user:token 或 token> python3 scripts/package/publish_release.py \\
-        --repo wangd/harness-framework --host https://desktop-9el2944.taile9f15e.ts.net
+        --repo wangd/sciencemate-pro --host https://desktop-9el2944.taile9f15e.ts.net
 
 ## 做什么
 
@@ -45,9 +45,6 @@ DEFAULT_HOST = "https://desktop-9el2944.taile9f15e.ts.net"
 
 #: 对外入口读不到就等一会儿再试。入口是 tailscale，断续是常态。
 RETRY_PAUSE_S = 10
-#: 发布件仓库（公开）。源码仓库是私有的，资产跟仓库同可见性 —— 发那儿等于
-#: 同事没 token 就下不到。
-DEFAULT_REPO = "wangd/sciencemate"
 
 
 class Forgejo:
@@ -604,7 +601,7 @@ def main(argv=None) -> int:
     parser.add_argument("--api-host", default=None,
                         help="API 请求发往哪儿；默认同 --host。在 Forgejo 本机发布时给回环地址，"
                              "绕开吞不下大写入的对外入口")
-    parser.add_argument("--repo", default=DEFAULT_REPO)
+    parser.add_argument("--repo", required=True, help="明确指定 Forgejo 发布仓库（owner/repo）")
     args = parser.parse_args(argv)
     token = os.environ.get("FORGEJO_TOKEN", "").strip()
     if not token:
@@ -622,7 +619,7 @@ def main(argv=None) -> int:
         url = fixed or f"{result['base']}/{filename}"
         print(f"  同事装（{platform}）：  " + command.format(url=url)
               + ("" if fixed else "   ⚠️ 这条带版本号，下一版要换"))
-    print(f"  应用的更新源：      {args.host}/{args.repo}   （settings.update_source；默认值已是它）")
+    print(f"  应用的更新源：      {args.host}/{args.repo}   （settings.update_source）")
     status, repo = api.get("")
     if status == 200 and repo and repo.get("private"):
         print("  ⚠️ 这个仓库是私有的：没登录的人下不到资产。给同事只读 token（install.sh 认 AFS_AUTH=user:token），"

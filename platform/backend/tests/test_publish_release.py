@@ -146,10 +146,11 @@ def test_a_failed_stable_update_is_loud_but_does_not_undo_the_release(release_di
     assert "仍指向上一版" in out and "手工更新" in out
 
 
-def test_the_default_repo_is_the_public_one() -> None:
-    """发布件必须发到**公开**仓库：资产跟仓库同可见性，发私有的等于同事下不到。"""
-    assert pr.DEFAULT_REPO == "wangd/sciencemate"
-    assert "harness-framework" not in pr.DEFAULT_REPO, "默认发到了私有源码仓库"
+def test_forgejo_publish_requires_an_explicit_repo(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        pr.main([])
+    assert exc.value.code == 2
+    assert "--repo" in capsys.readouterr().err
 
 
 def test_a_transient_upload_failure_is_retried_not_fatal(release_dir) -> None:

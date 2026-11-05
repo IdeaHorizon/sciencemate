@@ -45,3 +45,10 @@ def test_credentials_still_do_not_leak_through(monkeypatch, _stub_provider):
     env = hs._child_environment(Path("/harness/root"), {"reasoning": object()})
     assert "AWS_SECRET_ACCESS_KEY" not in env
     assert "SYSTEMROOT" in env
+
+
+def test_resource_bridge_uses_the_workers_selected_harness(monkeypatch, _stub_provider, tmp_path):
+    monkeypatch.setenv("HARNESS_ROOT", str(tmp_path / "old-bundle"))
+    root = tmp_path / "payload" / "harness"
+    env = hs._child_environment(root, {"reasoning": object()})
+    assert env["HARNESS_ROOT"] == str(root)
