@@ -33,8 +33,8 @@ Python、git、LaTeX（tectonic）、跑实验用的 bash 都随包带，**不�
 
 | 平台 | 下载 | 大小 |
 |---|---|---|
-| macOS（Apple Silicon） | [ScienceMate-0.5.10-arm64.dmg](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.10/ScienceMate-0.5.10-arm64.dmg) | 465 MB |
-| Windows 10 / 11（64 位） | [ScienceMate-Setup.exe](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.10/ScienceMate-Setup.exe) | 491 MB |
+| macOS（Apple Silicon） | [ScienceMate-0.5.10-arm64.dmg](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.10/ScienceMate-0.5.10-arm64.dmg) | 471 MiB |
+| Windows 10 / 11（64 位） | [ScienceMate-Setup.exe](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.10/ScienceMate-Setup.exe) | 491 MiB |
 
 校验和：[SHA256SUMS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.10/SHA256SUMS) · 全部文件：[Releases](../../releases/latest)
 
