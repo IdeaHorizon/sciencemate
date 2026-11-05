@@ -342,10 +342,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return false
     }
 
-    /// 上一次自替换留下的 .old 收掉；收不掉就下次再收。
+    /// 旧壳也是上次重签时封入 bundle 的资源，删除之后必须重新封签。
     private func cleanupOldShellFiles() {
-        guard let exe = Bundle.main.executableURL else { return }
-        try? FileManager.default.removeItem(at: exe.appendingPathExtension("old"))
+        guard let exe = Bundle.main.executableURL,
+              let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String else { return }
+        let old = exe.appendingPathExtension("old")
+        guard FileManager.default.fileExists(atPath: old.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: old)
+            alignMyVersion(to: version, forceResign: true)
+        } catch { NSLog("SHELL-CLEANUP failed: %@", "\(error)") }
     }
 
     /// 数据根里有比我新的壳就换成它并重新拉起自己。返回 true = 已拉起新的，调用方该收摊。
@@ -421,13 +427,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     /// Info.plist 更不过。先签新壳本身，再签 bundle（外层要把内层算进去，顺序不能反）；
     /// 内层的 python / git 等原生二进制没动，不重签。签不成只记日志：应用照样能跑
     /// （ad-hoc、没有隔离属性），和改之前一样。
-    private func alignMyVersion(to version: String) {
+    private func alignMyVersion(to version: String, forceResign: Bool = false) {
         let bundle = Bundle.main.bundleURL
         let plistURL = bundle.appendingPathComponent("Contents/Info.plist")
         guard let data = try? Data(contentsOf: plistURL),
               var plist = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any]
         else { NSLog("VERSION-ALIGN skip: 读不出 Info.plist"); return }
-        if (plist["CFBundleShortVersionString"] as? String) == version,
+        if !forceResign, (plist["CFBundleShortVersionString"] as? String) == version,
            (plist["CFBundleVersion"] as? String) == version { return }
         plist["CFBundleShortVersionString"] = version
         plist["CFBundleVersion"] = version

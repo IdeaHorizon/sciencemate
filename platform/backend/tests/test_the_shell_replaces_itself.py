@@ -123,6 +123,12 @@ def test_the_mac_shell_checks_again_after_the_backend_restarts() -> None:
         "先记下后端再换壳 —— 不然 applicationWillTerminate 收不掉这个后端")
 
 
+def test_the_mac_shell_reseals_after_removing_the_signed_backup() -> None:
+    cleanup = MAC[MAC.index("private func cleanupOldShellFiles"):MAC.index("private func replaceMyselfIfANewerShellIsStaged")]
+    assert cleanup.index("removeItem(at: old)") < cleanup.index("alignMyVersion(to: version, forceResign: true)")
+    assert "if !forceResign," in _mac_align(), "相同版本也必须重签，否则删除已封存的 .old 后签名失效"
+
+
 def _mac_swap() -> str:
     """换壳那一个函数（到下一个成员为止）。补齐版本号的函数紧跟其后，别把它的字算进来。"""
     start = MAC.index("private func replaceMyselfIfANewerShellIsStaged")
