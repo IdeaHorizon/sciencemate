@@ -85,7 +85,7 @@ async function metadata(tabId, row, cached) {
           paper.abstract = detail.abstract; paper.abstract_truncated = detail.abstract_truncated;
         }
       } catch (error) {
-        if (error.message === "waiting_for_verification") {detailTab = null; throw error;}
+        if (["waiting_for_verification","access_denied","rate_limited"].includes(error.message)) {detailTab = null; throw error;}
         // A partial abstract is kept with an explicit truncation marker.
       } finally {
         if (detailTab) {await chrome.tabs.remove(detailTab.id).catch(() => {}); await save({detailTabId: null});}
@@ -96,7 +96,7 @@ async function metadata(tabId, row, cached) {
       await expanded;
     }
   } catch (error) {
-    if (["waiting_for_verification", "rate_limited", "metadata_title_mismatch", "browser_closed"].includes(error.message)) throw error;
+    if (["waiting_for_verification", "access_denied", "rate_limited", "metadata_title_mismatch", "browser_closed"].includes(error.message)) throw error;
     // Bounded attempt; the platform can display an index even when the source
     // provides no abstract. A future refresh may retry incomplete records.
     paper.metadata_attempted = true;
@@ -108,11 +108,13 @@ async function collect(job) {
   const tabId = await searchTab();
   await loaded(tabId);
   let state = await execute(tabId, "state");
+  const resource = {journal:"JOURNAL",thesis:"DISSERTATION",conference:"CONFERENCE",book:"BOOK"}[job.document_kind] || "CROSSDB";
   if (state.captcha) throw new Error("waiting_for_verification");
-  if (state.query !== job.query || state.page !== job.page || state.field !== job.field) {
+  if (state.query !== job.query || state.page !== job.page || state.field !== job.field || state.resource !== resource) {
     await chrome.tabs.update(tabId, {url: "https://kns.cnki.net/kns8s/search"});
     await loaded(tabId);
     state = await execute(tabId, "search", {query: job.query, field: job.field});
+    if (state.resource !== resource) state = await execute(tabId,"resource",{resource});
     while (state.page < job.page && state.hasNext) {
       state = await execute(tabId, "next");
       await report(job, "working");
@@ -122,11 +124,11 @@ async function collect(job) {
   while (true) {
     const cfg = await read();
     if (cfg.paused) throw new Error("paused");
-    const remaining = job.limit == null ? 20 : Math.max(0, job.limit - (job.page - 1) * 20);
+    const remaining = job.limit == null || job.document_kind ? 20 : Math.max(0, job.limit - (job.page - 1) * 20);
     const wanted = state.rows.slice(0, remaining);
     const beforeWindow = row => /^\d{4}-\d{2}-\d{2}/.test(row.pub_date) && row.pub_date.slice(0,10) < job.since;
     const within = wanted.filter(row => !job.since || !beforeWindow(row));
-    await api(`/worker/jobs/${job.id}/batch`, {lease:job.lease, page:job.page, papers:within.map(cleanPaper), total:state.total});
+    const receipt = await api(`/worker/jobs/${job.id}/batch`, {lease:job.lease, page:job.page, papers:within.map(cleanPaper), total:state.total});
     const cached = await api("/worker/cache", within.map(cleanPaper));
     const byTitle = new Map(cached.papers.map(p => [paperKey(p), p]));
     const pending = within.filter(row => !(job.accepted || []).includes(row.title));
@@ -142,7 +144,7 @@ async function collect(job) {
       if (failed) throw failed.reason;
       await badge("working", `${job.query} · 第 ${job.page} 页 · 已处理 ${Math.min(i+2,pending.length)}/${pending.length}`);
     }
-    const finished = !state.hasNext || !wanted.length || (job.limit != null && job.page * 20 >= job.limit)
+    const finished = !state.hasNext || !wanted.length || (job.limit != null && (job.document_kind ? receipt.count >= job.limit : job.page * 20 >= job.limit))
       || (job.since && state.dateSorted && state.rows.length > 0 && state.rows.every(beforeWindow));
     await api(`/worker/jobs/${job.id}/batch`, {lease:job.lease, page:job.page, papers:[], total:state.total, page_complete:true, finished:!!finished});
     if (finished) {await save({currentJob:null}); return;}
@@ -182,14 +184,14 @@ async function tick() {
     await badge("idle","本轮 index 已同步");
     setTimeout(() => void tick(),500);
   } catch (error) {
-    const state = ["waiting_for_verification","browser_closed","paused"].includes(error.message) ? error.message : "error";
+    const state = error.message === "access_denied" ? "paused" : ["waiting_for_verification","browser_closed","paused"].includes(error.message) ? error.message : "error";
     const messages = {waiting_for_verification:"请在本机 Chrome 完成知网验证，之后自动继续", browser_closed:"知网标签页已关闭，点击继续采集", paused:"采集已暂停", rate_limited:"知网暂时限制请求，稍后重试", platform_unavailable:"平台暂时无法连接，已保留采集进度", disconnected:"连接已失效，请重新配对", result_pages_changed:"搜索结果页数已变化，请重新发起检索"};
-    const detail = messages[error.message] || "采集暂时未完成，将从已确认的进度重试";
+    const detail = error.message === "access_denied" ? "知网拒绝当前访问（HTTP 403），已暂停请求；请检查知网页面后再继续" : messages[error.message] || "采集暂时未完成，将从已确认的进度重试";
     await badge(state,detail);
     if (job) {
       try {await report(job,state,detail); await save({currentJob:null});} catch {}
     }
-    if (state === "browser_closed" || error.message === "rate_limited") await save({paused:true});
+    if (state === "browser_closed" || ["rate_limited","access_denied"].includes(error.message)) await save({paused:true});
   } finally {running=false;}
 }
 

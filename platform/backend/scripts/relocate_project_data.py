@@ -14,6 +14,8 @@
    的判据。不改写 = 下次启动照样被拦。
 4. 复核：搬完后按新根逐条现算 `session_path()`，全部落在实处才算成功。
 
+用户自选的 Root Folder 保持原位；只把地址索引带到新的应用数据根。
+
 默认 dry-run，`--apply` 才真动。搬之前请先停掉 App Server 与 worker：这个脚本
 不会去猜"有没有人正在写"。
 """
@@ -28,6 +30,8 @@ from pathlib import Path
 from sqlalchemy import text
 
 from app.database import get_session_factory
+from app.services.project_locations import ProjectLocations
+from app.services.project_repository import get_project_repository
 
 LAYOUT = (("project-repositories", "repositories"), ("project-worktrees", "worktrees"))
 
@@ -146,6 +150,19 @@ async def main() -> None:
     if not target_root.is_absolute():
         raise SystemExit(f"--to 必须是绝对路径，收到 {args.to!r}")
 
+    # Explicit folders belong to the user, independently of the app data root.
+    # Transfer their index; leave their repositories and session paths in place.
+    custom_roots = get_project_repository().locations.custom_roots()
+    target_locations = ProjectLocations(target_root / "project-repositories")
+    for project_id, root in custom_roots.items():
+        existing = target_locations.custom_root(project_id)
+        if existing is not None and existing != root:
+            raise SystemExit(f"目标数据根已有不同的项目地址：{project_id} → {existing}")
+    for project_id, root in custom_roots.items():
+        print(f"保留根文件夹 {project_id}: {root}")
+        if args.apply:
+            target_locations.register(project_id, root)
+
     recorded = await _recorded_paths()
     if not recorded:
         print("库里没有任何活跃 Session 的 worktree 记录 —— 无需搬迁。")
@@ -158,7 +175,7 @@ async def main() -> None:
         mark = "（已是目标）" if root == str(target_root / "project-worktrees") else ""
         print(f"  {count:>4} 个会话  {root} {mark}")
 
-    projects = sorted({project_id for _, project_id, _ in recorded})
+    projects = sorted({project_id for _, project_id, _ in recorded} - custom_roots.keys())
     mode = "执行中" if args.apply else "（dry-run，加 --apply 才动手）"
     print(f"\n涉及 {len(projects)} 个 Project。{mode}")
 
@@ -199,7 +216,10 @@ async def main() -> None:
         print("\n（dry-run 结束，什么都没动。）")
         return
 
-    mapping = {session_id: str(_relocated(target_root, path)) for session_id, project_id, path in recorded}
+    mapping = {
+        session_id: path if project_id in custom_roots else str(_relocated(target_root, path))
+        for session_id, project_id, path in recorded
+    }
     changed = await _rewrite(mapping)
     print(f"\n已改写 {changed} 行 sessions.git_worktree_path")
 

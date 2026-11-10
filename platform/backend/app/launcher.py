@@ -31,8 +31,8 @@ from pathlib import Path
 # 不 import 任何东西的一个模块（见它的文档）：启动器里说话不能等配置读出来。
 from app.services.say import in_both_languages
 
-#: 这个进程是不是由开发者模式接过来的（随包那份 launcher 把启动交给声明的源码 checkout 时，
-#: 在**接过去的那份** launcher 模块上翻成 True）。进程内的记号，不进环境变量 —— env 会漏给
+#: 这个进程启动时是不是按开发者声明从源码跑的（接管过去、或一开始就在声明的 checkout）。
+#: 在 API 导入的 app.launcher 模块上记 True。进程内的记号，不进环境变量 —— env 会漏给
 #: worker 子进程。「撤了声明还没重启」那一句靠它：没有它，任何从源码目录起的后端（终端里
 #: 开发、测试进程）都会被当成「撤了声明」而要求重启。
 RUNNING_DECLARED_CHECKOUT = False
@@ -184,16 +184,20 @@ def hand_over_to_the_source_checkout(checkout, argv: list[str] | None) -> int | 
 def _hand_the_start_to(candidate: Path, argv: list[str] | None, *, label: str, mark=None) -> int | None:
     """把这次启动整个交给 `candidate` 里的 `app/`（同一进程）。我就住在那儿 → None（循环终止）。
 
-    `mark`：接过去之前在**那份** launcher 模块上做的记号（开发者模式用它说「我是被接过来的」）。
+    `mark`：在实际运行的 app.launcher 上记下启动状态；已经在目标目录也要记。
     """
+    import importlib
+
     here = Path(__file__).resolve().parent
     if here == candidate.resolve():
+        if mark is not None:
+            # -m 时本模块叫 __main__，API 导入的是 app.launcher；必须标在 API 读的那份上。
+            # 否则「正在从源码跑」虽能按路径认出来，撤掉声明后却会误报不需要重启。
+            mark(importlib.import_module("app.launcher"))
         return None
     sys.path.insert(0, str(candidate.parent))
     for name in [m for m in sys.modules if m == "app" or m.startswith("app.")]:
         del sys.modules[name]
-    import importlib
-
     new = importlib.import_module("app.launcher")
     landed = Path(new.__file__).resolve().parent
     if landed != candidate.resolve():

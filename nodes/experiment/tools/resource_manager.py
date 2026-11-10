@@ -26,6 +26,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timezone
+from functools import wraps
+from inspect import Parameter, signature
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol, runtime_checkable
 
@@ -106,7 +108,8 @@ except ImportError:
 # `_job_status_sync` / `_submit_job` / 五个工具 schema 各抄一份 {local,slurm,pbs,
 # kubernetes}，现在 schema enum 与代码都从这里取；派发口按 schema 核值。
 SCHEDULERS: tuple[str, ...] = ("local", "slurm", "pbs", "kubernetes")
-SUBMIT_SCHEDULERS: tuple[str, ...] = ("auto", *SCHEDULERS)
+JOB_SCHEDULERS: tuple[str, ...] = (*SCHEDULERS, "ssh")
+SUBMIT_SCHEDULERS: tuple[str, ...] = ("auto", *JOB_SCHEDULERS)
 
 _EXTERNAL_JOB_LIFECYCLE_TYPE = "external_job_lifecycle"
 _EXTERNAL_JOB_OPERATION_CLOSURE_TYPE = "external_job_operation_closure"
@@ -2114,7 +2117,9 @@ def _job_output_identity(record: dict[str, Any], value: str) -> dict[str, Any]:
 
 
 def _ssh_submission_path_guard(workdir: str, output_dir: str,
-                               output_roots: list[str], command: str | None = None) -> dict[str, Any] | None:
+                               output_roots: list[str], command: str | None = None, *,
+                               confine_to_workdir: bool = False,
+                               command_write_root: str | None = None) -> dict[str, Any] | None:
     """Remote coordinates are authorized by the existing exact submit approval.
 
     This is lexical protection, not a remote filesystem sandbox or a grant to
@@ -2124,11 +2129,17 @@ def _ssh_submission_path_guard(workdir: str, output_dir: str,
     for value in [workdir, output_dir, *output_roots]:
         p = _slurm_transport().normalize_path(value)
         parts = PurePosixPath(p).parts
-        if (p == "/" or any(p == root or p.startswith(root + "/") for root in protected)
+        outside = command_write_root is not None and not _path_is_within(
+            p, [command_write_root], remote=True)
+        if (outside or p == "/" or any(p == root or p.startswith(root + "/") for root in protected)
                 or any(part in {".git", ".ssh", ".research"} for part in parts)):
-            return {"status": "error", "reason": "protected_remote_path",
-                    "error": f"Remote job output must use an application directory: {p}",
-                    "job_submitted": False}
+            return {
+                "status": "error",
+                "reason": "ssh_command_path_outside_job" if outside else "protected_remote_path",
+                "error": ("Use job-relative paths for remote directory changes and explicit writes."
+                          if outside else f"Remote job output must use an application directory: {p}"),
+                "job_submitted": False,
+            }
     if command:
         try:
             from .bash_semantics import analyze_bash
@@ -2174,9 +2185,13 @@ def _ssh_submission_path_guard(workdir: str, output_dir: str,
                 # Absolute literals and protected components remain meaningful
                 # even when cwd is dynamic; do not invent a local grant.
                 path = posixpath.normpath(target if target.startswith("/") else posixpath.join(workdir, target))
-                blocked = _ssh_submission_path_guard(path, path, [])
+                blocked = _ssh_submission_path_guard(
+                    path, path, [], command_write_root=workdir if confine_to_workdir else None)
                 if blocked is not None:
-                    return {**blocked, "reason": "protected_remote_command_path", "command_fragment": event.raw}
+                    reason = blocked["reason"]
+                    if reason == "protected_remote_path":
+                        reason = "protected_remote_command_path"
+                    return {**blocked, "reason": reason, "command_fragment": event.raw}
     return None
 
 
@@ -2491,6 +2506,9 @@ async def _discover_resources(
     try:
         target = _slurm_transport().normalize_target(slurm_target) if slurm_target is not None else None
         result = _discover(namespace, **({"slurm_target": target} if target is not None else {}))
+        from .managed_ssh import discover as discover_project_ssh
+
+        result.update(await discover_project_ssh(state))
         if save_artifact:
             name = f"resource_profile_{state.run_id}"
             state.save_artifact(
@@ -3145,7 +3163,8 @@ def _stage_in_readable(state: State, source: Path) -> bool:
     return bool(matching_path_roles(source, state))
 
 
-def _validate_stage_in(state: State, stage_in: Any, *, remote: bool = False) -> list[dict[str, str]]:
+def _validate_stage_in(state: State, stage_in: Any, *, remote: bool = False,
+                       max_bytes: int | None = None) -> list[dict[str, str]]:
     """Validate file-only staging without granting a new remote write root.
 
     每一项都带上 `sha256` 与 `mode`：两者都进提交确认的 payload，所以**批准之后
@@ -3181,8 +3200,15 @@ def _validate_stage_in(state: State, stage_in: Any, *, remote: bool = False) -> 
         # bootstrap 日志里，最难查的位置。
         if remote and any(part in {".git", ".ssh", ".research"} for part in target.parts):
             raise ValueError(f"stage_in[{index}].dst refers to a protected remote directory")
-        mode = "0755" if os.stat(source).st_mode & 0o111 else "0644"
-        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        source_stat = source.stat()
+        if max_bytes is not None and source_stat.st_size > max_bytes:
+            raise ValueError(f"stage_in[{index}].src exceeds the {max_bytes}-byte per-file limit")
+        mode = "0755" if source_stat.st_mode & 0o111 else "0644"
+        with source.open("rb") as stream:
+            content = stream.read() if max_bytes is None else stream.read(max_bytes + 1)
+        if max_bytes is not None and len(content) > max_bytes:
+            raise ValueError(f"stage_in[{index}].src grew beyond the per-file limit")
+        digest = hashlib.sha256(content).hexdigest()
         validated.append({"src": str(source), "dst": target.as_posix(),
                           "mode": mode, "sha256": digest})
     return validated
@@ -6941,6 +6967,30 @@ def _referenced_files_payload(command: str, workdir: Any, state: Any) -> dict[st
         return {}
 
 
+def _route_project_ssh(native_submit):
+    """Route before applying native resource defaults to omitted arguments."""
+    contract = signature(native_submit)
+    default_scheduler = contract.parameters["scheduler"].default
+
+    @wraps(native_submit)
+    async def submit(
+        state: State, command: str, scheduler: str = default_scheduler, *args, **kwargs
+    ) -> dict:
+        if scheduler == "ssh" or kwargs.get("resource_id") is not None:
+            from .managed_ssh import submit as submit_ssh
+
+            if scheduler not in {"auto", "ssh"}:
+                return {"status": "error", "reason": "resource_requires_ssh", "job_submitted": False}
+            supplied = contract.bind(state, command, scheduler, *args, **kwargs).arguments
+            extras = supplied.pop("_", {})
+            del supplied["state"], supplied["scheduler"]
+            return await submit_ssh(state, **supplied, **extras)
+        return await native_submit(state, command, scheduler, *args, **kwargs)
+
+    return submit
+
+
+@_route_project_ssh
 async def _submit_job(
     state: State,
     command: str,
@@ -6972,6 +7022,8 @@ async def _submit_job(
     route_step_id: str | None = None,
     expected_termination: dict[str, Any] | None = None,
     slurm_target: dict[str, Any] | None = None,
+    *,
+    resource_id: str | None = None,
     **_: Any,
 ) -> dict:
     """Render or submit a job through local/SLURM/PBS/Kubernetes."""
@@ -8194,9 +8246,8 @@ async def _submit_job(
                 dry_run=bool(dry_run),
             )
         # The durable submission record and the route `submitted` outcome must
-        # exist before any synchronous UX wait.  Core may hand control back
-        # while this await continues; recovery and duplicate-submit prevention
-        # therefore never depend on the in-memory wait task.
+        # exist before any synchronous UX wait. Recovery and duplicate-submit
+        # prevention use physical identity, never an in-memory wait task.
         if (
             not dry_run
             and foreground_wait_s is not None
@@ -8988,6 +9039,10 @@ async def _job_status(
     **_: Any,
 ) -> dict:
     """Query a submitted job."""
+    if scheduler == "ssh":
+        from .managed_ssh import status
+
+        return await status(state, job_id, submission_nonce, max_bytes=max_output_bytes)
     # 判决拆除·第三波（rm:2305 → schema，2026-09-02）：scheduler enum / job_id 非空由 schema 核。
     try:
         record = _external_job_record(state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce))
@@ -9641,27 +9696,28 @@ def _probe_external_job_health_impl(state: Any, scheduler: str, job_id: str,
 
 async def _check_external_job_health(state: State, scheduler: str, job_id: str,
                                      namespace: str | None = None, submission_nonce: str | None = None, **_: Any) -> dict:
+    if scheduler == "ssh":
+        from .managed_ssh import status
+
+        return await status(state, job_id, submission_nonce)
     return probe_external_job_health(state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce))
-
-
-# 收敛任务书 K13（缺陷 #13）：短作业常在几秒内结束，第二次探测却要等 min(interval, max_wait_s)
-# ——默认 180 秒。调用方没指定 poll_interval_s 时（submit_job 前台等待就是这样），前几次按短退避
-# 探测，每次不超过声明的间隔，用完之后回到声明的间隔。
-_EXTERNAL_WAIT_BACKOFF_S = (0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0)
 
 
 async def _wait_for_external_job(
     state: State, scheduler: str, job_id: str, namespace: str | None = None,
-    max_wait_s: int = 300,
+    max_wait_s: int | None = None,
     poll_interval_s: int | None = None, submission_nonce: str | None = None, **_: Any,
 ) -> dict:
     """Wait inside a live experiment session without spending LLM turns per poll.
 
-    The wait is bounded and cancellation-aware. An active elapsed wait creates
-    a node-local handoff permit, so the next model stop can persist the durable
-    external-job workflow rather than being rewritten into another identical
-    wait forever.
+    The harness owns the selected job's wait until terminal/diagnostic facts.
+    An explicitly supplied observation budget retains the bounded handoff
+    contract. Submission stays asynchronous and can launch independent jobs.
     """
+    if scheduler == "ssh":
+        from .managed_ssh import wait
+
+        return await wait(state, job_id, submission_nonce, max_wait_s, poll_interval_s)
     _raise_if_external_wait_cancelled(state)
     initial = await _probe_external_job_health_cancellable(
         state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce))
@@ -9688,55 +9744,55 @@ async def _wait_for_external_job(
     record = _external_job_record(state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce)) or {}
     configured = (record.get("health_contract") or {}).get("poll_interval_s", 180)
     interval = int(poll_interval_s if poll_interval_s is not None else configured)
-    backoff = list(_EXTERNAL_WAIT_BACKOFF_S) if poll_interval_s is None else []
+    from core import job_wait
 
-    def next_gap() -> float:
-        return min(float(interval), backoff.pop(0)) if backoff else float(interval)
+    submission_nonce = submission_nonce or record.get("submission_nonce")
+    namespace = namespace or record.get("namespace")
+    arguments = {key: value for key, value in dict(
+        scheduler=scheduler, job_id=job_id, namespace=namespace,
+        submission_nonce=submission_nonce, max_wait_s=max_wait_s,
+        poll_interval_s=poll_interval_s).items() if value is not None}
+    identity = {key: record.get(key) for key in (
+        "submission_nonce", "namespace", "launch_host", "scheduler_cluster",
+        "resource_uid", "container_runtime_id", "process_group_id", "process_start_ticks")}
+    identity.update(scheduler=scheduler, job_id=job_id)
+    job_wait.register(state, "wait_for_external_job", arguments, identity)
 
-    deadline = time.monotonic() + max_wait_s
-    next_probe = time.monotonic() + min(next_gap(), max_wait_s)
-    health = initial
-    while time.monotonic() < deadline:
-        remaining = deadline - time.monotonic()
-        until_probe = max(0.0, next_probe - time.monotonic())
-        await _sleep_with_external_wait_cancellation(
-            state,
-            min(60.0, remaining, until_probe),
-        )
-        _raise_if_external_wait_cancelled(state)
-        if time.monotonic() < next_probe and time.monotonic() < deadline:
-            continue
+    async def observe():
         health = await _probe_external_job_health_cancellable(
             state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce))
-        try:
-            state.append_transcript("external_job_wait_tick", scheduler=scheduler, job_id=job_id,
-                                    health_state=health.get("health_state"),
-                                    resource_health=health.get("resource_health"),
-                                    decision=health.get("decision"),
-                                    workflow_status=health.get("workflow_status"))
-        except Exception:
-            pass
-        if health.get("status") != "success":
-            return health
-        if health.get("workflow_status") != "awaiting_external_job":
-            return {
-                "status": "success",
-                "wait_outcome": (
-                    "scheduler_terminal"
-                    if health.get("scheduler_phase") == "terminal"
-                    else "needs_diagnosis"
-                ),
-                "health": health,
-            }
-        if (
-            health.get("health_state") in {"stalled", "failure_signal", "unknown"}
-            or health.get("decision") in {
-                "diagnose", "diagnose_resource_exhaustion",
-                "managed_cancel_recommended",
-            }
-        ):
-            return {"status": "success", "wait_outcome": "needs_diagnosis", "health": health}
-        next_probe = time.monotonic() + next_gap()
+        state.append_transcript("external_job_wait_tick", scheduler=scheduler, job_id=job_id,
+                                health_state=health.get("health_state"),
+                                resource_health=health.get("resource_health"),
+                                decision=health.get("decision"),
+                                workflow_status=health.get("workflow_status"))
+        return health
+
+    def done(health):
+        return (health.get("status") != "success"
+                or health.get("workflow_status") != "awaiting_external_job"
+                or health.get("health_state") in {"stalled", "failure_signal", "unknown"}
+                or health.get("decision") in {"diagnose", "diagnose_resource_exhaustion",
+                                              "managed_cancel_recommended"})
+
+    try:
+        health = await job_wait.poll(state, observe, done,
+                                     interval=interval if poll_interval_s is not None else None,
+                                     steady_interval=configured,
+                                     max_wait_s=max_wait_s, initial=initial)
+    except job_wait.RunCancelled:
+        job_wait.acknowledge(state)
+        raise
+    job_wait.finish(state)
+    if health.get("status") != "success":
+        return health
+    if health.get("workflow_status") != "awaiting_external_job":
+        return {"status": "success", "wait_outcome": (
+            "scheduler_terminal" if health.get("scheduler_phase") == "terminal"
+            else "needs_diagnosis"),
+            "health": health}
+    if done(health):
+        return {"status": "success", "wait_outcome": "needs_diagnosis", "health": health}
     handoff_eligible = _mark_external_job_handoff_ready(
         state, scheduler, job_id, namespace, record.get("launch_host"),
         record.get("scheduler_cluster"), record.get("resource_uid"),
@@ -13734,6 +13790,10 @@ async def _cancel_job(
     reason: str = "", superseded_by: str | None = None, submission_nonce: str | None = None, **_: Any,
 ) -> dict:
     """Cancel one managed job as an append-only, recoverable transaction."""
+    if scheduler == "ssh":
+        from .managed_ssh import status
+
+        return await status(state, job_id, submission_nonce, cancel_reason=reason)
     record = _external_job_record(state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce))
     if record is None:
         return {"status": "error",
@@ -14147,6 +14207,17 @@ register_tool(
     _preflight_build_resources,
 )
 
+
+def _submit_job_properties(properties: dict) -> dict:
+    """Expose the executor's concrete defaults; None means no backend default."""
+    parameters = signature(_submit_job).parameters
+    for name, schema in properties.items():
+        default = parameters[name].default
+        if default is not Parameter.empty and default is not None:
+            schema["default"] = default
+    return properties
+
+
 register_tool(
     ToolDefinition(
         name="submit_job",
@@ -14154,6 +14225,7 @@ register_tool(
             '把会活过本次调用的工作交给调度器：真正的构建、simulation、并行启动器、长任务。默认 dry_run=true 只渲染脚本；dry_run=false 才提交。\n'
             '\n'
             '**Use when**：需要作业身份（活过调用、能查状态、能取消、终态由调度器说了算）。\n'
+            '普通 SSH 使用 discover_resources 返回的 resource_id（scheduler=ssh）。workdir 相对本次作业的独立远端目录，stage_in 暂存项目文件，output_paths 列出要核验回传的相对文件。支持墙钟上限，远端账户不提供内存或文件系统隔离。\n'
             '**Do NOT use when**：一条几秒钟的检查 → safe_run_bash。auto 绝不会自动选择 Kubernetes。\n'
             '\n'
             f'**关键参数**：scheduler=auto/local/slurm/pbs（auto 只选择可用的本地 CPU；显式 Slurm 真实提交目前限单节点、单任务、0 或 1 张 GPU，单任务不承诺任意 payload 的 OS 进程树；须提供计算节点可见的 workdir 和 output_dir 并经一次外部作业确认；GPU 请求不证明分配、实算或设备隔离，远端写入/网络/设备隔离不保证；PBS 只支持 dry_run；Kubernetes 缺 PVC/volume 契约时拒绝）；command；workdir（本地省略=本 run 的 run_root）；output_paths（作业会写到哪，省略=workdir）；mpi_ranks/cpus_per_rank/gpus/memory_gb；walltime_minutes 是硬性墙钟上限，**本地作业也算**：省略时本地按 {_LOCAL_WALLTIME_SAFETY_DEFAULT_MINUTES} 分钟的平台安全上限执行、到点杀进程，长作业请显式给足；expected_termination（可选：成功时的退出码或 stdout 标记，让终态判定不只看 exit 0）。\n'
@@ -14162,22 +14234,21 @@ register_tool(
         ),
         parameters_schema={
             "type": "object",
-            "properties": {
+            "properties": _submit_job_properties({
                 "slurm_target": _SLURM_TARGET_SCHEMA,
+                "resource_id": {"type": "string", "minLength": 1, "description": "Registered SSH resource from discover_resources. Selects the SSH account supervisor."},
                 "command": {"type": "string", "minLength": 1, "description": "Command payload to run inside the job."},
                 "scheduler": {
                     "type": "string",
                     "enum": list(SUBMIT_SCHEDULERS),
-                    "default": "auto",
                 },
-                "job_name": {"type": "string", "default": "experiment_job"},
-                "mpi_ranks": {"type": "integer", "minimum": 1, "default": 1},
-                "cpus_per_rank": {"type": "integer", "minimum": 1, "default": 1},
-                "gpus": {"type": "integer", "minimum": 0, "default": 0},
+                "job_name": {"type": "string"},
+                "mpi_ranks": {"type": "integer", "minimum": 1},
+                "cpus_per_rank": {"type": "integer", "minimum": 1},
+                "gpus": {"type": "integer", "minimum": 0},
                 "memory_gb": {
                     "type": "number",
                     "minimum": 0.1,
-                    "default": 4.0,
                     "description": (
                         "可选的明确内存契约（GiB）；构建路线省略时优先消费"
                         "获准的构建资源计划，其他情况使用带来源标记的节点自动建议。"
@@ -14194,7 +14265,7 @@ register_tool(
                         "SLURM/PBS：省略不落任何指令，站点默认记为 unknown。"
                     ),
                 },
-                "storage_gb": {"type": "number", "minimum": 0.1, "default": 8.0,
+                "storage_gb": {"type": "number", "minimum": 0.1,
                                "description": "Maximum writable growth for a local sandbox job; Kubernetes ephemeral-storage request/limit."},
                 "queue": {"type": "string", "description": "SLURM partition or PBS queue."},
                 "nodelist": {"type": "string", "description": "Optional SLURM --nodelist value, e.g. spr-cu04."},
@@ -14288,9 +14359,9 @@ register_tool(
                         "required": ["src", "dst"],
                     },
                 },
-                "dry_run": {"type": "boolean", "default": True},
+                "dry_run": {"type": "boolean"},
                 "namespace": {"type": "string", "description": "Kubernetes namespace."},
-            },
+            }),
             "required": ["command"],
         },
         allowed_node_types=["experiment"],
@@ -14367,12 +14438,12 @@ register_tool(
     ToolDefinition(
         name="job_status",
         description=(
-            "Query status for a job submitted through local, SLURM, PBS, or Kubernetes.\n\n"
+            "Query status for a job submitted by this Experiment.\n\n"
             "**Use when**:\n"
             "  - After submit_job(dry_run=false), to monitor completion or queue state.\n\n"
             "**Do NOT use when**:\n"
             "  - No job has been submitted yet -> use submit_job first.\n\n"
-            "**关键参数**: scheduler must match the submit scheduler; job_id is the returned scheduler id.\n"
+            "**关键参数**: scheduler must match the submit scheduler; job_id is the returned job handle. For SSH, the submission handle also works after a lost acknowledgement.\n"
             "**返回**: raw scheduler output with status=success/error."
         ),
         parameters_schema={
@@ -14380,7 +14451,7 @@ register_tool(
             "properties": {
                 "collect_outputs": {"type": "boolean", "default": False, "description": "For a terminal SSH job, retry bounded hash-verified result collection without rerunning it."},
                 "max_output_bytes": {"type": "integer", "minimum": 1, "default": 268435456},
-                "scheduler": {"type": "string", "enum": list(SCHEDULERS)},
+                "scheduler": {"type": "string", "enum": list(JOB_SCHEDULERS)},
                 "job_id": {"type": "string", "minLength": 1},
                 "submission_nonce": {"type": "string", "description": "Optional exact identifier returned by submit_job; disambiguates identical job IDs on different targets."},
                 "namespace": {"type": "string"},
@@ -14405,7 +14476,7 @@ register_tool(
         parameters_schema={
             "type": "object",
             "properties": {
-                "scheduler": {"type": "string", "enum": list(SCHEDULERS)},
+                "scheduler": {"type": "string", "enum": list(JOB_SCHEDULERS)},
                 "job_id": {"type": "string", "minLength": 1},
                 "submission_nonce": {"type": "string", "description": "Optional exact identifier returned by submit_job; disambiguates identical job IDs on different targets."},
                 "namespace": {"type": "string"},
@@ -14423,18 +14494,18 @@ register_tool(
         name="wait_for_external_job",
         description=(
             "In a live chat session, wait for one managed external job without LLM sleep polling. "
-            "It checks declared health at an interval for at most 15 minutes, then returns only on "
-            "a terminal/diagnostic state or a still-running checkpoint with an explicit evidence level. "
+            "By default Harness holds the wait until terminal/diagnostic facts, without more model calls. "
+            "An explicit max_wait_s returns a bounded still-running checkpoint. "
             "It never cancels or retries."
         ),
         parameters_schema={
             "type": "object",
             "properties": {
-                "scheduler": {"type": "string", "enum": list(SCHEDULERS)},
+                "scheduler": {"type": "string", "enum": list(JOB_SCHEDULERS)},
                 "job_id": {"type": "string", "minLength": 1},
                 "submission_nonce": {"type": "string", "description": "Optional exact identifier returned by submit_job; disambiguates identical job IDs on different targets."},
                 "namespace": {"type": "string"},
-                "max_wait_s": {"type": "integer", "minimum": 30, "maximum": 900, "default": 300},
+                "max_wait_s": {"type": "integer", "minimum": 30, "maximum": 900},
                 "poll_interval_s": {"type": "integer", "minimum": 30, "maximum": 3600},
             },
             "required": ["scheduler", "job_id"],
@@ -14503,7 +14574,7 @@ register_tool(
         parameters_schema={
             "type": "object",
             "properties": {
-                "scheduler": {"type": "string", "enum": list(SCHEDULERS)},
+                "scheduler": {"type": "string", "enum": list(JOB_SCHEDULERS)},
                 "job_id": {"type": "string", "minLength": 1},
                 "submission_nonce": {"type": "string", "description": "Optional exact identifier returned by submit_job; disambiguates identical job IDs on different targets."},
                 "namespace": {"type": "string"},

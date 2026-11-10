@@ -26,6 +26,8 @@ class ProjectCreate(BaseModel):
     #: 电脑上开个课题的人，不该先回答"你属于哪个组织"。选家是一次性的：项目出生
     #: 那一刻挑，之后只有"搬家"，没有"同步"。
     home: str = ""
+    #: Local filesystem address; omitted = the installation's default project directory.
+    root_folder: str | None = Field(None, min_length=1, max_length=4096)
 
     # Optional config overrides at creation time
     operation_mode: OperationMode = OperationMode.ASSISTED
@@ -74,6 +76,7 @@ class ProjectResponse(BaseModel):
     #: 它住在哪 —— `{"kind": "local"}` 或 `{"kind": "organisation", …}`。
     #: 侧栏按它分组；`reachable: false` 的那一组是上一次问到的名字，灰着摆。
     home: dict | None = None
+    root_folder: str | None = None
     #: 组织里谁看得见它。
     visibility: str = "organisation"
     #: 在不在「我的项目」里（自己建的 / 是成员的）。`GET /projects/` 只答我的；只读打开的组里

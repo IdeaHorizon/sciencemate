@@ -755,8 +755,11 @@ class GitProjectRepository:
     _locks: dict[str, threading.RLock] = {}
 
     def __init__(self, repository_root: Path | None = None, worktree_root: Path | None = None):
+        from app.services.project_locations import ProjectLocations
+
         self.repository_root = (repository_root or data_root("repositories")).resolve()
         self.worktree_root = (worktree_root or data_root("worktrees")).resolve()
+        self.locations = ProjectLocations(self.repository_root)
         self.git = settings.project_git_executable
 
     @classmethod
@@ -791,15 +794,21 @@ class GitProjectRepository:
         return candidate
 
     def project_path(self, project_id: str) -> Path:
-        # 仓库树**不**走短名：它浅（`<根>/<id>`），够不着预算；而它装的是
-        # 项目的持久数据，改名等于把既有项目挪走。短名只用在够得着预算的
-        # 那棵树上，理由写在 `_worktree_dir_name`。
-        return self.repository_root / self._safe_id(project_id, "project id")
+        # One address boundary for canonical Git and file I/O. Old projects keep
+        # their <repository_root>/<id> location; chosen roots are resolved from
+        # the installation-local index, including after a backend restart.
+        return self.locations.root(self._safe_id(project_id, "project id"))
+
+    def _project_worktrees(self, project_id: str) -> Path:
+        project_id = self._safe_id(project_id, "project id")
+        custom = self.locations.custom_root(project_id)
+        if custom:
+            return custom / ".research" / "worktrees"
+        return self.worktree_root / _worktree_dir_name(project_id)
 
     def session_path(self, project_id: str, session_id: str) -> Path:
         return (
-            self.worktree_root
-            / _worktree_dir_name(self._safe_id(project_id, "project id"))
+            self._project_worktrees(project_id)
             / _worktree_dir_name(self._safe_id(session_id, "session id"))
         )
 
@@ -844,8 +853,7 @@ class GitProjectRepository:
         而 checkpoint 的脏路径枚举是 `--untracked-files=all`。
         """
         return (
-            self.worktree_root
-            / _worktree_dir_name(self._safe_id(project_id, "project id"))
+            self._project_worktrees(project_id)
             / f"{_worktree_dir_name(self._safe_id(session_id, 'session id'))}__lane__"
               f"{_worktree_dir_name(self._safe_id(lane_id, 'lane id'))}"
         )
@@ -1166,6 +1174,7 @@ class GitProjectRepository:
         research_domain: str | None,
         owner_id: str,
         lang: str = "zh",
+        root_folder: str | None = None,
     ) -> RepositoryStatus:
         """Create the fixed Project schema and its genesis commit, idempotently.
 
@@ -1173,8 +1182,8 @@ class GitProjectRepository:
         第一眼看到的就是这两份文件。没说（补建旧项目的仓库）就按界面的默认语言。
         """
         project_id = self._safe_id(project_id, "project id")
-        destination = self.project_path(project_id)
         with self._project_lock(project_id):
+            destination = self.locations.prepare(project_id, root_folder)
             if (destination / ".git").is_dir():
                 self._require_current_schema(destination, project_id=project_id)
                 return self.status(project_id)
@@ -1182,13 +1191,14 @@ class GitProjectRepository:
                 raise ProjectRepositoryError(
                     f"Project repository path is non-empty but is not Git: {destination}"
                 )
-            self.repository_root.mkdir(parents=True, exist_ok=True)
+            destination.parent.mkdir(parents=True, exist_ok=True)
             # 不用 tempfile.mkdtemp：它按 0o700 建，Windows 上是只认 owner 的受保护 DACL，改名成正式
             # 仓库之后照样留着 —— 提权跑过一次的项目，之后正常运行就打不开（#1263 诊断包）。
             ensure_harness_importable()
             from shared.lib.private_files import mkdir_private
 
-            temporary = self.repository_root / f".{project_id}.init-{secrets.token_hex(6)}"
+            # Stage beside the destination: a chosen root may live on another volume.
+            temporary = destination.parent / f".{project_id}.init-{secrets.token_hex(6)}"
             mkdir_private(temporary, exist_ok=False)
             try:
                 self._git(temporary, "init", "-b", DEFAULT_BRANCH)
@@ -1228,7 +1238,7 @@ class GitProjectRepository:
                     # `.research/runtime/` 不进版本，但**不是缓存**：一次研究
                     # 到底发生了什么（transcript / events / checkpoint / 工具
                     # 原文）全部在那下面，没有任何一步能把它重算回来。
-                    ".research/runtime/\n.research/locks/\n"
+                    ".research/runtime/\n.research/locks/\n.research/worktrees/\n"
                     "**/__pycache__/\n**/.pytest_cache/\n**/.venv/\n"
                     "**/build/\n**/cache/\n"
                     "*.tmp\n*.swp\n.DS_Store\n",
@@ -1295,9 +1305,16 @@ class GitProjectRepository:
                     "-m",
                     f"Project-ID: {project_id}\nSchema-Version: {PROJECT_SCHEMA_VERSION}",
                 )
-                if destination.exists():
-                    destination.rmdir()
-                temporary.replace(destination)
+                # Persist the address before installing the tree, so an index write
+                # failure cannot leave an unregistered repository in the chosen folder.
+                self.locations.register(project_id, destination)
+                try:
+                    if destination.exists():
+                        destination.rmdir()
+                    temporary.replace(destination)
+                except Exception:
+                    self.locations.unregister(project_id)
+                    raise
                 temporary = destination
                 return self.status(project_id)
             except Exception:

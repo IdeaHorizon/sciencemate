@@ -31,7 +31,8 @@ export function compareAcademicPapers(
   mode: AcademicSortMode,
 ): number {
   if (mode === "recommendation") {
-    const backgroundDiff = Number(left.relevance_assessment?.tier === "background") - Number(right.relevance_assessment?.tier === "background");
+    const tierRank = (tier?: string) => tier === "unconfirmed" ? 2 : tier === "background" ? 1 : 0;
+    const backgroundDiff = tierRank(left.relevance_assessment?.tier) - tierRank(right.relevance_assessment?.tier);
     if (backgroundDiff) return backgroundDiff;
   }
   if (mode === "recommendation" && left.federated_rank != null && right.federated_rank != null) {

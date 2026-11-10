@@ -50,7 +50,6 @@ import inspect as _inspect
 import asyncio
 import inspect
 import logging
-import os
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -404,65 +403,18 @@ def list_tools_for_node(
     return out
 
 
-# ── 框架保留参数：check_after_seconds ───────────────────────────────────────
-#
-# "多久算异常"是**领域知识，只有 agent 知道**：`pip install` 半分钟没动静就该
-# 看一眼，LAMMPS 弛豫跑六小时才正常，HPC 排队几天也正常。框架去猜一个统一阈值，
-# 本来就是在替它做判断（而且必然猜错一半）。
-#
-# 所以由 agent 在调用时自己声明检查点。到点框架**只把轮次还给它**，命令一点没动
-# 继续跑（见 `_hand_back`）。它拿自己的 shell 去看日志/进程/端口，判断合理就接着
-# 干别的，结果跑完自动送到。判断不对劲就自己 kill。
-#
-# 注入在 `to_openai_schema` 这一处 —— 所有工具（含同事的、MCP 的）自动获得，
-# 谁都不用改。
+# Retired wire parameter: old checkpoints may still contain it. Consume it at
+# dispatch, but never advertise or use it to detach an unowned asyncio task.
 RESERVED_CHECK_AFTER = "check_after_seconds"
-
-_CHECK_AFTER_SCHEMA = {
-    "type": "number",
-    "description": (
-        "（框架参数，可选）你估计这条要跑多久才算异常，单位秒。到点框架把轮次"
-        "还给你去查看，**命令不会被中断**，它继续在后台跑、结果跑完自动送到你"
-        "下一轮。填你认为『超过这个时间就该看一眼』的值：快命令不用填；长作业"
-        "（编译 / 下载 / 训练 / HPC 提交）填大些，可以先短后长 —— 第一次早点看"
-        "确认起步正常，之后放宽。不填 = 一直等到它自己返回。"
-    ),
-}
-
-_MAX_HANDBACK_S = float(os.getenv("HARNESS_TOOL_HANDBACK_MAX_S", "21600") or 21600)
-"""agent 没声明检查点时的兜底（默认 6 小时）。**不杀任何东西**，只是到点把轮次
-还给它 —— 纯粹为了"再离谱的挂死也不会挂穿一整夜"（E2E-5 实测挂了 15.5 小时）。
-设 0 关闭。agent 自己声明的值优先。"""
-
-
-def _pop_check_after(kwargs: dict) -> float:
-    """摘出框架保留参数。非法值当没填（不因为参数写错就拒绝执行工具）。"""
-    raw = kwargs.pop(RESERVED_CHECK_AFTER, None)
-    if raw is None:
-        return _MAX_HANDBACK_S
-    try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        return _MAX_HANDBACK_S
-    return v if v > 0 else 0.0
 
 
 def to_openai_schema(tool: ToolDefinition) -> dict:
-    """把 ToolDefinition 转成 OpenAI function-calling 风格的 schema。
-
-    统一注入框架保留参数 `check_after_seconds`（见上）——**唯一注入点**，
-    所有工具自动获得，工具定义一行不用改。工具自己已有同名参数就不覆盖。
-    """
-    params = tool.parameters_schema
-    props = params.get("properties") if isinstance(params, dict) else None
-    if isinstance(props, dict) and RESERVED_CHECK_AFTER not in props:
-        params = {**params, "properties": {**props, RESERVED_CHECK_AFTER: _CHECK_AFTER_SCHEMA}}
     return {
         "type": "function",
         "function": {
             "name": tool.name,
             "description": tool.description,
-            "parameters": params,
+            "parameters": tool.parameters_schema,
         },
     }
 
@@ -481,29 +433,10 @@ def all_tool_names() -> list[str]:
 
 # ── 执行 + result envelope ──────────────────────────────────────────────────
 
-# ── 工具调用必须有界（E2E-5 实测：一次 tool_call 挂了 15.5 小时）────────────
-#
-# `execute()` 的 envelope 契约写着"工具抛异常 → catch 成 error"。但**挂住不是
-# 异常** —— 第 345 行原本是一个裸 await，没有任何上界。现场：experiment 节点
-# 用 safe_run_bash 起 vLLM 服务，`A && B &` 让 bash fork 出的子 shell 继承了
-# stdout 管道并 wait 到服务结束为止，而工具等的是管道 EOF 而非进程退出 →
-# 工具永不返回 → 节点永不返回 → 两个 E2E 分别僵死 15.5 小时和 5 小时。
-#
-# 那个 bug 在节点 owner 的工具里，但**框架允许它挂穿一整夜**是架构缺兜底：
-# 工具实现的质量参差不齐是常态，框架不能假设每个工具作者都写对了收尾。
-#
-# **不设硬性超时。** 合法的长任务是常态 —— 那次模型下载真跑了 60 分钟，HPC
-# 上一个作业跑几天很正常。框架无从判断"多久算太久"，硬杀只会把真实验砍掉。
-#
-# 框架该做的是让**"卡了多久"变成监督方看得见的事实**：工具在飞期间按递增间隔
-# 记 `tool_long_running`。orchestrator 的 runtime_control progress 读的就是
-# transcript，于是它看到的不再是"子节点安静着"（15 小时里它一直只知道这个，
-# 每次都合理地选择继续等），而是"子节点在**同一次 safe_run_bash 调用**里待了
-# 3 小时、零输出"。后者是完全不同的信号，够它判断该不该干预了。
-#
-# 决定权归有上下文的那一方 —— 跟今天早上把"等"从模型手里收回框架是同一条原则
-# 的另一面：机械的事（等）框架做，需要判断的事（这么久合不合理）给看得见全局
-# 的人/agent 判，但**必须先让它看得见**。
+# A tool call keeps ownership until its real result or cancellation. Slow
+# calls remain visible to supervisors without returning another model turn or
+# inventing an in-memory job ID. Physical jobs use their existing managed
+# adapter; explicit waits use core.job_wait for restart and delivery.
 _LONG_RUNNING_MARKS_S = (600, 1800, 3600, 7200, 14400, 28800, 57600, 86400)
 """在这些时刻各记一条 —— 10 分钟起，之后 30m/1h/2h/4h/8h/16h/24h，
 之后每 24h 一条。递增是为了长作业不刷屏，又不会彻底失声。"""
@@ -544,102 +477,30 @@ async def _long_running_watch(state, tool_name: str, kwargs: dict) -> None:
             pass
 
 
-async def _await_bounded(tool_name: str, executor, state, kwargs: dict, check_after: float):
-    """await 工具，同时开一个留痕看门狗。配置了硬上界才会超时。
+async def _await_owned(tool_name: str, executor, state, kwargs: dict):
+    """One call owns its result and cancellation until it actually returns.
 
-    看门狗或上界机制本身出问题时退化成裸 await —— 兜底层不该比没有兜底更坏。
+    Long-running observations remain visible to supervisors. A clock tick is
+    never a reason to create a second, process-local job lifecycle.
     """
+    from core.cancellation import RunCancelled
+
+    watch = asyncio.create_task(_long_running_watch(state, tool_name, kwargs))
     try:
-        watch = asyncio.ensure_future(_long_running_watch(state, tool_name, kwargs))
-    except Exception:
-        return await executor(state=state, **kwargs)
-    try:
-        call = asyncio.ensure_future(executor(state=state, **kwargs))
-        if check_after <= 0:
-            return await call
-        try:
-            return await asyncio.wait_for(asyncio.shield(call), timeout=check_after)
-        except TimeoutError:
-            return _hand_back(state, tool_name, kwargs, call, check_after)
+        from core.job_wait import cancellable
+
+        return await cancellable(state, executor(state=state, **kwargs))
+    except RunCancelled:
+        from core import job_wait
+
+        selected = job_wait.load(state)
+        if selected:
+            state.append_transcript("job_wait_cancelled", identity=selected["identity"])
+            job_wait.acknowledge(state)
+        raise
     finally:
         watch.cancel()
-
-
-# ── 交还控制权（不是中止）──────────────────────────────────────────────────
-#
-# agent 说的 check_after_seconds 到点了 → 框架把**轮次**还给它，**底下的调用
-# 一点没动**，继续在后台跑。它跑完时结果走 `injected_messages` 推回去 ——
-# 复用后台子节点那条现成通道（agent_loop.py 每轮 turn_start 消费，所有节点都吃）。
-#
-# 为什么这里不加任何"查作业"的工具：agent 判断作业健不健康靠的是看外部世界
-# （tail 日志 / ps / curl 端口），那些**它自己的 bash 全能干**。框架唯一能提供
-# 而 bash 拿不到的，只有"框架自己这个还没返回的调用最终返回了什么"—— 而那个
-# 直接推给它就行，不需要它来查。
-#   （wangd 连着三次戳这一点：我一遇到问题就伸手加工具。最后净新增 = 一个参数。）
-_PENDING: dict[str, dict] = {}
-
-
-def _job_id(state, tool_name: str) -> str:
-    try:
-        n = int(state.hook_state.get("_job_seq", 0) or 0) + 1
-        state.hook_state["_job_seq"] = n
-    except Exception:
-        n = len(_PENDING) + 1
-    return f"{tool_name}#{n}"
-
-
-def _hand_back(state, tool_name: str, kwargs: dict, call, waited: float) -> dict[str, Any]:
-    """到检查点了：把轮次还给 agent，调用继续跑。"""
-    job_id = _job_id(state, tool_name)
-    _PENDING[job_id] = {"task": call, "tool": tool_name}
-
-    def _done(task) -> None:
-        _PENDING.pop(job_id, None)
-        try:
-            if task.cancelled():
-                body = f"⏹️ 后台调用 `{job_id}` 已取消。"
-            elif task.exception() is not None:
-                body = f"❌ 后台调用 `{job_id}`（{tool_name}）出错：{task.exception()!r}"
-            else:
-                body = (
-                    f"✅ 后台调用 `{job_id}`（{tool_name}）已返回。结果：\n"
-                    f"{str(task.result())[:2000]}"
-                )
-            state.hook_state.setdefault("injected_messages", []).append(
-                {"content": body, "source": "pending_tool_call"}
-            )
-        except Exception:
-            pass
-
-    call.add_done_callback(_done)
-    try:
-        state.append_transcript(
-            "tool_handed_back",
-            tool_name=tool_name,
-            job_id=job_id,
-            waited_seconds=waited,
-            args_preview=str(kwargs)[:400],
-        )
-    except Exception:
-        pass
-    return {
-        "status": "running",
-        "job_id": job_id,
-        "waited_seconds": round(waited, 1),
-        "note": (
-            f"到你设的检查点了（{waited:.0f}s）。**命令没有被中断，也没有失败** —— "
-            f"它还在后台跑，跑完的结果会自动送到你下一轮。\n"
-            f"现在轮到你判断它健不健康：用你自己的 shell 去看 —— 日志尾部"
-            f"（时间戳有没有推进 / 吞吐是否合理 / 有没有 error、OOM、nan）、"
-            f"输出文件在不在变大、进程还在不在、端口通不通。\n"
-            f"判断合理 → 什么都不用做，继续干别的，结果到了会通知你；"
-            f"判断不对劲 → 用 shell 自己处理（kill 进程 / 换做法）。\n"
-            f"⚠️ **不要因为没拿到返回值就重跑同一条命令** —— 它还在跑，重跑会"
-            f"起第二份。"
-        ),
-    }
-
-
+        await asyncio.gather(watch, return_exceptions=True)
 
 
 def _dumps_for_scan(result: Any) -> str:
@@ -1026,9 +887,8 @@ def _argument_shape_mismatches(schema: Any, kwargs: dict[str, Any]) -> list[str]
 
 async def _execute_dispatch(tool_name: str, state, /, **kwargs: Any) -> dict[str, Any]:
     """execute 的原始派发实现（取消/脱敏由 execute 包在外面）。"""
-    # 框架保留参数：**在这里摘掉，永远不传给工具** —— 于是任何工具（包括同事
-    # 写的、MCP 来的）都不用改一行就获得"到点交还控制权"的能力。
-    check_after = _pop_check_after(kwargs)
+    # Consume the retired parameter from old calls/checkpoints.
+    kwargs.pop(RESERVED_CHECK_AFTER, None)
 
     executor = _REGISTRY.executors.get(tool_name)
     if executor is None:
@@ -1095,7 +955,7 @@ async def _execute_dispatch(tool_name: str, state, /, **kwargs: Any) -> dict[str
             "parameters_schema": _schema,
         }
     try:
-        result = await _await_bounded(tool_name, executor, state, kwargs, check_after)
+        result = await _await_owned(tool_name, executor, state, kwargs)
     except _errs.ToolRejection as e:
         # 故意用 raise 实现的驳回 —— 不是 bug，也别带 `TypeError:` 那种前缀。
         return {"status": "error", "error_code": _errs.REJECTED, "error": str(e)}

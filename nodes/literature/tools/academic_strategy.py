@@ -10,11 +10,12 @@ from core.paths import literature_cache_dir
 from shared.lib import filelock
 from . import strategy_generator
 
-_VERSION = "academic-bilingual-research-scope-v13"
+_VERSION = "academic-bilingual-recall-aliases-v20"
 _MAX_AGE_SECONDS = 86400
 
 
 def generate_academic_strategy(question: str) -> tuple[dict, dict]:
+    from .bilingual_strategy import PROMPT, recompile_chinese_queries
     config = strategy_generator.LLM_CONFIG
 
     def generate():
@@ -24,7 +25,8 @@ def generate_academic_strategy(question: str) -> tuple[dict, dict]:
     if not config.get("api_base") or not config.get("api_key"):
         return generate()
     identity = json.dumps(
-        [_VERSION, " ".join(question.split()), config.get("api_base", "").rstrip("/"),
+        [_VERSION, hashlib.sha256(PROMPT.encode()).hexdigest(),
+         " ".join(question.split()), config.get("api_base", "").rstrip("/"),
          config.get("model"), config.get("api_key")],
         ensure_ascii=False,
     )
@@ -51,6 +53,7 @@ def generate_academic_strategy(question: str) -> tuple[dict, dict]:
                     question, str(strategy.get("english_query") or "")
                 ))
             ):
+                recompile_chinese_queries(strategy)
                 return strategy, {
                     "status": "strategy_cache_hit", "strategy_cache_hit": True,
                     "strategy_cache_age_seconds": round(age, 3),

@@ -653,7 +653,7 @@ def project_output_observations(records: Iterable[dict[str, Any]]) -> list[dict[
                                "unknown": sorted(uncertain), "truncated": True,
                                "observation_error": f"{type(exc).__name__}: {exc}"}
         if (row.get("kind") == "job_terminal"
-                and (row.get("output_diff") or {}).get("coordinate_space") == "slurm_remote"):
+                and (row.get("output_diff") or {}).get("coordinate_space") in {"slurm_remote", "project_ssh"}):
             # Remote POSIX coordinates must never be interpreted as paths on
             # the current worker. Keep the immutable source for later mirror
             # receipts; only their verified local coordinates enter this view.

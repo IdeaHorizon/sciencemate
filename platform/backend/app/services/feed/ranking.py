@@ -372,6 +372,17 @@ def _attention_score(item: FeedItem) -> float:
     return min(math.log1p(upvotes) / math.log(100.0), 1.0)
 
 
+def is_arxiv_item(item: FeedItem) -> bool:
+    """Recognize the subscribed repository, not every paper tagged with physics/CS."""
+    if item.kind != FeedItemKind.PAPER:
+        return False
+    return (
+        str(getattr(item, "canonical_key", "") or "").startswith("arxiv:")
+        or url_host(item.url).lower() in {"arxiv.org", "www.arxiv.org", "export.arxiv.org"}
+        or journal_key(item.venue) in {"arxiv", "arxivpreprint", "arxivcornelluniversity"}
+    )
+
+
 def _domain_hits(item: FeedItem, profile: Profile) -> tuple[str, ...]:
     """条目的域（含其上行链）与用户订阅的交集。
 
@@ -382,6 +393,10 @@ def _domain_hits(item: FeedItem, profile: Profile) -> tuple[str, ...]:
         return ()
     wanted = set(profile.domains)
     hits: list[str] = []
+    # "arxiv" is a repository subscription, not an ancestor in the discipline
+    # registry. Keep original subject tags and match the actual source instead.
+    if domain_service.FEED_ARXIV_DOMAIN in wanted and is_arxiv_item(item):
+        hits.append(domain_service.FEED_ARXIV_DOMAIN)
     slugs = item.domains or ()
     extra = item.extra if isinstance(item.extra, dict) else {}
     if item.kind == FeedItemKind.PAPER and (
@@ -396,6 +411,8 @@ def _domain_hits(item: FeedItem, profile: Profile) -> tuple[str, ...]:
         slugs = current_domains(item.venue or "", slugs, item.title or "", item.summary or "")
     for slug in slugs:
         for ancestor in domain_service.ancestors(str(slug)):
+            if ancestor == domain_service.FEED_ARXIV_DOMAIN:
+                continue
             if ancestor in wanted and ancestor not in hits:
                 hits.append(ancestor)
     return tuple(hits)
@@ -753,6 +770,13 @@ async def candidate_items(
             _windowed(select(FeedItem)).where(domain_condition),
             lambda item: bool(_domain_hits(item, profile)),
         )
+        if domain_service.FEED_ARXIV_DOMAIN in profile.domains:
+            # A simultaneous CAS leaf selection must not hide repository papers
+            # whose original subject tags are cs.LG, quant-ph, etc.
+            await supplement(
+                _windowed(select(FeedItem)),
+                lambda item: is_arxiv_item(item),
+            )
 
     # Journal names and verified scholar identities each receive a complete scan.
     if profile.journals:
@@ -843,6 +867,7 @@ def show_in_feed(item: FeedItem, *, include_preparing: bool = False) -> bool:
         completed_project = (
             bool(acquisition_routes(item) & {"project_profile", "scholar", "journal"})
             and extra.get("literature_preparation") == "ready"
+            and extra.get("abstract_status") not in {"retry_pending", "access_blocked", "pending", "not_requested"}
             and (extra.get("abstract_lookup_completed") is True or extra.get("abstract_enrichment_attempted") is True)
         )
         if not completed_project:
@@ -1150,6 +1175,10 @@ def rank_rednote(
     }
     for base in base_scored:
         routes = acquisition_routes(base.item)
+        if base.matched_domains and is_arxiv_item(base.item):
+            # Public Atom entries have no project/journal acquisition marker.
+            # An explicit matching subscription still gives them a delivery lane.
+            routes = routes | {"journal"}
         if matches_subscribed_scholar(base.item, profile):
             routes = routes | {"scholar"}
         extra = base.item.extra if isinstance(base.item.extra, dict) else {}

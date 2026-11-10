@@ -1,4 +1,4 @@
-"""打一个 Mac 安装包：`.app` 拖进"应用程序"，双击出窗口。
+"""打一个 Mac 安装包：双击 `.app` 检测已有版本，安装或升级后出窗口。
 
 ## 判据
 
@@ -417,7 +417,7 @@ def build_the_shell(app: Path) -> None:
     binary.parent.mkdir(parents=True, exist_ok=True)
     run(["swiftc", "-O", "-target", "arm64-apple-macos13.0",
          "-framework", "AppKit", "-framework", "WebKit",
-         str(SHELL / "Shell.swift"), "-o", str(binary)])
+         str(SHELL / "Shell.swift"), str(SHELL / "Installation.swift"), "-o", str(binary)])
 
 
 def draw_the_icon(app: Path) -> None:
@@ -559,7 +559,12 @@ def make_the_dmg(app: Path, edition: str = "personal") -> Path:
         # 是同一个 inode，`cp -R` 会把它们展开成 143 份实体副本 —— 实测 dmg 因此
         # 从 213 MB 涨到 499 MB，比它装的那个 .app（409 MB）还大。
         run(["ditto", str(app), str(staging / app.name)])
-        os.symlink("/Applications", staging / "Applications")
+        (staging / "Install.txt").write_text(
+            "双击 ScienceMate，然后选择“安装并打开”。安装器会检测已有版本；新版覆盖升级，相同或更高版本会跳过。\n\n"
+            "Double-click ScienceMate, then choose Install and Open. Setup upgrades the existing installation "
+            "and skips installation when the same or a newer version is already installed.\n",
+            encoding="utf-8",
+        )
         dmg.unlink(missing_ok=True)
         run(["hdiutil", "create", "-volname", APP_NAME, "-srcfolder", str(staging),
              "-ov", "-format", "UDZO", str(dmg)], capture_output=True)
@@ -585,7 +590,7 @@ HOW_TO_INSTALL = """
                 Windows：  irm {url}/install.ps1 | iex
      两条都不经浏览器，于是文件不带来源标记：Gatekeeper / SmartScreen 根本不会去
      问它签没签名。共享盘拷过来也一样。
-  B. 浏览器下 dmg → 拖进「应用程序」→ 第一次打开会被拦（未签名）：
+  B. 浏览器下 dmg → 双击 ScienceMate →「安装并打开」（自动检测并升级已有版本）。第一次打开会被拦（未签名）：
      系统设置 → 隐私与安全性 → 拉到底「仍要打开」→ 再确认一次。每台机器一次。
      Windows 浏览器下 Setup.exe → 「Windows 已保护你的电脑」→ 更多信息 → 仍要运行。
 """
@@ -972,7 +977,7 @@ def main(argv: list[str] | None = None) -> int:
     build_a_portable_git(app)
     place_the_tex_toolchain(app)
     # 壳先于载荷编：载荷的附加归档要带上壳本身（#953），所以壳得在打载荷之前就存在。
-    # 编壳只要 app 骨架 + Shell.swift，不依赖运行时，挪到前面没有副作用。
+    # 编壳只要 app 骨架和 Swift 源码，不依赖运行时，挪到前面没有副作用。
     build_the_shell(app)
     interface = build_the_interface(args.skip_ui)
     # 服务器包在装配之前打：`stage_the_pro_only_things` 要把它放进 app/。（它只拷 git 跟踪的

@@ -1,6 +1,7 @@
 """Real detached processes: replay, reconnect, cancellation, logs and transfers."""
 
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -61,6 +62,53 @@ def test_reconnect_and_replay_do_not_duplicate_a_job(remote):
     assert len(remote("jobs")["jobs"]) == 1
     conflict = remote("submit", command="echo different", job_id=key)
     assert "different command" in conflict["error"]
+
+
+@pytest.mark.parametrize("original_manifest", [None, "a" * 64])
+def test_submission_key_cannot_be_rebound_to_changed_inputs(remote, original_manifest):
+    key = uuid4().hex
+    request = dict(job_id=key, command="cat input.txt >> observed.txt")
+    if original_manifest is not None:
+        request["input_manifest_sha256"] = original_manifest
+
+    def put_input(content):
+        remote("put", path="input.txt", content_base64=base64.b64encode(content).decode())
+
+    put_input(b"version one\n")
+    first = remote("submit", **request)
+    assert terminal(remote, key)["state"] == "succeeded"
+    assert first.get("input_manifest_sha256") == original_manifest
+    if original_manifest is None:
+        legacy_identity = dict(command=request["command"], cwd=first["cwd"], timeout=86400, environment={})
+        assert first["request_digest"] == hashlib.sha256(
+            json.dumps(legacy_identity, sort_keys=True).encode()
+        ).hexdigest()
+
+    put_input(b"version two\n")
+    replay = remote("submit", **request)
+    assert replay["job_id"] == key and replay["request_digest"] == first["request_digest"]
+    conflict = remote("submit", **{**request, "input_manifest_sha256": "b" * 64})
+    assert conflict["error_code"] == "input_manifest_conflict"
+    assert conflict["existing_input_manifest_sha256"] == original_manifest
+    if original_manifest is not None:
+        missing_manifest = remote("submit", job_id=key, command=request["command"])
+        assert missing_manifest["error_code"] == "input_manifest_conflict"
+
+    final = remote("status", job_id=key)
+    assert final["request_digest"] == first["request_digest"]
+    assert final.get("input_manifest_sha256") == original_manifest
+    assert len(remote("jobs")["jobs"]) == 1
+    assert base64.b64decode(remote("get", path="observed.txt")["content_base64"]) == b"version one\n"
+
+    new_key = uuid4().hex
+    new_job = remote(
+        "submit", job_id=new_key, command=request["command"], input_manifest_sha256="b" * 64
+    )
+    assert new_job["job_id"] == new_key and new_job["request_digest"] != first["request_digest"]
+    assert terminal(remote, new_key)["state"] == "succeeded"
+    assert base64.b64decode(remote("get", path="observed.txt")["content_base64"]) == (
+        b"version one\nversion two\n"
+    )
 
 
 def test_cancel_and_timeout_terminate_managed_jobs(remote):

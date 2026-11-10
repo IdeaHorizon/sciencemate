@@ -188,13 +188,16 @@ internal sealed class WizardForm : Form
         ShowWhichLanguage();
 
         string version = InstallerVersion.Value;
+        bool upgrading = Footprint.VersionIn(_options.InstallDir) != null;
         var subtitle = new Label
         {
             AutoSize = true,
             ForeColor = Color.FromArgb(96, 96, 96),
             Location = new Point(26, 54),
         };
-        Speak(() => subtitle.Text = string.IsNullOrWhiteSpace(version)
+        Speak(() => subtitle.Text = upgrading
+            ? Speech.T("已检测到现有安装，将检查版本并在原位置升级。", "Existing installation found. Setup will check and upgrade it.")
+            : string.IsNullOrWhiteSpace(version)
             ? Speech.T("选择安装位置。", "Choose where to install.")
             : string.Format(Speech.T("版本 {0}　·　选择安装位置。", "Version {0}  ·  Choose where to install."), version));
         _pageChoose.Controls.Add(subtitle);
@@ -204,6 +207,7 @@ internal sealed class WizardForm : Form
         _pageChoose.Controls.Add(installTo);
 
         _dir.Text = _options.InstallDir;
+        _dir.ReadOnly = upgrading;
         _dir.Location = new Point(24, 118);
         _dir.Size = new Size(420, 24);
         _pageChoose.Controls.Add(_dir);
@@ -215,6 +219,7 @@ internal sealed class WizardForm : Form
             UseVisualStyleBackColor = true,
         };
         Speak(() => browse.Text = Speech.T("浏览…", "Browse…"));
+        browse.Enabled = !upgrading;
         browse.Click += OnBrowse;
         _pageChoose.Controls.Add(browse);
 
@@ -306,7 +311,7 @@ internal sealed class WizardForm : Form
         _complaint.Text = why ?? "";
         _install.Enabled = why == null;
         // 写不进去的时候给一条出路：默认位置不用任何权限，点一下就换过去。
-        _useDefault.Visible = why != null && _dir.Text.Trim() != InstallOptions.DefaultInstallDir();
+        _useDefault.Visible = why != null && !_dir.ReadOnly && _dir.Text.Trim() != InstallOptions.DefaultInstallDir();
     }
 
     /// <summary>这个盘还剩多少、大概要多少。</summary>
@@ -480,6 +485,11 @@ internal sealed class WizardForm : Form
         _installing = false;
         _outcome = outcome;
         _doneWhere.Text = Speech.T("已安装到：", "Installed to: ") + outcome.InstallDir;
+        if (outcome.SkippedMessage != null)
+        {
+            _doneNotes.Text = outcome.SkippedMessage;
+            _doneNotes.Visible = true;
+        }
         if (outcome.Warnings.Count > 0)
         {
             _doneNotes.Text = Speech.T("有几件事没做成（不影响使用）：", "A few things did not work out (ScienceMate still works):")
@@ -512,8 +522,7 @@ internal sealed class WizardForm : Form
         {
             try
             {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(_outcome.ExePath)
-                { UseShellExecute = true, WorkingDirectory = _outcome.InstallDir });
+                Installer.OpenApplication(_outcome);
             }
             catch (Exception ex)
             {

@@ -34,6 +34,7 @@ import logging
 from collections import OrderedDict
 
 import httpx
+from app.services.harness_imports import harness_module
 
 from app.services.feed.collectors import FETCH_TIMEOUT_SECONDS, USER_AGENT
 from app.services.harness_imports import harness_module

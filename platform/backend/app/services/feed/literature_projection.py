@@ -7,6 +7,8 @@ feed needs for stable identities, visibility and engagement foreign keys.
 
 from __future__ import annotations
 
+from app.services.harness_imports import harness_module
+
 from app.services.feed.profile import journal_display_name
 
 import html
@@ -27,6 +29,10 @@ from app.models.feed import FeedItem, FeedItemKind, FeedVisibility
 from app.services.feed import windows
 
 
+def abstract_processing_status(metadata: dict) -> str:
+    return harness_module("shared.contrib.literature_status").abstract_processing_status(metadata)
+
+
 def literature_papers_root() -> Path:
     """Return the same shared paper root used by the literature node.
 
@@ -39,13 +45,14 @@ def literature_papers_root() -> Path:
         literature_home = Path(configured).expanduser()
         return literature_home.resolve() / "papers"
 
-    from core import paths as harness_paths
-
+    harness_paths = harness_module("core.paths")
     return harness_paths.literature_papers_dir().resolve()
 
 
 def preparation_status(metadata: dict) -> str:
     """Recognize completed legacy lookups even when no abstract was available."""
+    if abstract_processing_status(metadata) in {"retry_pending", "access_blocked"}:
+        return "pending"
     if metadata.get("literature_preparation"):
         return str(metadata["literature_preparation"])
     image = metadata.get("image") if isinstance(metadata.get("image"), dict) else {}
@@ -322,6 +329,8 @@ async def project_literature_catalog(
             "author_identities": metadata.get("author_identities") or [],
             "verified_author_ids": metadata.get("verified_author_ids") or [],
             "literature_preparation": preparation_status(metadata),
+            "abstract_status": abstract_processing_status(metadata),
+            "abstract_lookup_retry_after": metadata.get("abstract_lookup_retry_after"),
             "abstract_enrichment_attempted": bool(metadata.get("abstract_enrichment_attempted")),
             "abstract_lookup_completed": bool(metadata.get("abstract_lookup_completed") or (metadata.get("abstract_enrichment_attempted") and metadata.get("literature_preparation") == "ready")),
         }

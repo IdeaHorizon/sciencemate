@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Plus, X } from "lucide-react";
 import { ProjectsList } from "@/features/projects";
 import { WhereItLives } from "@/features/projects/WhereItLives";
+import { ProjectRootFolder } from "@/features/projects/ProjectRootFolder";
 import { otherHomes } from "@/features/projects/homes";
 import { useCreateProject } from "@/features/projects/hooks/useProjects";
 import { api } from "@/lib/api";
@@ -19,6 +20,7 @@ const INITIAL_FORM = {
   //: 放在哪：空串 = 本机。**默认必须是空的** —— 一个只想在自己电脑上开个课题的人
   //: 不该先回答"你属于哪个组织"。
   home: "",
+  root_folder: null as string | null,
 };
 
 export default function ProjectsPage() {
@@ -42,10 +44,13 @@ export default function ProjectsPage() {
     const isContinuous = form.operation_mode === "continuous";
     const created = await createProject.mutateAsync({
       ...form,
+      root_folder: form.home ? undefined : form.root_folder?.trim() || undefined,
       operation_mode: isContinuous ? "autonomous" : form.operation_mode,
       description: form.description.trim() || undefined,
       research_domain: form.research_domain.trim() || undefined,
-    });
+    }).catch(() => undefined);
+    // The mutation displays the server's error; keep the form and chosen path for retry.
+    if (!created) return;
     // 连续档那一刀只补得了**本机**的项目：组织项目的 config 在那台服务器上，而
     // `updateProjectConfig` 走的是带 id 的路径，转交那一层会把它送对地方。
     if (isContinuous) {
@@ -94,8 +99,11 @@ export default function ProjectsPage() {
               <label><span>{t({ zh: "研究方向", en: "Research domain" })}</span><input value={form.research_domain} onChange={(e) => setForm({ ...form, research_domain: e.target.value })} placeholder={t({ zh: "流体力学", en: "Materials science" })} /></label>
               <label><span>{t({ zh: "研究说明", en: "Research brief" })}</span><textarea rows={4} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder={t({ zh: "想解决什么问题、有什么限制、希望得到什么结果。", en: "Describe the question, constraints and desired result." })} /></label>
               <WhereItLives value={form.home}
-                            onChange={(home) => setForm({ ...form, home })}
+                            onChange={(home) => setForm({ ...form, home, root_folder: null })}
                             onAddOne={() => setAddingHome(true)} />
+              {!form.home && <ProjectRootFolder value={form.root_folder}
+                onChange={(root_folder) => setForm((current) => ({ ...current, root_folder }))}
+                disabled={createProject.isPending} />}
               <details className="project-create-advanced">
                 <summary>{t({ zh: "高级", en: "Advanced" })}</summary>
                 <div className="project-create-grid">

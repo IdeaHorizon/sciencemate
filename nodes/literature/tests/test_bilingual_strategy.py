@@ -8,8 +8,30 @@ def concept(zh, en):
     return {'zh': [zh], 'en': [en]}
 
 
+@pytest.mark.parametrize('question,zh,en', [
+    ('水稻 耐盐性 根系离子稳态', ['水稻', '耐盐性', '根系离子稳态'], ['rice', 'salt tolerance', 'root ion homeostasis']),
+    ('个人信息保护法中自动化决策的透明度', ['个人信息保护法', '自动化决策', '透明度'], ['privacy law', 'automated decisions', 'transparency']),
+    ('Find steel fatigue crack growth studies', ['钢', '疲劳', '裂纹扩展'], ['steel', 'fatigue', 'crack growth']),
+])
+def test_independent_input_conditions_cannot_be_or_synonyms(question, zh, en):
+    data = {'core_concepts': [{'zh': zh, 'en': en}], 'search_groups': [{'additional_concepts': []}]}
+    with pytest.raises(ValueError, match='independent_terms_merged_as_synonyms'):
+        bs.compile_plan(json.dumps(data), question)
+    data['core_concepts'] = [concept(z, e) for z, e in zip(zh, en)]
+    assert bs.compile_plan(json.dumps(data), question)['english_query'].count(' AND ') == 2
+
+
+@pytest.mark.parametrize('question,terms', [
+    ('Find sodium chloride (NaCl, table salt) research', ['sodium chloride', 'NaCl', 'table salt']),
+    ('Find heart attack or myocardial infarction or MI research', ['heart attack', 'myocardial infarction', 'MI']),
+    ('support vector machine research', ['support vector machine', 'vector machine', 'machine']),
+])
+def test_explicit_aliases_and_nested_terms_do_not_trigger_group_repair(question, terms):
+    bs._check_source_alternatives({'en': terms, 'zh': ['主题']}, question, 'core')
+
+
 def raw(groups=1):
-    return {'core_concepts': [concept('生成式人工智能', 'generative artificial intelligence'),
+    return {'retrieval_mode':'exploratory', 'core_concepts': [concept('生成式人工智能', 'generative artificial intelligence'),
                              concept('基层公务员', 'grassroots civil servants'),
                              concept('数字素养', 'digital literacy')],
             'search_groups': [{'label': str(i), 'additional_concepts': [] if not i else [concept('方面'+str(i),'aspect '+str(i))]} for i in range(groups)]}
@@ -34,6 +56,8 @@ def test_short_topic_has_one_group_and_no_mechanical_expansion():
     plan = bs.compile_plan(json.dumps(data), '布拉格反射')
     assert _academic_strategy_queries(plan,'布拉格反射') == ['"Bragg reflection"']
     data['search_groups'] *= 3
+    assert len(bs.compile_plan(json.dumps(data),'布拉格反射')['bilingual_queries']) == 1
+    data['search_groups'].append({'label':'应用','additional_concepts':[concept('光学器件','optical devices')]})
     with pytest.raises(ValueError,match='short_topic_was_expanded'):
         bs.compile_plan(json.dumps(data),'布拉格反射')
 
@@ -46,6 +70,100 @@ def test_synonyms_and_exclusions_compile_in_both_languages():
     assert ' OR "generative AI"' in p['en']
     assert ' NOT ("simulation studies")' in p['en']
     assert ' - ("模拟研究")' in p['zh']
+
+
+@pytest.mark.parametrize('names', [
+    [['颗粒沉降', '颗粒沉积'], ['浸入边界', '浸没边界', 'IBM'],
+     ['格子玻尔兹曼', '格子Boltzmann', 'LBM']],
+    [['电子病历', '电子健康记录', 'EMR'], ['急性肾损伤', 'AKI'],
+     ['外部验证', '独立验证']],
+    [['个人信息保护法', '个人信息保护法律'], ['自动化决策', '算法决策'],
+     ['透明度', '算法透明']],
+])
+def test_chinese_alias_budget_preserves_each_condition_and_useful_alternatives(names):
+    concepts = [{'zh': group} for group in names]
+    first_aliases = [{'zh': group[:2]} for group in names]
+    budget = len(bs.expression(first_aliases, lang='zh'))
+    # Long model alternatives must not erase useful aliases of other concepts.
+    concepts[0]['zh'] = [names[0][0], names[0][1] * 30, names[0][1]]
+    query = bs.chinese_expression(concepts, limit=budget)
+    assert len(query) <= budget
+    assert query.count(' * ') == len(names) - 1
+    for group in names:
+        assert f'"{group[0]}"' in query
+        # A compact abbreviation may take priority over a longer spelling.
+        assert any(f'"{alias}"' in query for alias in group[1:])
+
+
+def test_chinese_shortening_keeps_every_exclusion_alias():
+    concepts = [{'zh': ['自动化决策', '算法决策', '自动化决策系统']},
+                {'zh': ['透明度', '算法透明', '决策透明度']}]
+    exclusions = [{'zh': ['新闻报道', '新闻']}, {'zh': ['法律条文', '法条原文']}]
+    minimum = bs.expression([{'zh': c['zh'][:1]} for c in concepts], exclusions, lang='zh')
+    query = bs.chinese_expression(concepts, exclusions, limit=len(minimum))
+    assert query == minimum
+    with pytest.raises(ValueError, match='query_too_long'):
+        bs.chinese_expression(concepts, exclusions, limit=len(minimum) - 1)
+
+
+def test_compile_long_chinese_plan_keeps_some_aliases_instead_of_dropping_them_all():
+    names = [['电子病历', '电子健康记录', '医院电子健康记录系统'],
+             ['急性肾损伤', 'AKI', '急性肾功能损伤'],
+             ['预测模型', '风险预测', '临床风险预测模型'],
+             ['外部验证', '独立验证', '跨医院外部独立验证']]
+    cores = [{'zh': group, 'en': [en]} for group, en in zip(names,
+             ['electronic health records', 'acute kidney injury', 'prediction model', 'external validation'])]
+    assert len(bs.expression(cores, lang='zh')) > 120
+    plan = bs.compile_plan(json.dumps({'core_concepts': cores,
+        'search_groups': [{'label': '研究条件', 'additional_concepts': []}]}),
+        '基于电子病历预测急性肾损伤并经过外部验证的模型')
+    query = plan['bilingual_queries'][0]['zh']
+    assert len(query) <= 120 and query.count(' * ') == 3
+    for group in names:
+        assert f'"{group[0]}"' in query and f'"{group[1]}"' in query
+
+
+def test_chinese_query_fitting_budget_keeps_terms_intact():
+    concepts = [{'zh': ['个人信息保护法', '个人信息保护法律']}, {'zh': ['自动化决策']}]
+    query = bs.expression(concepts, lang='zh')
+    assert bs.chinese_expression(concepts, limit=len(query)) == query
+
+
+@pytest.mark.parametrize('zh,en,abbreviation', [
+    ('浸入边界', ['immersed boundary', 'IBM'], 'IBM'),
+    ('电子病历', ['electronic health records', 'EHR'], 'EHR'),
+    ('个人信息保护法', ['Personal Information Protection Law', 'PIPL'], 'PIPL'),
+])
+def test_chinese_reuses_the_same_concepts_english_abbreviation(zh,en,abbreviation):
+    cores = [{'zh': [zh], 'en': en}, concept('研究对象', 'research object')]
+    before = json.loads(json.dumps(cores))
+    data = {'core_concepts': cores, 'search_groups': [{'additional_concepts': []}]}
+    plan = bs.compile_plan(json.dumps(data), zh + '与研究对象')
+    assert plan['bilingual_queries'][0]['zh'] == f'("{zh}" + "{abbreviation}") * "研究对象"'
+    assert cores == before
+    assert plan['english_query'] == bs.expression(cores)
+
+
+def test_shared_acronyms_respect_query_budget_and_exclusion_scope():
+    cores = [{'zh': ['方法名称', '较长的中文方法别名'], 'en': ['method name', 'ABC']},
+             concept('研究对象', 'study subject')]
+    excluded = [{'zh': ['排除对象'], 'en': ['excluded subject', 'XYZ']}]
+    expected = '("方法名称" + "ABC") * "研究对象" - (("排除对象" + "XYZ"))'
+    assert bs.chinese_expression(cores, excluded, limit=len(expected)) == expected
+
+
+def test_shared_acronyms_are_not_invented_from_english_phrases_or_single_letters():
+    core = {'zh': ['研究主题'], 'en': ['example method', 'X', 'study']}
+    assert bs.chinese_expression([core]) == '"研究主题"'
+    core = {'zh': ['电子病历', 'EHR'], 'en': ['electronic health record', 'EHR']}
+    assert bs.chinese_expression([core]).count('"EHR"') == 1
+
+
+def test_budget_keeps_acronyms_from_both_languages_before_long_aliases():
+    core = {'zh': ['电子病历', '电子病历记录系统', 'electronic health record', 'EMR'],
+            'en': ['electronic health records', 'EHR']}
+    expected = '("电子病历" + "EHR" + "EMR")'
+    assert bs.chinese_expression([core], limit=len(expected)) == expected
 
 
 @pytest.mark.parametrize('mutate', [lambda d:d.update(search_groups=[1]),lambda d:d.update(core_concepts=[]),
@@ -68,7 +186,7 @@ def test_invalid_model_output_has_bounded_repair_not_original_paragraph_fallback
 
 def test_schema_repair_can_then_restore_an_omitted_source_aspect(monkeypatch):
     question='研究县域慢病管理的数字工具与基层能力适配，包括AI辅助筛查。'
-    base={'core_concepts':[{**concept('慢性病管理','chronic disease management'),
+    base={'retrieval_mode':'exploratory', 'core_concepts':[{**concept('慢性病管理','chronic disease management'),
                            'role':'subject','background_optional':False}],
           'search_groups':[{'label':'核心主题','additional_concepts':[]}]}
     oversize=json.loads(json.dumps(base))
@@ -276,7 +394,7 @@ def test_multiple_subquestions_also_retrieve_shared_topic():
 
 def test_aspects_compile_to_separate_queries_and_admission_groups():
     core=[concept('海上风电','offshore wind'),concept('直流输电','HVDC')]
-    data={'core_concepts':core,'exclude_concepts':[concept('撤稿','retraction')],
+    data={'retrieval_mode':'exploratory', 'core_concepts':core,'exclude_concepts':[concept('撤稿','retraction')],
           'search_groups':[{'label':'主题','additional_concepts':[]},
                            {'label':'拓扑','additional_concepts':[concept('换流器拓扑','converter topology')]},
                            {'label':'稳定性','additional_concepts':[concept('稳定性','stability')]}]}
@@ -291,7 +409,7 @@ def test_aspects_compile_to_separate_queries_and_admission_groups():
 
 
 def test_deployment_context_is_compiled_as_an_aspect_not_a_universal_gate():
-    data = {'core_concepts': [
+    data = {'retrieval_mode':'exploratory', 'core_concepts': [
         {**concept('动态异构冗余','dynamic heterogeneous redundancy'), 'role':'subject','background_optional':False},
         {**concept('云边端协同','cloud-edge-end collaboration'), 'role':'context','background_optional':False}],
         'search_groups':[{'label':'核心主题','additional_concepts':[]},
@@ -310,7 +428,7 @@ def test_deployment_context_is_compiled_as_an_aspect_not_a_universal_gate():
 
 
 def test_context_rule_never_drops_population_outcome_or_combined_methods():
-    data = {'core_concepts':[
+    data = {'retrieval_mode':'exploratory', 'core_concepts':[
         {**concept('儿童患者','pediatric patients'),'role':'population','background_optional':False},
         {**concept('哮喘','asthma'),'role':'outcome','background_optional':False},
         {**concept('城市环境','urban environment'),'role':'context','background_optional':False}],
@@ -323,7 +441,7 @@ def test_context_rule_never_drops_population_outcome_or_combined_methods():
 
 
 def test_design_objective_is_retrieved_separately_and_numeric_constraints_remain():
-    data={'core_concepts':[
+    data={'retrieval_mode':'exploratory', 'core_concepts':[
         {**concept('冗余架构','redundancy architecture'),'role':'subject','background_optional':False},
         {**concept('网络韧性','network resilience'),'role':'objective','background_optional':False},
         {**concept('300 K','300 K'),'role':'context','background_optional':False}],

@@ -181,6 +181,9 @@ def isolation_disclosure(scheduler: str) -> dict[str, Any]:
         "remote_write_isolation": caps.remote_write_isolation,
         "enforced": caps.remote_write_isolation == _adapters.ISOLATION_ENFORCED,
         "notes": list(caps.notes),
-        "means": ("可写根之外物理写不进去" if caps.remote_write_isolation == _adapters.ISOLATION_ENFORCED
-                  else "计算节点上没有沙箱：越界写只能事后从快照看出并披露，必要时记 blocked"),
+        "means": {
+            _adapters.ISOLATION_ENFORCED: "可写根之外物理写不进去",
+            _adapters.ISOLATION_MISSING: "计算节点上没有沙箱：越界写只能事后从快照看出并披露，必要时记 blocked",
+            _adapters.ISOLATION_UNKNOWN: "没有足够的证据确认执行端的写隔离",
+        }[caps.remote_write_isolation],
     }

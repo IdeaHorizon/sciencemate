@@ -1772,9 +1772,8 @@ def load_run_contract(state: Any) -> dict[str, Any]:
     # only. Multiple forwarded preregs above remain an upstream-selection
     # conflict; multiple unrelated project entries do not become authority.
 
-    # 合并而不是遇到第一个非空候选就停止：编排器可能只把 actual-facing
-    # expected_params 放在 hook_state，而角色/协议引用仍只在 prereg metadata。
-    # hook_state 优先覆盖同名字段，缺失字段从 prereg 补齐。
+    # Keep legacy runtime hints, but the selected prereg is the sole source
+    # of formal parameters, including when it declares no parameter contract.
     source = "default"
     raw: dict[str, Any] = {}
     sources: list[str] = []
@@ -1786,6 +1785,9 @@ def load_run_contract(state: Any) -> dict[str, Any]:
         # but can never create or override this frozen preregistration policy.
         if candidate_source == "hook_state":
             fields.pop("input_delivery_policy", None)
+            if declared_id or selected_prereg_id:
+                fields.pop("expected_params", None)
+                fields.pop("execution_contract", None)
         if not fields:
             continue
         if candidate_source == "hook_state":

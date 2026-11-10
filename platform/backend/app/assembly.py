@@ -255,6 +255,11 @@ def the_worker_home_has_one_tenant() -> bool:
     return settings.profile == "personal"
 
 
+def can_choose_project_folders() -> bool:
+    """Only a personal installation can browse and choose local filesystem addresses."""
+    return settings.profile == "personal"
+
+
 def weak_resource_walls_are_acceptable() -> bool:
     """跑飞的时候没有自动刹车 —— 这台机器上能不能接受。
 

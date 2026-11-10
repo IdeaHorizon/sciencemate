@@ -48,7 +48,7 @@ def _authorized(institution_id: str) -> tuple[Path, str] | None:
     return config[0], config[2]
 
 
-def search(query: str, *, institution_id: str, limit: int = 200) -> list[dict]:
+def search(query: str, *, institution_id: str, limit: int | None = 200) -> list[dict]:
     """Return catalogue metadata only for a user in the configured school."""
     allowed = _authorized(institution_id)
     if allowed is None:
@@ -68,10 +68,13 @@ def search(query: str, *, institution_id: str, limit: int = 200) -> list[dict]:
         "THEN 1 ELSE 0 END AS has_fulltext "
         "FROM school_papers WHERE "
         + " AND ".join(clauses)
-        + " ORDER BY published_at DESC, id LIMIT ?"
+        + " ORDER BY published_at DESC, id"
     )
+    if limit is not None:
+        sql += " LIMIT ?"
+        parameters.append(max(1, int(limit)))
     with closing(_connect(path)) as conn:
-        rows = conn.execute(sql, (*parameters, max(1, min(int(limit), 200)))).fetchall()
+        rows = conn.execute(sql, parameters).fetchall()
     return [
         {
             **dict(row),
@@ -179,7 +182,15 @@ def _school_paper(row: dict) -> dict:
                 "url": url,
             }.items()
         },
-        "metadata_provenance": {"school_library": label},
+        "metadata_provenance": {
+            "school_library": label,
+            **{key: label for key, value in {
+                "title": title, "authors": row["authors"], "year": year,
+                "venue": row.get("venue"), "doi": doi,
+                "abstract": row.get("abstract"), "url": url,
+                "pub_date": row.get("published_at"),
+            }.items() if value},
+        },
         "publication_category": _publication_category(row),
         "exact_title_match": False,
         "local_pdf_url": None,
@@ -193,62 +204,8 @@ def _school_paper(row: dict) -> dict:
     }
 
 
-def merge_search_results(result: dict, rows: list[dict], *, limit: int) -> dict:
-    """Interleave school-only hits without inventing a comparable quality score."""
-    merged = dict(result)
-    public_papers = [dict(paper) for paper in result.get("papers") or []]
-    by_key = {_identity(paper): paper for paper in public_papers}
-    school_only = []
-    added = 0
-    for row in rows:
-        incoming = _school_paper(row)
-        key = _identity(incoming)
-        current = by_key.get(key)
-        if current is None:
-            school_only.append(incoming)
-            by_key[key] = incoming
-            added += 1
-            continue
-        current["school_holdings"] = list(
-            dict.fromkeys([*(current.get("school_holdings") or []), *incoming["school_holdings"]])
-        )
-        if incoming["school_fulltext_url"]:
-            current["school_fulltext_url"] = incoming["school_fulltext_url"]
-        provenance = dict(current.get("metadata_provenance") or {})
-        provenance["school_library"] = row["library_name"]
-        current["metadata_provenance"] = provenance
-        for field in ("abstract", "authors", "venue", "year", "pub_date", "url"):
-            if not current.get(field) and incoming.get(field):
-                current[field] = incoming[field]
-    # Each source keeps its own order. Give a school-only hit one slot after
-    # every four public hits, so a full public result does not hide the school
-    # catalogue. When either source runs out, fill the remaining slots from
-    # the other. The federated position is presentation order, not a quality
-    # score comparable across two different search systems.
-    papers = []
-    public_index = school_index = public_since_school = 0
-    cap = max(1, min(int(limit), 200))
-    while len(papers) < cap and (public_index < len(public_papers) or school_index < len(school_only)):
-        if school_index < len(school_only) and (
-            public_index >= len(public_papers) or public_since_school >= 4
-        ):
-            papers.append(school_only[school_index])
-            school_index += 1
-            public_since_school = 0
-        else:
-            papers.append(public_papers[public_index])
-            public_index += 1
-            public_since_school += 1
-    if rows:
-        for position, paper in enumerate(papers):
-            paper["federated_rank"] = position
-    merged["papers"] = papers
-    merged["total"] = len(merged["papers"])
-    merged["candidate_count"] = (
-        int(result.get("candidate_count") or len(result.get("papers") or [])) + added
+def merge_search_results(result: dict, rows: list[dict], *, limit: int | None) -> dict:
+    from app.services.harness_imports import harness_module
+    return harness_module("shared.contrib.literature_federation").merge_school_papers(
+        result, [_school_paper(row) for row in rows], limit=limit,
     )
-    counts = dict(result.get("source_counts") or {})
-    if rows:
-        counts["school_library"] = len(rows)
-    merged["source_counts"] = counts
-    return merged

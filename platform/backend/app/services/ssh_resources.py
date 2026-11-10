@@ -176,7 +176,10 @@ async def connect(
     return dict(status="success", resource=_resource_response(resource), observation=observed)
 
 
-async def operate(db, user, project_id: str, resource_id: str, action: str, **params):
+async def operate(
+    db, user, project_id: str, resource_id: str, action: str, *,
+    lang: Language | None = None, **params,
+):
     from app.api.v1.resources import _get_resource
 
     await require_capability(db, user, project_id, "drive_session")
@@ -211,6 +214,25 @@ async def operate(db, user, project_id: str, resource_id: str, action: str, **pa
     ssh = harness_module("core.ssh_transport")
     try:
         result = await asyncio.to_thread(transport.call, request, timeout=timeout)
+    except ssh.SSHInputManifestConflict as exc:
+        raise HTTPException(
+            409,
+            dict(
+                error_code="input_manifest_conflict",
+                message=said_of(
+                    exc,
+                    lang or language_for(user),
+                    otherwise={
+                        "zh": "此提交键已绑定到另一份输入清单。",
+                        "en": "Submission key already belongs to a different input manifest",
+                    },
+                ),
+                resource_id=resource_id,
+                job_id=request["job_id"],
+                existing_input_manifest_sha256=exc.existing_input_manifest_sha256,
+                requested_input_manifest_sha256=request.get("input_manifest_sha256"),
+            ),
+        ) from exc
     except (ssh.SSHError, ValueError) as exc:
         detail = dict(message=str(exc), resource_id=resource_id)
         if request.get("job_id"):

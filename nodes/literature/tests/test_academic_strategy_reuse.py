@@ -57,6 +57,71 @@ def test_model_or_account_change_does_not_reuse_another_strategy(monkeypatch, ca
     assert len(calls) == 3
 
 
+def test_planning_instruction_change_invalidates_previous_interpretation(monkeypatch, cached_environment):
+    from nodes.literature.tools import bilingual_strategy
+    calls = []
+    def generate(source, **kwargs):
+        calls.append(source)
+        return {'english_query':'quantum computing', 'search_queries':[{'query':'quantum computing'}]}, {}
+    monkeypatch.setattr(strategy_generator, 'generate_strategy_detailed', generate)
+    academic_strategy.generate_academic_strategy('量子计算')
+    academic_strategy.generate_academic_strategy('量子计算')
+    assert len(calls) == 1
+    monkeypatch.setattr(bilingual_strategy, 'PROMPT', bilingual_strategy.PROMPT + '\nUpdated concept grouping instructions.')
+    academic_strategy.generate_academic_strategy('量子计算')
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize('mode', ['focused', 'exploratory'])
+def test_cached_interpretation_recompiles_chinese_without_another_model_call(monkeypatch,cached_environment,mode):
+    from nodes.literature.tools import bilingual_strategy as bs
+    data = {'retrieval_mode': mode, 'core_concepts': [
+        {'zh': ['电子病历'], 'en': ['electronic health records', 'EHR']}],
+        'exclude_concepts': [{'zh': ['病例报告'], 'en': ['case reports']}],
+        'search_groups': [{'label': '核心', 'additional_concepts': []}]}
+    if mode == 'exploratory':
+        data['search_groups'].append({'label': '外部验证', 'additional_concepts': [
+            {'zh': ['外部验证'], 'en': ['external validation']}]})
+    question = 'Electronic health records research, excluding case reports'
+    original = bs.compile_plan(json.dumps(data), question)
+    # A valid cached plan from before acronym sharing still has its concepts.
+    for group in original['bilingual_queries']:
+        group['zh'] = group['zh'].replace('("电子病历" + "EHR")', '"电子病历"')
+    calls = []
+    def generate(*args, **kwargs):
+        calls.append(1)
+        return json.loads(json.dumps(original)), {'translation_valid': True}
+    monkeypatch.setattr(strategy_generator, 'generate_strategy_detailed', generate)
+    academic_strategy.generate_academic_strategy(question)
+    current, diagnostics = academic_strategy.generate_academic_strategy(question)
+    assert calls == [1] and diagnostics['strategy_cache_hit']
+    assert current['english_query'] == original['english_query']
+    for before, after in zip(original['bilingual_queries'], current['bilingual_queries']):
+        assert before['en'] == after['en']
+        assert '("电子病历" + "EHR")' in after['zh']
+        assert ' - ("病例报告")' in after['zh']
+        assert ('"外部验证"' in after['zh']) == (after['label'] == '外部验证')
+
+
+def test_cached_query_with_unknown_concepts_is_regenerated(monkeypatch,cached_environment):
+    from nodes.literature.tools import bilingual_strategy as bs
+    original = bs.compile_plan(json.dumps({'core_concepts': [{'zh':['主题'], 'en':['topic']}],
+        'search_groups':[{'additional_concepts':[]}]}), 'topic research')
+    calls = []
+    def generate(*args, **kwargs):
+        calls.append(1)
+        return json.loads(json.dumps(original)), {'translation_valid': True}
+    monkeypatch.setattr(strategy_generator, 'generate_strategy_detailed', generate)
+    academic_strategy.generate_academic_strategy('topic research')
+    path = next(cached_environment.rglob('*.json'))
+    stored = json.loads(path.read_text())
+    stored['strategy']['bilingual_queries'][0]['en'] = '"different topic"'
+    path.write_text(json.dumps(stored))
+    current, diagnostics = academic_strategy.generate_academic_strategy('topic research')
+    assert calls == [1, 1] and not diagnostics['strategy_cache_hit']
+    assert current['bilingual_queries'] == original['bilingual_queries']
+
+
 def test_failure_is_not_cached_and_expired_success_regenerates(monkeypatch, cached_environment):
     calls = []
 

@@ -632,6 +632,12 @@ async def _run_loop_body(
 
         await wait_for_interjection(state)
 
+        # A restart must reattach the selected physical job before another
+        # model turn. Submission and ordinary status queries remain nonblocking.
+        from core import job_wait
+
+        await job_wait.resume(state, messages, turn=turn)
+
         # ── (-0.5) 外部 injected_messages 注入 ────────────────────────
         # 写法：上层 / 主 harness 用 `inject_into_node` 工具往本 run 的
         # state.hook_state['injected_messages'] 追加 {content, source} 字典；
@@ -1596,6 +1602,7 @@ async def _run_loop_body(
         # 太频繁；turn 末 = LLM 完成一轮思考的自然边界）。
         try:
             _persist_messages_checkpoint(state, messages, turn=turn)
+            job_wait.acknowledge(state)
         except Exception as e:
             log.debug("messages checkpoint failed at turn %d: %s", turn, e)
 

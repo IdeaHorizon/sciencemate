@@ -58,7 +58,8 @@ def test_translation_column_requires_current_source_hash(index):
 def test_reverse_translation_matches_whole_original_not_legacy_hash(index):
     prefix = "Scientific characterization of multilayer metasurfaces and optical "
     left, right = prefix + "heating", prefix + "cooling"
-    assert index._title_hash(left) == index._title_hash(right)
+    assert index._legacy_title_hash(left) == index._legacy_title_hash(right)
+    assert index._title_hash(left) != index._title_hash(right)
     index.add_papers([Paper(title=left, doi="10.1/heating"),
                       Paper(title=right, doi="10.1/cooling")])
     index.save_title_translations({left: "光学加热的完整研究"})

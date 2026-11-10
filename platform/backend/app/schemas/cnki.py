@@ -17,8 +17,9 @@ class JobIn(StrictModel):
     query: str = Field(min_length=1, max_length=500)
     category: Literal["domain", "journal", "scholar", "project"] = "domain"
     recurring: bool = False
-    limit: int = Field(default=200, ge=1, le=200)
+    limit: int | None = Field(default=None, ge=1)
     executor: Literal["server", "local"] = "server"
+    document_kind: Literal["journal", "thesis", "conference", "book", "other"] | None = None
 
     @field_validator("query")
     @classmethod
@@ -69,7 +70,7 @@ class HeartbeatIn(StrictModel):
 
 class BatchIn(StrictModel):
     lease: str = Field(min_length=20, max_length=100)
-    page: int = Field(ge=1, le=100000)
+    page: int = Field(ge=1)
     papers: list[IndexIn] = Field(default_factory=list, max_length=20)
     page_complete: bool = False
     finished: bool = False

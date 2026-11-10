@@ -172,7 +172,8 @@ def _trim(raw: Any) -> Any:
 
 
 def settle_terminal(state: Any, record: dict[str, Any], *, evidence: dict[str, Any] | None,
-                    scheduler_result: dict[str, Any] | None = None, observed_by: str = "") -> dict[str, Any]:
+                    scheduler_result: dict[str, Any] | None = None, observed_by: str = "",
+                    output_observation: dict[str, Any] | None = None) -> dict[str, Any]:
     """幂等：同 nonce 只写一次 job_terminal。返回 {settled, reason, nonce, derived_state, exit_code, record}。"""
     nonce = str((record or {}).get("submission_nonce") or "")
     scheduler = str((record or {}).get("scheduler") or "").lower()
@@ -223,7 +224,7 @@ def settle_terminal(state: Any, record: dict[str, Any], *, evidence: dict[str, A
         return {"settled": False, "reason": "no_positive_terminal_evidence", "nonce": nonce}
     # One atomic B record owns both terminal facts and output observations.
     # There is no second pseudo-action with an invented successful exit code.
-    observation = _output_diff(state, nonce)
+    observation = output_observation if output_observation is not None else _output_diff(state, nonce)
     paths = list(observation.get("created", [])) + list(observation.get("modified", []))
     files = [p for p in paths if ((observation.get("identities") or {}).get(p, {}).get("after") or {}).get("kind") == "file"]
     try:
@@ -236,6 +237,7 @@ def settle_terminal(state: Any, record: dict[str, Any], *, evidence: dict[str, A
             **({"slurm_target": record["slurm_target"], "remote_user": record.get("remote_user"),
                 "scheduler_cluster": record.get("scheduler_cluster")}
                if record.get("slurm_target") else {}),
+            **({"resource_id": record["resource_id"]} if record.get("resource_id") else {}),
             capture_record=str(_capture.allocate_record_dir(state, f"job-{nonce}")),
             output_diff=stored_observation, observation_status=observation.get("status"))
     except Exception as exc:

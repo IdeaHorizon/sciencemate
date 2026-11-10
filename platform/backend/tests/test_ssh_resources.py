@@ -23,35 +23,18 @@ from app.services import ssh_resources
 def local_ssh(tmp_path, monkeypatch):
     if os.name != "posix":
         pytest.skip("The remote supervisor requires a POSIX server")
-    from core import ssh_transport
-
     remote_home = tmp_path / "remote"
     remote_home.mkdir()
-    agent = Path(ssh_transport.__file__).with_name("_ssh_agent.py.in")
+    popen = subprocess.Popen
 
-    class LocalTransport:
-        def __init__(self, connection, password=None):
-            self.password = password
+    def local_popen(argv, *args, **kwargs):
+        if isinstance(argv, list) and argv[0] == "ssh":
+            # Run the exact command the transport sends without connecting to any host.
+            argv = ["/bin/sh", "-c", argv[-1]]
+            kwargs["env"] = {**kwargs["env"], "HOME": str(remote_home)}
+        return popen(argv, *args, **kwargs)
 
-        def call(self, request, timeout=40):
-            request = dict(request)
-            if request["action"] == "submit":
-                request["agent_source"] = agent.read_text()
-            result = subprocess.run(
-                [sys.executable, "-I", str(agent)],
-                input=json.dumps(request),
-                text=True,
-                capture_output=True,
-                timeout=timeout,
-                env={**os.environ, "HOME": str(remote_home)},
-            )
-            assert result.returncode == 0, result.stderr
-            data = json.loads(result.stdout)
-            if "error" in data:
-                raise ssh_transport.SSHError(data["error"])
-            return data
-
-    monkeypatch.setattr(ssh_transport, "SSHTransport", LocalTransport)
+    monkeypatch.setattr(subprocess, "Popen", local_popen)
     key = Fernet.generate_key()
     monkeypatch.setattr("app.services.credential_key.master_key", lambda: key)
 
@@ -106,7 +89,35 @@ async def test_api_connect_exec_transfer_jobs_and_bridge(client, db_session, loc
         endpoint, json=dict(action="submit", command="sleep 30", idempotency_key="one")
     )
     assert replay.json()["job_id"] == job_id
-    from core import remote_resources
+    rejected = await client.post(
+        endpoint, json=dict(action="status", job_id="remote_job#1")
+    )
+    assert rejected.status_code == 422
+
+    conflict_messages = {
+        "zh": "此提交键已绑定到另一份输入清单。",
+        "en": "Submission key already belongs to a different input manifest",
+    }
+    for lang in (None, "zh", "en"):
+        bind_legacy = await client.post(
+            endpoint,
+            json=dict(
+                action="submit", command="sleep 30", idempotency_key="one",
+                input_manifest_sha256="a" * 64,
+            ),
+            headers={"X-Interface-Language": lang} if lang else None,
+        )
+        assert bind_legacy.status_code == 409, bind_legacy.text
+        assert bind_legacy.json()["detail"] == {
+            "error_code": "input_manifest_conflict",
+            "message": conflict_messages[lang or "zh"],
+            "resource_id": resource_id,
+            "job_id": job_id,
+            "existing_input_manifest_sha256": None,
+            "requested_input_manifest_sha256": "a" * 64,
+        }
+    from core import remote_resources, tool_registry
+    from core.bootstrap import bootstrap
     from core.state import State
 
     monkeypatch = pytest.MonkeyPatch()
@@ -136,10 +147,97 @@ async def test_api_connect_exec_transfer_jobs_and_bridge(client, db_session, loc
         assert result["state"] == "cancelled"
         history = await remote_resources.call(state, "jobs", resource_id=resource_id)
         assert any(job["job_id"] == job_id for job in history["jobs"])
+
+        bootstrap()
+        bound = await tool_registry.execute(
+            "remote_job", state, action="submit", resource_id=resource_id, command="exit 0",
+            idempotency_key="bound", input_manifest_sha256="a" * 64,
+        )
+        assert bound["input_manifest_sha256"] == "a" * 64
+        observed = await client.post(
+            endpoint, json=dict(action="status", job_id=bound["job_id"])
+        )
+        assert observed.json()["input_manifest_sha256"] == "a" * 64
+        conflict = await tool_registry.execute(
+            "remote_job", state, action="submit", resource_id=resource_id, command="exit 0",
+            idempotency_key="bound", input_manifest_sha256="b" * 64,
+        )
+        assert conflict["status"] == "error"
+        assert conflict["error"] == {
+            "error_code": "input_manifest_conflict",
+            "message": conflict_messages["zh"],
+            "resource_id": resource_id,
+            "job_id": bound["job_id"],
+            "existing_input_manifest_sha256": "a" * 64,
+            "requested_input_manifest_sha256": "b" * 64,
+        }
         text = state.transcript_path.read_text()
         assert resource_id in text and secret not in text
     finally:
         monkeypatch.undo()
+
+
+@pytest.mark.asyncio
+async def test_experiment_settles_the_registered_ssh_job_with_its_input_binding(
+    client, db_session, local_ssh, monkeypatch, tmp_path,
+):
+    pytest.importorskip("tree_sitter_bash", reason="full worker dependencies required")
+    from core import remote_resources, tool_registry
+    from core.bootstrap import bootstrap
+    from core.state import State
+    from nodes.experiment.tools import ledger, run_bootstrap
+    from shared.lib import dangerous_commands
+
+    user, project = await identities(db_session)
+    app.dependency_overrides[get_current_user] = lambda: user
+    prefix = f"/api/v1/projects/{project.id}/resources"
+    connected = await client.post(f"{prefix}/ssh/connect", json={"host": "test-host"})
+    assert connected.status_code == 200, connected.text
+    resource_id = connected.json()["resource"]["id"]
+    await db_session.commit()
+
+    monkeypatch.setattr(remote_resources, "_handler", None)
+    monkeypatch.setattr(dangerous_commands, "bypass_enabled", lambda: True)
+    context = {key: getattr(settings, key) for key in (
+        "database_url", "platform_data_root", "runtime_tenant_id", "profile", "secret_key",
+    )}
+    ssh_resources.install_worker_bridge(context, user_id=user.id, project_id=project.id)
+    bootstrap()
+    state = State.new(node_type="experiment", project_id=project.id, base_dir=tmp_path / "runs")
+    requirement = "Run the staged script and check its output."
+    state.hook_state["node_inputs"] = {
+        "experiment_spec": requirement,
+        "prereg_assignment": {"kind": "none", "reason": "Operation fixture"},
+    }
+    await run_bootstrap.establish(state)
+    script = state.root / "produce.py"
+    script.write_text("from pathlib import Path\nPath('result.txt').write_text('fresh result')\n")
+
+    resources = await tool_registry.execute("discover_resources", state, save_artifact=False)
+    available = {row["resource_id"] for row in resources["project_resources"]}
+    assert resource_id in available, resources
+    result = await tool_registry.execute(
+        "submit_job", state, scheduler="ssh", resource_id=resource_id, dry_run=False,
+        command="python3 produce.py", output_paths=["result.txt"], foreground_wait_s=5,
+        stage_in=[{"src": str(script), "dst": "produce.py"}],
+    )
+    assert result.get("state") == "succeeded", result
+    path = Path(result["output_collection"]["files"][0]["path"])
+    assert path.read_text() == "fresh result"
+    intent = next(row for row in ledger.open_ledger(state).records() if row["kind"] == "intent")
+    status = await client.post(f"{prefix}/{resource_id}/ssh", json={
+        "action": "status", "job_id": result["job_id"],
+    })
+    assert status.status_code == 200, status.text
+    digest = intent["ssh_request"]["input_manifest_sha256"]
+    assert len(digest) == 64 and status.json()["input_manifest_sha256"] == digest
+    closure = await tool_registry.execute(
+        "finish", state, outcome="success", summary=requirement,
+        verification=[{
+            "requirement": requirement, "checks": [{"kind": "file", "path": str(path)}],
+        }],
+    )
+    assert closure["status"] == "success", closure
 
 
 @pytest.mark.asyncio

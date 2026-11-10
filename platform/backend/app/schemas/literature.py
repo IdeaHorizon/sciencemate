@@ -1,5 +1,6 @@
 """学术搜索 API 的稳定线上契约，只交付 literature index。"""
 from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
 
 
 class LiteratureModel(BaseModel):
@@ -8,8 +9,11 @@ class LiteratureModel(BaseModel):
 
 class LiteratureSearchIn(LiteratureModel):
     query: str = Field(min_length=1, max_length=2000)
-    limit: int = Field(default=200, ge=1, le=200)
+    limit: int | None = Field(default=None, ge=1)
+    per_category_limit: int | None = Field(default=200, ge=1, le=200)
+    pagination_scope: Literal["query", "category"] = "category"
     remote_refresh: bool = False
+    continuation: dict | None = None
 
 
 class LiteratureTranslatePaperIn(LiteratureModel):
@@ -111,3 +115,4 @@ class LiteratureSearchOut(LiteratureModel):
     timings: dict[str, float] = Field(default_factory=dict)
     strategy_diagnostics: dict = Field(default_factory=dict)
     search_mode: str = 'local_only'
+    continuation: dict | None = None

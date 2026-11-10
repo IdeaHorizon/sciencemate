@@ -27,11 +27,26 @@ async def remote_exec(state, resource_id: str, command: str, **params: Any):
 
 
 async def remote_job(state, action: str, resource_id: str, **params: Any):
-    if action in ("status", "cancel") and not params.get("job_id"):
-        return dict(status="error", error="status/cancel requires job_id")
-    return await call(
+    if action in ("status", "cancel", "wait") and not params.get("job_id"):
+        return dict(status="error", error="status/cancel/wait requires job_id")
+    if action == "wait":
+        from core.remote_resources import wait
+
+        return await wait(
+            state,
+            resource_id,
+            params["job_id"],
+            poll_interval_s=params.get("poll_interval_s"),
+            max_wait_s=params.get("max_wait_s"),
+        )
+    result = await call(
         state, "jobs" if action == "list" else action, resource_id=resource_id, **params
     )
+    if action in ("submit", "status") and result.get("state") in ("launching", "running"):
+        result["next_action"] = dict(
+            tool="remote_job", action="wait", resource_id=resource_id, job_id=result["job_id"]
+        )
+    return result
 
 
 async def remote_file(
@@ -126,15 +141,36 @@ register(
 )
 register(
     "remote_job",
-    "受管 SSH 长任务：submit 启动，status 查询（含日志），list 列出持久任务，cancel 终止进程组。"
+    "受管 SSH 长任务：submit 启动后立即返回，可先提交多个独立任务；status 查询（含日志），"
+    "wait 将指定 job_id 的等待交给 Harness，终态后自动继续，不耗模型轮次；"
+    "等待已有任务用 wait，不要用 shell sleep/进程名轮询。list 列出持久任务，cancel 终止进程组。"
     "submit 必须给稳定 idempotency_key，连接失败后复用同一个键或查询返回的 job_id，避免重复启动。"
     "任务由远端监督器守护，平台重启和 SSH 断线后仍可跟踪。timeout 为强制墙钟上限，默认一天。"
     "运行记录 analysis_eligible=false；正式研究证据仍须走节点的审计与交付流程。",
     {
         **COMMAND,
-        "action": {"type": "string", "enum": ["submit", "status", "cancel", "list"]},
+        "action": {"type": "string", "enum": ["submit", "status", "wait", "cancel", "list"]},
+        "poll_interval_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600},
+        "max_wait_s": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": (
+                "Optional observation budget. Omit to wait until terminal or diagnostic state."
+            ),
+        },
         "idempotency_key": S,
-        "job_id": S,
+        "input_manifest_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": (
+                "Optional on submit. SHA-256 of the immutable input manifest declared for this job."
+            ),
+        },
+        "job_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{32}$",
+            "description": "Persistent SSH job ID returned by the remote service.",
+        },
     },
     ["action", "resource_id"],
     remote_job,

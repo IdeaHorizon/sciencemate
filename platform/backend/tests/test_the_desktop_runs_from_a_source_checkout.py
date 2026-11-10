@@ -18,6 +18,9 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -169,6 +172,7 @@ def test_the_checkout_launcher_does_not_hand_over_again(tmp_path, monkeypatch, r
     _declare(data_root, src)
     monkeypatch.setenv("PLATFORM_DATA_ROOT", str(data_root))
     monkeypatch.setattr(launcher, "__file__", str(src / "platform" / "backend" / "app" / "launcher.py"))
+    monkeypatch.setattr(launcher, "RUNNING_DECLARED_CHECKOUT", False)
 
     checkout = launcher.the_source_checkout_in_charge()
     assert checkout is not None
@@ -176,6 +180,52 @@ def test_the_checkout_launcher_does_not_hand_over_again(tmp_path, monkeypatch, r
     assert not (src / "platform" / "backend" / "app" / "ran.json").exists()
     assert Path(os.environ["HARNESS_ROOT"]) == src.resolve(), (
         "直接从 checkout 起后端时环境也得指到 checkout —— 否则 find_the_harness 会被载荷抢走")
+
+
+@pytest.mark.parametrize("entry", ["module", "console"])
+def test_turning_off_a_checkout_started_in_place_still_allows_a_restart(tmp_path, entry) -> None:
+    """不经过 app 接管也要记住启动状态；-m 和 API 导入的 launcher 必须读到同一个答案。"""
+    data = tmp_path / "data"
+    _declare(data, REPO)
+    (tmp_path / "uvicorn.py").write_text(textwrap.dedent('''
+        import asyncio
+        import json
+
+        def run(*args, **kwargs):
+            from app.api.v1 import update
+            from app.services import self_update
+
+            async def check():
+                before = update._describe("en")
+                cleared = await update.clear_developer_source(user=object(), lang="en")
+                scheduled = []
+                self_update.schedule_restart = lambda: scheduled.append(True)
+                try:
+                    restarted = await update.restart_for_update(user=object(), lang="en")
+                except update.HTTPException as exc:
+                    restarted = {"status": exc.status_code, "detail": exc.detail}
+                print("RESULT " + json.dumps({"before": before, "cleared": cleared,
+                    "restarted": restarted, "scheduled": scheduled}))
+
+            asyncio.run(check())
+        '''), encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path), str(REPO / "platform/backend")]),
+           "PLATFORM_PROFILE": "personal", "PLATFORM_DATA_ROOT": str(data),
+           "HARNESS_FRAMEWORK_HOME": str(data)}
+    for name in ("HARNESS_ROOT", "STATIC_UI_ROOT", "DATABASE_URL"):
+        env.pop(name, None)
+    command = (["-m", "app.launcher", "start", "--no-browser"] if entry == "module" else
+               ["-c", "from app.launcher import main; raise SystemExit(main(['start', '--no-browser']))"])
+    done = subprocess.run([sys.executable, "-B", *command], cwd=tmp_path, env=env,
+                          capture_output=True, text=True, timeout=45)
+    assert done.returncode == 0, done.stdout + done.stderr
+    result = json.loads(next(line.removeprefix("RESULT ") for line in done.stdout.splitlines()
+                             if line.startswith("RESULT ")))
+    assert result["before"]["active"] is True
+    assert result["cleared"]["declared"] is None
+    assert result["cleared"]["restart_needed"] is True, result
+    assert result["restarted"]["restarting"] is True, result
+    assert result["scheduled"] == [True]
 
 
 def test_a_declaration_that_no_longer_points_at_a_checkout_does_not_block_the_start(tmp_path, monkeypatch, restore_the_app_modules, clean_explicit_env) -> None:

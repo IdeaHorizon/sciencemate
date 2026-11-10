@@ -21,6 +21,12 @@ class SSHError(RuntimeError):
     pass
 
 
+class SSHInputManifestConflict(SSHError):
+    def __init__(self, existing_input_manifest_sha256: str | None):
+        super().__init__("Submission key already belongs to a different input manifest")
+        self.existing_input_manifest_sha256 = existing_input_manifest_sha256
+
+
 @dataclass(frozen=True)
 class SSHConnection:
     host: str
@@ -132,5 +138,7 @@ class SSHTransport:
                 if not isinstance(result, dict):
                     raise SSHError("Remote Python returned an invalid response shape")
                 if result.get("error") and "state" not in result:
+                    if payload.get("job_id") and result.get("error_code") == "input_manifest_conflict":
+                        raise SSHInputManifestConflict(result.get("existing_input_manifest_sha256"))
                     raise SSHError(str(result["error"]))
                 return result

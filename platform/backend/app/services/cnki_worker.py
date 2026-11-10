@@ -24,13 +24,21 @@ logger = logging.getLogger(__name__)
 MESSAGES = {
     "waiting_for_verification": "知网要求人工验证，平台已保留进度；请在运行平台的电脑上完成知网验证（远程部署请联系管理员），之后自动继续。",
     "rate_limited": "知网暂时限制请求，已保留进度，稍后自动重试。",
-    "access_denied": "知网检索页拒绝访问（HTTP 403），已保留采集进度。再次搜索或点击“重试知网”可重新启动采集；如浏览器出现验证，请完成验证。",
+    "access_denied": "知网拒绝当前访问（HTTP 403），已暂停该会话的检索和摘要请求；已取得的题录仍可使用。可在运行平台的电脑上检查知网访问，再点击“重试知网”。",
+    "session_paused": "知网会话因上次 HTTP 403 暂停，当前请求未发送到知网；这不代表知网刚刚再次拒绝。已取得的题录仍可使用，稍后重新搜索或点击“重试知网”可检查恢复情况。",
     "virtual_display_unavailable": "后台浏览器需要虚拟桌面组件，请管理员安装 Xvfb 与 xvfb-run。",
     "browser_not_installed": "采集服务器未找到 Chrome 或 Edge，请联系管理员。",
     "browser_start_failed": "知网采集浏览器启动失败，请管理员检查浏览器运行环境。",
+    "browser_activation_failed": "知网检索控件未能正常操作，已保留进度；请检查当前知网页面。",
+    "browser_activation_moved": "知网页面变化导致操作未完成，已保留进度，稍后自动重试。",
     "metadata_title_mismatch": "知网返回的题录与标题不一致，已暂停本次补齐。",
     "result_pages_changed": "知网结果分页发生变化，已保留获取到的题录，请重新检索。",
-    "results_unavailable": "知网返回“暂无数据，请稍后重试”，本组尚未取得题录，已保留进度；这不代表已确认没有匹配文献。",
+    "result_type_mismatch": "知网返回的文献类型与当前类别不一致，已停止翻页并保留进度，等待修正分类识别。",
+    "results_unavailable": "知网暂未提供检索结果，已保留进度，稍后重试；这不代表已确认没有匹配文献。",
+    "cnki_timeout": "知网检索页面响应超时，已保留进度，稍后自动重试；可先查看其他来源结果。",
+    "TimeoutError": "知网浏览器操作超时，已保留进度，稍后自动重试；可先查看其他来源结果。",
+    "search_http_417": "知网题录接口拒绝本次请求（HTTP 417），该来源尚未完成，已保留进度；可先查看其他来源结果。",
+    "verification_result_pending": "正在等待知网载入验证后的结果，已保留进度，不会重复提交查询。",
 }
 
 
@@ -72,19 +80,21 @@ class Collector:
             await asyncio.gather(self.task, return_exceptions=True)
             self.task = None
 
-    async def claim(self):
+    async def claim(self, user_id=None, *, server_slots=1):
         async with self.sessions.begin() as db:
             ids = (await db.scalars(select(CnkiJob.user_id).join(User, User.id==CnkiJob.user_id)
                 .where(CnkiJob.enabled.is_(True), User.is_active.is_(True))
                 .order_by(CnkiJob.last_report_at.asc().nullsfirst(), CnkiJob.created_at))).all()
-        for user_id in dict.fromkeys(ids):
+        for owner in dict.fromkeys(ids):
+            if user_id is not None and owner != user_id:
+                continue
             async with self.sessions.begin() as db:
-                await store.lock_user(db, user_id)
-                user = await db.get(User, user_id)
+                await store.lock_user(db, owner)
+                user = await db.get(User, owner)
                 if not user or not user.is_active:
                     continue
-                device = SimpleNamespace(id=str(uuid5(NAMESPACE_URL, user_id+"/cnki-server")), user_id=user_id)
-                job = await store.claim_job(db, device, executor="server")
+                device = SimpleNamespace(id=str(uuid5(NAMESPACE_URL, owner+"/cnki-server")), user_id=owner)
+                job = await store.claim_job(db, device, executor="server", server_slots=server_slots)
                 if job:
                     return device, job
         return None
@@ -131,7 +141,7 @@ class Collector:
                 if title == row["title"] and len(detail.get("abstract", "")) > len(paper.get("abstract", "")):
                     paper.update(abstract=detail["abstract"], abstract_truncated=detail.get("abstract_truncated", False))
         except CollectionError as exc:
-            if str(exc) in {"waiting_for_verification", "rate_limited", "access_denied"}:
+            if str(exc) in {"waiting_for_verification", "rate_limited", "access_denied", "session_paused"}:
                 raise
             # Retain the original index, never merge a different paper's export.
             # A bad export must not restart the browser or the whole query.
@@ -150,7 +160,7 @@ class Collector:
             job.checkpoint = checkpoint
             job.lease_until = store.now()
             job.last_report_at, job.last_report = store.now(), {
-                "state":"queued", "detail":"题录已入库，摘要等待补齐"}
+                "state":"queued", "detail":"中文题录已获取，等待读取知网摘要"}
 
     async def enrich(self, device, task):
         started = time.monotonic()
@@ -164,7 +174,7 @@ class Collector:
             await self.browser.ensure(device.user_id)
             await self.browser.prepare_metadata()
         for i in range(0, len(pending), 2):
-            await self.report(device, task, detail=f"题录已入库，正在补齐摘要 {i+1}–{min(i+2,len(pending))}/{len(pending)} 篇")
+            await self.report(device, task, detail=f"中文题录已获取，正在读取知网摘要 {i+1}–{min(i+2,len(pending))}/{len(pending)} 篇")
             replies = await asyncio.gather(*(self.metadata(row, None) for row in pending[i:i+2]), return_exceptions=True)
             await self.batch(device, task, papers=[p for p in replies if isinstance(p,dict)], total=task["total"])
             for result in replies:
@@ -182,7 +192,12 @@ class Collector:
         started = time.monotonic()
         await self.report(device, task, detail="正在连接知网")
         await self.browser.ensure(device.user_id)
-        state = await self.browser.search(task["query"], task["field"])
+        await self.report(device, task, detail="正在向知网提交检索并等待题录")
+        options = {"resume_verification": task.get("resume_verification", False)}
+        if task.get("document_kind"):
+            options["document_kind"] = task["document_kind"]
+        state = await self.browser.search(task["query"], task["field"], **options)
+        await self.report(device, task, metrics={"resume_verification": False})
         while state["page"] < task["page"] and state["hasNext"]:
             await self.report(device, task, detail="正在恢复已保存的分页进度")
             state = await self.browser.execute("next")
@@ -191,18 +206,23 @@ class Collector:
         while True:
             if not state["rows"] and not state.get("emptyConfirmed"):
                 raise CollectionError("unrecognized_results_page")
-            remaining = 20 if task["limit"] is None else max(0, task["limit"]-(task["page"]-1)*20)
+            remaining = 20 if task["limit"] is None or task.get("document_kind") else max(0, task["limit"]-(task["page"]-1)*20)
             wanted = state["rows"][:remaining]
             def older(row):
                 date = row.get("pub_date", "")
                 return bool(task["since"] and re.match(r"\d{4}-\d{2}-\d{2}", date) and date[:10] < task["since"])
             within = [row for row in wanted if not older(row)]
+            category = {"journal":"中文期刊", "thesis":"学位论文", "conference":"会议文章", "book":"书籍"}.get(task.get("document_kind"))
+            if category and within and not any(store.as_literature(row).publication_category == category for row in within):
+                raise CollectionError("result_type_mismatch")
             finished = (not state["hasNext"] or not wanted or
-                        (task["limit"] is not None and task["page"]*20 >= task["limit"]) or
+                        (not task.get("document_kind") and task["limit"] is not None and task["page"]*20 >= task["limit"]) or
                         (state.get("dateSorted") and bool(state["rows"]) and all(older(r) for r in state["rows"])))
             # Page acknowledgement follows durable index storage, independent
             # of slower metadata exports. Restart resumes at the next page.
-            await self.batch(device, task, papers=[clean(row) for row in within], total=state["total"], page_complete=not finished)
+            receipt = await self.batch(device, task, papers=[clean(row) for row in within], total=state["total"], page_complete=not finished)
+            if task.get("document_kind") and task["limit"] is not None and receipt["count"] >= task["limit"]:
+                finished = True
             if finished:
                 await self.finish_index(device, task, time.monotonic()-started)
                 return
@@ -221,6 +241,15 @@ class Collector:
                     job.lease_until = store.now()+timedelta(seconds=90)
         pulse = asyncio.create_task(heartbeat())
         try:
+            if task.get("recover_session") or task.get("check_session"):
+                # Consume once per explicit retry. A second denial pauses again;
+                # it must not turn into an unattended browser restart loop.
+                await self.report(device, task, detail="正在检查知网会话", metrics={"recover_session": False, "check_session": False})
+                await self.browser.ensure(device.user_id)
+                if task.get("recover_session"):
+                    await self.browser.recover_session()
+                else:
+                    await self.browser.check_session()
             await self.collect(device, task)
         except asyncio.CancelledError:
             try:
@@ -230,13 +259,17 @@ class Collector:
             raise
         except Exception as exc:
             code = str(exc) if isinstance(exc, CollectionError) else type(exc).__name__
-            state = "waiting_for_verification" if code=="waiting_for_verification" else "paused" if code=="access_denied" else "error"
+            waiting = code in {"waiting_for_verification", "verification_result_pending", "search_http_417"}
+            state = "waiting_for_verification" if waiting else "paused" if code in {"access_denied", "session_paused", "result_type_mismatch"} else "error"
             try:
                 await self.report(device, task, state, MESSAGES.get(code, "知网采集暂时失败，已保留进度，稍后自动重试。"),
-                                  metrics={f"{task.get('phase', 'index')}_seconds":round(time.monotonic()-started, 3)})
+                                  metrics={f"{task.get('phase', 'index')}_seconds":round(time.monotonic()-started, 3),
+                                           **({"resume_verification": True} if waiting and task.get("phase", "index") == "index" else {})})
             except Exception:
                 pass  # Cancelled/expired leases must not be overwritten.
-            logger.info("CNKI collection state=%s code=%s", state, code)
+            logger.info("CNKI collection job=%s kind=%s phase=%s state=%s code=%s endpoint=%s http_status=%s",
+                        task["id"], task.get("document_kind"), task.get("phase", "index"), state, code,
+                        getattr(exc, "endpoint", None), getattr(exc, "http_status", None))
             if code in {"browser_start_failed", "browser_start_timeout", "browser_command_failed", "ConnectionClosedError", "ConnectError"}:
                 await self.browser.close()
         finally:
@@ -248,22 +281,39 @@ class Collector:
         lock = None
         self.sessions = self.sessions or get_session_factory()
         self.browser = self.browser or Browser()
+        active = {}
         try:
             while True:
                 try:
                     if lock is None:
                         lock = _the_file_lock().try_hold(the_data_root()/"cnki/worker.lock")
                     if lock:
-                        task = await self.claim()
-                        if task:
-                            await self.process(*task)
-                            continue
+                        for slot, (_, work) in list(active.items()):
+                            if work.done():
+                                await asyncio.gather(work, return_exceptions=True)
+                                del active[slot]
+                        owner = next((owner for owner, _ in active.values()), None)
+                        if len(active) < 2:
+                            claimed = await self.claim(owner, server_slots=2)
+                            if claimed:
+                                device, task = claimed
+                                slot = next(s for s in range(2) if s not in active)
+                                child = Collector(self.sessions, self.browser.lane(slot))
+                                active[slot] = (device.user_id, asyncio.create_task(child.process(device, task)))
+                                continue
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
                     logger.warning("CNKI queue unavailable: %s", type(exc).__name__)
-                await asyncio.sleep(3)
+                if active:
+                    await asyncio.wait([work for _, work in active.values()], timeout=3,
+                                       return_when=asyncio.FIRST_COMPLETED)
+                else:
+                    await asyncio.sleep(3)
         finally:
+            for _, work in active.values():
+                work.cancel()
+            await asyncio.gather(*(work for _, work in active.values()), return_exceptions=True)
             await self.browser.close()
             if lock:
                 lock.close()

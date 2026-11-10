@@ -1,8 +1,10 @@
 """User-owned CNKI indexes and receipts from a browser on that user's computer."""
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import (
+    JSON, Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint, Uuid, func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base, UTCDateTime
@@ -53,7 +55,11 @@ class CnkiPaper(Base):
     identity: Mapped[str] = mapped_column(String(64))
     metadata_json: Mapped[dict] = mapped_column(JSON)
     observed_at: Mapped[datetime] = mapped_column(UTCDateTime())
-    __table_args__ = (UniqueConstraint("user_id", "identity", name="uq_cnki_paper_owner_identity"),)
+    # Separate change delivery from the metadata cache's attempted-at timestamp.
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=lambda: datetime.now(UTC), server_default=func.current_timestamp())
+    __table_args__ = (UniqueConstraint("user_id", "identity", name="uq_cnki_paper_owner_identity"),
+                     Index("ix_cnki_papers_updates", "user_id", "updated_at", "id"))
 
 
 class CnkiJobPaper(Base):

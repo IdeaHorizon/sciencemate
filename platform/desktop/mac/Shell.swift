@@ -95,6 +95,9 @@ final class Backend {
         logHandle?.seekToEndOfFile()
 
         process.executableURL = python
+        // 从随包 Python 的根目录启动：-m 会优先从当前目录导入 app，继承到源码目录
+        // 就会绕过随包的 launcher；即使撤掉开发者声明，重启也仍然会加载源码。
+        process.currentDirectoryURL = python.deletingLastPathComponent().deletingLastPathComponent()
         // `-m app.launcher`：跟命令行 `research-platform` 走的是同一个入口。
         // 壳里另起一条启动路径的话，两条路会各自演化，而"我在终端里能跑、
         // 双击就不行"这类报告没有任何东西能解释。
@@ -247,6 +250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 起任何东西之前先看数据根里有没有比我新的壳（上次更新留下的）。有就换成它并重新
         // 拉起自己 —— 此刻还没起后端、没开窗口，是壳能被自更新换掉的唯一时机（#953 ④）。
+        if handleInstallation() { return }
         cleanupOldShellFiles()
         if replaceMyselfIfANewerShellIsStaged() { return }
 
@@ -734,8 +738,114 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func applicationWillTerminate(_ notification: Notification) { backend?.stop() }
 }
 
-let application = NSApplication.shared
-let delegate = AppDelegate()
-application.delegate = delegate
-application.setActivationPolicy(.regular)
-application.run()
+@main
+struct ShellApplication {
+    static func main() {
+        let arguments = CommandLine.arguments
+        if arguments.contains("--install") || arguments.contains("--install-to") {
+            do {
+                var directories = installationDirectories()
+                if let index = arguments.firstIndex(of: "--install-to") {
+                    guard index + 1 < arguments.count, arguments[index + 1].hasPrefix("/") else {
+                        throw DesktopInstallation.failure("--install-to requires an absolute directory.")
+                    }
+                    directories = [URL(fileURLWithPath: arguments[index + 1], isDirectory: true)]
+                }
+                let outcome = try DesktopInstallation.install(source: Bundle.main.bundleURL,
+                    directories: directories, preferredDirectory: preferredInstallationDirectory(directories),
+                    isRunning: installationIsRunning)
+                print(outcome.changed ? "Installed ScienceMate \(outcome.version)" : "ScienceMate \(outcome.version) is already installed; installation skipped.")
+                for warning in outcome.warnings { fputs(warning + "\n", stderr) }
+                // Last line is the path install.sh opens, including an existing custom filename.
+                print(outcome.application.path)
+                exit(0)
+            } catch {
+                fputs("ScienceMate installation failed: \(error.localizedDescription)\n", stderr)
+                exit(1)
+            }
+        }
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.delegate = delegate
+        application.setActivationPolicy(.regular)
+        withExtendedLifetime(delegate) { application.run() }
+    }
+}
+
+private func installationDirectories() -> [URL] {
+    [URL(fileURLWithPath: "/Applications", isDirectory: true),
+     FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)]
+}
+
+private func preferredInstallationDirectory(_ directories: [URL]) -> URL {
+    directories.first { FileManager.default.isWritableFile(atPath: $0.path) } ?? directories.last!
+}
+
+private func installationIsRunning(_ application: URL) -> Bool {
+    NSRunningApplication.runningApplications(withBundleIdentifier: DesktopInstallation.bundleID).contains {
+        $0.processIdentifier != ProcessInfo.processInfo.processIdentifier
+            && $0.bundleURL.map { DesktopInstallation.samePath($0, application) } == true
+    }
+}
+
+extension AppDelegate {
+    /// Route DMG/download copies through installation before starting a backend.
+    fileprivate func handleInstallation() -> Bool {
+        let source = Bundle.main.bundleURL.standardizedFileURL
+        // Build products are intentionally portable so packaging probes stay isolated.
+        if source.pathComponents.contains(where: { $0.hasSuffix(".noindex") }) { return false }
+        let directories = installationDirectories()
+        let existing = DesktopInstallation.newest(in: directories)
+        if let existing = existing, DesktopInstallation.samePath(existing, source) { return false }
+        let incoming = DesktopInstallation.version(at: source) ?? ""
+        if let existing = existing, let installed = DesktopInstallation.version(at: existing),
+           DesktopInstallation.compare(installed, incoming) >= 0 {
+            let alert = NSAlert()
+            alert.messageText = Speech.both("已安装相同或更高版本", "This version or a newer version is already installed")
+            alert.informativeText = Speech.both("已安装 \(installed)，此安装包为 \(incoming)。将打开已安装的应用。",
+                "Installed: \(installed). This package: \(incoming). The installed application will open.")
+            alert.runModal()
+            openInstalledApplication(existing)
+            return true
+        }
+        let alert = NSAlert()
+        alert.messageText = Speech.both("安装 ScienceMate \(incoming)", "Install ScienceMate \(incoming)")
+        alert.informativeText = Speech.both("应用将安装到“应用程序”。已有的旧版本会被替换，项目和设置会保留。",
+            "ScienceMate will be installed in Applications. The previous version will be replaced; projects and settings will be kept.")
+        alert.addButton(withTitle: Speech.t("安装并打开", "Install and Open"))
+        alert.addButton(withTitle: Speech.t("取消", "Cancel"))
+        guard alert.runModal() == .alertFirstButtonReturn else { NSApp.terminate(nil); return true }
+        do {
+            let outcome = try DesktopInstallation.install(source: source, directories: directories,
+                preferredDirectory: preferredInstallationDirectory(directories), isRunning: installationIsRunning)
+            if !outcome.warnings.isEmpty {
+                let warning = NSAlert()
+                warning.messageText = Speech.both("安装完成，旧副本未全部清理", "Installed; some previous copies could not be removed")
+                warning.informativeText = outcome.warnings.joined(separator: "\n")
+                warning.runModal()
+            }
+            openInstalledApplication(outcome.application)
+        } catch {
+            let failure = NSAlert()
+            failure.messageText = Speech.both("未能安装 ScienceMate", "ScienceMate could not be installed")
+            failure.informativeText = error.localizedDescription
+            failure.runModal()
+            NSApp.terminate(nil)
+        }
+        return true
+    }
+
+    private func openInstalledApplication(_ url: URL) {
+        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            DispatchQueue.main.async {
+                if let error = error {
+                    let alert = NSAlert()
+                    alert.messageText = Speech.both("未能打开 ScienceMate", "ScienceMate could not be opened")
+                    alert.informativeText = error.localizedDescription
+                    alert.runModal()
+                }
+                NSApp.terminate(nil)
+            }
+        }
+    }
+}

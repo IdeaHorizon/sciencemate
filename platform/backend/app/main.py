@@ -564,6 +564,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     delivery_reconciler.start()
     from app.services.cnki_worker import cnki_collector
     cnki_collector.start()
+    from app.services.literature_access import literature_access
+    await literature_access.start()
 
     # 发行的长活任务（专业版：装出来的组织服务器夜里自己升级）。钩子自己决定起不起。
     long_running: list[asyncio.Task] = []
@@ -575,6 +577,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         yield
     finally:
+        await literature_access.stop()
         await cnki_collector.stop()
         for task in long_running:
             task.cancel()

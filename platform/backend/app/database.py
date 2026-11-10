@@ -136,14 +136,18 @@ async def create_schema_for_unmanaged_databases() -> None:
     if not settings.database_url.startswith("sqlite"):
         return
     import app.models  # noqa: F401 —— 建表前必须让所有模型注册进 Base.metadata
+    from app.services.cnki_schema import upgrade_personal_results
 
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        cnki_upgraded = await conn.run_sync(upgrade_personal_results)
         added = await conn.run_sync(_add_the_columns_the_models_have_and_the_database_lacks)
         reindexed = await conn.run_sync(_make_the_indexes_match_the_models)
         unreadable = await conn.run_sync(_uuid_cells_that_cannot_be_read_back)
         retyped = await conn.run_sync(_give_text_columns_text_affinity)
+    if cnki_upgraded:
+        logger.info("Schema: upgraded CNKI incremental results, preserving observation timestamps")
     for table, column in added:
         logger.info("Schema: added missing column %s.%s", table, column)
     for what, name in reindexed:

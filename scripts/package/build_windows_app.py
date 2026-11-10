@@ -1499,8 +1499,18 @@ def prove_a_reinstall_never_breaks_a_working_install(setup: Path, install_dir: P
         raise SystemExit(
             f"❌ 这条闸的前提不成立：重装之前这份安装就已经缺件 {missing_before}")
 
-    proc = subprocess.run([str(setup), "--no-launch", "--install-dir", str(install_dir)], capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", timeout=600)
+    # Make this a real upgrade attempt. Same-version setup now succeeds without writing
+    # any files, even while the app is open; that cannot exercise the running-upgrade guard.
+    config_path = install_dir / "backend.json"
+    original_config = config_path.read_bytes()
+    config = json.loads(original_config)
+    config["version"] = "0.0.0"
+    try:
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        proc = subprocess.run([str(setup), "--no-launch", "--install-dir", str(install_dir)],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+    finally:
+        config_path.write_bytes(original_config)
     said = ((proc.stdout or "") + (proc.stderr or "")).strip()
     missing_after = [n for n in INSTALL_INVENTORY if not (install_dir / n).is_file()]
     if missing_after:

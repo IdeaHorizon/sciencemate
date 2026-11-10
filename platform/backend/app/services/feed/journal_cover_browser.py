@@ -161,6 +161,16 @@ class Browser:
     def save_gates(self):
         covers._write(covers.cache_dir() / "browser-verification.json", self.gates)
 
+    async def prune_closed_verifications(self):
+        """A restarted Chrome must not inherit slots held by vanished tabs."""
+        live_ids = {tab["id"] for tab in await self.tabs()}
+        stale = [host for host, gate in self.gates.items()
+                 if gate.get("target_id") not in live_ids]
+        for host in stale:
+            self.gates.pop(host, None)
+        if stale:
+            self.save_gates()
+
     async def blocked(self, host: str) -> bool:
         gate = self.gates.get(host)
         if not gate:
@@ -242,6 +252,8 @@ async def process(browser: Browser, tab: dict, journal: covers.Journal) -> bool:
         page = await browser.page(tab, url)
         if challenged(page):
             if len(browser.gates) >= MAX_MANUAL_TABS:
+                await browser.prune_closed_verifications()
+            if len(browser.gates) >= MAX_MANUAL_TABS:
                 record(journal, "verification_tabs_full")
                 return False
             browser.gates[host] = {"target_id": tab["id"], "journal": journal.name,
@@ -304,7 +316,7 @@ async def warm_missing() -> dict:
     journals = [enriched(j) for j in candidate_index().values()]
     browser = Browser(options["cdp_url"])
     try:
-        await browser.tabs()
+        await browser.prune_closed_verifications()
         grouped = defaultdict(list)
         for journal in journals:
             if due(journal):

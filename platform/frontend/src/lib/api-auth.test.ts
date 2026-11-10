@@ -2,6 +2,32 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ApiClient } from "./api.ts";
 
+test("folder browsing stays on this computer while an organisation project is open", async () => {
+  const requests: { url: string; init: RequestInit }[] = [];
+  const client = new ApiClient((async (input, init) => {
+    requests.push({ url: String(input), init: init ?? {} });
+    return new Response(JSON.stringify({ available: false }), { status: 200 });
+  }) as typeof fetch);
+  client.setToken("local-token");
+  client.askingAbout({ project: "organisation-project" });
+  await client.listProjectFolders("/Volumes/研究 data");
+  const request = requests[0];
+  assert.equal(new Headers(request.init.headers).get("X-Project"), null);
+  assert.equal(new Headers(request.init.headers).get("Authorization"), "Bearer local-token");
+  assert.equal(new URL(request.url, "http://local").searchParams.get("path"), "/Volumes/研究 data");
+});
+
+test("project creation sends an explicitly chosen root folder", async () => {
+  let body: unknown;
+  const client = new ApiClient((async (_input, init) => {
+    body = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({ id: "new-project", root_folder: "/Volumes/研究 data" }), { status: 201 });
+  }) as typeof fetch);
+  const project = await client.createProject({ name: "Research", root_folder: "/Volumes/研究 data" });
+  assert.deepEqual(body, { name: "Research", root_folder: "/Volumes/研究 data" });
+  assert.equal(project.root_folder, "/Volumes/研究 data");
+});
+
 test("authenticated transport attaches the current bearer token and handles 401", async () => {
   const requests: RequestInit[] = [];
   const client = new ApiClient((async (_input: string | URL | Request, init?: RequestInit) => {

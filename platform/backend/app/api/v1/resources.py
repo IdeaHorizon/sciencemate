@@ -136,9 +136,12 @@ async def connect_ssh_resource(
 async def operate_ssh_resource(
     project_id: str, resource_id: str, data: SSHOperationRequest,
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> dict:
     from app.services.ssh_resources import operate
-    return await operate(db, user, project_id, resource_id, **data.model_dump(exclude_none=True))
+    return await operate(
+        db, user, project_id, resource_id, lang=lang, **data.model_dump(exclude_none=True)
+    )
 
 
 @router.post(

@@ -4,6 +4,7 @@ Uses an ephemeral, untrusted test certificate; never modifies a trust store or
 the user's installed application. Run this on native Windows, not WSL Python.
 """
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -24,10 +25,12 @@ def installer(tmp_path, monkeypatch):
     output = tmp_path / "dist"
     output.mkdir()
     monkeypatch.setattr(builder, "DIST", output)
+    monkeypatch.setattr(builder, "ICON", output / "ScienceMate.ico")
+    monkeypatch.setattr(builder.payload_release, "the_version", lambda: "0.5.10")
     app = tmp_path / "app"
     app.mkdir()
     (app / "ScienceMate.exe").write_bytes(b"isolated installer fixture")
-    (app / "backend.json").write_bytes(b"{}")
+    (app / "backend.json").write_text(json.dumps({"version": builder.payload_release.the_version()}))
     (app / "report.txt").write_bytes("研究数据\n".encode("utf-8"))
     from shared.lib.filesystem import io_path
     report = io_path(app / LONG_REPORT)
@@ -36,9 +39,10 @@ def installer(tmp_path, monkeypatch):
     return builder.make_the_installer(app)
 
 
-def run_installer(installer, destination):
-    return subprocess.run([str(installer), "--no-launch", "--install-dir", str(destination)],
-                          capture_output=True, timeout=60)
+def run_installer(installer, destination, *arguments):
+    return subprocess.run([str(installer), "--no-launch", "--install-dir", str(destination), *arguments],
+                          capture_output=True, timeout=60,
+                          env={**os.environ, "HARNESS_FRAMEWORK_HOME": str(destination.parent / "data")})
 
 
 def test_unsigned_installer_and_reinstall_preserve_exact_payload(installer, tmp_path):
@@ -117,3 +121,83 @@ def test_invalid_package_entry_preserves_existing_install_and_cleans_staging(ins
     assert not list(tmp_path.glob("existing.new-*"))
     assert not list(tmp_path.glob("existing.old-*"))
     assert not (tmp_path / "escape.txt").exists()
+
+
+@pytest.mark.parametrize("installed_version", ["0.5.9", "0.5.11"])
+def test_upgrade_or_downgrade_obeys_installed_version(installer, tmp_path, installed_version):
+    destination = tmp_path / "installed"
+    destination.mkdir()
+    (destination / "ScienceMate.exe").write_bytes(b"previous executable")
+    (destination / "backend.json").write_text(json.dumps({"version": installed_version}))
+    (destination / "keep.txt").write_bytes(b"previous installation marker")
+    result = run_installer(installer, destination)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    if installed_version == "0.5.11":
+        assert (destination / "ScienceMate.exe").read_bytes() == b"previous executable"
+        assert (destination / "keep.txt").exists()
+        assert b"already installed" in result.stdout
+    else:
+        assert (destination / "ScienceMate.exe").read_bytes() == b"isolated installer fixture"
+        assert not (destination / "keep.txt").exists()
+    assert not list(tmp_path.glob("installed.new-*"))
+    assert not list(tmp_path.glob("installed.old-*"))
+
+
+def test_same_version_does_not_reinstall(installer, tmp_path):
+    destination = tmp_path / "installed"
+    assert run_installer(installer, destination).returncode == 0
+    marker = destination / "keep.txt"
+    marker.write_bytes(b"must not be replaced")
+    result = run_installer(installer, destination)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert b"already installed" in result.stdout
+    assert marker.read_bytes() == b"must not be replaced"
+
+
+@pytest.mark.parametrize("version", ["0.5.9", "0.5.10"])
+def test_running_application_is_kept_intact(installer, tmp_path, version):
+    destination = tmp_path / "running"
+    destination.mkdir()
+    source = tmp_path / "Running.cs"
+    source.write_text("class Running { static void Main() { System.Threading.Thread.Sleep(60000); } }")
+    executable = destination / "ScienceMate.exe"
+    csc = Path(os.environ["SystemRoot"]) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+    subprocess.run([str(csc), "/nologo", "/target:exe", "/out:" + str(executable), str(source)], check=True)
+    (destination / "backend.json").write_text(json.dumps({"version": version}))
+    before = executable.read_bytes()
+    process = subprocess.Popen([str(executable)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        result = run_installer(installer, destination)
+        if version == "0.5.9":
+            assert result.returncode != 0, (result.stdout, result.stderr)
+        else:
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            assert b"already installed" in result.stdout
+        assert process.poll() is None
+        assert executable.read_bytes() == before
+        assert not list(tmp_path.glob("running.new-*"))
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+
+def test_default_install_finds_registered_custom_location(installer, tmp_path):
+    import uuid
+    import winreg
+    key = "Software\\ScienceMateInstallerTests\\" + uuid.uuid4().hex
+    destination = tmp_path / "custom-location"
+    try:
+        result = run_installer(installer, destination, "--register-uninstall", "--uninstall-key", key)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        marker = destination / "keep.txt"
+        marker.write_bytes(b"current custom installation")
+        result = subprocess.run([str(installer), "--no-launch", "--uninstall-key", key],
+                                capture_output=True, timeout=60,
+                                env={**os.environ, "LOCALAPPDATA": str(tmp_path / "local"),
+                                     "HARNESS_FRAMEWORK_HOME": str(tmp_path / "data")})
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert b"already installed" in result.stdout
+        assert marker.read_bytes() == b"current custom installation"
+        assert not (tmp_path / "local/Programs/ScienceMate").exists()
+    finally:
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)

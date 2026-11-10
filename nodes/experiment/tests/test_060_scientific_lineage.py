@@ -115,3 +115,40 @@ def test_absent_parameter_witness_is_disclosed_not_invented_or_a_new_gate(tmp_pa
     assert entry["parameter_source"] == "not_observed"
     assert entry["parameter_comparison"]["passed"] is None
     assert result["delivery"]["limitations"]
+
+
+def test_producer_bound_to_a_different_prereg_cannot_support_success(tmp_path, monkeypatch):
+    from nodes.experiment.tools import execution_context
+
+    state = _state(tmp_path)
+    alternate = state.save_artifact("pre_registration", "alternate", "Different protocol.")
+    state.mark_frozen(alternate["id"], {"freeze_reason": "different protocol fixture"})
+    other = state.read_artifact(alternate["id"])
+    other_binding = {
+        "artifact_id": alternate["id"], "version": other["version"],
+        "content_hash": other["content_hash"],
+    }
+    capture = execution_context.capture
+
+    def capture_other_binding(*args, **kwargs):
+        context = capture(*args, **kwargs)
+        context["prereg_binding"] = other_binding
+        return context
+
+    # Simulate a trusted action/route reporting the wrong frozen identity. The
+    # output and parameter values still match, so neither alone exposes it.
+    monkeypatch.setattr(execution_context, "capture", capture_other_binding)
+    _square(state, 7)
+
+    rejected = _finish(state)
+
+    assert rejected["status"] == "success_unsupported", rejected
+    conflict, = [
+        c for c in rejected["contradictions"] if c["name"] == "producer_prereg_binding_conflict"
+    ]
+    assert conflict["observed_binding"] == other_binding
+    assert delivery_transaction.read_manifest(state) is None
+    partial = asyncio.run(finish._finish(
+        state, outcome="partial", summary="Preserve the other protocol's output.",
+    ))
+    assert partial["status"] == "success" and partial["outcome"] == "partial", partial

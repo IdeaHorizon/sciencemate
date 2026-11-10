@@ -40,12 +40,13 @@ def test_full_title_keys_do_not_collide_and_legacy_cache_remains_readable(tmp_pa
     index = LocalPaperIndex(str(tmp_path / 'index.sqlite3'))
     a = 'A' * 70 + ' fluid particles'
     b = 'A' * 70 + ' solid crystals'
-    assert index._title_hash(a) == index._title_hash(b)
+    assert index._legacy_title_hash(a) == index._legacy_title_hash(b)
+    assert index._title_hash(a) != index._title_hash(b)
     index.save_title_translations({a: '流体颗粒', b: '固体晶格'})
     assert index.get_title_translations([a, b]) == {a: '流体颗粒', b: '固体晶格'}
     with sqlite3.connect(index.db_path) as conn:
         conn.execute('INSERT INTO title_translations(title_key,original_title,translated_title) VALUES(?,?,?)',
-                     (index._title_hash('Legacy paper'), 'Legacy paper', '历史论文'))
+                     (index._legacy_title_hash('Legacy paper'), 'Legacy paper', '历史论文'))
     assert index.get_title_translations(['Legacy paper']) == {'Legacy paper': '历史论文'}
 
 

@@ -70,9 +70,12 @@ def test_merges_duplicate_doi_and_keeps_school_only_record(school_db: Path) -> N
     assert duplicate["school_holdings"] == ["模拟学校馆藏"]
     assert duplicate["school_fulltext_url"].endswith("/LIB-001")
     assert duplicate["abstract"].startswith("A demonstration study")
+    assert duplicate["metadata_provenance"]["abstract"] == "模拟学校馆藏"
+    assert "title" not in duplicate["metadata_provenance"]
     assert merged["papers"][1]["source"] == "模拟学校馆藏"
     assert merged["source_counts"] == {"crossref": 1, "school_library": 2}
     assert public["papers"][0].get("school_holdings") is None
+    assert public["papers"][0]["metadata_provenance"] == {}
 
 
 def test_full_public_result_still_shows_school_only_papers(school_db: Path) -> None:

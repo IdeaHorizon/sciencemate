@@ -647,3 +647,25 @@ def test_a_witnessed_precondition_does_not_strip_a_primary_run_of_its_verdict(
     assert after["requires_hypothesis_verdict"] is True, after
     # 派生别名也跟着不动（它等根测试改掉后会一起删）。
     assert after["analysis_eligible"] is True, after
+
+
+def test_bound_prereg_parameters_are_not_overridden_by_run_cache(tmp_path):
+    state = _state(tmp_path)
+    classified = asyncio.run(_classify_experiment_scope(
+        state, scope="scientific", reason="Compare the bound scientific parameters.",
+    ))
+    assert classified["status"] == "success", classified
+
+    state.hook_state["run_contract"] = {
+        "expected_params": {"grid": [1, 1]},
+        "execution_contract": {
+            "version": 1, "scientific_params": {"grid": [1, 1]}, "runtime_params": {},
+        },
+    }
+    match = audit_execution_contract(state, {"grid": [50, 50]}, stage="simulation")
+    deviation = audit_execution_contract(state, {"grid": [1, 1]}, stage="simulation")
+
+    assert match["passed"] is True, match
+    assert deviation["mismatched_parameters"] == [
+        {"parameter": "grid", "expected": [50, 50], "actual": [1, 1]},
+    ]

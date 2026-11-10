@@ -15,8 +15,7 @@
 #
 # ## 它做什么
 #
-# 下载 dmg → 用发布目录里的 SHA256SUMS 核对 → 挂载 → 复制进「应用程序」（写不了就
-# 进 ~/Applications）→ 卸载 → 打开。每一步失败就停，不留半个应用。
+# 下载 dmg → 核对 SHA256SUMS → 挂载 → 原生安装器检测版本并事务升级 → 卸载 → 打开。
 #
 # 环境变量：AFS_RELEASE_URL（发布目录；打包器已经烧了默认值）、AFS_INSTALL_DIR、AFS_AUTH（私有仓库）、
 # AFS_DRY_RUN=1（只打印要做什么，不做）。
@@ -68,23 +67,28 @@ else
 fi
 
 say "③ 装进 $DEST"
-if [ -z "$DRY" ] && [ ! -w "$DEST" ]; then
-  DEST="$HOME/Applications"; mkdir -p "$DEST"
-  say "  /Applications 写不了，改装到 $DEST"
-fi
-if [ -z "$DRY" ] && pgrep -x ScienceMate >/dev/null 2>&1; then
-  say "  应用正在运行，先退出它"
-  osascript -e 'tell application "ScienceMate" to quit' >/dev/null 2>&1 || true
-  sleep 2
-fi
 run hdiutil attach "$WORK/$DMG" -nobrowse -readonly -quiet -mountpoint "$WORK/mnt"
-run rm -rf "$DEST/$APP"
-run ditto "$WORK/mnt/$APP" "$DEST/$APP"
+if [ -n "$DRY" ]; then
+  if [ -n "${AFS_INSTALL_DIR:-}" ]; then
+    run "$WORK/mnt/$APP/Contents/MacOS/ScienceMate" --install-to "$DEST"
+  else
+    run "$WORK/mnt/$APP/Contents/MacOS/ScienceMate" --install
+  fi
+  INSTALLED="$DEST/$APP"
+else
+  if [ -n "${AFS_INSTALL_DIR:-}" ]; then
+    result="$("$WORK/mnt/$APP/Contents/MacOS/ScienceMate" --install-to "$DEST")" || die "安装未完成，已保留原有应用"
+  else
+    result="$("$WORK/mnt/$APP/Contents/MacOS/ScienceMate" --install)" || die "安装未完成，已保留原有应用"
+  fi
+  say "$result"
+  INSTALLED="$(printf '%s\n' "$result" | tail -n 1)"
+fi
 run hdiutil detach "$WORK/mnt" -quiet
 [ -n "$DRY" ] || rmdir "$WORK/mnt" 2>/dev/null || true
 
 say "④ 去掉隔离标记（若有）"
-run xattr -dr com.apple.quarantine "$DEST/$APP" 2>/dev/null || true
+run xattr -dr com.apple.quarantine "$INSTALLED" 2>/dev/null || true
 
-say "✅ 装好了：$DEST/$APP"
-run open -a "$DEST/$APP"
+say "✅ 安装已就绪：$INSTALLED"
+run open -a "$INSTALLED"

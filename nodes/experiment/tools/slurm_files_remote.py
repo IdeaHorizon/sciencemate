@@ -227,6 +227,21 @@ def operate(action, data):
                 os.unlink(name, dir_fd=parent)
                 raise
         return {"ok": True, "size": size, "sha256": digest.hexdigest()}
+    if action == "project_file_snapshot":
+        cwd = os.getcwd()
+        paths = [clean(cwd + "/" + path) for path in data["paths"]]
+        if any(not path.startswith(cwd + "/") for path in paths):
+            raise ValueError("output path escaped the job workspace")
+        entries, coverage = {}, []
+        for path in paths:
+            ident = identity(path, hash_cap=8 * 1024 * 1024)
+            status = {"file": "complete", "missing": "missing"}.get(ident["kind"], "error")
+            if status == "error":
+                ident = {"kind": "error"}
+            entries[path] = {**ident, "size": ident.get("size_bytes"), "inode": ident.get("st_ino")}
+            coverage.append({"root": path, "status": status})
+        return {"cwd": cwd, "entries": entries, "root_coverage": coverage,
+                "truncated": any(row["status"] == "error" for row in coverage), "taken_at": time.time()}
     if action == "snapshot":
         return snapshot(data["roots"])
     if action == "health":

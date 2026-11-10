@@ -104,6 +104,7 @@ async def until_shutdown(source: AsyncIterator[str]) -> AsyncIterator[str]:
         return
 
     shutdown = asyncio.ensure_future(wait_for_shutdown())
+    nxt = None
     try:
         while True:
             nxt = asyncio.ensure_future(iterator.__anext__())
@@ -124,6 +125,9 @@ async def until_shutdown(source: AsyncIterator[str]) -> AsyncIterator[str]:
             yield RECONNECT_FRAME
             return
     finally:
+        if nxt is not None and not nxt.done():
+            nxt.cancel()
+            await asyncio.gather(nxt, return_exceptions=True)
         shutdown.cancel()
         await asyncio.gather(shutdown, return_exceptions=True)
         await _aclose(iterator)
@@ -169,8 +173,11 @@ def sse_response(
     async def _released() -> AsyncIterator[str]:
         if release is not None:
             await release.close()
-        async for chunk in source:
-            yield chunk
+        try:
+            async for chunk in source:
+                yield chunk
+        finally:
+            await _aclose(source)
 
     return StreamingResponse(
         until_shutdown(_released()),

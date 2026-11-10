@@ -208,6 +208,13 @@ def probe():
 def main(request):
     os.umask(0o077)
     action = request["action"]
+    input_manifest_sha256 = request.get("input_manifest_sha256")
+    if input_manifest_sha256 is not None and (
+        action != "submit"
+        or not isinstance(input_manifest_sha256, str)
+        or not re.fullmatch(r"[a-f0-9]{64}", input_manifest_sha256)
+    ):
+        raise ValueError("input_manifest_sha256 requires submit and a lowercase SHA-256")
     if action == "probe":
         return probe()
     project = request["project_id"]
@@ -286,16 +293,22 @@ def main(request):
         raise ValueError("Invalid job ID")
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     directory = root / job_id
-    digest = hashlib.sha256(
-        json.dumps(
-            dict(command=command, cwd=str(cwd), timeout=timeout, environment=environment),
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
+    identity_fields = dict(command=command, cwd=str(cwd), timeout=timeout, environment=environment)
+    if input_manifest_sha256 is not None:
+        # This binds the caller's declaration. The supervisor does not inspect
+        # which files the command actually opens.
+        identity_fields["input_manifest_sha256"] = input_manifest_sha256
+    digest = hashlib.sha256(json.dumps(identity_fields, sort_keys=True).encode()).hexdigest()
     with (root / (job_id + ".lock")).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if directory.exists():
             existing = read_job(directory)
+            if existing.get("input_manifest_sha256") != input_manifest_sha256:
+                return {
+                    "error": "Submission key already belongs to a different input manifest",
+                    "error_code": "input_manifest_conflict",
+                    "existing_input_manifest_sha256": existing.get("input_manifest_sha256"),
+                }
             if existing["request_digest"] != digest:
                 raise ValueError("Submission key already belongs to a different command")
             return existing
@@ -319,6 +332,8 @@ def main(request):
             stdout_path=str(directory / "stdout.log"),
             stderr_path=str(directory / "stderr.log"),
         )
+        if input_manifest_sha256 is not None:
+            record["input_manifest_sha256"] = input_manifest_sha256
         write_json(directory / "record.json", record)
         if action == "submit":
             agent = directory / "agent.py"

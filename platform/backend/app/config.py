@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     cnki_browser_executable: str = ""
     cnki_browser_headless: bool | None = None
     cnki_browser_virtual_display: bool = False
+    # Shared by both category lanes and metadata lookups; not a per-tab quota.
+    # This is our conservative pacing policy, not a published CNKI allowance.
+    cnki_request_interval_seconds: float = Field(default=1.0, ge=0.25, le=60)
 
     #: 静态导出的 UI 目录（`platform/frontend/out`）。给了就由 App Server 自己
     #: serve —— 个人档运行期没有 Node，也没有 nginx。留空 = 不挂载（组织档由

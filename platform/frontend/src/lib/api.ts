@@ -304,6 +304,11 @@ export class ApiClient {
     });
   }
 
+  async listProjectFolders(path?: string) {
+    const query = path ? `?${new URLSearchParams({ path })}` : "";
+    return this.onThisMachine<ProjectFolderListing>(`/projects/folders${query}`);
+  }
+
   /** 改会话属性。目前用于换模型：PATCH …/sessions/{id} { model_backend_id }。 */
   async updateSession(
     projectId: string,
@@ -729,7 +734,7 @@ export class ApiClient {
   // ── V2: Project assets summary ──────────────────────────────
 
   // ── 学术搜索（literature search）─────────────────────────────
-  async searchLiterature(query: string, limit = 200) {
+  async searchLiterature(query: string, limit: number | null = null) {
     return this.request<LiteratureSearchResponse>("/literature/search", {
       method: "POST",
       body: JSON.stringify({ query, limit }),
@@ -745,10 +750,11 @@ export class ApiClient {
 
   streamLiteratureSearch(
     query: string,
-    limit: number,
+    limit: number | null,
     onProgress: (event: Record<string, unknown>) => void,
     onDone: (result: LiteratureSearchResponse) => void,
     onError: (message: string) => void,
+    continuation?: Record<string, unknown>,
   ): () => void {
     const controller = new AbortController();
     (async () => {
@@ -756,7 +762,7 @@ export class ApiClient {
         const response = await this.fetchWithAuth(`${API_BASE}/literature/search/stream`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query, limit }),
+          body: JSON.stringify({ query, limit, continuation, pagination_scope: "query" }),
           signal: controller.signal,
         });
         if (!response.ok || !response.body) {
@@ -1224,6 +1230,7 @@ export interface Project {
   capabilities?: string[];
   /** 它住在哪 —— 侧栏按它分组。 */
   home?: ProjectHome | null;
+  root_folder?: string | null;
   /** 组织里谁看得见：组里所有人（只读）/ 只有项目成员。 */
   visibility?: "organisation" | "members";
   /** 在不在「我的项目」里（自己建的 / 是成员的）。组里别人的组内可见项目也在清单里（桌面靠它记
@@ -1295,6 +1302,7 @@ export interface RunListResponse {
 
 export interface CreateProjectRequest {
   name: string;
+  root_folder?: string;
   description?: string;
   research_domain?: string;
   entry_type?: string;
@@ -1308,6 +1316,16 @@ export interface CreateProjectRequest {
    */
   home?: string;
 }
+
+export type ProjectFolderListing = { available: false } | {
+  available: true;
+  default_parent: string;
+  path: string;
+  parent: string | null;
+  directories: { name: string; path: string }[];
+  roots: string[];
+  empty: boolean;
+};
 
 export type UpdateProjectRequest = Partial<Pick<Project, "name" | "description" | "research_domain" | "visibility">>;
 
@@ -2217,7 +2235,7 @@ export interface LiteraturePaper {
   publication_category: PublicationCategory;
   exact_title_match: boolean;
   relevance_assessment?: {
-    tier: "direct" | "background" | "excluded";
+    tier: "direct" | "background" | "unconfirmed" | "excluded";
     detail: string; matched_concepts: string[]; missing_concepts: string[];
     matched_aspects?: string[];
   };
@@ -2255,6 +2273,7 @@ export interface LiteratureQueryGroup { label: string; en: string; zh: string }
 
 export interface LiteratureSearchResponse {
   query: string;
+  continuation?: Record<string, unknown> | null;
   search_plan?: LiteratureQueryGroup[];
   decomposed_queries: string[];
   papers: LiteraturePaper[];

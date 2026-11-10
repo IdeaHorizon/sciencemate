@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_session_factory
-from app.models.feed import FeedSource
+from app.models.feed import FeedSource, FeedSourceKind
 from app.models.user import User
 from app.services.feed import collectors, discovery, ingest
 from app.services.feed.collectors import CollectorError
@@ -272,9 +272,8 @@ class FeedCollector:
                 item_domains = {str(code) for code in (source.domains or []) if code}
                 if not subscribed or not item_domains:
                     return False
-                if domain_service.FEED_ARXIV_DOMAIN in subscribed and any(
-                    not code.isdigit() for code in item_domains
-                ):
+                if (domain_service.FEED_ARXIV_DOMAIN in subscribed
+                        and source.kind == FeedSourceKind.ARXIV):
                     return True
                 return any(
                     selected in domain_service.ancestors(item)
@@ -304,7 +303,9 @@ class FeedCollector:
                 )
                 for source, items, error in fetched:
                     stored_total += await self._record(db, source, items, error)
-            await db.commit()
+                    # Publish each completed source before another publisher's
+                    # image/abstract work. A later failure must not roll it back.
+                    await db.commit()
             return {"polled": len(due), "stored": stored_total}
 
     async def run_discovery_once(self) -> dict[str, int]:

@@ -1,21 +1,24 @@
 """User-scoped CNKI indexes, checkpoints and leases for managed/local collectors."""
 from __future__ import annotations
 
+from app.services.say import say
+
 import hashlib
+import base64
+import json
 import re
 import secrets
 import unicodedata
 from datetime import UTC, datetime, timedelta
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from fastapi import HTTPException
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 
 from app.models.cnki import CnkiDevice, CnkiJob, CnkiJobPaper, CnkiPaper
 from app.models.feed import FeedItem
 from app.models.user import User
 from app.schemas.literature import LiteraturePaperOut, LiteratureSearchOut
-from app.services.say import say
 
 
 def now():
@@ -64,22 +67,70 @@ def job_state(job: CnkiJob) -> str:
     } else "queued"
 
 
-async def job_view(db, job: CnkiJob, *, papers=False) -> dict:
+async def job_view(db, job: CnkiJob, *, papers=False, page_size: int | None = None, cursor: str | None = None) -> dict:
+    # All paper writes take the same user lock. Taking it before a page watermark
+    # prevents an in-flight transaction from committing an older unseen update.
+    if papers and page_size is not None:
+        await lock_user(db, job.user_id)
     count = await db.scalar(select(func.count()).select_from(CnkiJobPaper).where(CnkiJobPaper.job_id == job.id))
     result = {"id": job.id, "query": job.query, "category": job.category, "recurring": job.recurring,
               "enabled": job.enabled, "state": job_state(job), "count": count,
+              "phase": (job.checkpoint or {}).get("phase", "index"),
               "page": (job.checkpoint or {}).get("page", 1), "total": (job.checkpoint or {}).get("total", 0),
               "detail": (job.last_report or {}).get("detail", ""), "last_completed_at": job.last_completed_at,
-              "executor": (job.checkpoint or {}).get("executor", "server")}
+              "executor": (job.checkpoint or {}).get("executor", "server"),
+              "document_kind": (job.checkpoint or {}).get("document_kind")}
     if papers:
-        rows = (await db.scalars(select(CnkiPaper).join(CnkiJobPaper, CnkiJobPaper.paper_id == CnkiPaper.id)
-                                .where(CnkiJobPaper.job_id == job.id, CnkiPaper.user_id == job.user_id)
-                                .order_by(CnkiPaper.metadata_json["pub_date"].as_string().desc(),
-                                          CnkiPaper.observed_at.desc(), CnkiPaper.id).limit(job.result_limit or 200))).all()
+        statement = select(CnkiPaper).join(CnkiJobPaper, CnkiJobPaper.paper_id == CnkiPaper.id).where(
+            CnkiJobPaper.job_id == job.id, CnkiPaper.user_id == job.user_id)
+        if page_size is not None:
+            after = after_id = None
+            through = now()
+            if cursor:
+                try:
+                    if len(cursor) > 2048:
+                        raise ValueError()
+                    owner_job, after_raw, after_id, through_raw = json.loads(base64.urlsafe_b64decode(cursor))
+                    if owner_job != job.id or (after_id is not None and not isinstance(after_id, str)):
+                        raise ValueError()
+                    if after_id is not None:
+                        UUID(after_id)
+                    after = datetime.fromisoformat(after_raw) if after_raw else None
+                    through = datetime.fromisoformat(through_raw) if through_raw else through
+                    if (after and after.tzinfo is None) or through.tzinfo is None:
+                        raise ValueError()
+                    if (after_id and not after) or (after and after > through) or through > now():
+                        raise ValueError()
+                except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                    raise HTTPException(422, "Invalid CNKI result cursor") from exc
+            if after:
+                condition = CnkiPaper.updated_at > after
+                if after_id:
+                    condition = or_(condition, and_(CnkiPaper.updated_at == after, CnkiPaper.id > after_id))
+                statement = statement.where(condition)
+            statement = statement.where(CnkiPaper.updated_at <= through).order_by(CnkiPaper.updated_at, CnkiPaper.id)
+            rows = list((await db.scalars(statement.limit(page_size + 1))).all())
+            more = len(rows) > page_size
+            rows = rows[:page_size]
+            next_position = [job.id, rows[-1].updated_at.isoformat(), rows[-1].id, through.isoformat()] if more else [job.id, through.isoformat(), None, None]
+            result.update(paper_ids=[p.id for p in rows], has_more=more,
+                          next_cursor=base64.urlsafe_b64encode(json.dumps(next_position).encode()).decode())
+        else:
+            statement = statement.order_by(CnkiPaper.metadata_json["pub_date"].as_string().desc(),
+                                           CnkiPaper.observed_at.desc(), CnkiPaper.id)
+            if job.result_limit is not None:
+                statement = statement.limit(job.result_limit)
+            rows = list((await db.scalars(statement)).all())
+        blocked = result["state"] in {"waiting_for_verification", "browser_closed", "paused", "error", "cancelled"}
         result["result"] = LiteratureSearchOut(
             query=job.query, papers=[as_literature(p.metadata_json) for p in rows], total=len(rows),
             candidate_count=count, source_counts={"cnki": count}, requested_sources=["cnki"],
             attempted_sources=["cnki"], search_mode="cnki_" + result["executor"] + "_browser", from_cache=job_state(job)=="completed",
+            unavailable_sources=["cnki"] if blocked else [],
+            warnings=[{"code": "source_incomplete", "sources": ["cnki"], "reason": result["state"],
+                       "detail": result["detail"] or "知网本轮采集尚未完成，已取得的题录仍可使用。"}] if blocked else [],
+            strategy_diagnostics={"cnki": {"state": result["state"], "page": result["page"],
+                                           "count": count, "phase": (job.checkpoint or {}).get("phase", "index")}},
         ).model_dump()
     return result
 
@@ -99,10 +150,12 @@ def as_literature(p: dict) -> LiteraturePaperOut:
     )
 
 
-async def claim_job(db, device: CnkiDevice, *, executor="local") -> dict | None:
+async def claim_job(db, device: CnkiDevice, *, executor="local", server_slots=1) -> dict | None:
     moment = now()
-    if await db.scalar(select(CnkiJob.id).where(CnkiJob.user_id == device.user_id,
-            CnkiJob.enabled.is_(True), CnkiJob.lease_until > moment).limit(1)):
+    active = list((await db.scalars(select(CnkiJob).where(CnkiJob.user_id == device.user_id,
+            CnkiJob.enabled.is_(True), CnkiJob.lease_until > moment))).all())
+    if active and (executor != "server" or len(active) >= min(server_slots, 2)
+                   or any(j.lease_device_id != device.id or (j.checkpoint or {}).get("executor", "server") != "server" for j in active)):
         return None
     statement = select(CnkiJob).where(CnkiJob.user_id == device.user_id, CnkiJob.enabled.is_(True)).order_by(CnkiJob.recurring, CnkiJob.created_at)
     if db.get_bind().dialect.name == "postgresql":
@@ -110,8 +163,11 @@ async def claim_job(db, device: CnkiDevice, *, executor="local") -> dict | None:
     jobs = list((await db.scalars(statement)).all())
     if executor == "server":
         # Collect every queued query's indexes before spending time on abstracts.
-        jobs.sort(key=lambda job: (job.checkpoint or {}).get("phase") == "metadata"
-                  and not (job.checkpoint or {}).get("finished"))
+        jobs.sort(key=lambda job: (
+            (job.checkpoint or {}).get("phase") == "metadata"
+            and not (job.checkpoint or {}).get("finished"),
+            (job.last_report or {}).get("state") in {"error", "waiting_for_verification"},
+        ))
     for job in jobs:
         if (job.checkpoint or {}).get("executor", "server") != executor:
             continue
@@ -142,6 +198,10 @@ async def claim_job(db, device: CnkiDevice, *, executor="local") -> dict | None:
         job.last_report_at, job.last_report = moment, {"state":"working"}
         await db.flush()
         return {"id":job.id, "query":job.query, "field":job.field, "category":job.category,
+                "recover_session": bool(checkpoint.get("recover_session")),
+                "check_session": bool(checkpoint.get("check_session")),
+                "resume_verification": bool(checkpoint.get("resume_verification")),
+                "document_kind": checkpoint.get("document_kind"),
                 "page":checkpoint["page"], "accepted":checkpoint["accepted"], "since":checkpoint["since"],
                 "phase":checkpoint.get("phase", "index"), "total":checkpoint.get("total", 0),
                 "limit":job.result_limit, "lease":lease}
@@ -153,7 +213,7 @@ async def leased_job(db, device: CnkiDevice, job_id: str, lease: str, *, lang: s
     if (not job or not job.enabled or job.lease_device_id != device.id or not job.lease_hash
             or not secrets.compare_digest(job.lease_hash, digest(lease))
             or not job.lease_until or job.lease_until < now()):
-        raise HTTPException(409, say({"zh": "任务已暂停或已由新的采集会话接续", "en": "The task is paused or has been taken over by a new collection session."}, lang))
+        raise HTTPException(409, say({"zh": "任务已暂停或已由新的采集会话接续", "en": "This task is paused or has been taken over by another collection session."}, lang))
     return job
 
 
@@ -166,11 +226,20 @@ async def receive_batch(db, device, job, batch, *, lang: str = "zh"):
         raise HTTPException(409, say({"zh": "请从上次确认的页继续", "en": "Continue from the last acknowledged page."}, lang))
     moment = now()
     accepted = set(checkpoint.get("accepted", []))
+    count = await db.scalar(select(func.count()).select_from(CnkiJobPaper).where(CnkiJobPaper.job_id==job.id))
     for value in batch.papers:
         incoming = value.model_dump()
+        kind = checkpoint.get("document_kind")
+        if kind:
+            expected_category = {"journal":"中文期刊", "thesis":"学位论文", "conference":"会议文章", "book":"书籍", "other":"其他"}[kind]
+            if as_literature(incoming).publication_category != expected_category:
+                continue
         incoming["transport"] = "server_browser" if (job.checkpoint or {}).get("executor", "server") == "server" else "user_browser"
         key = identity(incoming)
         paper_id = str(uuid5(NAMESPACE_URL, device.user_id+"/cnki/"+key))
+        link = await db.get(CnkiJobPaper, (job.id, paper_id))
+        if kind and job.result_limit is not None and not link and count >= job.result_limit:
+            continue
         paper = await db.get(CnkiPaper, paper_id)
         if paper is None:
             paper = CnkiPaper(id=paper_id, user_id=device.user_id, identity=key, metadata_json={}, observed_at=moment)
@@ -184,10 +253,16 @@ async def receive_batch(db, device, job, batch, *, lang: str = "zh"):
         if incoming.get("metadata_attempted"):
             merged["metadata_error"] = incoming.get("metadata_error", "")
         paper.metadata_json = merged
+        paper.updated_at = moment
         if incoming.get("metadata_attempted"):
             paper.observed_at = moment
-        if not await db.get(CnkiJobPaper, (job.id, paper_id)):
+        if not link:
+            # These mappers have no ORM relationship to order their inserts.
+            # PostgreSQL checks the FK immediately: persist the index before
+            # linking it to a job, including the first uncached result page.
+            await db.flush([paper])
             db.add(CnkiJobPaper(job_id=job.id, paper_id=paper_id))
+            count += 1
         await db.flush()
         if merged.get("metadata_attempted"):
             accepted.add(incoming["title"])
@@ -206,7 +281,7 @@ async def receive_batch(db, device, job, batch, *, lang: str = "zh"):
     job.last_report_at, job.last_report = moment, {"state":"completed" if batch.finished else "working"}
     device.last_seen_at, device.last_report = moment, {"state":"working"}
     await db.flush()
-    return {"accepted":True, "page":checkpoint["page"]}
+    return {"accepted":True, "page":checkpoint["page"], "count":count}
 
 
 async def sync_feed_paper(db, paper: CnkiPaper):
@@ -233,3 +308,39 @@ async def sync_feed_paper(db, paper: CnkiPaper):
                   "abstract_lookup_completed":bool(p.get("metadata_attempted"))}
     item.visibility = "private" if jobs and p.get("metadata_attempted") and not is_journal_notice(item) else "withdrawn"
     clear()
+
+
+async def create_job(db, user, payload, *, page_size: int | None = None) -> dict:
+    """Shared job reuse/retry policy for the UI and authenticated E2E source access."""
+    await lock_user(db, user.id)
+    if not payload.recurring:
+        previous = await db.scalar(select(CnkiJob).where(CnkiJob.user_id==user.id, CnkiJob.query==payload.query,
+            CnkiJob.recurring.is_(False), CnkiJob.enabled.is_(True), CnkiJob.category==payload.category,
+            CnkiJob.result_limit==payload.limit,
+            (CnkiJob.checkpoint["document_kind"].as_string()==payload.document_kind
+             if payload.document_kind else CnkiJob.checkpoint["document_kind"].as_string().is_(None)),
+            ).order_by(CnkiJob.created_at.desc()).limit(1))
+        if previous and (previous.checkpoint or {}).get("executor", "server") == payload.executor and (not previous.last_completed_at or now()-previous.last_completed_at < timedelta(hours=24)):
+            # An explicit new search is a retry request, unlike background polling.
+            # Preserve accumulated papers/checkpoints and any active lease.
+            if job_state(previous) in {"paused", "error", "browser_closed"}:
+                previous.checkpoint = {**(previous.checkpoint or {}), "check_session": payload.executor == "server"}
+                if job_state(previous) == "paused":
+                    previous.checkpoint = {**(previous.checkpoint or {}), "recover_session": True}
+                previous.last_report = {"state": "queued"}
+                previous.last_report_at = now()
+            return await job_view(db,previous,papers=True,page_size=page_size)
+    else:
+        previous = await db.scalar(select(CnkiJob).where(CnkiJob.user_id==user.id, CnkiJob.query==payload.query,
+            CnkiJob.recurring.is_(True), CnkiJob.enabled.is_(True), CnkiJob.category==payload.category).limit(1))
+        if previous and (previous.checkpoint or {}).get("executor", "server") == payload.executor:
+            return await job_view(db,previous,papers=True,page_size=page_size)
+    job = CnkiJob(user_id=user.id, query=payload.query, category=payload.category,
+                  field={"journal":"LY","scholar":"AU"}.get(payload.category,"SU"),
+                  recurring=payload.recurring, result_limit=None if payload.recurring else payload.limit,
+                  created_at=now(), checkpoint={"executor":payload.executor,
+                                               **({"check_session":True} if payload.executor == "server" and not payload.recurring else {}),
+                                               **({"document_kind":payload.document_kind} if payload.document_kind else {})})
+    db.add(job)
+    await db.flush()
+    return await job_view(db,job,papers=True,page_size=page_size)

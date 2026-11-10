@@ -181,7 +181,7 @@ def test_a_build_leaves_one_app_and_spotlight_does_not_list_it(packaging, tmp_pa
     dmg = packaging.make_the_dmg(app)
 
     assert dmg.read_bytes() == b"dmg"
-    assert seen_in_staging == ["Applications", app.name], f"dmg 里装的不对：{seen_in_staging}"
+    assert seen_in_staging == ["Install.txt", app.name], f"dmg 里装的不对：{seen_in_staging}"
     leftover = [p.relative_to(dist).as_posix() for p in dist.rglob("*.app") if p != app]
     assert not leftover, f"打完 dmg 还留着别的 .app（每次打包多一份）：{leftover}"
 

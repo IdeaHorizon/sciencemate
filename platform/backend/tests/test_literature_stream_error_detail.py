@@ -1,4 +1,4 @@
-"""Streamed errors use the UI language and retain the bridge cause in logs."""
+"""A streamed search error should explain the bridge failure to the user."""
 
 import json
 from unittest.mock import AsyncMock
@@ -7,7 +7,7 @@ import pytest
 
 
 @pytest.mark.asyncio
-async def test_search_stream_preserves_bridge_failure_reason(monkeypatch, caplog):
+async def test_search_stream_preserves_bridge_failure_reason(monkeypatch):
     from app.api.v1 import literature
     from app.schemas.literature import LiteratureSearchIn
 
@@ -31,5 +31,4 @@ async def test_search_stream_preserves_bridge_failure_reason(monkeypatch, caplog
     ]
 
     assert events[-1]["type"] == "error"
-    assert "无法处理检索结果" in events[-1]["message"]
-    assert "未能生成有效的英文检索词" in caplog.text
+    assert "未能生成有效的英文检索词" in events[-1]["message"]

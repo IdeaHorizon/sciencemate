@@ -8,7 +8,7 @@ import zipfile
 from datetime import timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select, update
@@ -31,11 +31,11 @@ async def browser_device(auth: HTTPAuthorizationCredentials | None = Depends(bea
     device = await db.scalar(select(CnkiDevice).where(CnkiDevice.token_hash==service.digest(auth.credentials), CnkiDevice.revoked_at.is_(None)))
     user = await db.get(User, device.user_id) if device else None
     if not device or not user or not user.is_active or not hmac.compare_digest(device.credential_fingerprint, credential_fingerprint(user)):
-        raise HTTPException(401, say({"zh": "本机采集连接已失效，请重新连接", "en": "The local collector connection has expired. Reconnect it."}, lang))
+        raise HTTPException(401, say({"zh": "本机采集连接已失效，请重新连接", "en": "The local collection connection has expired. Reconnect it."}, lang))
     await service.lock_user(db, device.user_id)
     await db.refresh(device)
     if device.revoked_at:
-        raise HTTPException(401, say({"zh": "本机采集连接已失效，请重新连接", "en": "The local collector connection has expired. Reconnect it."}, lang))
+        raise HTTPException(401, say({"zh": "本机采集连接已失效，请重新连接", "en": "The local collection connection has expired. Reconnect it."}, lang))
     return device
 
 
@@ -57,7 +57,7 @@ async def pair(payload: PairIn, db=Depends(get_db), lang: Language = Depends(lan
         CnkiDevice.revoked_at.is_(None), CnkiDevice.pair_expires_at > service.now(),
     ).values(token_hash=service.digest(token), pair_hash=None, claimed_at=service.now(), name=payload.name).returning(CnkiDevice.id))
     if not device_id:
-        raise HTTPException(400, say({"zh": "连接码无效或已过期，请在平台重新生成", "en": "The pairing code is invalid or expired. Generate a new one in the platform."}, lang))
+        raise HTTPException(400, say({"zh": "连接码无效或已过期，请在平台重新生成", "en": "The pairing code is invalid or expired. Generate a new code in the platform."}, lang))
     return {"token":token, "device_id":device_id}
 
 
@@ -74,56 +74,34 @@ async def revoke(device_id: str, user=Depends(get_current_user), db=Depends(get_
     await service.lock_user(db, user.id)
     device = await db.scalar(select(CnkiDevice).where(CnkiDevice.id==device_id, CnkiDevice.user_id==user.id))
     if not device:
-        raise HTTPException(404, say({"zh": "连接不存在", "en": "The collector connection was not found."}, lang))
+        raise HTTPException(404, say({"zh": "连接不存在", "en": "The connection does not exist."}, lang))
     device.revoked_at = service.now()
     return {"ok":True}
 
 
 @router.post("/jobs")
-async def create_job(payload: JobIn, user=Depends(get_current_user), db=Depends(get_db)):
-    await service.lock_user(db, user.id)
-    if not payload.recurring:
-        previous = await db.scalar(select(CnkiJob).where(CnkiJob.user_id==user.id, CnkiJob.query==payload.query,
-            CnkiJob.recurring.is_(False), CnkiJob.enabled.is_(True), CnkiJob.category==payload.category,
-            CnkiJob.result_limit==payload.limit).order_by(CnkiJob.created_at.desc()).limit(1))
-        if previous and (previous.checkpoint or {}).get("executor", "server") == payload.executor and (not previous.last_completed_at or service.now()-previous.last_completed_at < timedelta(hours=24)):
-            # An explicit new search is a retry request, unlike background polling.
-            # Preserve accumulated papers/checkpoints and any active lease.
-            if service.job_state(previous) in {"paused", "error", "browser_closed"}:
-                previous.last_report = {"state": "queued"}
-                previous.last_report_at = service.now()
-            return await service.job_view(db,previous,papers=True)
-    else:
-        previous = await db.scalar(select(CnkiJob).where(CnkiJob.user_id==user.id, CnkiJob.query==payload.query,
-            CnkiJob.recurring.is_(True), CnkiJob.enabled.is_(True), CnkiJob.category==payload.category).limit(1))
-        if previous and (previous.checkpoint or {}).get("executor", "server") == payload.executor:
-            return await service.job_view(db,previous,papers=True)
-    job = CnkiJob(user_id=user.id, query=payload.query, category=payload.category,
-                  field={"journal":"LY","scholar":"AU"}.get(payload.category,"SU"),
-                  recurring=payload.recurring, result_limit=None if payload.recurring else payload.limit,
-                  created_at=service.now(), checkpoint={"executor":payload.executor})
-    db.add(job)
-    await db.flush()
-    return await service.job_view(db,job,papers=True)
-
+async def create_job(payload: JobIn, page_size: int | None = Query(default=None, ge=1, le=500), user=Depends(get_current_user), db=Depends(get_db)):
+    return await service.create_job(db, user, payload, page_size=page_size)
 
 @router.post("/jobs/{job_id}/retry")
 async def retry(job_id: str, user=Depends(get_current_user), db=Depends(get_db), lang: Language = Depends(language_on_screen)):
     await service.lock_user(db, user.id)
     job = await db.scalar(select(CnkiJob).where(CnkiJob.id==job_id, CnkiJob.user_id==user.id).with_for_update())
     if not job or not job.enabled:
-        raise HTTPException(404, say({"zh": "采集任务不存在", "en": "The collection task was not found."}, lang))
+        raise HTTPException(404, say({"zh": "采集任务不存在", "en": "The collection task does not exist."}, lang))
     if service.job_state(job) not in {"working", "completed"}:
+        if service.job_state(job) == "paused":
+            job.checkpoint = {**(job.checkpoint or {}), "recover_session": True}
         job.last_report, job.last_report_at = {"state":"queued"}, service.now()
     return await service.job_view(db,job,papers=True)
 
 
 @router.get("/jobs/{job_id}")
-async def get_job(job_id: str, user=Depends(get_current_user), db=Depends(get_db), lang: Language = Depends(language_on_screen)):
+async def get_job(job_id: str, page_size: int | None = Query(default=None, ge=1, le=500), cursor: str | None = Query(default=None, max_length=2048), user=Depends(get_current_user), db=Depends(get_db), lang: Language = Depends(language_on_screen)):
     job = await db.scalar(select(CnkiJob).where(CnkiJob.id==job_id, CnkiJob.user_id==user.id))
     if not job:
-        raise HTTPException(404, say({"zh": "采集任务不存在", "en": "The collection task was not found."}, lang))
-    return await service.job_view(db,job,papers=True)
+        raise HTTPException(404, say({"zh": "采集任务不存在", "en": "The collection task does not exist."}, lang))
+    return await service.job_view(db,job,papers=True,page_size=page_size,cursor=cursor)
 
 
 @router.delete("/jobs/{job_id}")
@@ -131,7 +109,7 @@ async def cancel(job_id: str, user=Depends(get_current_user), db=Depends(get_db)
     await service.lock_user(db, user.id)
     job = await db.scalar(select(CnkiJob).where(CnkiJob.id==job_id, CnkiJob.user_id==user.id).with_for_update())
     if not job:
-        raise HTTPException(404, say({"zh": "采集任务不存在", "en": "The collection task was not found."}, lang))
+        raise HTTPException(404, say({"zh": "采集任务不存在", "en": "The collection task does not exist."}, lang))
     job.enabled, job.lease_until = False, service.now()
     await db.flush()
     if job.recurring:
@@ -160,13 +138,13 @@ async def cache(papers: list[IndexIn], device=Depends(browser_device), db=Depend
 
 @router.post("/worker/jobs/{job_id}/batch")
 async def batch(job_id: str, payload: BatchIn, device=Depends(browser_device), db=Depends(get_db), lang: Language = Depends(language_on_screen)):
-    job = await service.leased_job(db,device,job_id,payload.lease, lang=lang)
+    job = await service.leased_job(db,device,job_id,payload.lease,lang=lang)
     return await service.receive_batch(db,device,job,payload,lang=lang)
 
 
 @router.post("/worker/jobs/{job_id}/report")
 async def report(job_id: str, payload: ReportIn, device=Depends(browser_device), db=Depends(get_db), lang: Language = Depends(language_on_screen)):
-    job = await service.leased_job(db,device,job_id,payload.lease, lang=lang)
+    job = await service.leased_job(db,device,job_id,payload.lease,lang=lang)
     state = payload.model_dump(exclude={"lease"})
     job.last_report_at, job.last_report = service.now(), state
     job.lease_until = service.now()+timedelta(seconds=90) if payload.state=="working" else service.now()

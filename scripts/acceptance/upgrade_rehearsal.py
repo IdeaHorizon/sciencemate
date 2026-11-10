@@ -186,7 +186,9 @@ def capture(data_root: Path, out: Path, *, version: str) -> dict[str, Any]:
 
     def copy_tree(src: Path, dst: Path) -> None:
         nonlocal total
-        for directory, names, files in os.walk(src, followlinks=False):
+        # Copy children before restoring directory modes (some are read-only).
+        # mkdir's umask must not replace the permissions the old version left.
+        for directory, names, files in os.walk(src, topdown=False, followlinks=False):
             rel = Path(directory).relative_to(src)
             (dst / rel).mkdir(parents=True, exist_ok=True)
             for name in files:
@@ -204,6 +206,8 @@ def capture(data_root: Path, out: Path, *, version: str) -> dict[str, Any]:
                     raise SystemExit(f"夹具超过 {TOTAL_CAP // (1 << 20)} MB 上限：先清掉大产物再抄")
                 shutil.copy2(source, dst / rel / name)
                 total += info.st_size
+            if sys.platform != "win32":
+                shutil.copystat(directory, dst / rel)
 
     for name in CARRIED:
         source = data_root / name
@@ -217,6 +221,11 @@ def capture(data_root: Path, out: Path, *, version: str) -> dict[str, Any]:
         source = data_root / "logs" / name
         if source.is_file():
             shutil.copy2(source, out / "logs" / name)
+    if sys.platform != "win32":
+        # These two directories are not copied by copy_tree; Windows inherits ACLs.
+        if (data_root / "logs").is_dir():
+            shutil.copystat(data_root / "logs", out / "logs")
+        shutil.copystat(data_root, out)
     scrubbed = _scrub_sqlite(out / "db.sqlite") if (out / "db.sqlite").is_file() else []
     inventory = _inventory(out / "db.sqlite")
     manifest = {
@@ -314,14 +323,19 @@ def restore(fixture: Path, to: Path, *, python: str | None = None, tree: Path | 
             shutil.copytree(long_path(item), long_path(to / item.name), symlinks=False)
         else:
             shutil.copy2(long_path(item), long_path(to / item.name))
+    if sys.platform != "win32":
+        # copytree preserves descendant modes, but the separately created root does not.
+        shutil.copystat(fixture, to)
     if python is None:
         print("⚠️ 没给 --python：只抄了数据，没有搬根。新版会因为库里记的旧根拒绝启动 —— 彩排要给装好的解释器。")
         return manifest
     relocate = (tree or HERE.parents[1]) / "platform" / "backend" / "scripts" / "relocate_project_data.py"
-    env = {**os.environ, "PLATFORM_DATA_ROOT": str(to), "HARNESS_FRAMEWORK_HOME": str(to), "PYTHONUTF8": "1"}
+    env = {**os.environ, "PLATFORM_DATA_ROOT": str(to), "HARNESS_FRAMEWORK_HOME": str(to),
+           "PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1"}
     import subprocess
 
-    done = subprocess.run([python, str(relocate), "--to", str(to), "--apply", "--copied"],
+    # This is the signed application's interpreter: relocation must not add .pyc to its bundle.
+    done = subprocess.run([python, "-B", str(relocate), "--to", str(to), "--apply", "--copied"],
                           capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=600)
     print((done.stdout or "").strip())
     if done.returncode != 0:

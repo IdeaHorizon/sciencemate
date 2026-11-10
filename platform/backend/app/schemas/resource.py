@@ -29,12 +29,15 @@ class SSHOperationRequest(BaseModel):
     timeout: float | None = Field(default=None, gt=0, le=604800)
     environment: dict[str, str] | None = None
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+    input_manifest_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     job_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     path: str | None = Field(default=None, max_length=4096)
     content_base64: str | None = Field(default=None, max_length=11184812)
 
     @model_validator(mode="after")
     def require_action_inputs(self):
+        if self.input_manifest_sha256 is not None and self.action != "submit":
+            raise ValueError("input_manifest_sha256 is only valid for submit")
         needed = {
             'exec': ('command',), 'submit': ('command', 'idempotency_key'),
             'status': ('job_id',), 'cancel': ('job_id',),

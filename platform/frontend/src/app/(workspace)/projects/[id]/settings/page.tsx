@@ -137,6 +137,14 @@ export default function ProjectSettingsPage() {
         </div>
       </section>
 
+      {project.root_folder && !inAnOrganisation && <section className="settings-compact-section">
+        <div className="settings-compact-heading"><div>
+          <h2>{t({ zh: "根文件夹", en: "Root folder" })}</h2>
+          <p>{t({ zh: "创建项目时确定的文件存储位置。", en: "The file location chosen when this project was created." })}</p>
+        </div></div>
+        <code className="project-folder-path">{project.root_folder}</code>
+      </section>}
+
       <ProjectSSHResources projectId={projectId} canManage={Boolean(project.capabilities?.includes("manage_resources"))} />
 
       {inAnOrganisation && (

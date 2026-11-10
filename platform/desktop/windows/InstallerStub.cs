@@ -64,7 +64,7 @@
 //
 // 另外**动手之前先看有没有实例在跑**：不看的话，即便顺序对了，`Directory.Move` 也会
 // 被文件锁挡住；而且那时用户已经等了半分钟解压。发现了就明说、什么都不动。
-// 同一个安装目录同时只许一个安装器动手（按目录取名的 Mutex）；目标目录里有别人的
+// 正常安装按产品注册项取 Mutex，便携自检按目录取 Mutex，同时只许一个安装器动手；目标目录里有别人的
 // 文件（既不是空目录也不是一份 ScienceMate 安装）就拒绝 —— 别把人家的目录当 staging。
 // `--install-dir <绝对路径>` 改安装位置（向导里是「浏览…」那个按钮）。
 
@@ -82,6 +82,7 @@ using System.Threading;
 internal sealed class InstallOptions
 {
     public string InstallDir;
+    public bool ExplicitInstallDir;
     public bool Launch = true;
     /// <summary>无 GUI（命令行/自检）。</summary>
     public bool Silent;
@@ -92,6 +93,7 @@ internal sealed class InstallOptions
     public string DesktopDirOverride;
     public string StartMenuDirOverride;
     public string UninstallKey = Footprint.DefaultUninstallKey;
+    public bool ManagedInstall { get { return !Silent || !ExplicitInstallDir || RegisterUninstall; } }
 
     /// <summary>人双击进来时该有的默认值 —— 桌面图标、开始菜单、能卸载。</summary>
     /// <remarks>
@@ -104,7 +106,22 @@ internal sealed class InstallOptions
         DesktopShortcut = true;
         StartMenuShortcut = true;
         RegisterUninstall = true;
+        ResolveExistingInstallation();
         return this;
+    }
+
+    public void ResolveExistingInstallation()
+    {
+        // Explicit, unregistered silent installs are isolated packaging probes / portable copies.
+        if (!ManagedInstall) return;
+        string existing = Footprint.RegisteredInstallDir(UninstallKey);
+        if (existing == null && UninstallKey == Footprint.DefaultUninstallKey)
+        {
+            string standard = DefaultInstallDir();
+            if (File.Exists(Footprint.IoPath(Path.Combine(standard, Footprint.ShellExeName)))
+                && File.Exists(Footprint.IoPath(Path.Combine(standard, "backend.json")))) existing = standard;
+        }
+        if (existing != null) InstallDir = existing;
     }
 
     public static string DefaultInstallDir()
@@ -127,12 +144,34 @@ internal sealed class InstallOutcome
 {
     public string ExePath;
     public string InstallDir;
+    public string SkippedMessage;
     /// <summary>快捷方式没建成之类：不影响「装好了」，但得让人知道。</summary>
     public readonly List<string> Warnings = new List<string>();
 }
 
 internal static class Installer
 {
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr window, int command);
+
+    public static void OpenApplication(InstallOutcome outcome)
+    {
+        int running = RunningPidIn(outcome.InstallDir);
+        if (running != 0)
+        {
+            using (var process = Process.GetProcessById(running))
+            {
+                IntPtr window = process.MainWindowHandle;
+                if (window != IntPtr.Zero) { ShowWindow(window, 9); SetForegroundWindow(window); }
+            }
+            return;
+        }
+        Process.Start(new ProcessStartInfo(outcome.ExePath)
+            { UseShellExecute = true, WorkingDirectory = outcome.InstallDir });
+    }
+
     /// <summary>出错要让人看见。</summary>
     /// <remarks>
     /// 双击起来的程序，退出的那一刻窗口就关 —— 一段 .NET 栈闪一下没了，和什么都没说
@@ -298,6 +337,7 @@ internal static class Installer
                 return Speech.T("这个目录里已经有别的文件了。请选一个空目录，或已有的 ScienceMate 安装目录。",
                                 "This folder already has other files in it. Choose an empty folder, or an existing ScienceMate installation.");
             int running = RunningPidIn(full);
+            if (AlreadyInstalledMessage(full) != null) return null;
             if (running != 0)
                 return string.Format(Speech.T("ScienceMate 正在运行（pid {0}）。请先关掉它再安装。",
                                               "ScienceMate is running (pid {0}). Close it first, then install."), running);
@@ -379,10 +419,23 @@ internal static class Installer
             && File.Exists(IoPath(Path.Combine(dir, "backend.json")));
     }
 
+    private static string AlreadyInstalledMessage(string dir)
+    {
+        if (!IsAnInstallation(dir)) return null;
+        string version = Footprint.VersionIn(dir);
+        if (string.IsNullOrWhiteSpace(version) || Footprint.CompareVersions(version, InstallerVersion.Value) < 0)
+            return null;
+        return string.Format(Speech.T(
+            "已安装 ScienceMate {0}。此安装包为 {1}，无需重复安装，已保留当前版本。",
+            "ScienceMate {0} is already installed. This installer is {1}; no installation is needed. The current version was kept."),
+            version, InstallerVersion.Value);
+    }
+
     /// <summary>真正装。向导在后台线程调它，命令行在主线程调它 —— 同一条路。</summary>
     /// <param name="progress">(这一步在干什么, 0..1 或 -1 表示说不出百分比)</param>
     public static InstallOutcome Install(InstallOptions options, Action<string, double> progress)
     {
+        options.ResolveExistingInstallation();
         Action<string, double> say = progress ?? delegate { };
         Mutex installLock = null;
         string tmpZip = null;
@@ -405,10 +458,11 @@ internal static class Installer
                                                   "Broken installer: the footer magic is wrong (payload not attached?)"), 2);
 
             string installDir = Path.GetFullPath(options.InstallDir).TrimEnd(Path.DirectorySeparatorChar);
+            string lockIdentity = options.ManagedInstall ? options.UninstallKey : installDir;
             string lockName;
             using (var sha = SHA256.Create())
                 lockName = "Local\\ScienceMate-Install-" + BitConverter.ToString(
-                    sha.ComputeHash(Encoding.UTF8.GetBytes(installDir.ToUpperInvariant()))).Replace("-", "");
+                    sha.ComputeHash(Encoding.UTF8.GetBytes(lockIdentity.ToUpperInvariant()))).Replace("-", "");
             installLock = new Mutex(false, lockName);
             bool acquired;
             try { acquired = installLock.WaitOne(0); }
@@ -418,6 +472,19 @@ internal static class Installer
                 installLock.Dispose(); installLock = null;
                 throw new InstallRefused(Speech.T("另一个安装程序正在使用这个目录，请等它完成。",
                                                   "Another installer is using this folder. Wait for it to finish."), 4);
+            }
+            // Another setup may have registered its chosen location while we were starting.
+            options.ResolveExistingInstallation();
+            installDir = Path.GetFullPath(options.InstallDir).TrimEnd(Path.DirectorySeparatorChar);
+            string skipped = AlreadyInstalledMessage(installDir);
+            if (skipped != null)
+            {
+                Console.WriteLine(skipped);
+                say(skipped, 1.0);
+                return new InstallOutcome {
+                    InstallDir = installDir, ExePath = Path.Combine(installDir, Footprint.ShellExeName),
+                    SkippedMessage = skipped,
+                };
             }
             if (Directory.Exists(IoPath(installDir))
                 && Directory.GetFileSystemEntries(IoPath(installDir)).Length > 0
@@ -679,6 +746,7 @@ internal static class Installer
                 case "--install-dir":
                     if (++i >= args.Length || !Path.IsPathRooted(args[i])) { error = Usage; return null; }
                     options.InstallDir = Path.GetFullPath(args[i]).TrimEnd(Path.DirectorySeparatorChar);
+                    options.ExplicitInstallDir = true;
                     if (string.IsNullOrEmpty(Path.GetDirectoryName(options.InstallDir)))
                     { error = Speech.T("不能安装到磁盘根目录", "ScienceMate cannot be installed at the root of a drive"); return null; }
                     break;
@@ -737,9 +805,7 @@ internal static class Installer
             InstallOutcome outcome = Install(options, null);
             if (options.Launch)
             {
-                var psi = new ProcessStartInfo(outcome.ExePath)
-                { UseShellExecute = true, WorkingDirectory = outcome.InstallDir };
-                Process.Start(psi);
+                OpenApplication(outcome);
             }
             return 0;
         }

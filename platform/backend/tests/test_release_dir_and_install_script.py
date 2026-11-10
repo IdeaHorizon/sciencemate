@@ -93,7 +93,7 @@ def test_install_sh_plans_exactly_the_safe_steps(packager, tmp_path) -> None:
                             env={"PATH": "/usr/bin:/bin", "AFS_DRY_RUN": "1", "HOME": str(tmp_path)})
     assert result.returncode == 0, result.stderr
     plan = result.stdout
-    order = [plan.index(k) for k in ("curl -fsSL", "shasum -a 256", "hdiutil attach", "ditto", "hdiutil detach", "xattr -dr com.apple.quarantine", "open -a")]
+    order = [plan.index(k) for k in ("curl -fsSL", "shasum -a 256", "hdiutil attach", "--install", "hdiutil detach", "xattr -dr com.apple.quarantine", "open -a")]
     assert order == sorted(order), f"步骤顺序不对：\n{plan}"
     assert "http://10.0.0.1/afs/Agent-for-Science-9.9.9-arm64.dmg" in plan
     assert "http://10.0.0.1/afs/SHA256SUMS" in plan

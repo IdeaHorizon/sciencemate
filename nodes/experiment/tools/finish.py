@@ -880,6 +880,7 @@ def _execution_lineage_findings(
             if observation.get("limitation"):
                 limitations.append(f"{row.get('nonce')}: {observation['limitation']}")
     has_parameter_contract = authority.get("prereg_status") == "bound_valid"
+    expected_binding = authority.get("prereg") if has_parameter_contract else None
     if not producer_ids and (has_parameter_contract or authority.get("scope") == "scientific"):
         limitations.append("No result-producer lineage was recorded for the required checks; actual parameter use was not verified.")
         unresolved = []
@@ -901,11 +902,20 @@ def _execution_lineage_findings(
     for aid in sorted(producer_ids | modifier_ids):
         context = contexts.get(aid)
         context = context if isinstance(context, dict) else {}
+        binding = context.get("prereg_binding")
         comparison = context.get("parameter_comparison") or {"applicable": False, "passed": None}
         source = context.get("parameter_source", "not_observed")
+        relationship = "content_producer" if aid in producer_ids else "identity_modifier"
+        if expected_binding and binding and binding != expected_binding:
+            reason = "the delivered output's observed lineage is bound to a different preregistration"
+            contradictions.append({
+                "name": "producer_prereg_binding_conflict", "action": aid,
+                "relationship": relationship, "reason": reason,
+                "expected_binding": expected_binding, "observed_binding": binding,
+            })
+            comparison = {"applicable": False, "passed": None, "reason": reason}
         lineage.append({"action_id": aid, "parameter_source": source,
-                        "relationship": "content_producer" if aid in producer_ids else "identity_modifier",
-                        "prereg_binding": context.get("prereg_binding"),
+                        "relationship": relationship, "prereg_binding": binding,
                         "parameter_comparison": comparison,
                         "input_verification": context.get("input_verification", {"status": "not_observed"})})
         input_observation = context.get("input_verification") or {}
@@ -929,7 +939,7 @@ def _execution_lineage_findings(
         if _parameter_value_conflict(authority, context):
             contradictions.append({"name": "producer_parameter_claim_conflict", "action": aid,
                                    "source": source, "comparison": comparison,
-                                   "relationship": "content_producer" if aid in producer_ids else "identity_modifier",
+                                   "relationship": relationship,
                                    "reason": "the delivered output's observed lineage contains a parameter claim inconsistent with the bound preregistration"})
     return lineage, gaps, contradictions, limitations
 

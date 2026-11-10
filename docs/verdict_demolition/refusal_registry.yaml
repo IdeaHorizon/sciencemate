@@ -28,6 +28,20 @@
 #       probe_toolchain / resource_fetch / run_contract / hooks   共 +7
 #
 entries:
+  # ── 文献自然语言检索与候选分页（2026-11-09）────────────────────────────
+  - file: nodes/literature/tools/academic_tool.py
+    class: C
+    why: search 的全部来源开关关闭时没有可发起的请求，报告 invalid_sources，不能擅自打开来源。
+  - file: nodes/literature/tools/academic_tool.py
+    class: collector
+    why: search 原样记录共享检索链路实际抛出的异常，并取消关联的私有来源任务；不增加检索前置判断。
+  - file: nodes/literature/tools/academic_tool.py
+    class: B
+    why: read_candidates 的 search_id 必须存在于当前运行的候选池，不能用其他运行的结果冒充本次检索。
+  - file: nodes/literature/tools/search_papers.py
+    class: C
+    why: _dispatch_search_papers 的 query_mode 只接受 question 或 keywords，未知模式没有对应的调用协议。
+
   # ── 待答问题仍可对话，答复交回既有驱动器（2026-11-04）────────────────────
   - file: core/pause_dialogue.py
     class: C
@@ -2093,10 +2107,59 @@ entries:
       写包 —— 两样都是副作用，且装包器绕开那堵墙。不评判算得对不对，只是这条通道不留东西；
       报错带 read_only_shell / recommended_nodes，指路 run_node 派 experiment / data。
 
+  # ── PR#1330：Project Resources SSH 受管作业 ──
+  # resource_manager 在 ada6d16e 已为 123 = 96 + 27；应用路径共用原边界，
+  # 此处只登记新增的 target/scheduler 冲突。managed_ssh 的 AST 也计共享
+  # 错误信封；实际暂存源的敏感路径拒绝经 ValueError 汇入该信封。
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: submit_job 的 Project Resource 句柄只适用于 SSH 监督器；显式选其他调度器时报告冲突，避免换目标执行。
+  - file: nodes/experiment/tools/managed_ssh.py
+    class: A
+    why: _stage 在读取并上传前拒绝敏感源路径；共享 SSH 错误信封保留失败原因，避免凭据越过本机边界。
+  - file: nodes/experiment/tools/managed_ssh.py
+    class: A
+    why: 提交与取消共用只读授权检查；只读 run 可查询已知状态，但不能写远端或发出取消。
+  - file: nodes/experiment/tools/managed_ssh.py
+    class: C
+    why: SSH 未确认接受、状态或精确身份时保留原句柄及 unknown；禁止把连接失败解释成未执行或另起一次。
+  - file: nodes/experiment/tools/managed_ssh.py
+    class: B
+    why: 状态和取消只能消费当前 run 中唯一且已过提交边界的意图；无法绑定时不给其他 run 的作业补记或发送取消。
+  - file: nodes/experiment/tools/managed_ssh.py
+    class: B
+    why: 无法持久化与同一作业身份绑定的取消请求时停止在发信号前，保留对账依据。
+  - file: nodes/experiment/tools/managed_ssh.py
+    class: C
+    why: 普通 SSH 监督器无法兑现显式申请的调度器选项或资源限制；指出不支持的参数，不能静默删掉请求。
+  - file: nodes/experiment/tools/managed_ssh.py
+    class: A
+    why: SSH 进程组监督不能保证已识别的脱离控制载荷有可信退出和回收；要求把各前台载荷分别提交。
+  - file: nodes/experiment/tools/managed_ssh.py
+    class: A
+    why: 缺少显式可用的本项目 SSH 资源时停在授权边界，不能猜另一资源或退回本地执行。
+  - file: nodes/experiment/tools/managed_ssh.py
+    class: C
+    why: 请求无法组成有效的作业路径、文件选择或受支持的墙钟契约时报告原因，远端尚无提交。
+  - file: nodes/experiment/tools/managed_ssh.py
+    class: B
+    why: v3 启动未就绪时无法保证先持久化意图和后续证据，保持未提交，由现有 bootstrap 恢复。
+  - file: nodes/experiment/tools/managed_ssh.py
+    class: B
+    why: 已关闭的提交或绑定到不同输入内容的意图不能用同一键重新解释；保留原句柄，明确新尝试的出口。
+  - file: nodes/experiment/tools/managed_ssh.py
+    class: A
+    why: 资源可见性不授予执行权限；App 账号探测或基本监督能力无法验证时不写提交意图。
+  - file: nodes/experiment/tools/managed_ssh.py
+    class: B
+    why: 持久意图、输入暂存或提交前观测失败时在启动前收束；若已有提交标记则查询原身份，避免重复副作用。
+
   # ── Experiment #1258：SSH Slurm 身份、传输与恢复边界（维护者整合）──
   - file: nodes/experiment/tools/resource_manager.py
     class: A
-    why: _ssh_submission_path_guard：远端输出不得进入 OS、凭据、Git 或框架状态目录；由既有提交授权绑定应用目录，未提交作业。
+    why: >-
+      _ssh_submission_path_guard：远端输出不得进入 OS、凭据、Git 或框架状态目录。
+      普通 SSH 的显式写路径和目录切换也按同一检查限制在作业目录内；违反边界时未提交作业。
   - file: nodes/experiment/tools/resource_manager.py
     class: A
     why: 远端 command 的路径语法解析不可用或失败时，不以未检查的写目标启动作业；报告 parser 缺口，保持 job_submitted=false。

@@ -1,6 +1,10 @@
 """DOI based abstract retry for subscribed papers with an auditable source trail."""
 from __future__ import annotations
 
+from shared.contrib.literature_status import (
+    ACCESS_BLOCKED_RESULTS, abstract_processing_status, lookup_failed,
+)
+
 import asyncio
 import json
 import re
@@ -37,7 +41,9 @@ def _candidates(
                      AND EXISTS (SELECT 1 FROM json_each(metadata_json, '$.profile_user_ids')
                                  WHERE value = ?)
                      AND COALESCE(json_extract(metadata_json, '$.abstract'), '') = ''
-                     AND COALESCE(json_extract(metadata_json, '$.abstract_lookup_completed'), 0) = 0
+                     AND (COALESCE(json_extract(metadata_json, '$.abstract_lookup_completed'), 0) = 0
+                          OR EXISTS (SELECT 1 FROM json_each(metadata_json, '$.abstract_lookup_source_state')
+                                     WHERE json_extract(value, '$.result') NOT IN ('found','no_abstract','not_found','http_404')))
                    {key_clause}
                    ORDER BY updated_at DESC""",
                 parameters,
@@ -116,8 +122,9 @@ async def _lookup(record: dict, client: httpx.AsyncClient, preferred: str | None
         old = state.get(name) or {}
         try:
             until = datetime.fromisoformat(str(old.get("retry_after") or ""))
-            if until > now:
-                attempts.append({"source": name, "result": "cached_no_abstract", "previous_result": old.get("result", "")})
+            legacy_failed_completion = record.get("abstract_lookup_completed") is True and lookup_failed(str(old.get("result") or ""))
+            if until > now and not legacy_failed_completion:
+                attempts.append({"source": name, "result": "cached_result", "previous_result": old.get("result", "")})
                 return name, ""
         except (ValueError, TypeError):
             pass
@@ -141,14 +148,19 @@ async def _lookup(record: dict, client: httpx.AsyncClient, preferred: str | None
                     text = " ".join(word for _, word in sorted((index, word) for word, positions in inverted.items() for index in positions))
                 else:
                     text = _publisher_landing_abstract(response.text)
+                    if not text and re.search(r"<title[^>]*>\s*(?:just a moment|access denied|attention required)", response.text, re.I):
+                        result = "verification_required"
             if text:
                 result = "found"
         except asyncio.CancelledError:
             raise
+        except httpx.HTTPStatusError as exc:
+            result = f"http_{exc.response.status_code}"
         except Exception as exc:
             result = type(exc).__name__
-        transient = result in {"http_408", "http_429", "http_500", "http_502", "http_503", "http_504"} or result.endswith("Error")
-        delay = timedelta(minutes=15 if result == "http_429" else 30) if transient else timedelta(days=7)
+        transient = lookup_failed(result)
+        delay = (timedelta(hours=4) if result in ACCESS_BLOCKED_RESULTS else
+                 timedelta(minutes=15 if result == "http_429" else 30) if transient else timedelta(days=7))
         state[name] = {"result": result, "attempted_at": now.isoformat(),
                        "retry_after": (now + delay).isoformat()}
         attempts.append({"source": name, "result": result})
@@ -174,15 +186,15 @@ async def _lookup(record: dict, client: httpx.AsyncClient, preferred: str | None
         if abstract:
             break
 
-    transient = any(str(value.get("result") or "").endswith("Error") or value.get("result") in
-                    {"http_408", "http_429", "http_500", "http_502", "http_503", "http_504"} for value in state.values())
+    transient = any(lookup_failed(str(value.get("result") or "")) for value in state.values())
     record["abstract_lookup_source_state"] = state
     record["abstract_lookup_attempts"] = attempts
     record["abstract_lookup_attempted_at"] = now.isoformat()
     record["abstract_lookup_completed"] = bool(abstract) or not transient
     record["abstract_enrichment_attempted"] = True
     if transient and not abstract:
-        deadlines = [value["retry_after"] for value in state.values() if value.get("retry_after")]
+        deadlines = [value["retry_after"] for value in state.values()
+                     if value.get("retry_after") and lookup_failed(str(value.get("result") or ""))]
         record["abstract_lookup_retry_after"] = min(deadlines) if deadlines else (now + timedelta(minutes=30)).isoformat()
     else:
         record.pop("abstract_lookup_retry_after", None)
@@ -190,6 +202,9 @@ async def _lookup(record: dict, client: httpx.AsyncClient, preferred: str | None
         record["abstract"] = abstract
         provenance = record.get("metadata_provenance")
         record["metadata_provenance"] = {**(provenance if isinstance(provenance, dict) else {}), "abstract": source}
+    record["abstract_status"] = abstract_processing_status(record)
+    if record["abstract_status"] in {"retry_pending", "access_blocked"}:
+        record["literature_preparation"] = "pending"
     return record
 
 

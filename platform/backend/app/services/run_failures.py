@@ -132,7 +132,6 @@ _FALLS_TO_GENERIC: dict[str, str] = {
     "pause_not_addressable": "pause 不可寻址：前端状态过期，重发即可",
     # ── 知识 / 组织面：参数不合法（后端拼错了）──
     "invalid_entity": "后端拼错了",
-    "invalid_query": "后端拼错了",
     "invalid_items": "后端拼错了",
     "invalid_projects": "后端拼错了",
     "invalid_candidates": "后端拼错了",

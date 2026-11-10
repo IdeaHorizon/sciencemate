@@ -11,6 +11,7 @@ from core.tool_registry import ToolDefinition, register_tool
 
 from .filter import compute_quality_score, compute_relevance_score, quality_score_breakdown
 from .search_engines import Paper, SearchManager
+from shared.contrib.literature_identity import paper_identity
 
 # 搜索结果可以很多，但不应把所有候选直接塞入 LLM 上下文。完整结果仍
 # 保存在 SearchManager 的本地缓存；这里只控制工具返回给模型的候选量。
@@ -40,11 +41,7 @@ _INDEX_CORE_FIELDS = ("title", "authors", "abstract", "year", "venue", "url")
 
 
 def _paper_identity(paper: Paper) -> str:
-    doi = str(paper.doi or "").strip().lower()
-    if doi:
-        return doi
-    title = " ".join(str(paper.title or "").lower().split())
-    return f"title:{title}" if title else ""
+    return paper_identity(paper)
 
 
 def _reuse_local_indexes(
@@ -97,7 +94,13 @@ def _reuse_local_indexes(
             cached_value = getattr(cached, field, None)
             if not current and cached_value:
                 setattr(paper, field, cached_value)
-                paper.metadata_provenance.setdefault(field, "local_index")
+                paper.metadata_provenance[field] = (
+                    cached.metadata_provenance.get(field) or "local_index"
+                )
+        if int(cached.citations or 0) > int(paper.citations or 0):
+            paper.metadata_provenance["citations"] = (
+                cached.metadata_provenance.get("citations") or "local_index"
+            )
         paper.citations = max(
             int(getattr(paper, "citations", 0) or 0),
             int(getattr(cached, "citations", 0) or 0),
@@ -395,6 +398,17 @@ async def _search_papers(
         return {"status": "error", "error": f"搜索失败: {type(e).__name__}: {str(e)[:200]}"}
 
 
+async def _dispatch_search_papers(state, query: str, query_mode: str = "question", **kwargs):
+    # Existing programmatic keyword callers retain their explicit contract. The
+    # agent-facing default now uses the same question pipeline as the search UI.
+    if query_mode == "keywords" or kwargs.get("crossref_query_mode") == "title":
+        return await _search_papers(state, query, **kwargs)
+    if query_mode != "question":
+        return {"status": "error", "error": "query_mode 必须为 question 或 keywords"}
+    from .academic_tool import search
+    return await search(state, query, **kwargs)
+
+
 register_tool(
     ToolDefinition(
         name="search_papers",
@@ -409,20 +423,22 @@ register_tool(
             "**Do NOT use when**：\n"
             "  - 只想要单一来源 → 还是用本工具，把其它 include_* 设 false"
             "（关掉的源不会混进结果，见返回里的 returned_sources）\n\n"
-            "**语言（重要）**：本工具**不做任何翻译**，传什么就搜什么。arXiv/S2/"
-            "OpenAlex/Crossref 是英文库，CNKI 是中文库。要跨语言覆盖就你自己出词、"
-            "分两次调用——一次传英文词搜国际库，一次传中文词搜 CNKI。\n\n"
+            "**语言**：默认 question 模式直接传原始自然语言问题，与学术搜索共用"
+            "中英文规划、同义词、AND/OR、相关性准入、排序和索引缓存。平台运行时"
+            "复用当前用户的知网浏览器任务与学校库权限。不要预先翻译或反复拆词。"
+            "仅已确定的题名补查/严格来源关键词使用 query_mode=keywords。\n\n"
             "**关键参数**：\n"
-            "  - query: 检索词（英文搜国际库 / 中文搜 CNKI，工具不代翻译）\n"
-            "  - max_results: 1-100，默认 20\n"
+            "  - query: 原始问题或针对证据缺口的自然语言问题\n"
+            "  - query_mode: question（默认共享学术检索）或 keywords（精确补查兼容入口）\n"
+            "  - max_results: 默认展示 20 篇；question 模式每次最多展示 30 篇，完整候选保留供分页\n"
             "  - crossref_query_mode: full（默认主题检索）或 title（定向补查时按题名/事件词检索 Crossref）\n"
             "  - include_*: 控制各来源开关（关掉的源**不会**出现在结果里；"
             "全部关掉是参数错误，不会回退成全开）\n\n"
-            "**返回**：papers 列表（按 quality_score 降序）+ 来源审计字段：\n"
+            "**返回**：papers 小批结果 + search_id/next_offset（用 read_literature_candidates 继续读取）+ 来源审计字段；学校库/知网保留自身顺序，不虚构质量分。\n"
             "  - requested_sources / attempted_sources / unavailable_sources / returned_sources\n"
-            "  - index_reuse / metadata_enrichment / pipeline_timings：复用、补齐与阶段耗时\n"
+            "  - strategy_diagnostics / timings：准入、复用、补齐和阶段耗时（keywords 模式保留原诊断字段）\n"
             "  - query_result_cache_used 固定为 false：查询结果不缓存，只复用论文 Index\n"
-            "  - warnings: 机器可读告警（如 CNKI 未配置 cookie → 零结果而非用别的源顶替）\n"
+            "  - warnings: 机器可读告警（如知网等待验证/任务未完成/私有来源不可用）\n"
             "  被关掉的源一篇都不会返回；要的源不可用时是零结果 + warning，"
             "看到 total=0 先读 unavailable_sources / warnings 再决定换词还是换源。"
         ),
@@ -432,8 +448,10 @@ register_tool(
                 "query": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "检索关键词。工具不翻译：英文词搜国际库，中文词搜 CNKI。",
+                    "description": "原始自然语言问题；仅 keywords 模式要求调用方提供检索词。",
                 },
+                "query_mode": {"type": "string", "enum": ["question", "keywords"], "default": "question"},
+                "include_school": {"type": "boolean", "description": "含当前用户学校库；仅 question 模式可用。"},
                 "max_results": {
                     "type": "integer",
                     "default": 20,
@@ -450,43 +468,55 @@ register_tool(
                     "type": "integer",
                     "description": "可选：只取这一年及以后发表的；年份缺失的条目保留。",
                 },
-                "include_arxiv": {"type": "boolean", "default": True, "description": "含 arXiv"},
+                "include_arxiv": {"type": "boolean", "description": "含 arXiv"},
                 "include_biorxiv": {
                     "type": "boolean",
-                    "default": True,
                     "description": "含 bioRxiv 预印本",
                 },
                 "include_medrxiv": {
                     "type": "boolean",
-                    "default": True,
                     "description": "含 medRxiv 预印本",
                 },
                 "include_s2": {
                     "type": "boolean",
-                    "default": True,
                     "description": "含 Semantic Scholar",
                 },
                 "include_openalex": {
                     "type": "boolean",
-                    "default": True,
                     "description": "含 OpenAlex",
                 },
                 "include_pubmed": {
                     "type": "boolean",
-                    "default": True,
                     "description": "含 PubMed 生物医学文献",
                 },
                 "include_crossref": {
                     "type": "boolean",
-                    "default": True,
                     "description": "含 Crossref",
                 },
-                "include_cnki": {"type": "boolean", "default": True, "description": "含 CNKI 知网"},
+                "include_cnki": {"type": "boolean", "description": "含 CNKI 知网"},
             },
             "required": ["query"],
         },
         allowed_node_types=["literature"],
         risk_level="low",
     ),
-    _search_papers,
+    _dispatch_search_papers,
 )
+
+
+async def _read_literature_candidates(state, **kwargs):
+    from .academic_tool import read_candidates
+    return await read_candidates(state, **kwargs)
+
+
+register_tool(ToolDefinition(
+    name="read_literature_candidates",
+    description="读取本次运行已检索并筛选的下一批文献，不重发检索或翻译请求。使用 search_papers 返回的 search_id 和 next_offset；知网尚在采集时传 refresh_sources=true 读取原任务新增题录，自动跳过已看条目。遵守每轮上下文预算。",
+    parameters_schema={"type": "object", "properties": {
+        "search_id": {"type": "string", "minLength": 1},
+        "offset": {"type": "integer", "minimum": 0, "default": 0},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 30, "default": 20},
+        "refresh_sources": {"type": "boolean", "default": False},
+    }, "required": ["search_id"]},
+    allowed_node_types=["literature"], risk_level="low",
+), _read_literature_candidates)

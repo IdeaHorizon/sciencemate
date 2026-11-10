@@ -20,6 +20,8 @@ from .scihub_fetcher import get_full_text, paper_cache_dir, fulltext_capabilitie
 from .paper_images import extract_paper_image, fetch_paper_image_url, generate_title_card, materialize_image_url
 from shared.contrib.paper_image_policy import image_record_rejection_reason
 from .literature_catalog import retry_asset_records, upsert_paper, upsert_papers
+from shared.contrib.literature_provenance import selected_metadata_provenance
+from shared.contrib.literature_status import abstract_processing_status
 
 # 全文获取涉及多个来源和浏览器回退；90 秒通常只够处理少量论文。
 # 默认放宽到 10 分钟，仍可用 HARNESS_FULLTEXT_BUDGET_SECONDS 覆盖。
@@ -449,6 +451,21 @@ def complete_missing_figures(
 
 
 
+def _merge_index_metadata(existing: dict, incoming: dict) -> dict:
+    """A partial refresh must retain completed fields and their original sources."""
+    record = dict(existing)
+    for key, value in incoming.items():
+        if value not in (None, "", [], {}):
+            if key == "abstract" and len(str(value).strip()) < len(str(record.get(key) or "").strip()):
+                continue
+            record[key] = value
+        elif key not in record:
+            record[key] = value
+    record["metadata_provenance"] = selected_metadata_provenance(existing, incoming, record)
+    record["abstract_status"] = abstract_processing_status(record)
+    return record
+
+
 def archive_indexes_only(
     papers: list[dict[str, Any]], output_dir: str
 ) -> list[dict[str, Any]]:
@@ -472,18 +489,7 @@ def archive_indexes_only(
             except (OSError, ValueError):
                 pass
 
-        record = dict(existing)
-        for key, value in incoming.items():
-            if value not in (None, "", [], {}):
-                if (
-                    key == "abstract"
-                    and len(str(value).strip())
-                    < len(str(record.get(key) or "").strip())
-                ):
-                    continue
-                record[key] = value
-            elif key not in record:
-                record[key] = value
+        record = _merge_index_metadata(existing, incoming)
         # The same DOI can be discovered by multiple users and source routes.
         # Index-first acquisition must retain them just like figure archival does.
         for field in ("feed_acquisition_routes", "profile_user_ids", "second_level_domains"):
@@ -581,6 +587,19 @@ def archive_index_and_figure(paper: dict[str, Any], output_dir: str) -> dict[str
         and not image_record_rejection_reason(existing_image)
     )
     record = {**existing, **incoming}
+    retained = _merge_index_metadata(existing, incoming)
+    # Preserve completed bibliographic fields, while letting retry/status fields
+    # (including an explicitly cleared error) follow the current attempt.
+    for field in (
+        "title", "authors", "abstract", "year", "venue", "doi", "url", "pub_date",
+        "pdf_url", "keywords", "subjects", "fields_of_study",
+    ):
+        if field in retained:
+            record[field] = retained[field]
+    record["metadata_provenance"] = selected_metadata_provenance(existing, incoming, record)
+    record["abstract_status"] = abstract_processing_status(record)
+    if record["abstract_status"] in {"retry_pending", "access_blocked"}:
+        record["literature_preparation"] = "pending"
     # 同一论文可能由期刊采集和项目画像检索同时发现。来源路线取并集，
     # 不能由后到的一条覆盖先到的一条，否则资讯分栏会随机变化。
     record["feed_acquisition_routes"] = list(dict.fromkeys([
@@ -601,7 +620,7 @@ def archive_index_and_figure(paper: dict[str, Any], output_dir: str) -> dict[str
         # 否则一篇先被期刊路线发现的论文，之后命中Project画像时会被提前
         # return 掉，永远进不了该用户的小红书候选池。
         record["harvest_skip_reason"] = "index_and_figure_already_acquired"
-        if record.get("abstract_enrichment_attempted") is True:
+        if abstract_processing_status(record) in {"available", "not_found"}:
             record["literature_preparation"] = "ready"
         record["index_path"] = str((index_dir / "index.json").resolve())
         _write_article_index(record, index_dir)
@@ -632,7 +651,7 @@ def archive_index_and_figure(paper: dict[str, Any], output_dir: str) -> dict[str
             image["failure_reason"] = failure
     record["figure_attempted"] = figure_attempted
     record["figure_status"] = "acquired" if image.get("status") == "available" else "failed"
-    if record.get("abstract_enrichment_attempted") is True:
+    if abstract_processing_status(record) in {"available", "not_found"}:
         record["literature_preparation"] = "ready"
     record["figure_failure_reason"] = str(image.get("failure_reason") or "") if record["figure_status"] == "acquired" else str(image.get("reason") or "image_not_found")
     record["image"] = image

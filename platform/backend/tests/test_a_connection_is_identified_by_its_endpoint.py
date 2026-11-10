@@ -466,13 +466,15 @@ def test_a_nullable_column_in_a_unique_key_is_a_decision_not_an_accident():
             # 同表可以有多个未命名唯一键，不能都压成 (table, None)。
             name = name or "columns:" + ",".join(columns)
             nullable = {c for c in columns if c in table.c and table.c[c].nullable}
-            if nullable and _NULLABLE_ON_PURPOSE.get((table.name, name)) != nullable:
-                offenders[(table.name, name)] = sorted(nullable)
+            key = (table.name, name if name is not None else tuple(columns))
+            if nullable and _NULLABLE_ON_PURPOSE.get(key) != nullable:
+                offenders[key] = sorted(nullable)
 
     assert not offenders, (
         "这些唯一键里有可空列 —— PG 下 NULL 不参与唯一性比较，约束对那些行"
         "等于不存在。想清楚 NULL 在这里是「不适用」（那就登记到 "
         "_NULLABLE_ON_PURPOSE，写下理由）还是「没填」（那就像 "
         "uq_model_backend_connection 一样用 coalesce 表达式索引）：\n  "
-        + "\n  ".join(f"{t}.{n}: {cols}" for (t, n), cols in sorted(offenders.items()))
+        + "\n  ".join(f"{t}.{n}: {cols}" for (t, n), cols in sorted(
+            offenders.items(), key=lambda item: str(item[0])))
     )

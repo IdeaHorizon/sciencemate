@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock
 import pytest
+from sqlalchemy import true
 from app.services.feed import domain_progress
 from app.schemas.feed import FeedProgressOut, FeedTodayOut
 
@@ -78,7 +79,7 @@ async def test_parent_domain_counts_expanded_children_once(monkeypatch):
     db = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [item]))))
     user = SimpleNamespace(id='one')
     profile = SimpleNamespace(domains=('110401', '110402'), projects=(), journals={}, scholars=(), active_project_queries=None)
-    monkeypatch.setattr(feed, '_visible_clause', lambda user: True)
+    monkeypatch.setattr(feed, '_visible_clause', lambda user: true())
     monkeypatch.setattr(feed.profile_service, 'stored_domains', lambda user: ('cas:1104',))
     monkeypatch.setattr(feed, 'language_for', lambda user: 'zh')
     monkeypatch.setattr(feed.domain_service, 'label', lambda code, lang: '战术学')

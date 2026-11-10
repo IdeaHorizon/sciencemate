@@ -20,6 +20,22 @@ import httpx
 
 from .config import SEARCH_ENGINES, DEFAULT_RESULTS_PER_SOURCE, PER_SOURCE_LIMITS
 from .crossref_http import crossref_list_get
+from shared.contrib.literature_provenance import selected_metadata_provenance
+from shared.contrib.literature_identity import PublicationIdentityIndex, paper_identity
+from shared.contrib.publication_categories import published_journal_metadata
+
+
+def source_failure_message(source: str, diagnostic: dict) -> str:
+    """Public notice; upstream response bodies remain in source diagnostics."""
+    status = diagnostic.get("http_status")
+    if status == 429:
+        return f"{source} 请求受到限流（HTTP 429），本轮结果可能不完整。"
+    if isinstance(status, int) and status >= 500:
+        return f"{source} 检索服务暂不可用（HTTP {status}），本次已跳过，不影响其他来源结果。"
+    if diagnostic.get("status") == "timeout":
+        return f"{source} 请求超时，本次已跳过，不影响其他来源结果。"
+    code = f"（HTTP {status}）" if status else ""
+    return f"{source} 请求未成功{code}，本次已跳过，不影响其他来源结果。"
 
 
 @dataclass
@@ -1076,7 +1092,7 @@ class CrossrefSearch:
                 if name.strip():
                     authors.append(name.strip())
             doi = item.get("DOI", "")
-            pub_type = item.get("type", "journal-article")
+            pub_type = item.get("type") or ""
             # 年与日出自同一个字段：旧实现年取 published-print→created、日取
             # published-print→published-online→created，两条链各走各的。
             year, pub_date = crossref_publication_date(item)
@@ -1121,6 +1137,8 @@ class CrossrefSearch:
                 url=item.get("URL", ""),
                 abstract=item.get("abstract") or "",
                 pub_type=pub_type, pub_date=pub_date, issn=issn, eissn=eissn,
+                metadata_provenance={"publication_type": pub_type, "language": item.get("language") or "",
+                                     "relations": item.get("relation") or {}},
             ))
         return papers
 
@@ -1240,6 +1258,13 @@ class OpenAlexSearch:
             papers.append(Paper(
                 title=(item.get("title") or ""), authors=authors, year=year,
                 venue=venue, doi=doi, source="openalex",
+                pub_type=item.get("type") or "",
+                metadata_provenance={"publication_type": item.get("type") or "",
+                                     "language": item.get("language") or "",
+                                     "source_type": source_record.get("type") or "",
+                                     "source_collection": primary_loc.get("raw_source_name") or "",
+                                     "journal_source_present": any((loc.get("source") or {}).get("type") == "journal"
+                                         for loc in [primary_loc, *(item.get("locations") or [])])},
                 author_identities=[{"author_id": str((a.get("author") or {}).get("id") or ""), "name": str((a.get("author") or {}).get("display_name") or ""), "orcid": str((a.get("author") or {}).get("orcid") or "")} for a in item.get("authorships") or [] if (a.get("author") or {}).get("id")],
                 citations=item.get("cited_by_count", 0),
                 url=item.get("id", ""), abstract=abstract_text,
@@ -1398,6 +1423,7 @@ class SearchManager:
         progress_callback: Callable[[dict], None] | None = None,
         arxiv_timeout_seconds: float = 15.0,
         per_source_limits: dict[str, int] | None = None,
+        results_callback: Callable[[list], None] | None = None,
     ):
         try:
             from .local_index import LocalPaperIndex
@@ -1405,6 +1431,7 @@ class SearchManager:
         except Exception:
             self.local_index = None
         self._s2_key = sem_scholar_key or os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
+        self._results_callback = results_callback
         self._progress_callback = progress_callback
         self._arxiv_timeout_seconds = max(0.1, float(arxiv_timeout_seconds))
         # None 保留 literature/E2E 的全局来源上限；呈现层学术搜索可以传入
@@ -1886,26 +1913,31 @@ class SearchManager:
         return bool(re.search(r'[\u4e00-\u9fff]', query))
 
     def _merge_results(self, results1: list, results2: list) -> list:
-        seen = {}
+        identities = PublicationIdentityIndex()
         merged = []
         for p in results1 + results2:
-            # 使用 Unicode 兼容的 key：保留所有字母数字（含中文）
-            title_key = re.sub(r'[^\w]', '', (p.title or "").lower())[:60]
-            doi_key = re.sub(r'[^\w]', '', (p.doi or "").lower())[:40]
-            key = doi_key if doi_key else title_key
-            if not key:
+            if not paper_identity(p):
                 continue
-            if key not in seen:
-                seen[key] = len(merged)
+            publication = published_journal_metadata(p)
+            if publication:
+                # Also repair previously cached merged records: the arXiv
+                # retrieval origin is not the publication venue/version.
+                p.venue, p.pub_type = publication["venue"], publication["pub_type"]
+            existing = identities.find(p)
+            if existing is None:
                 merged.append(p)
+                identities.remember(p)
             else:
-                existing = merged[seen[key]]
+                previous = existing.to_dict()
+                previous_publication = published_journal_metadata(existing)
+                incoming_record = p.to_dict()
+                selected_publication = previous if previous_publication else incoming_record if publication else None
                 # 远程结果经常只有标题/DOI；SQLite 中的历史记录可能已有完整
                 # 摘要、作者和链接。逐字段合并，避免把完整本地记录丢掉后，
                 # 又对同一篇论文发起跨源元数据补齐请求。
                 scalar_fields = (
                     "abstract", "venue", "year", "url", "citations", "pdf_url",
-                    "oa_url", "pub_date", "pub_type",
+                    "oa_url", "pub_date", "pub_type", "doi",
                 )
                 for field_name in scalar_fields:
                     current = getattr(existing, field_name, None)
@@ -1918,8 +1950,33 @@ class SearchManager:
                     incoming = getattr(p, field_name, None)
                     if not current and incoming:
                         setattr(existing, field_name, list(incoming))
-                if getattr(p, "metadata_provenance", None):
-                    existing.metadata_provenance.update(p.metadata_provenance)
+                existing.metadata_provenance = selected_metadata_provenance(
+                    previous, p.to_dict(), existing.to_dict(),
+                )
+                if selected_publication:
+                    # Choose publication metadata as a consistent set. Preserve
+                    # preprint access links separately instead of losing either
+                    # version according to source arrival order.
+                    chosen = selected_publication
+                    for field_name in ("venue", "pub_type", "year", "pub_date", "doi", "url", "issn", "eissn"):
+                        if chosen.get(field_name):
+                            setattr(existing, field_name, chosen[field_name])
+                    provenance = selected_metadata_provenance(previous, incoming_record, existing.to_dict())
+                    existing.metadata_provenance = provenance
+                    for key in ("publication_type", "language", "source_type", "source_collection", "journal_source_present"):
+                        if key in (chosen.get("metadata_provenance") or {}):
+                            provenance[key] = chosen["metadata_provenance"][key]
+                    provenance.update(publication_type=chosen["pub_type"], source_type="journal",
+                                      source_collection=chosen["venue"], journal_source_present=True)
+                    versions = list(provenance.get("alternate_versions") or [])
+                    for version in (previous, incoming_record):
+                        if version.get("source") in {"arxiv", "biorxiv", "medrxiv"} and version.get("url"):
+                            link = {"source": version["source"], "url": version["url"]}
+                            if link not in versions:
+                                versions.append(link)
+                    if versions:
+                        provenance["alternate_versions"] = versions
+                identities.remember(existing, alias=p)
         return merged
 
     async def _safe_search(
@@ -1959,6 +2016,14 @@ class SearchManager:
                 "result_count": len(results),
                 "elapsed_seconds": elapsed,
             })
+            if self._results_callback:
+                try:
+                    # Source policy applies to provisional results as well.
+                    source_id = {"s2": "semantic_scholar", "googlescholar": "google_scholar"}.get(name.lower(), name.lower())
+                    allowed, _ = filter_papers_by_sources(results, {source_id})
+                    self._results_callback(allowed)
+                except Exception:
+                    pass  # A preview must never break source retrieval.
             return results
         except asyncio.TimeoutError:
             diag.update({"status": "timeout", "error": f"超过 {timeout_sec}s"})
@@ -2110,27 +2175,8 @@ class SearchManager:
             if isinstance(by_source.get("crossref_title"), list):
                 results.extend(by_source["crossref_title"])
             
-            seen = {}  # key -> index in deduped
-            deduped = []
-            for p in results:
-                title_key = re.sub(r'[^a-zA-Z0-9]', '', (p.title or "").lower())[:60]
-                doi_key = re.sub(r'[^a-zA-Z0-9]', '', (p.doi or "").lower())[:40]
-                key = doi_key if doi_key else title_key
-                if not key:
-                    continue
-                if key not in seen:
-                    seen[key] = len(deduped)
-                    deduped.append(p)
-                else:
-                    # 合并字段：保留有值的版本
-                    existing = deduped[seen[key]]
-                    if not existing.venue and p.venue:
-                        existing.venue = p.venue
-                    if not existing.abstract and p.abstract:
-                        existing.abstract = p.abstract
-                    if not existing.year and p.year:
-                        existing.year = p.year
-            
+            deduped = self._merge_results([], results)
+
             # 去重后回填：有 DOI 但无 venue 的论文，尝试从 CrossRef 查
             #
             # #230 复核残留（qinp 2026-07-30）：外层 search_all 的回填已按白名单
@@ -2193,9 +2239,7 @@ class SearchManager:
                     audit_warnings.append({"code": "source_request_failed", "sources": [src],
                                            "reason": diag.get("status"),
                                            "http_status": diag.get("http_status"),
-                                           "detail": (f"{src} 请求受到限流（HTTP 429），本轮结果可能不完整。"
-                                                      if diag.get("http_status") == 429 else
-                                                      f"{src}：{diag.get('error', '')}")})
+                                           "detail": source_failure_message(src, diag)})
             for src, count in source_counts.items():
                 diagnostics.setdefault(src, {}).update({"deduped_count": count})
             return deduped, {

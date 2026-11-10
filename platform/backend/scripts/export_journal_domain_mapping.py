@@ -110,7 +110,7 @@ def export(*, scope_active: bool = False) -> Path:
               '- 主题规则：`nodes/literature/tools/journal_domain_scope_rules.json`',
               '- 完整变更记录：`docs/journal_mapping_changes_20260928.json`',
               '- 学科目录：`platform/backend/app/data/discipline_catalog.json`',
-              '- 本文导出器：`scripts/export_journal_domain_mapping.py`', '']
+              '- 本文导出器：`platform/backend/scripts/export_journal_domain_mapping.py`', '']
     dest = ROOT / 'docs/二级学科与期刊映射_20260928.md'
     dest.write_text('\n'.join(lines), encoding='utf-8')
     print(json.dumps({'document':str(dest),'disciplines':len(labels),'pairs':len(rows),'scope_active':scope_active},ensure_ascii=False))

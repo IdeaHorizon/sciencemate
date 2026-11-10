@@ -44,7 +44,6 @@ KIND_APPEAL = "appeal"                     # 节点自己申诉：根因在别�
 KIND_REPEATED_FAILURE = "repeated_failure"  # 框架统计：同一节点反复挂同一处
 KIND_UNMEASURED = "unmeasured_commitment"   # 预注册承诺里没测的 metric
 KIND_UNANALYZED_RESULTS = "unanalyzed_results"  # 实验出了结果，Analysis 还没看
-KIND_UNACCOUNTED_DESIGN = "unaccounted_design"  # 预注册声明的设计，没人交代兑现
 KIND_UNFROZEN_MANUSCRIPT = "unfrozen_manuscript"  # 论文审过了却没冻结 = 没交付
 
 
@@ -66,6 +65,16 @@ class Obligation:
     def key(self) -> tuple:
         """去重键 —— 同一个节点欠同一样东西只算一条。"""
         return (self.kind, self.owed_by or "", self.what[:120])
+
+
+def _stamp(value: object) -> float:
+    """ISO 时间戳 → 秒。解析不了就返回 0（= 没有可用时间信息）。"""
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # ── 来源 1：节点主动申诉 ────────────────────────────────────────────────────
@@ -631,207 +640,10 @@ def _collect_unfrozen_manuscript(state: Any, runs: list) -> list[Obligation]:
     )]
 
 
-# ── 来源 5：预注册声明了设计，没人交代兑现 ──────────────────────────────────
-
-_DESIGN_ACCOUNTING_KEYS = ("design_accounting", "expected_params_accounting")
-
-
-def _stamp(value: object) -> float:
-    """ISO 时间戳 → 秒。解析不了就返回 0（= 没有可用时间信息）。"""
-    from datetime import datetime
-
-    try:
-        return datetime.fromisoformat(str(value)).timestamp()
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _frozen_designs(worktree) -> list[dict]:
-    """**每一份**冻结预注册各自声明的实验设计。
-
-    只认冻结的：没冻的还在改，拿它当承诺会在设计期就吵。
-
-    ## 为什么是列表（issue #414）
-
-    这里以前是 `_frozen_design()`：glob 出所有 `pre_registration*.json`，
-    命中第一份冻结的就 `return` —— 一个项目多轮修订会留下 v1…v6 多份冻结预
-    注册，而框架只看第一份，其余几份的设计声明**从来没有进过账**。同一个
-    项目的多份承诺被混成一笔账，正是 issue #414 报的现象。
-
-    返回每份的 `{id, params, frozen_at}`：`frozen_at` 取 `metadata.frozen_at`
-    （freeze_artifact 写的），退回 `created_at`；两个都没有就是 0.0，
-    表示"这份没有可用的时间信息"——判定那边据此退回宽松口径，见
-    `_design_accounted_for`。
-    """
-    import json
-    from pathlib import Path
-
-    from core.ledger import iter_heads, workspace_store
-
-    out: list[dict] = []
-    if not worktree:
-        return out
-    store = workspace_store(Path(worktree))
-    for head in iter_heads(worktree, artifact_type="pre_registration"):
-        # 一个身份 = 一条账；head 可能是未冻结的修订草稿 —— 当前承诺是该身份
-        # **最新冻结版**的设计（修订 + 重新冻结后 frozen_at 前移，时间判据自动
-        # 把旧账重新记开）。
-        record = store.latest_frozen(head.artifact_id)
-        if record is None:
-            continue
-        meta = record.get("metadata") or {}
-        if isinstance(meta, str):
-            try:
-                meta = json.loads(meta)
-            except ValueError:
-                continue
-        params = meta.get("expected_params") or {}
-        if not (isinstance(params, dict) and params):
-            continue
-        out.append({
-            "id": head.artifact_id,
-            "name": str(record.get("name") or head.artifact_id),
-            "params": params,
-            "frozen_at": _stamp(meta.get("frozen_at")) or _stamp(record.get("created_at")),
-        })
-    return out
-
-
-def _design_accountings(worktree) -> list[dict]:
-    """交代过设计兑现情况的每一版 research_state：`{at, text}`。
-
-    `text` 是那份 accounting 的 JSON 序列化，用来判断它有没有**点名**某份
-    预注册（点名了就只清那一份，不管先后）。
-    """
-    import json
-
-    out: list[dict] = []
-    for record in _iter_research_state_records(worktree) or []:
-        meta = _meta_of(record)
-        entries = [meta.get(k) for k in _DESIGN_ACCOUNTING_KEYS if meta.get(k)]
-        if not entries:
-            continue
-        out.append({
-            "at": _stamp(record.get("created_at")),
-            "text": json.dumps(entries, ensure_ascii=False),
-        })
-    return out
-
-
-def _design_accounted_for(design: dict, accountings: list[dict],
-                          all_names: set[str]) -> bool:
-    """这**一份**冻结预注册的设计，有没有被哪一版 research_state 交代过。
-
-    逐笔 accounting 看，两种账分开算：
-
-      · **点名的账**（正文里出现了某份预注册的 id 或 name）：只清它点到的那几份。
-        点了名就说明它讲的是特定的某一份，不能顺带把别人的账也清了。
-      · **笼统的账**：按时间——它写在这份预注册冻结**之后**才算数。一版
-        research_state 只可能交代它写作时已经存在的东西；冻在它之后的那份，
-        它不可能交代过（issue #414 的现场就是被一笔旧账清掉了新冻的 v2）。
-
-    ⚠️ 笼统账缺时间戳时退回**宽松**口径（有账就算清）—— 宁可少记一笔，也不要
-    造出一笔无法了结的账：这条义务是 blocking 的，判严了就是把项目锁死在一个
-    模型无从解除的门上。
-    """
-    for acc in accountings:
-        mentions_self = design["id"] in acc["text"] or design["name"] in acc["text"]
-        if mentions_self:
-            return True
-        if any(n in acc["text"] for n in all_names):
-            continue                        # 点的是别人的名，与这份无关
-        if not (design["frozen_at"] and acc["at"]):
-            return True                     # 没有可比的时间 → 老口径
-        if acc["at"] >= design["frozen_at"]:
-            return True
-    return False
-
-
-def _collect_unaccounted_design(state: Any, runs: list) -> list[Obligation]:
-    """每一份冻结预注册声明的实验设计，都得有人交代兑现情况。
-
-    ## 为什么加这条（E2E v23，2026-08-11 实测）
-
-    冻结的预注册写着 7 个温度点 × 2 副本。实际跑出来 7 个点都有生产日志，但
-    **只有 3 个点有轨迹**，另外 4 个既没轨迹、日志里也没有 MSD 列 —— 那 4 个点
-    根本算不出扩散系数。预注册要 7 个点区分 Arrhenius / VFT，可用的只有 3 个。
-
-    没有任何一层提出这件事：`_collect_unmeasured` 读的是预注册**正文**里的
-    YAML metric 块（这份没写成那个形状 → 返回空 → 义务永不触发）；
-    hypothesis 这一轮一次没跑过；reviewer 审的是一条作业提交记录。
-
-    ## 一份预注册一笔账（issue #414，2026-08-12）
-
-    此前这里是"取第一份冻结预注册 + 任意一版 research_state 里任意非空
-    accounting"→ 一个布尔。多轮修订的项目会留下多份冻结预注册，于是
-    **后面几份的设计声明从来没进过账，而且第一份的一笔账把所有份都清了**。
-    现在逐份判定、逐份记账，义务文案里点名是哪一份。
-
-    ## 只做"看见"，不做判决
-
-    机器机械知道的只有一件事：**声明过一个设计，而没人交代过兑现情况**。
-    至于"3 个点够不够判定"，那是 Analysis 读了数据才能下的判断 —— 硬编码成
-    阈值就是又一个会凑会误伤的门（今晚下线 QC 判决层正是因为这个）。
-
-    ## 判据从已有字段现算
-
-    不要求节点在预注册里多写一份 `metrics` —— 多写一份就多一个会分叉的真相源。
-    `expected_params` 本来就是机器可读的。
-    """
-    worktree = getattr(state, "project_worktree", None)
-    designs = _frozen_designs(worktree)
-    if not designs:
-        return []
-    accountings = _design_accountings(worktree)
-    all_names = {d["id"] for d in designs} | {d["name"] for d in designs}
-    out: list[Obligation] = []
-    for design in designs:
-        if _design_accounted_for(design, accountings, all_names):
-            continue
-        params = design["params"]
-        shape = []
-        for key in ("temperature_points", "n_replicas", "n_particles", "composition",
-                    "density", "models"):
-            value = params.get(key)
-            if value is None:
-                continue
-            shape.append(f"{key}={len(value) if isinstance(value, list) else value}")
-        if not shape:
-            continue
-        listed = "、".join(shape[:4])
-        many = len(designs) > 1
-        whose = f"冻结预注册 `{design['name']}`" if many else "冻结预注册"
-        out.append(Obligation(
-            kind=KIND_UNACCOUNTED_DESIGN,
-            what=(f"{whose} 声明了实验设计（{listed}），但没有任何一版 "
-                  f"research_state 交代过它的兑现情况"),
-            owed_by=_ANALYSIS_NODE,
-            claimed_by="pre_registration",
-            acceptance=("research_state 的 metadata 里写 `design_accounting`：逐项说明"
-                        "声明的设计点哪些实现了、哪些没有、没实现的原因"
-                        + (f"，并点名这份预注册（`{design['name']}`）"
-                           if many else "")),
-            blocking=True,
-            discharge_hint=(
-                f"用 run_node 起 `{_ANALYSIS_NODE}`：拿实际产出对照冻结预注册 "
-                f"`{design['name']}` 的 expected_params，把**每一项**的兑现情况"
-                f"写进 research_state 的 `design_accounting`。\n"
-                + ("这个项目有多份冻结预注册，每一份都要各自交代 —— "
-                   "在 accounting 里写上是哪一份（用它的名字），"
-                   "一笔笼统的账清不掉后冻的那几份。\n" if many else "")
-                + "**如实写**：没实现的就写没实现 —— 这条账要的是交代，不是好看的数字。\n"
-                "实际数据能否支撑判定，由你读了数据自己判断；框架不替你判，也不设阈值。"
-            ),
-            extra={"pre_registration": design["name"],
-                   "artifact_id": design["id"],
-                   "expected_params": {k: params.get(k) for k in list(params)[:8]}},
-        ))
-    return out
-
-
+# Execution coverage comes from the bound run's evidence and delivery.
+# Historical research_state design_accounting remains readable as commentary.
 _COLLECTORS = (_collect_appeals, _collect_repeated_failure, _collect_unmeasured,
-               _collect_unanalyzed_results, _collect_unaccounted_design,
-               _collect_unfrozen_manuscript)
+               _collect_unanalyzed_results, _collect_unfrozen_manuscript)
 
 
 # ── 汇总 / 渲染 / 门禁 ──────────────────────────────────────────────────────

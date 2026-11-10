@@ -58,6 +58,22 @@ def test_normal_publisher_page_with_cloudflare_script_is_not_a_challenge():
     assert browser.challenged({"title": "Just a moment...", "html": ""})
 
 
+@pytest.mark.asyncio
+async def test_restarted_browser_releases_only_closed_verification_slots(monkeypatch):
+    client = browser.Browser("http://127.0.0.1:29222")
+    client.gates = {"old.test": {"target_id": "vanished"},
+                    "live.test": {"target_id": "still-open"}}
+    async def tabs():
+        return [{"id": "still-open"}]
+    monkeypatch.setattr(client, "tabs", tabs)
+    try:
+        await client.prune_closed_verifications()
+        assert set(client.gates) == {"live.test"}
+        assert set(covers._read(covers.cache_dir() / "browser-verification.json")) == {"live.test"}
+    finally:
+        await client.client.aclose()
+
+
 def test_lazy_cover_does_not_use_placeholder_image():
     journal = covers.Journal("Active Learning in Higher Education", (), "Sage")
     page = {
@@ -152,6 +168,7 @@ async def test_timed_out_worker_tab_is_replaced_before_next_journal(monkeypatch)
             self.client = SimpleNamespace(aclose=self.aclose)
         async def aclose(self): pass
         async def tabs(self): return []
+        async def prune_closed_verifications(self): pass
         async def new_tab(self):
             tab = {"id": str(len(created))}
             created.append(tab)

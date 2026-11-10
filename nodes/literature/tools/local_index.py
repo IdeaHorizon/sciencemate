@@ -20,6 +20,8 @@ from typing import Optional
 from pathlib import Path
 
 from .search_engines import Paper
+from shared.contrib.literature_provenance import selected_metadata_provenance
+from shared.contrib.literature_identity import normalize_doi, normalize_title, paper_identity
 from core import paths as _paths
 
 # 索引数据库 / 搜索缓存路径 —— 真相源 core.paths（issue #166.4）。
@@ -71,13 +73,17 @@ class LocalPaperIndex:
             """)
             
             columns = {row[1] for row in conn.execute("PRAGMA table_info(paper_index)")}
-            for name in ("title_zh", "abstract_zh", "title_zh_source_key", "abstract_zh_source_key"):
+            for name in ("title_zh", "abstract_zh", "title_zh_source_key", "abstract_zh_source_key", "metadata_provenance"):
                 if name not in columns:
                     try:
                         conn.execute(f"ALTER TABLE paper_index ADD COLUMN {name} TEXT")
                     except sqlite3.OperationalError as exc:
                         if "duplicate column" not in str(exc).lower():
                             raise
+            self._provenance_column = next(
+                row[0] for row in conn.execute("PRAGMA table_info(paper_index)")
+                if row[1] == "metadata_provenance"
+            )
 
             # 全文搜索索引（标题+摘要+关键词）
             conn.execute("""
@@ -307,7 +313,7 @@ class LocalPaperIndex:
         seen: set[str] = set()
         merged: list[Paper] = []
         for paper in [*first, *second]:
-            key = (paper.doi or "").lower() or "title:" + " ".join((paper.title or "").lower().split())
+            key = paper_identity(paper)
             if key not in seen:
                 seen.add(key)
                 merged.append(paper)
@@ -320,14 +326,16 @@ class LocalPaperIndex:
         因而数据库里其他论文不会混进本次候选集合。
         """
         doi_keys = {
-            str(p.doi or "").strip().lower()
+            variant
             for p in candidates
-            if str(p.doi or "").strip()
+            if normalize_doi(p.doi)
+            for variant in self._doi_lookup_keys(p.doi)
         }
         title_hashes = {
-            f"hash:{self._title_hash(p.title)}"
+            f"hash:{key}"
             for p in candidates
-            if not str(p.doi or "").strip() and str(p.title or "").strip()
+            if not normalize_doi(p.doi) and str(p.title or "").strip()
+            for key in (self._title_hash(p.title), self._legacy_title_hash(p.title))
         }
         if not doi_keys and not title_hashes:
             return {}
@@ -344,14 +352,13 @@ class LocalPaperIndex:
                 ).fetchall())
 
         found: dict[str, Paper] = {}
+        wanted_identities = {paper_identity(p) for p in candidates}
         for row in rows:
             paper = self._row_to_paper(row)
-            stored_identity = str(row[7] or "").strip().lower()
-            if stored_identity.startswith("hash:"):
-                key = "title:" + " ".join((paper.title or "").lower().split())
-            else:
-                key = stored_identity
-            if key:
+            key = paper_identity(paper)
+            # Legacy hashes discarded Chinese and long suffixes. Validate the
+            # actual full title before reusing any historical row.
+            if key and key in wanted_identities:
                 found[key] = paper
         return found
 
@@ -404,14 +411,28 @@ class LocalPaperIndex:
         skipped = 0
         
         with sqlite3.connect(self.db_path) as conn:
+            # Couple each value update and its provenance under the same writer lock.
+            conn.execute("BEGIN IMMEDIATE")
             for p in papers:
                 # 生成唯一键
-                doi = p.doi or ""
+                doi = normalize_doi(p.doi)
                 if not doi:
                     # 无 DOI 时用标题哈希
                     doi = f"hash:{self._title_hash(p.title)}"
                 
+                conn.execute("SAVEPOINT paper_metadata")
                 try:
+                    old_row = conn.execute("SELECT * FROM paper_index WHERE doi = ?", (doi,)).fetchone()
+                    if old_row is None:
+                        aliases = (self._doi_lookup_keys(p.doi) if normalize_doi(p.doi)
+                                   else [f"hash:{self._legacy_title_hash(p.title)}"])
+                        for alias in aliases:
+                            legacy = conn.execute("SELECT * FROM paper_index WHERE lower(doi) = ?", (alias,)).fetchone()
+                            if legacy and (normalize_doi(p.doi) or normalize_title(legacy[1]) == normalize_title(p.title)):
+                                conn.execute("UPDATE paper_index SET doi = ? WHERE id = ?", (doi, legacy[0]))
+                                old_row = legacy
+                                break
+                    previous = self._row_to_paper(old_row).to_dict() if old_row else {}
                     conn.execute("""
                         INSERT INTO paper_index
                         (title, authors, abstract, year, citations, url, doi, source,
@@ -452,8 +473,19 @@ class LocalPaperIndex:
                         json.dumps(p.keywords, ensure_ascii=False),
                         search_query.lower().strip()
                     ))
+                    selected_row = conn.execute("SELECT * FROM paper_index WHERE doi = ?", (doi,)).fetchone()
+                    provenance = selected_metadata_provenance(
+                        previous, p.to_dict(), self._row_to_paper(selected_row).to_dict(),
+                    )
+                    conn.execute(
+                        "UPDATE paper_index SET metadata_provenance = ? WHERE doi = ?",
+                        (json.dumps(provenance, ensure_ascii=False), doi),
+                    )
+                    conn.execute("RELEASE SAVEPOINT paper_metadata")
                     added += 1
                 except Exception:
+                    conn.execute("ROLLBACK TO SAVEPOINT paper_metadata")
+                    conn.execute("RELEASE SAVEPOINT paper_metadata")
                     skipped += 1
             
             conn.commit()
@@ -461,7 +493,7 @@ class LocalPaperIndex:
             # 同步 FTS 索引
             self._rebuild_fts(conn)
         
-        self._sync_index_translations([p.doi or f"hash:{self._title_hash(p.title)}" for p in papers])
+        self._sync_index_translations([normalize_doi(p.doi) or f"hash:{self._title_hash(p.title)}" for p in papers])
         return added, skipped
     
     def search(self, query: str, limit: int = 200, min_year: Optional[int] = None) -> list[Paper]:
@@ -746,7 +778,7 @@ class LocalPaperIndex:
             for paper in papers:
                 if not paper.get("title"):
                     continue
-                identity = str(paper.get("doi") or "").strip().lower() or f"hash:{self._title_hash(paper['title'])}"
+                identity = normalize_doi(paper.get("doi")) or f"hash:{self._title_hash(paper['title'])}"
                 identities.append(identity)
                 inserted = conn.execute("""INSERT INTO paper_index(title,authors,abstract,doi,url,source,venue,year)
                     VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(doi) DO NOTHING""", (
@@ -763,7 +795,7 @@ class LocalPaperIndex:
     def get_title_translations(self, titles: list[str]) -> dict[str, str]:
         """Read full-title keys, retaining compatible historical cache entries."""
         result = {}
-        wanted = {key for title in titles if title for key in (self._translation_title_key(title), self._title_hash(title))}
+        wanted = {key for title in titles if title for key in (self._translation_title_key(title), self._title_hash(title), self._legacy_title_hash(title))}
         if not wanted:
             return result
         rows = []
@@ -775,7 +807,7 @@ class LocalPaperIndex:
                 rows.extend(conn.execute(f"SELECT title_key,original_title,translated_title FROM title_translations WHERE title_key IN ({marks})", batch))
         lookup = {key: (original, translated) for key, original, translated in rows}
         for title in titles:
-            for key in (self._translation_title_key(title), self._title_hash(title)):
+            for key in (self._translation_title_key(title), self._title_hash(title), self._legacy_title_hash(title)):
                 original, translated = lookup.get(key, ("", None))
                 if translated and self._translation_text(original).casefold() == self._translation_text(title).casefold():
                     result[title] = translated
@@ -859,17 +891,20 @@ class LocalPaperIndex:
         """读取缺摘要论文的 AI 总结缓存；与来源摘要严格分表。"""
         if not titles:
             return {}
-        keyed = {self._title_hash(title): title for title in titles if title}
+        keyed = {key: title for title in titles if title
+                 for key in (self._title_hash(title), self._legacy_title_hash(title))}
         if not keyed:
             return {}
         placeholders = ",".join("?" for _ in keyed)
         with sqlite3.connect(self.db_path) as conn:
             rows = conn.execute(
-                f"SELECT title_key, summary FROM ai_summaries "
+                f"SELECT title_key, original_title, summary FROM ai_summaries "
                 f"WHERE title_key IN ({placeholders})",
                 tuple(keyed),
             ).fetchall()
-        return {keyed[key]: summary for key, summary in rows if summary and key in keyed}
+        return {title: summary for title in titles for key, original, summary in rows
+                if summary and key in {self._title_hash(title), self._legacy_title_hash(title)}
+                and normalize_title(original) == normalize_title(title)}
 
     def save_ai_summaries(self, summaries: dict[str, str]) -> None:
         """批量保存 {论文题名: AI总结}，不写入 papers.abstract。"""
@@ -915,6 +950,10 @@ class LocalPaperIndex:
     def _row_to_paper(self, row: tuple) -> Paper:
         """数据库行转 Paper 对象"""
         # row: (id, title, authors, abstract, year, citations, url, doi, source, ...)
+        try:
+            provenance = json.loads(row[self._provenance_column] or "{}")
+        except (IndexError, TypeError, ValueError):
+            provenance = {}
         return Paper(
             title=row[1] or "",
             authors=json.loads(row[2]) if row[2] else [],
@@ -922,25 +961,38 @@ class LocalPaperIndex:
             year=row[4],
             citations=row[5] or 0,
             url=row[6] or "",
-            doi=row[7] or "",
+            doi=normalize_doi(row[7]),
             source=row[8] or "",
             venue=row[9] or "",
             pdf_url=row[10] or "",
             fields_of_study=json.loads(row[11]) if row[11] else [],
             subjects=json.loads(row[12]) if row[12] else [],
-            pub_type=row[13] or "journal-article",
+            pub_type=row[13] or "",
             pub_date=row[14] or "",
             keywords=json.loads(row[15]) if row[15] else [],
+            metadata_provenance=provenance if isinstance(provenance, dict) else {},
             title_zh=(row[18] if len(row) > 21 and row[20] == self._abstract_hash(row[1] or "") else None),
             abstract_zh=(row[19] if len(row) > 21 and row[21] == self._abstract_hash(row[3] or "") else None),
         )
     
     @staticmethod
     def _title_hash(title: str) -> str:
-        """标题哈希（用于无 DOI 论文的去重）"""
-        import hashlib
+        """Full Unicode identity for new index/summary records."""
+        return hashlib.sha256(normalize_title(title).encode()).hexdigest()
+
+    @staticmethod
+    def _legacy_title_hash(title: str) -> str:
+        """Read old records only; always check their stored full title."""
         normalized = re.sub(r"[^a-zA-Z0-9]", "", title.lower())[:60]
         return hashlib.md5(normalized.encode()).hexdigest()[:16]
+
+    @staticmethod
+    def _doi_lookup_keys(doi: str) -> list[str]:
+        canonical = normalize_doi(doi)
+        return list(dict.fromkeys([str(doi).strip().lower(), canonical,
+            "https://doi.org/" + canonical, "http://doi.org/" + canonical,
+            "https://dx.doi.org/" + canonical, "http://dx.doi.org/" + canonical,
+            "doi:" + canonical, "doi: " + canonical]))
     
     @staticmethod
     def _query_hash(query: str) -> str:

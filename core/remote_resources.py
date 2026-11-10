@@ -57,7 +57,11 @@ async def call(state, action, **params):
     try:
         result = await _handler(state, action, params)
     except Exception as exc:
-        return dict(status="error", error=getattr(exc, "detail", str(exc)))
+        return dict(
+            status="error",
+            error=getattr(exc, "detail", str(exc)),
+            retryable=getattr(exc, "status_code", 500) in (500, 502, 503, 504),
+        )
     state.append_transcript(
         "remote_resource_operation",
         action=action,
@@ -65,4 +69,108 @@ async def call(state, action, **params):
         job_id=result.get("job_id"),
         remote_state=result.get("state"),
     )
+    return result
+
+
+async def wait(
+    state,
+    resource_id: str,
+    job_id: str,
+    *,
+    poll_interval_s=None,
+    max_wait_s=None,
+    resume_tool="remote_job",
+    resume_arguments=None,
+) -> dict:
+    """Yield to the harness for one exact SSH job, not a command/pgrep loop.
+
+    Every observation still goes through the authenticated bridge. The remote
+    record remains authoritative; a failed connection never becomes job failure.
+    """
+    from core import job_wait
+
+    arguments = resume_arguments or {
+        key: value
+        for key, value in dict(
+            action="wait",
+            resource_id=resource_id,
+            job_id=job_id,
+            poll_interval_s=poll_interval_s,
+            max_wait_s=max_wait_s,
+        ).items()
+        if value is not None
+    }
+    previous = job_wait.load(state)
+    same_wait = previous and previous["tool"] == resume_tool and previous["arguments"] == arguments
+    expected = (
+        previous["identity"] if previous and (same_wait or not previous.get("finished")) else None
+    )
+    registered = False
+    failures = 0
+
+    async def observe():
+        nonlocal expected, failures, registered
+        result = await call(state, "status", resource_id=resource_id, job_id=job_id)
+        if result.get("status") != "success":
+            failures += 1
+            return {
+                **result,
+                "wait_outcome": "connection_unconfirmed",
+                "job_id": job_id,
+                "resource_id": resource_id,
+                "do_not_resubmit": True,
+            }
+        identity = {
+            key: result.get(key)
+            for key in ("project_id", "resource_id", "job_id", "request_digest")
+        }
+        if (
+            identity["project_id"] != str(state.project_id)
+            or identity["resource_id"] != resource_id
+            or identity["job_id"] != job_id
+            or not identity["request_digest"]
+            or (expected is not None and identity != expected)
+        ):
+            return dict(
+                status="error",
+                error="Job wait identity does not match the selected job",
+                wait_outcome="identity_mismatch",
+                do_not_resubmit=True,
+            )
+        failures = 0
+        if not registered:
+            expected = identity
+            job_wait.register(state, resume_tool, arguments, identity)
+            registered = True
+        return result
+
+    def done(result):
+        if result.get("status") != "success":
+            return not result.get("retryable") or failures >= 3
+        return result.get("state") not in ("launching", "running")
+
+    try:
+        result = await job_wait.poll(
+            state,
+            observe,
+            done,
+            interval=poll_interval_s,
+            steady_interval=30.0,
+            max_wait_s=max_wait_s,
+        )
+    except job_wait.RunCancelled:
+        state.append_transcript(
+            "job_wait_cancelled",
+            identity=expected,
+            note="Wait stopped; use managed cancel to terminate the remote job",
+        )
+        job_wait.acknowledge(state)
+        raise
+    state.append_transcript(
+        "job_wait_observed",
+        identity=expected,
+        remote_state=result.get("state"),
+        wait_outcome=result.get("wait_outcome"),
+    )
+    job_wait.finish(state)
     return result

@@ -44,14 +44,23 @@ async def plan_literature(payload: LiteratureSearchIn, user: User = Depends(get_
         result = await bridge.call(op="literature_search_plan", payload={"query": payload.query},
                                    result_type="literature_search_plan_result", backend=backend)
     except (bridge.BridgeUnavailable, RuntimeError) as exc:
-        raise HTTPException(status_code=503, detail=said_of(exc, lang, otherwise={
-            "zh": "检索词生成这次没完成，请重试。", "en": "Search planning did not complete. Please retry."})) from exc
+        # Match the streamed search: retain the bridge's actionable failure
+        # explanation, while unexpected runtime errors stay in the server log.
+        detail = str(exc) if isinstance(exc, bridge.BridgeUnavailable) else ""
+        message = say({"zh": "检索词生成未完成：{detail}",
+                       "en": "Search planning did not complete: {detail}"},
+                      lang, detail=detail) if detail else said_of(exc, lang, otherwise={
+            "zh": "检索词生成未完成，请重试或检查模型配置。",
+            "en": "Search planning did not complete. Retry or check the model settings."})
+        raise HTTPException(status_code=503, detail=message) from exc
     for key in ("type", "request_id", "at"):
         result.pop(key, None)
     return LiteraturePlanOut.model_validate(result)
 
 
-async def _school_search(query: str, user: User, limit: int) -> list[dict]:
+async def _school_search(query: str, user: User, limit: int | None, *, continuation=None) -> list[dict]:
+    if continuation:
+        return []  # Catalogue hits were delivered in the first processing batch.
     try:
         return await asyncio.to_thread(
             school_library.search, query,
@@ -74,9 +83,9 @@ async def search_literature(payload: LiteratureSearchIn, user: User = Depends(ge
     if backend is None:
         raise HTTPException(status_code=503, detail=say(_NO_REASONING_MODEL, lang))
     # 学校馆藏检索与平台索引并行（#1235）；平台那边失败时把它收掉，别留下孤儿任务。
-    school_task = asyncio.create_task(_school_search(payload.query, user, payload.limit))
+    school_task = asyncio.create_task(_school_search(payload.query, user, payload.limit, continuation=payload.continuation))
     try:
-        result = await bridge.call(op="literature_search", payload={"query": payload.query, "limit": payload.limit, "remote_refresh": payload.remote_refresh}, result_type="literature_search_result", backend=backend)
+        result = await bridge.call(op="literature_search", payload={"query": payload.query, "limit": payload.limit, "remote_refresh": payload.remote_refresh, "continuation": payload.continuation, "per_category_limit": payload.per_category_limit, "pagination_scope": payload.pagination_scope}, result_type="literature_search_result", backend=backend)
     except (bridge.BridgeUnavailable, RuntimeError) as exc:
         school_task.cancel()
         raise HTTPException(status_code=503, detail=said_of(exc, lang, otherwise={
@@ -93,7 +102,7 @@ async def search_literature(payload: LiteratureSearchIn, user: User = Depends(ge
 @router.get("/school/search", response_model=LiteratureSearchOut)
 async def search_school_library(
     query: str = Query(..., min_length=1, max_length=2000),
-    limit: int = Query(default=200, ge=1, le=200),
+    limit: int | None = Query(default=None, ge=1),
     user: User = Depends(get_current_user),
 ) -> LiteratureSearchOut:
     """Search the school's catalogue without requiring the model or platform index."""
@@ -220,127 +229,142 @@ async def search_literature_stream(payload: LiteratureSearchIn, user: User = Dep
 
     async def events():
         queue: asyncio.Queue[dict] = asyncio.Queue()
-        school_task = asyncio.create_task(_school_search(payload.query, user, payload.limit))
+        school_task = asyncio.create_task(_school_search(payload.query, user, payload.limit, continuation=payload.continuation))
 
-        started = time.monotonic()
-
-        # 连接建立后立即通知前端
-        yield (
-            "data: "
-            + json.dumps(
-                {
-                    "type": "progress",
-                    "stage": "strategy",
-                    "detail": say(_STARTING, lang),
-                    "progress_percent": 3,
-                },
-                ensure_ascii=False,
-            )
-            + "\n\n"
-        )
-
-        async def on_progress(event: dict) -> None:
-            await queue.put(
-                {
-                    "type": "progress",
-                    **{k: v for k, v in event.items() if k != "type"},
-                }
-            )
-
-        task = asyncio.create_task(
-            bridge.call(
-                op="literature_search",
-                payload={
-                    "query": payload.query,
-                    "limit": payload.limit,
-                    "remote_refresh": payload.remote_refresh,
-                },
-                result_type="literature_search_result",
-                backend=backend,
-                on_progress=on_progress,
-            )
-        )
-
-        last_heartbeat = started
-        current_progress = {
-            "stage": "strategy",
-            "detail": say(_STARTING, lang),
-            "progress_percent": 3,
-        }
-
-        while not task.done() or not queue.empty():
-            try:
-                event = await asyncio.wait_for(queue.get(), timeout=0.25)
-
-                if event.get("type") == "progress":
-                    current_progress = {
-                        "stage": str(event.get("stage") or "search"),
-                        "detail": str(event.get("detail") or say({"zh": "正在检索…", "en": "Searching…"}, lang)),
-                        "progress_percent": int(
-                            event.get("progress_percent")
-                            or current_progress["progress_percent"]
-                        ),
-                    }
-
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-
-            except asyncio.TimeoutError:
-                now = time.monotonic()
-
-                # 模型等待期间每 5 秒发送一次心跳
-                if not task.done() and now - last_heartbeat >= 5.0:
-                    elapsed = int(now - started)
-
-                    heartbeat = {
-                        "type": "progress",
-                        "stage": current_progress["stage"],
-                        "detail": current_progress["detail"] + say(
-                            {"zh": "（已等待 {n} 秒）", "en": " (waited {n} s)"}, lang, n=elapsed),
-                        "elapsed_seconds": elapsed,
-                        "progress_percent": current_progress["progress_percent"],
-                    }
-
-                    yield (
-                        "data: "
-                        + json.dumps(heartbeat, ensure_ascii=False)
-                        + "\n\n"
-                    )
-
-                    last_heartbeat = now
-
+        task = None
         try:
-            result = task.result()
+            started = time.monotonic()
 
-            for key in ("type", "request_id", "at"):
-                result.pop(key, None)
-
-            result = school_library.merge_search_results(
-                result, await school_task, limit=payload.limit,
+            # 连接建立后立即通知前端
+            yield (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "progress",
+                        "stage": "strategy",
+                        "detail": say(_STARTING, lang),
+                        "progress_percent": 3,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n\n"
             )
-            validated = LiteratureSearchOut.model_validate(result)
 
-            done_event = {
-                "type": "done",
-                **validated.model_dump(),
+            async def on_progress(event: dict) -> None:
+                await queue.put(
+                    {
+                        "type": "progress",
+                        **{k: v for k, v in event.items() if k != "type"},
+                    }
+                )
+
+            task = asyncio.create_task(
+                bridge.call(
+                    op="literature_search",
+                    payload={
+                        "query": payload.query,
+                        "limit": payload.limit,
+                        "remote_refresh": payload.remote_refresh,
+                        "continuation": payload.continuation,
+                        "per_category_limit": payload.per_category_limit,
+                        "pagination_scope": payload.pagination_scope,
+                    },
+                    result_type="literature_search_result",
+                    backend=backend,
+                    on_progress=on_progress,
+                )
+            )
+
+            last_heartbeat = started
+            current_progress = {
+                "stage": "strategy",
+                "detail": say(_STARTING, lang),
+                "progress_percent": 3,
             }
 
-            yield f"data: {json.dumps(done_event, ensure_ascii=False)}\n\n"
+            while not task.done() or not queue.empty():
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=0.25)
 
-        except Exception as exc:
-            # SSE 响应头已经发出后，异常不能再由 FastAPI 改成普通 5xx；必须
-            # 变成流内 error 事件，否则浏览器只会永远停在最后一条 progress。
-            logger.warning(
-                "literature search result handling failed: %s", type(exc).__name__, exc_info=True)
-            message = said_of(exc, lang, otherwise={
-                "zh": "无法处理检索结果，请重试。",
-                "en": "Could not process the search results. Try again.",
-            })
-            error_event = {
-                "type": "error",
-                "message": message,
-            }
+                    if event.get("type") == "progress":
+                        current_progress = {
+                            "stage": str(event.get("stage") or "search"),
+                            "detail": str(event.get("detail") or say({"zh": "正在检索…", "en": "Searching…"}, lang)),
+                            "progress_percent": int(
+                                event.get("progress_percent")
+                                or current_progress["progress_percent"]
+                            ),
+                        }
 
-            yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+                except asyncio.TimeoutError:
+                    now = time.monotonic()
+
+                    # 模型等待期间每 5 秒发送一次心跳
+                    if not task.done() and now - last_heartbeat >= 5.0:
+                        elapsed = int(now - started)
+
+                        heartbeat = {
+                            "type": "progress",
+                            "stage": current_progress["stage"],
+                            "detail": current_progress["detail"] + say(
+                                {"zh": "（本轮检索累计 {n} 秒）", "en": " (search elapsed: {n} s)"},
+                                lang, n=elapsed),
+                            "elapsed_seconds": elapsed,
+                            "progress_percent": current_progress["progress_percent"],
+                        }
+
+                        yield (
+                            "data: "
+                            + json.dumps(heartbeat, ensure_ascii=False)
+                            + "\n\n"
+                        )
+
+                        last_heartbeat = now
+
+            try:
+                result = task.result()
+
+                for key in ("type", "request_id", "at"):
+                    result.pop(key, None)
+
+                result = school_library.merge_search_results(
+                    result, await school_task, limit=payload.limit,
+                )
+                validated = LiteratureSearchOut.model_validate(result)
+
+                done_event = {
+                    "type": "done",
+                    **validated.model_dump(),
+                }
+
+                yield f"data: {json.dumps(done_event, ensure_ascii=False)}\n\n"
+
+            except Exception as exc:
+                # SSE 响应头已经发出后，异常不能再由 FastAPI 改成普通 5xx；必须
+                # 变成流内 error 事件，否则浏览器只会永远停在最后一条 progress。
+                # Keep the bridge's actionable explanation; unexpected exception
+                # types and stack traces belong in logs, not the product message.
+                logger.warning(
+                    "literature search result handling failed: %s", type(exc).__name__, exc_info=True)
+                detail = str(exc) if isinstance(exc, bridge.BridgeUnavailable) else ""
+                error_event = {
+                    "type": "error",
+                    "message": say({"zh": "检索结果处理失败：{detail}",
+                                    "en": "Could not process the search results: {detail}"},
+                                   lang, detail=detail) if detail else say(
+                        {"zh": "无法处理检索结果，请重试。",
+                         "en": "Could not process the search results. Try again."}, lang),
+                }
+
+                yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
+        finally:
+            tasks = [pending for pending in (task, school_task) if pending is not None]
+            for pending in tasks:
+                if not pending.done():
+                    pending.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
     return sse_response(events(), release=db)

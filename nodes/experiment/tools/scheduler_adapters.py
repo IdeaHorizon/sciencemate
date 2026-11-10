@@ -212,14 +212,48 @@ class LocalAdapter:
                 "reason": "本机作业按不可变容器 id 对账，不按 correlation key 反查"}
 
 
+@dataclass
+class ProjectSSHAdapter:
+    """Capabilities of the registered account supervisor; per-job IO uses the bridge."""
+
+    name: str = "ssh"
+
+    def capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            scheduler=self.name, submit=True, query_status=True, cancel=True,
+            terminal_facts=True, reconnect_by_correlation_key=False,
+            remote_write_isolation=ISOLATION_MISSING,
+            notes=("Remote account execution with walltime and process-group supervision.",),
+        )
+
+    def reconnect(self, correlation_key: str, *, since: str | None = None) -> dict[str, Any]:
+        return {"status": "cannot_query", "reason": "Use job_status with the run-owned SSH submission handle."}
+
+
+@dataclass
+class UnknownAdapter:
+    name: str
+
+    def capabilities(self) -> AdapterCapabilities:
+        return AdapterCapabilities(
+            scheduler=self.name, submit=False, query_status=False, cancel=False,
+            terminal_facts=False, reconnect_by_correlation_key=False,
+            remote_write_isolation=ISOLATION_UNKNOWN,
+        )
+
+    def reconnect(self, correlation_key: str, *, since: str | None = None) -> dict[str, Any]:
+        return {"status": "cannot_query", "reason": "Unknown execution backend."}
+
+
 _ADAPTERS: dict[str, Any] = {}
 
 
 def adapter_for(scheduler: str) -> Any:
     key = str(scheduler or "").strip().lower()
     if key not in _ADAPTERS:
-        _ADAPTERS[key] = {"slurm": SlurmAdapter, "pbs": PbsAdapter, "torque": PbsAdapter,
-                          "local": LocalAdapter}.get(key, LocalAdapter)()
+        factory = {"slurm": SlurmAdapter, "pbs": PbsAdapter, "torque": PbsAdapter,
+                   "local": LocalAdapter, "ssh": ProjectSSHAdapter}.get(key)
+        _ADAPTERS[key] = factory() if factory else UnknownAdapter(key)
     return _ADAPTERS[key]
 
 

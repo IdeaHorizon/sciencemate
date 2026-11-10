@@ -120,6 +120,25 @@ def test_restore_copies_everything_but_the_manifest_into_an_empty_dir(tmp_path):
         rehearsal.restore(out, tmp_path / "dirty")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows restores inherited ACLs")
+def test_capture_and_restore_keep_posix_directory_permissions(tmp_path):
+    import stat
+
+    root = _fake_data_root(tmp_path)
+    modes = {".": 0o700, "logs": 0o700, "harness-state": 0o700,
+             "harness-state/projects/p1": 0o750, "project-worktrees": 0o700,
+             "project-worktrees/w/.research": 0o500}
+    for name, mode in modes.items():
+        (root / name).chmod(mode)
+    fixture = tmp_path / "fixture"
+    rehearsal.capture(root, fixture, version="0.5.12")
+    restored = tmp_path / "restored"
+    rehearsal.restore(fixture, restored)
+    for name, mode in modes.items():
+        assert stat.S_IMODE((fixture / name).stat().st_mode) == mode
+        assert stat.S_IMODE((restored / name).stat().st_mode) == mode
+
+
 def test_a_packed_fixture_restores_like_a_directory(tmp_path):
     import tarfile
 
@@ -182,9 +201,11 @@ def test_restore_relocates_through_the_one_legal_exit(tmp_path, monkeypatch):
     target = tmp_path / "fresh"
     rehearsal.restore(out, target, python="/opt/app/python", tree=REPO)
     assert seen["argv"][0] == "/opt/app/python"
-    assert seen["argv"][1].endswith("platform/backend/scripts/relocate_project_data.py")
+    assert seen["argv"][1] == "-B", "不能往已签名的安装包补写 Python 字节码"
+    assert seen["argv"][2].endswith("platform/backend/scripts/relocate_project_data.py")
     assert {"--to", str(target), "--apply", "--copied"} <= set(seen["argv"])
     assert seen["env"]["PLATFORM_DATA_ROOT"] == str(target)
+    assert seen["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
     source = (REPO / "platform" / "backend" / "scripts" / "relocate_project_data.py").read_text(encoding="utf-8")
     assert '"--copied"' in source and "不搬" in source
 

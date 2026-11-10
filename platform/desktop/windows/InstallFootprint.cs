@@ -436,4 +436,38 @@ internal static class Footprint
         }
         catch { return null; }
     }
+
+    // Use the same numeric release ordering as the shell and self_update.
+    public static int CompareVersions(string left, string right)
+    {
+        Func<string, int[]> parts = delegate(string text) {
+            var numbers = new List<int>();
+            foreach (string piece in (text ?? "").Trim().Split('-')[0].Split('+')[0].Split('.'))
+            {
+                string digits = "";
+                foreach (char c in piece) { if (c >= '0' && c <= '9') digits += c; else break; }
+                int value; int.TryParse(digits, out value); numbers.Add(value);
+            }
+            return numbers.ToArray();
+        };
+        int[] a = parts(left), b = parts(right);
+        for (int i = 0; i < Math.Max(a.Length, b.Length); i++)
+        {
+            int x = i < a.Length ? a[i] : 0, y = i < b.Length ? b[i] : 0;
+            if (x != y) return x.CompareTo(y);
+        }
+        return 0;
+    }
+
+    public static string RegisteredInstallDir(string keyPath)
+    {
+        using (RegistryKey key = Registry.CurrentUser.OpenSubKey(keyPath))
+        {
+            if (key == null) return null;
+            string dir = Convert.ToString(key.GetValue("InstallLocation"));
+            if (string.IsNullOrWhiteSpace(dir)) return null;
+            return File.Exists(IoPath(Path.Combine(dir, ShellExeName)))
+                && File.Exists(IoPath(Path.Combine(dir, "backend.json"))) ? dir : null;
+        }
+    }
 }

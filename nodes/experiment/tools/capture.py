@@ -21,6 +21,7 @@ import json
 import os
 import stat
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -66,8 +67,16 @@ def persist_observation(state: Any, action_id: str, observation: dict[str, Any])
     limit = OBSERVATION_SUMMARY_LIMIT
     sequences = ("created", "modified", "deleted", "unknown")
     mappings = ("identities", "identity_basis", "overlapping_actions")
+    coverage = observation.get("coverage") or {}
+    managed_coverage = ("root_coverage", "baseline_root_coverage")
+    coverage_lists = [*coverage.values(),
+                      *(observation.get(key) or [] for key in managed_coverage)]
+    coverage_rows = sum(len(rows) for rows in coverage_lists)
+    coverage_names = sum(len(row.get("entry_names") or [])
+                         for rows in coverage_lists for row in rows)
     if not (any(len(observation.get(k) or []) > limit for k in (*sequences, *mappings))
-            or len(observation.get("created") or []) + len(observation.get("modified") or []) > limit):
+            or len(observation.get("created") or []) + len(observation.get("modified") or []) > limit
+            or coverage_rows > limit or coverage_names > limit):
         return observation
     payload = json.dumps({"action_id": action_id, "observation": observation},
                          sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -93,6 +102,36 @@ def persist_observation(state: Any, action_id: str, observation: dict[str, Any])
         summary[key] = list(observation.get(key) or [])[:limit]
     for key in mappings:
         summary[key] = dict(list((observation.get(key) or {}).items())[:limit])
+    if coverage_rows > limit or coverage_names > limit:
+        rows_remaining = limit
+        names_remaining = limit
+
+        def summarized_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            nonlocal rows_remaining, names_remaining
+            displayed = []
+            for row in rows:
+                if not rows_remaining:
+                    break
+                rows_remaining -= 1
+                shown = dict(row)
+                if "entry_names" in row:
+                    names = row["entry_names"]
+                    # One display budget across ALL rows and shapes, not
+                    # 200 rows times 200 names for each before/after list.
+                    shown["entry_names"] = (names[:names_remaining]
+                                            if isinstance(names, list) else None)
+                    names_remaining -= len(shown["entry_names"] or [])
+                if row.get("status") == "direct_complete" or row.get("direct_complete"):
+                    shown.update(status="direct_partial", direct_complete=False)
+                displayed.append(shown)
+            return displayed
+        if "coverage" in observation:
+            summary["coverage"] = {side: summarized_rows(rows)
+                                   for side, rows in coverage.items()}
+        for key in managed_coverage:
+            if key in observation:
+                summary[key] = summarized_rows(observation[key])
+        summary["coverage_summary_truncated"] = True
     summary.update(summary_truncated=True,
                    observation_counts={key: len(observation.get(key) or []) for key in (*sequences, *mappings)},
                    observation_ref={"file": path.name, "sha256": digest, "size_bytes": len(payload)})
@@ -171,6 +210,12 @@ def _identity(path: Path, *, hash_small: bool) -> dict[str, Any]:
     return row
 
 
+def _junction(st: os.stat_result) -> bool:
+    """Windows junction check also works on supported Python 3.11 hosts."""
+    tag = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
+    return tag is not None and getattr(st, "st_reparse_tag", None) == tag
+
+
 def snapshot(candidates: Iterable[Path], roots: Iterable[Path] = (), *,
              max_files: int = DEFAULT_MAX_FILES, max_seconds: float = DEFAULT_MAX_SECONDS,
              hash_small: bool = True, excluded_roots: Iterable[Path] = (),
@@ -184,16 +229,19 @@ def snapshot(candidates: Iterable[Path], roots: Iterable[Path] = (), *,
     entries: dict[str, dict[str, Any]] = {}
     truncated = False
     scanned = 0
+    enumerated = 0
     coverage: list[dict[str, Any]] = []
     excluded = [Path(p) for p in excluded_roots]
     coverage.extend({"root": str(p), "status": "excluded"} for p in excluded)
+    scan_limit = max_files
+    time_limit = started + max_seconds
 
     def observe(path: Path) -> bool:
         nonlocal scanned, truncated
         key = str(path)
         if key in entries:
             return True
-        if scanned >= max_files or time.monotonic() - started > max_seconds:
+        if scanned >= scan_limit or time.monotonic() > time_limit:
             truncated = True
             return False
         entries[key] = _identity(path, hash_small=hash_small)
@@ -206,12 +254,21 @@ def snapshot(candidates: Iterable[Path], roots: Iterable[Path] = (), *,
             continue
         if not observe(p):
             break
-    for root in roots:
-        r = Path(root)
-        if any(r.is_relative_to(root) for root in excluded):
-            continue
+    root_paths = [Path(root) for root in roots
+                  if not any(Path(root).is_relative_to(boundary) for boundary in excluded)]
+    for number, r in enumerate(root_paths):
+        # Each remaining root receives a share of the SAME remaining budgets.
+        # A wide scandir or deep tree in A cannot spend B's shallow coverage.
+        # A completed/missing root leaves its unused share for later roots;
+        # no cross-root directory iterators or extra filesystem budget survive.
+        remaining = len(root_paths) - number
+        scan_limit = scanned + (max_files - scanned) // remaining
+        name_limit = enumerated + (max_files - enumerated) // remaining
+        now = time.monotonic()
+        time_limit = now + max(0.0, started + max_seconds - now) / remaining
         covered: dict[str, Any] = {"root": str(r), "status": "complete"}
         coverage.append(covered)
+        local_coverage = []
         try:
             root_stat = r.lstat()
         except FileNotFoundError:
@@ -221,52 +278,92 @@ def snapshot(candidates: Iterable[Path], roots: Iterable[Path] = (), *,
             covered.update(status="error", error=f"{type(exc).__name__}: {exc}")
             truncated = True
             continue
-        if not stat.S_ISDIR(root_stat.st_mode):
+        if not stat.S_ISDIR(root_stat.st_mode) or _junction(root_stat):
             if not observe(r):
                 covered["status"] = "truncated"
-            elif stat.S_ISLNK(root_stat.st_mode):
+            elif stat.S_ISLNK(root_stat.st_mode) or _junction(root_stat):
                 covered["status"] = "excluded"
             continue
         if include_directories and not observe(r):
             covered["status"] = "truncated"
             continue
         errors: list[OSError] = []
-        for dirpath, dirnames, filenames in os.walk(r, onerror=errors.append):
-            if scanned >= max_files or (time.monotonic() - started) > max_seconds:
+        pending = deque([r])
+        while pending:
+            if scanned >= scan_limit or time.monotonic() > time_limit:
                 covered["status"] = "truncated"
                 truncated = True
                 break
-            if include_directories and not observe(Path(dirpath)):
+            directory = pending.popleft()
+            try:
+                directory_stat = directory.lstat()
+                if stat.S_ISLNK(directory_stat.st_mode) or _junction(directory_stat):
+                    coverage.append({"root": str(directory), "status": "excluded"})
+                    continue
+                if not stat.S_ISDIR(directory_stat.st_mode):
+                    raise NotADirectoryError(str(directory))
+            except OSError as exc:
+                errors.append(exc)
+                coverage.append({"root": str(directory), "status": "error",
+                                 "error": str(exc)})
+                continue
+            if include_directories and not observe(directory):
                 covered["status"] = "truncated"
                 break
-            traversed = []
-            for name in dirnames:
-                child = Path(dirpath) / name
-                if (name.startswith(".git") or child.is_symlink()
-                        or any(child.is_relative_to(root) for root in excluded)):
+            # Enumerate a directory's direct names before hashing its files.
+            # The separate bounded name budget prevents a wide directory from
+            # creating an unbounded queue or an unbounded absence claim.
+            children = []
+            names_complete = True
+            try:
+                with os.scandir(directory) as entries_in_directory:
+                    for entry in entries_in_directory:
+                        if enumerated >= name_limit or time.monotonic() > time_limit:
+                            names_complete = False
+                            covered["status"] = "truncated"
+                            truncated = True
+                            break
+                        enumerated += 1
+                        child = directory / entry.name
+                        is_directory = entry.is_dir(follow_symlinks=False)
+                        is_link_directory = ((entry.is_symlink() and entry.is_dir())
+                                             or (is_directory and _junction(entry.stat(follow_symlinks=False))))
+                        children.append((child, is_directory, is_link_directory))
+            except OSError as exc:
+                errors.append(exc)
+                names_complete = False
+                coverage.append({"root": str(directory), "status": "error",
+                                 "error": str(exc)})
+            if names_complete:
+                direct = {"root": str(directory), "status": "direct_complete",
+                          "entry_names": [child.name for child, _, _ in children]}
+                coverage.append(direct)
+                local_coverage.append(direct)
+            for child, is_directory, is_link_directory in children:
+                if (any(child.is_relative_to(root) for root in excluded)
+                        or is_link_directory
+                        or (is_directory and child.name.startswith(".git"))):
                     coverage.append({"root": str(child), "status": "excluded"})
-                else:
-                    traversed.append(name)
-            dirnames[:] = traversed
-            for name in filenames:
-                p = Path(dirpath) / name
-                if any(p.is_relative_to(root) for root in excluded):
                     continue
-                key = str(p)
-                if key in entries:
+                if is_directory:
+                    if include_directories and not observe(child):
+                        covered["status"] = "truncated"
+                        break
+                    pending.append(child)
                     continue
-                if not observe(p):
+                if not observe(child):
                     covered["status"] = "truncated"
-                    break
-                if scanned >= max_files or (time.monotonic() - started) > max_seconds:
-                    covered["status"] = "truncated"
-                    truncated = True
                     break
             if covered["status"] == "truncated":
                 break
         if errors:
-            covered.update(status="error", error=str(errors[0]))
+            covered.update(status="error", error=str(errors[0]), error_scope="subtree")
             truncated = True
+        if covered["status"] == "complete":
+            # Keep complete-tree consumers compatible: these directory
+            # subtrees really are complete when the whole root walk finished.
+            for row in local_coverage:
+                row.update(status="complete", direct_complete=True)
     return {"entries": entries, "truncated": truncated, "scanned": scanned,
             "root_coverage": coverage,
             "seconds": round(time.monotonic() - started, 3), "taken_at": time.time()}
@@ -298,18 +395,63 @@ def same_identity(a: dict[str, Any], b: dict[str, Any]) -> tuple[bool, str]:
     return _same_identity(a, b)
 
 
-def _absence_known(snapshot: dict[str, Any], path: str) -> bool:
+def _coverage_index(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Ephemeral lookup only; the serialized coverage remains the single B fact."""
+    direct: dict[Path, set[Path] | None] = {}
+    recursive: dict[Path, str] = {}
+    barriers: set[Path] = set()
+    for row in snapshot.get("root_coverage") or []:
+        directory = Path(row["root"])
+        status = row.get("status")
+        if status == "direct_partial":
+            # A presentation-only list cannot establish that a name is absent.
+            # The verified immutable reference is required to recover facts.
+            barriers.add(directory)
+            continue
+        if status == "direct_complete" or row.get("direct_complete"):
+            names = row.get("entry_names")
+            if (not isinstance(names, list)
+                    or any(not isinstance(name, str) or name in {"", ".", ".."}
+                           or Path(name).name != name for name in names)):
+                direct[directory] = None
+            elif directory not in direct:
+                direct[directory] = {Path(name) for name in names}
+            elif direct[directory] is not None:
+                direct[directory].update(Path(name) for name in names)
+        else:
+            recursive.setdefault(directory, status)
+            if status == "excluded" or (status == "error" and row.get("error_scope") != "subtree"):
+                barriers.add(directory)
+    return {"direct": direct, "recursive": recursive, "barriers": barriers}
+
+
+def _absence_known(snapshot: dict[str, Any], path: str, *,
+                   coverage_index: dict[str, Any] | None = None) -> bool:
     entries = snapshot.get("entries") or {}
     if path in entries:
         return entries[path].get("kind") == "missing"
     coverage = snapshot.get("root_coverage")
     if coverage is None:
         return not snapshot.get("truncated") and not snapshot.get("snapshot_error")
-    covering = [row for row in coverage if Path(path).is_relative_to(Path(row["root"]))]
-    if not covering:
+    candidate = Path(path)
+    index = coverage_index if coverage_index is not None else _coverage_index(snapshot)
+    ancestors = (candidate, *candidate.parents)
+    if any(ancestor in index["barriers"] for ancestor in ancestors):
         return False
-    closest = max(covering, key=lambda row: len(Path(row["root"]).parts))
-    return closest.get("status") in {"complete", "missing"}
+    for directory in candidate.parents:
+        if directory in index["direct"]:
+            names = index["direct"][directory]
+            if names is None:
+                return False
+            # This proves absence of precisely one direct child. A descendant
+            # is also absent only when that ancestor name did not exist.
+            # An existing but unvisited child never proves subtree absence.
+            child_name = Path(candidate.relative_to(directory).parts[0])
+            return child_name not in names
+    for ancestor in ancestors:
+        if ancestor in index["recursive"]:
+            return index["recursive"][ancestor] in {"complete", "missing"}
+    return False
 
 
 def diff(before: dict[str, Any], after: dict[str, Any], *, limit: int | None = 200) -> dict[str, Any]:
@@ -326,6 +468,8 @@ def diff(before: dict[str, Any], after: dict[str, Any], *, limit: int | None = 2
     deleted: list[str] = []
     unknown: list[str] = []
     basis: dict[str, str] = {}
+    before_coverage = _coverage_index(before)
+    after_coverage = _coverage_index(after)
     for key, after_row in a_entries.items():
         before_row = b_entries.get(key, {"kind": "missing"})
         if before_row.get("kind") == "error" or after_row.get("kind") == "error":
@@ -336,14 +480,14 @@ def diff(before: dict[str, Any], after: dict[str, Any], *, limit: int | None = 2
                 deleted.append(key)
             continue
         if before_row.get("kind") == "missing":
-            (created if _absence_known(before, key) else unknown).append(key)
+            (created if _absence_known(before, key, coverage_index=before_coverage) else unknown).append(key)
             continue
         same, why = _same_identity(before_row, after_row)
         basis[key] = why
         (unchanged if same else modified).append(key)
     for key, before_row in b_entries.items():
         if key not in a_entries and before_row.get("kind") != "missing":
-            (deleted if _absence_known(after, key) else unknown).append(key)
+            (deleted if _absence_known(after, key, coverage_index=after_coverage) else unknown).append(key)
     return {
         "created": created[:limit], "modified": modified[:limit], "unchanged_count": len(unchanged),
         "deleted": deleted[:limit],

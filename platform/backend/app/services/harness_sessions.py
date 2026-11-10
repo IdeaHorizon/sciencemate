@@ -2241,6 +2241,8 @@ class HarnessSessionManager:
         # 认的是它，不是"看起来像我们的进程"。
         spawn_token = uuid4().hex
         child_env = _child_environment(root, role_bindings)
+        from app.services.literature_access import literature_access
+        child_env.update(await literature_access.environment(user))
         child_env["HARNESS_SPAWN_TOKEN"] = spawn_token
         control_address = _control_address(project_id, session_id)
         if control_address is not None:

@@ -5,7 +5,8 @@ from platform_runtime import _academic_exclusion_reason, _select_academic_search
 
 @pytest.fixture(autouse=True)
 def isolated_local_catalog(monkeypatch, tmp_path):
-    from nodes.literature.tools import local_index
+    from nodes.literature.tools import local_index, strategy_generator
+    monkeypatch.setattr(strategy_generator, "LLM_CONFIG", {})
     index = local_index.LocalPaperIndex(db_path=tmp_path / "index.sqlite3")
     monkeypatch.setattr(local_index, "get_index", lambda: index)
     monkeypatch.setenv("HARNESS_LITERATURE_HOME", str(tmp_path))
@@ -219,3 +220,44 @@ async def test_title_batches_bound_parallelism_keep_success_and_reuse_cache(monk
     assert result['cached'] == 45
     assert sum(len(rows) for rows in calls) == 20
     assert result['translated'] == 20
+
+
+@pytest.mark.asyncio
+async def test_slow_exact_title_probe_does_not_block_normal_retrieval(monkeypatch):
+    import asyncio
+    import platform_runtime as runtime
+    from nodes.literature.tools import search_engines, academic_strategy
+    source_started=asyncio.Event()
+    class Results(list):
+        def audit_dict(self):return {}
+    class Manager:
+        local_index=None
+        def __init__(self,**kw):pass
+        async def search_all(self,*a,**kw):source_started.set();return Results()
+        def _merge_results(self,a,b):return a+b
+    class Crossref:
+        def __init__(self,*a):pass
+        async def search_title(self,*a,**kw):
+            await asyncio.wait_for(source_started.wait(),.5)
+            return []
+        async def search(self,*a,**kw):return []
+    monkeypatch.setattr(search_engines,'SearchManager',Manager)
+    monkeypatch.setattr(search_engines,'CrossrefSearch',Crossref)
+    monkeypatch.setattr(academic_strategy,'generate_academic_strategy',lambda q:({'english_query':'coral bleaching'},{}))
+    events=[]
+    await runtime.run_literature_search({'query':'coral bleaching'},progress=events.append)
+    title_events=[e for e in events if e['stage']=='exact_title']
+    assert title_events and not any(e.get('error_type') for e in title_events)
+
+
+@pytest.mark.asyncio
+async def test_completed_source_can_publish_before_slow_sources(monkeypatch,tmp_path):
+    from nodes.literature.tools.search_engines import SearchManager,Paper
+    manager=SearchManager(results_callback=lambda batch: received.extend(batch))
+    manager._last_search_diagnostics={};received=[]
+    class Source:
+        async def search(self,*a,**kw):
+            return [Paper(title='Research',source='crossref'),Paper(title='Wrong source',source='cnki')]
+    result=await manager._safe_search(Source(),'topic',2,'CrossRef')
+    assert len(result)==2
+    assert [p.title for p in received]==['Research']

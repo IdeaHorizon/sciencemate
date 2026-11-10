@@ -1,11 +1,13 @@
 "use client";
 
 import { FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUpDown, Bookmark, CalendarRange, ChartBar, ChevronDown, ExternalLink, Gauge, Heart, Search, Share2, X } from "lucide-react";
+import { ArrowUpDown, Bookmark, CalendarRange, ChartBar, ChevronDown, ExternalLink, Gauge, Search, Share2, X } from "lucide-react";
 import { AcademicSearchLanding } from "./AcademicSearchLanding";
 import { useAcademicSearch } from "../hooks/useAcademicSearch";
 import { usePaperSaves } from "../hooks/usePaperSaves";
 import { AC, SORT_OPTIONS, SORT_PHRASES } from "../lib/copy";
+import {sourceNotices} from "../lib/source-warning";
+import {cnkiProgressLabel} from "../lib/bilingual-search";
 import { compareAcademicPapers, type AcademicSortMode as SortMode } from "../lib/academic-search-order";
 import {
   CATEGORIES,
@@ -17,6 +19,7 @@ import {
 import { Badge, Button, Card, CardBody, CardFooter, CardHeader } from "@/shared/ui";
 import { useT } from "@/shared/i18n";
 import { pushError } from "@/stores/notification";
+import {paginationItems} from "../lib/pagination";
 import {
   api,
   literatureAssetUrl,
@@ -154,7 +157,7 @@ function RelevanceNote({paper}: {paper: LiteraturePaper}) {
   const t = useT();
   const assessment = paper.relevance_assessment;
   if (!assessment || !assessment.tier || assessment.tier === "excluded") return null;
-  return <p style={{fontSize:12, margin:"6px 0", color:assessment.tier === "background" ? "#986a24" : "var(--color-fg-muted)"}}>
+  return <p style={{fontSize:12, margin:"6px 0", color:["background", "unconfirmed"].includes(assessment.tier) ? "#986a24" : "var(--color-fg-muted)"}}>
     {assessment.detail || (assessment.tier === "background" ? t({zh:"背景参考",en:"Background reference"}) : t({zh:"直接相关",en:"Directly relevant"}))}
   </p>;
 }
@@ -323,7 +326,7 @@ export function AcademicSearch() {
       setYearMin(null);
       setYearMax(null);
       setActiveControl(null);
-      search.start({ query: value, limit: 200, source: "all" });
+      search.start({ query: value, limit: null, source: "all" });
     }
   };
   const result = search.data;
@@ -335,15 +338,22 @@ export function AcademicSearch() {
     .filter(() => !search.isError)
     .map(([key, channel]) => ({
       key,
-      detail: channel.groups?.find(group => blockedStates.includes(group.state))?.detail || channel.detail,
+      detail: (key==="cnki" && (channel.count || 0)>0
+        ? t({zh:"已获取 {count} 篇；{categories}暂未完成。",en:"Collected {count} papers; {categories} remain incomplete."},
+            {count:channel.count || 0,categories:channel.groups?.filter(group=>blockedStates.includes(group.state)).map(group=>group.label).join(t({zh:"、",en:", "})) || t({zh:"部分分类",en:"some categories"})})
+        : "") + (channel.groups?.find(group => blockedStates.includes(group.state))?.detail || channel.detail),
     }));
-  const visibleWarnings = (result?.warnings ?? []).filter(warning =>
-    !["source_no_matches", "low_relevance_candidates_excluded"].includes(String(warning.code || "")));
+  const coveredSources=channelAlerts.map(alert=>alert.key);
+  const unavailableSources=(result?.unavailable_sources || []).filter(source=>
+    !coveredSources.includes(source) && !(result?.source_counts?.[source]));
+  const visibleWarnings=sourceNotices(result?.warnings || [],{
+    coveredSources,hasRemoteResults:Boolean(result?.papers.some(p=>!["cnki","school","local"].includes(p.source.split("/")[0]))),
+  },t);
   const progressLabels: Record<string, string> = {
     strategy: t({zh:"正在准备检索…",en:"Preparing search\u2026"}), dedup: t({zh:"正在整理检索结果…",en:"Organizing results\u2026"}),
     metadata_enrichment: t({zh:"正在补充文献信息…",en:"Enriching paper metadata\u2026"}), final_abstract_enrichment: t({zh:"正在补充文献信息…",en:"Enriching paper metadata\u2026"}),
     scoring: t({zh:"正在整理检索结果…",en:"Organizing results\u2026"}), translation: t({zh:"正在准备文献信息…",en:"Preparing paper details\u2026"}),
-    finalize: t({zh:"正在整理检索结果…",en:"Organizing results\u2026"}), cnki: t({zh:"正在检索中文文献…",en:"Searching Chinese literature\u2026"}),
+    finalize: t({zh:"正在整理检索结果…",en:"Organizing results\u2026"}), cnki: cnkiProgressLabel(search.channels.cnki,t),
   };
   const categoryCounts = useMemo(() => {
     const counts = Object.fromEntries(CATEGORIES.map((item) => [item.zh, 0])) as Record<PaperCategory, number>;
@@ -392,7 +402,7 @@ export function AcademicSearch() {
     }) ?? [];
     return [...matching].sort((left, right) => compareAcademicPapers(left, right, sortMode));
   }, [category, impactFilterActive, impactMin, jcrFilter, result, selectedImpactMax, selectedYearMax, selectedYearMin, showBackground, sortMode, yearFilterActive]);
-  const pageCount = Math.min(10, Math.max(1, Math.ceil(visiblePapers.length / pageSize)));
+  const pageCount = Math.max(1, Math.ceil(visiblePapers.length / pageSize));
   const currentPage = Math.min(page, pageCount);
   const pagedPapers = visiblePapers.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   const translationPageKey = pagedPapers.map(paperKey).join("|");
@@ -485,7 +495,7 @@ export function AcademicSearch() {
           aria-label={t(AC.searchInputAria)}
         />
         <div className="academic-discovery-form-actions">
-          <span>{t({ zh: "自然语言提问 · 中英文文献检索", en: "Natural-language questions · Chinese and English literature" })}</span>
+          <span>{t({ zh: "自然语言提问 · 中英文文献检索 · 每类最多 200 篇", en: "Natural-language questions · Chinese and English literature · Up to 200 per category" })}</span>
         <Button type="submit" variant="primary" loading={search.isPending} iconLeft={<Search size={16} />}>
           {t(AC.searchButton)}
         </Button>
@@ -493,21 +503,22 @@ export function AcademicSearch() {
       </form>
       </AcademicSearchLanding>
       {search.isError && <Card accent="danger"><CardBody>{t(AC.searchFailed)}{search.error instanceof Error && search.error.message ? search.error.message : t(AC.retryLater)}</CardBody></Card>}
-      {(search.cnkiPending || channelAlerts.length > 0 || Boolean(result?.unavailable_sources?.length) || visibleWarnings.length > 0) && <Card><CardBody>
+      {(search.cnkiPending || channelAlerts.length > 0 || unavailableSources.length > 0 || visibleWarnings.length > 0) && <Card><CardBody>
         {channelAlerts.map(alert => <p key={alert.key} role="status">
           {alert.key === "cnki" ? t({zh:"知网：",en:"CNKI: "}) : t({zh:"部分文献检索暂未完成：",en:"Some sources are still pending: "})}{alert.detail}
         </p>)}
-        {search.cnkiPending && <div style={{display:"flex",gap:12,alignItems:"center"}}>
-          {!channelAlerts.some(alert => alert.key === "cnki") && <span>{t({zh:"正在检索中文文献…",en:"Searching Chinese literature\u2026"})}</span>}
+        {(search.cnkiPending || channelAlerts.some(alert => alert.key === "cnki")) && <div style={{display:"flex",gap:12,alignItems:"center"}}>
+          {!channelAlerts.some(alert => alert.key === "cnki") && <span>{cnkiProgressLabel(search.channels.cnki,t)}</span>}
           {["waiting_for_verification","error","paused","browser_closed"].includes(search.channels.cnki?.state) && <Button onClick={search.retryChinese}>{t({zh:"重试知网",en:"Retry CNKI"})}</Button>}
-          <Button onClick={search.stopWaiting}>{t({zh:"停止等待（保留后台任务）",en:"Stop waiting (keep collection running)"})}</Button>
+          <Button onClick={search.stopWaiting}>{t({zh:"停止检索（保留已获取结果）",en:"Stop search (keep collected results)"})}</Button>
         </div>}
-        {Boolean(result?.unavailable_sources?.length) && <p>{t({zh:"本次暂不可用的来源",en:"Sources unavailable in this search"})}：{result?.unavailable_sources.join("、")}</p>}
-        {visibleWarnings.map((warning,index)=>{
-          const detail = warning.message || warning.detail;
-          return typeof detail === "string" ? <p key={index}>{detail}</p> : null;
-        })}
+        {unavailableSources.length > 0 && <p>{t({zh:"本次暂不可用的来源",en:"Sources unavailable in this search"})}：{unavailableSources.join("、")}</p>}
+        {visibleWarnings.map(detail=><p key={detail}>{detail}</p>)}
       </CardBody></Card>}
+      {search.hasMore && !search.isPending && <div style={{display:"flex",gap:12,alignItems:"center"}}>
+        <span>{t({zh:"国际来源本轮检索已完成，可按需查看更多结果。",en:"This international search round is complete. More results are available on request."})}</span>
+        <Button onClick={search.loadMore}>{t({zh:"继续检索更多",en:"Find more results"})}</Button>
+      </div>}
       {search.isPending && search.progress && (
         <Card accent="info">
           <CardBody>
@@ -522,7 +533,7 @@ export function AcademicSearch() {
                 <span style={{ width: `${search.progress.percent}%` }} />
               </div>
               <p>{progressLabels[search.progress.stage] || t({zh:"正在检索文献…",en:"Searching literature\u2026"})}</p>
-              {search.progress.stage === "cnki" && <Button onClick={search.stopWaiting}>{t({zh:"停止等待（保留后台任务）",en:"Stop waiting (keep collection running)"})}</Button>}
+              <Button onClick={search.stopWaiting}>{t({zh:"停止检索（保留已获取结果）",en:"Stop search (keep collected results)"})}</Button>
             </div>
           </CardBody>
         </Card>
@@ -736,7 +747,8 @@ export function AcademicSearch() {
           {visiblePapers.length > pageSize && (
             <nav className="academic-search-pagination" aria-label={t(AC.paginationAria)}>
               <button type="button" disabled={currentPage === 1} onClick={() => setPage(currentPage - 1)}>{t(AC.previousPage)}</button>
-              {Array.from({ length: pageCount }, (_, index) => index + 1).map((item) => (
+              {paginationItems(currentPage,pageCount).map((item,index) => (
+                item==="gap" ? <span key={`gap-${index}`} aria-hidden="true">…</span> :
                 <button key={item} type="button" aria-current={currentPage === item ? "page" : undefined} className={currentPage === item ? "is-active" : ""} onClick={() => setPage(item)}>{item}</button>
               ))}
               <button type="button" disabled={currentPage === pageCount} onClick={() => setPage(currentPage + 1)}>{t(AC.nextPage)}</button>

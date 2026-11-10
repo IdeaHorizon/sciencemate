@@ -68,9 +68,13 @@ async def _project_response(db: AsyncSession, user: User, project: Project) -> d
             ProjectMembership.removed_at.is_(None),
         )))
     from app.policies import stewards_it
+    from app.services.project_repository import get_project_repository, run_in_repository_thread
+
+    root_folder = await run_in_repository_thread(get_project_repository().project_path, str(project.id))
 
     return {
         **ProjectResponse.model_validate(project).model_dump(),
+        "root_folder": str(root_folder),
         "mine": mine,
         "can_archive": await stewards_it(db, user, project),
         "capabilities": capabilities,
@@ -81,6 +85,26 @@ async def _project_response(db: AsyncSession, user: User, project: Project) -> d
         # 是对的：项目确实住在它身上。
         "home": other_homes.at_home_here(),
     }
+
+
+@router.get("/folders")
+async def project_folders(
+    path: str | None = Query(None, max_length=4096),
+    user: User = Depends(get_current_user),
+    lang: Language = Depends(language_on_screen),
+) -> dict:
+    from app.assembly import can_choose_project_folders
+    from app.services.project_locations import ProjectLocationError, list_project_folders
+    from app.services.project_repository import get_project_repository, run_in_repository_thread
+
+    if not can_choose_project_folders():
+        return {"available": False}
+    try:
+        return await run_in_repository_thread(
+            list_project_folders, get_project_repository().repository_root, path,
+        )
+    except ProjectLocationError as exc:
+        raise HTTPException(status_code=422, detail=exc.said_in(lang)) from exc
 
 
 @router.post("/", response_model=ProjectResponse, status_code=201)
@@ -96,6 +120,14 @@ async def create_project(
     记录、仓库、会话从出生起就只有一份在那儿（`RFC_ORGANISATION_IS_A_PROJECT_HOME`
     A2）。不是"本机建完同步过去"—— 两处各一份就是两个真相源。
     """
+    from app.assembly import can_choose_project_folders
+
+    if data.root_folder is not None and (data.home or not can_choose_project_folders()):
+        raise HTTPException(status_code=422, detail=say({
+            "zh": "组织项目的存储位置由服务器管理。请为本机项目选择根文件夹。",
+            "en": "Organisation project storage is managed by the server. Choose a root folder for a local project.",
+        }, lang))
+
     if data.home:
         from app.services import other_homes
 
@@ -106,19 +138,30 @@ async def create_project(
             raise HTTPException(status_code=refused.status, detail=refused.said_in(lang)) from refused
 
     from app.services.project_service import create_project
+    from app.services.project_locations import ProjectLocationError
+    from app.services.project_repository import ProjectRepositoryError
 
-    result = await create_project(
-        db=db,
-        owner_id=user.id,
-        name=data.name,
-        description=data.description,
-        research_domain=data.research_domain,
-        entry_type=data.entry_type or EntryType.FUZZY_IDEA,
-        operation_mode=data.operation_mode,
-        reporting_level=data.reporting_level,
-        preferred_model=data.preferred_model,
-        lang=lang,
-    )
+    try:
+        result = await create_project(
+            db=db,
+            owner_id=user.id,
+            name=data.name,
+            description=data.description,
+            research_domain=data.research_domain,
+            entry_type=data.entry_type or EntryType.FUZZY_IDEA,
+            operation_mode=data.operation_mode,
+            reporting_level=data.reporting_level,
+            preferred_model=data.preferred_model,
+            lang=lang,
+            root_folder=data.root_folder,
+        )
+    except ProjectLocationError as exc:
+        raise HTTPException(status_code=422, detail=exc.said_in(lang)) from exc
+    except (OSError, ProjectRepositoryError) as exc:
+        raise HTTPException(status_code=422, detail=said_of(exc, lang, otherwise={
+            "zh": "无法在这个位置创建项目，请检查文件夹权限和磁盘空间后重试。",
+            "en": "Could not create the project here. Check folder permissions and free disk space, then try again.",
+        })) from exc
     return await _project_response(db, user, result["project"])
 
 
