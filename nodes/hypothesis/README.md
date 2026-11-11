@@ -101,7 +101,7 @@ experiment 的结论绑定、本节点的收尾自检全都调它。一个问题
 - `validate_hypothesis_outputs(checks=[…])` —— 可只跑其中几项；`research_questions_declared` / `research_questions_covered_by_plan` 是所有科研范式的共性底线，冻结闸会在不可逆那一刻再兜一次
 - `read_research_state` / `update_research_state` —— 版本化研究状态；后续轮的接续点与裁决账
 - `audit_user_goal_alignment` —— 硬门（**freeze 前**）：最终 prereg + research_plan 必须覆盖全部 must_cover 支柱
-- `audit_definition_fidelity` —— 硬门（**freeze 前**）：prereg/plan 不得改写用户给定分类名与定义
+- `audit_definition_fidelity` —— 仅对本次请求显式 locked_taxonomy / operation_categories（含 source、request 作用域）核对定义；自由文本解析只作候选，旧缓存与工具参数不产生约束，无显式约束时不适用。恢复同一 run 时可复用原生首轮输入收据，不改历史协议或追认历史研究。
 - `audit_threshold_grounding` —— 硬门（**freeze 前**）：数值 threshold 须有 literature/theory/pilot 等依据 + 科学含义；定性/存在性（qualitative|exists|not_exists）写清判据即可，勿硬编伪精确数字
 - `audit_comparison_protocol` —— 硬门（**freeze 前**）：跨任务须含共同样本/分母/可比较操作/故障处理/**指标与定义统一审查**；异构另须行为映射
 - `audit_resource_feasibility` —— 硬门（**freeze 前**）：多模型/多人标注/大规模人工审计/多完整 benchmark 等须 confirmed 有来源或 assumed 有降级

@@ -2,6 +2,7 @@
 
 - 每条 BibTeX 必须有可解析的 doi 或 arXiv 编号或 url；三者都没有的条目不写。
 - 只写你确定存在的文献。作者、年份、题名、刊物必须与真实出版物一致；不确定的宁可不写。
+- 核验状态见 `read_bibliography`：`invalid` 是无效标识，`mismatch` 是元数据不符，`unavailable` 是暂不可核验，不能写成已核验或不存在。网络不可用时保留草稿并在作者备注说明；`resolved` 也不证明文献支持具体句子，URL 核验仅证明可达。
 - key 用 `作者姓小写年份关键词`，如 `mensh2017rules`。
 - 类型：期刊 @article，会议 @inproceedings，预印本 @misc 加 eprint/eprinttype=arXiv，软件与网页 @misc 加 url 与 urldate。
 - 中文文献用 @article 并给 language={zh}。

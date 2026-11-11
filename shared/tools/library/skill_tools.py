@@ -282,7 +282,10 @@ async def _load_skill(
         }
 
     # ── asset 分支 ───────────────────────────────────────────────────────────
-    if asset not in skill.assets:
+    # Logical asset IDs use POSIX separators; older Windows snapshots used '\\'.
+    # Normalize both sides, retaining the allowlist and resolved containment checks.
+    asset = asset.replace("\\", "/")
+    if asset not in {p.replace("\\", "/") for p in skill.assets}:
         return {
             "status": "error",
             "error": (

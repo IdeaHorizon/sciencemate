@@ -8,10 +8,11 @@
 
 1. read_artifact 拿 manuscript 全文
 2. read_external_artifact 拉 lineage：experiment_log（含 verdict reasoning）、pre_registration、survey_report（如有）
-3. 读 manuscript metadata 里的机械事实：`hard_lines_passed`（12 条机械硬线：标题块、过程词汇、空引用、图表编号与图题、
+3. 读 manuscript metadata 里的机械事实：`hard_lines_passed`（标题块、空引用、图表编号与图题、
    参考文献闭合、简报硬性要求、版面、图内语言、图内字号、乱码、图文件对账、成品字号）、`referee_verdict` / `referee_round` /
    `referee_pdf_matches`（写作节点内部审读官对**这一版 PDF** 的结论）、`pages`、`pdf_path`、`author_notes_path`、`forced` / `force_reason`。
    `hard_lines_passed=false` 或 `referee_pdf_matches=false` 的稿不是可交付状态，先记 critical 再读正文
+   `bibliography_verification` 保存交付时的书目事实；unavailable 是未知，旧 resolved 只证明标识可达，不能升级成题名/作者已核对或引用支持。未知本身不构成草稿拒绝条件。
 4. **重建"用户到底要什么"**（判 Responsiveness 维度的材料，缺了就是无材料空判）：
    - `read_artifact('research_state__research_state')` 拿注册的研究问题（Q1/Q2…）及各自裁决；
    - `read_file` 读项目根的 `PROJECT.md`（原始 brief）；
@@ -106,7 +107,7 @@ claim 是否都引了 chunk_id / claim_id？数字和具体实验细节是否能
 - 抽查 3-5 个 claim 引用，get_kb_record 验内容是否对应
 - Methods 里出现的每个方法参数都要能在 experiment_log/clean_results/pre_registration/survey_report/KB 中找到来源（清单见上面 Methods Reviewer 那条）
 - 引了 KB claim 的稿件：PDF 可见正文中若暴露 raw `claim_<hex>`，标 major；源码有不可追溯的 claim，标 critical
-- 正文出现「上游」「artifact」「not provided」「占位」「待补充」这类过程话 → major（稿件只面向期刊读者；缺口写在作者备注和正文的局限里，用读者语言）
+- 核对正文是否把尚未执行的工作写成已完成、是否承诺了未提供的结果/图表/引用；据具体事实与影响给意见。作者待办放备注，科学局限留正文；不按术语本身判缺陷。
 - 如果 manuscript 写了上游没有提供的具体细节，标 critical concern；若只是缺失但明确写入 limitations，可接受
 - 常见领域默认值也不例外：integrator、cutoff、timestep、trajectory length、temperature convergence criterion、software version 等没有上游来源时不得写成确定事实
 
@@ -116,7 +117,7 @@ claim 是否都引了 chunk_id / claim_id？数字和具体实验细节是否能
 - 必须检查：种子 / hyperparameter / randomization scheme / 数据预处理 / 评估 metric
 - 上游明确提供但 manuscript 漏写：缺一项算 minor concern，缺 2+ 算 major
 - 上游没有提供而 manuscript 写成确定事实：直接 critical concern，并推荐 revise
-- 正确做法是放入 limitations 用读者语言写明未做/未知，并在作者备注「缺口与未兑现」记一条，而不是猜测，也不在正文写「not provided」
+- 正确做法是放入 limitations 用读者语言写明未做/未知，并在作者备注「缺口与未兑现」记一条，不猜测缺失事实。
 
 ### 5. 逻辑链 (logical_chain)
 

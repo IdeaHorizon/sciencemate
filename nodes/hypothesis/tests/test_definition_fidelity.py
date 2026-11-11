@@ -7,7 +7,7 @@ from nodes.hypothesis.tools.definition_lock import (
     _audit_definition_fidelity,
     assess_definition_fidelity,
     build_definition_lock,
-    extract_locked_definitions_from_text,
+    extract_definition_candidates_from_text,
 )
 from nodes.hypothesis.tools.dialogue_context import build_dialogue_context
 from nodes.hypothesis.tools.output_validator import _validate_hypothesis_outputs
@@ -23,7 +23,7 @@ from pathlib import Path
 import tempfile
 
 
-def test_extract_locked_definitions_from_heading() -> None:
+def test_extract_candidates_from_heading() -> None:
     text = """
 研究 proposal
 
@@ -35,7 +35,7 @@ def test_extract_locked_definitions_from_heading() -> None:
 
 然后做实验。
 """
-    locked = extract_locked_definitions_from_text(text)
+    locked = extract_definition_candidates_from_text(text)
     labels = [e["label"] for e in locked]
     assert "感知操作" in labels
     assert "规划操作" in labels
@@ -94,7 +94,10 @@ H1: 感知操作延迟下降将提升规划操作成功率。
 
 def test_parse_research_goal_exposes_locked_definitions() -> None:
     parsed = parse_research_goal(
-        {},
+        {"locked_taxonomy": [
+            {"label": "感知操作", "definition": "采集观测"},
+            {"label": "执行操作", "definition": "调用工具"},
+        ]},
         dialogue={
             "user_prompt": "x",
             "locked_definitions": [
@@ -111,7 +114,7 @@ def test_parse_research_goal_exposes_locked_definitions() -> None:
     assert any("分类" in c or "locked" in c for c in parsed["checklist"])
 
 
-def test_dialogue_context_locks_taxonomy() -> None:
+def test_dialogue_context_exposes_text_taxonomy_as_candidates() -> None:
     state = State.new(node_type="hypothesis", base_dir=Path(tempfile.mkdtemp()))
     ctx = build_dialogue_context(state, {
         "user_prompt": (
@@ -120,16 +123,16 @@ def test_dialogue_context_locks_taxonomy() -> None:
             "- 规划操作：生成动作序列\n"
         ),
     })
-    labels = ctx["locked_labels"]
+    assert ctx["locked_labels"] == []
+    labels = [e["label"] for e in ctx["definition_candidates"]]
     assert "感知操作" in labels
     assert "规划操作" in labels
 
 
 def test_validate_fails_definition_fidelity_on_rewrite() -> None:
     state = _make_state()
-    state.hook_state["research_goal_parsed"] = {
-        "must_cover_themes": [],
-        "locked_definitions": [
+    state.hook_state["node_inputs"] = {
+        "locked_taxonomy": [
             {"label": "感知操作", "definition": "从环境采集观测并写入工作记忆"},
             {"label": "规划操作", "definition": "基于目标生成下一步动作序列"},
             {"label": "执行操作", "definition": "调用工具并返回可观测结果"},
@@ -169,8 +172,8 @@ def test_validate_fails_definition_fidelity_on_rewrite() -> None:
 
 def test_audit_definition_fidelity_tool_pass() -> None:
     state = _make_state()
-    state.hook_state["research_goal_parsed"] = {
-        "locked_definitions": [
+    state.hook_state["node_inputs"] = {
+        "locked_taxonomy": [
             {"label": "感知操作", "definition": "从环境采集观测并写入工作记忆"},
             {"label": "规划操作", "definition": "基于目标生成下一步动作序列"},
         ],

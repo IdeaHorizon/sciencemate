@@ -9,7 +9,7 @@ repository into authorized storage:
 2. create an empty staging directory inside an already-authorized write root;
 3. run the downloader as a one-shot networked process whose only writable root is
    that staging directory;
-4. verify the resulting file/tree on the host control plane; and
+4. verify the resulting file/tree using its execution target's filesystem semantics; and
 5. atomically import it into the requested authorized destination.
 
 Stated so nobody relies on more (#770): on the native backends the acquisition
@@ -20,14 +20,12 @@ filtering is this tool's own pre-request check; the real egress wall is Core's.
 
 from __future__ import annotations
 
-import hashlib
 import ipaddress
 import json
 import math
 import os
 import re
 import shutil
-import stat
 import subprocess
 import tempfile
 import uuid
@@ -41,6 +39,10 @@ from core.state import State
 from core.tool_registry import ToolDefinition, register_tool
 from shared.lib.cancellable_subprocess import spawn_and_wait
 
+from .resource_tree_inventory import (
+    _MAX_TREE_ENTRIES, TreeInventoryError, _sha256_file, _tree_inventory,
+)
+from . import resource_tree_inventory
 from .path_roles import (
     IMMUTABLE_ROLES,
     experiment_output_dir,
@@ -51,7 +53,6 @@ _DEFAULT_MAX_BYTES = 512 * 1024**2
 _MAX_MAX_BYTES = 8 * 1024**3
 _DEFAULT_TIMEOUT_SECONDS = 900
 _MAX_TIMEOUT_SECONDS = 3600
-_MAX_TREE_ENTRIES = 100_000
 #: 文件下载逐跳核对重定向的上限跳数；git 子模块逐层核对的上限层数（#770）。
 _MAX_REDIRECT_HOPS = 5
 _MAX_SUBMODULE_DEPTH = 8
@@ -363,63 +364,6 @@ def _resolve_destination(
     return candidate, root
 
 
-def _sha256_file(path: Path) -> tuple[str, int]:
-    digest = hashlib.sha256()
-    size = 0
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-            size += len(block)
-    return digest.hexdigest(), size
-
-
-def _tree_inventory(root: Path) -> tuple[str, int, int]:
-    """Hash a downloaded tree without following any downloaded symlink."""
-    digest = hashlib.sha256()
-    size = 0
-    entries = 0
-    resolved_root = root.resolve(strict=True)
-
-    def visit(directory: Path) -> None:
-        nonlocal size, entries
-        for entry in sorted(os.scandir(directory), key=lambda item: item.name):
-            # Git's commit is the reproducibility identity.  Administrative
-            # files contain clone-local reflog timestamps and would make a
-            # checkout content hash nondeterministic.
-            if entry.name == ".git":
-                continue
-            path = Path(entry.path)
-            relative = path.relative_to(root).as_posix()
-            info = entry.stat(follow_symlinks=False)
-            entries += 1
-            if entries > _MAX_TREE_ENTRIES:
-                raise AcquisitionError(
-                    f"下载树超过 {_MAX_TREE_ENTRIES} 个条目；已丢弃，未导入 destination"
-                )
-            mode = stat.S_IMODE(info.st_mode)
-            if stat.S_ISLNK(info.st_mode):
-                target = os.readlink(path)
-                target_path = Path(target)
-                if target_path.is_absolute():
-                    raise AcquisitionError(f"下载树含绝对 symlink：{relative} -> {target}")
-                resolved_target = (path.parent / target_path).resolve(strict=False)
-                if not resolved_target.is_relative_to(resolved_root):
-                    raise AcquisitionError(f"下载树含越界 symlink：{relative} -> {target}")
-                digest.update(f"L\0{relative}\0{mode:o}\0{target}\0".encode())
-            elif stat.S_ISDIR(info.st_mode):
-                digest.update(f"D\0{relative}\0{mode:o}\0".encode())
-                visit(path)
-            elif stat.S_ISREG(info.st_mode):
-                file_hash, file_size = _sha256_file(path)
-                size += file_size
-                digest.update(f"F\0{relative}\0{mode:o}\0{file_size}\0{file_hash}\0".encode())
-            else:
-                raise AcquisitionError(f"下载树含不支持的特殊文件：{relative}")
-
-    visit(root)
-    return digest.hexdigest(), size, entries
-
-
 def _git_head(repository: Path) -> str:
     result = subprocess.run(
         ["git", "--no-optional-locks", "-C", str(repository), "rev-parse", "HEAD"],
@@ -437,12 +381,19 @@ def _git_head(repository: Path) -> str:
     return commit
 
 
-def _copy_into_destination(source: Path, destination: Path, *, is_tree: bool) -> None:
+def _copy_into_destination(
+    source: Path, destination: Path, *, is_tree: bool, move_tree: bool = False,
+) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() or destination.is_symlink():
         raise AcquisitionError(
             f"destination 已存在，受控下载不会覆盖：{destination}。请换一个新路径。"
         )
+    if move_tree:
+        # On Windows, rename to a new name on the same volume preserves DrvFs
+        # symlinks. A host copy would reopen those entries as ordinary files.
+        source.rename(destination)
+        return
     temporary = destination.parent / f".{destination.name}.hf-import-{uuid.uuid4().hex}"
     try:
         if is_tree:
@@ -961,6 +912,7 @@ async def _fetch_resource(
             async def _spawn(
                 argv: list[str], url: str = source_url, *,
                 network: bool = True, ok_codes: tuple[int, ...] = (0,),
+                readonly_roots: tuple[Path, ...] = (),
             ) -> bytes:
                 is_curl = network and argv[:1] == ["curl"]
                 attempts = _MAX_CURL_ATTEMPTS if is_curl else 1
@@ -982,7 +934,7 @@ async def _fetch_resource(
                         timeout=remaining,
                         cwd=str(staging),
                         writable_roots=[staging],
-                        readonly_roots=[],
+                        readonly_roots=list(readonly_roots),
                         sandbox_limits=limits,
                         network_access=network,
                         sandbox_environment=(
@@ -1019,7 +971,7 @@ async def _fetch_resource(
                         (f"受控 {kind} 下载失败（status={status}, rc={returncode}）：{detail}\n"
                          + _network_failure_guidance(returncode, raw_detail, url, state))
                         if network else
-                        (f"受控 {kind} 取回之后的本地 git 步骤失败（未联网，status={status}, "
+                        (f"受控 {kind} 取回之后的本地验证失败（未联网，status={status}, "
                          f"rc={returncode}）：{detail}")
                     )
                 raise AssertionError("curl retry loop exhausted without a result")
@@ -1109,19 +1061,42 @@ async def _fetch_resource(
             else:
                 if not payload.is_dir() or payload.is_symlink():
                     raise AcquisitionError("Git 下载结果不是普通目录")
-                commit = _git_head(payload)
+                from .bash_paths import uses_wsl_paths
+
+                wsl_checkout = uses_wsl_paths()
+                if wsl_checkout:
+                    raw_commit = await _spawn(
+                        ["git", "--no-optional-locks", "-C", str(payload), "rev-parse", "HEAD"],
+                        network=False,
+                    )
+                    commit = raw_commit.decode("ascii").strip().lower()
+                    if not _HEX_DIGEST_RE.fullmatch(commit):
+                        raise AcquisitionError("Git 下载完成但无法解析 HEAD")
+                else:
+                    commit = _git_head(payload)
                 if expected_git and commit != expected_git:
                     raise AcquisitionError(
                         f"Git commit 不匹配：expected={expected_git}, actual={commit}；已丢弃"
                     )
-                tree_hash, size, entries = _tree_inventory(payload)
+                if wsl_checkout:
+                    inventory_script = Path(resource_tree_inventory.__file__).resolve()
+                    output = await _spawn(
+                        ["python3", "-I", "-B", str(inventory_script), str(payload)],
+                        network=False, readonly_roots=(inventory_script,),
+                    )
+                    tree_hash, size, entries = json.loads(output)
+                else:
+                    try:
+                        tree_hash, size, entries = _tree_inventory(payload)
+                    except TreeInventoryError as exc:
+                        raise AcquisitionError(str(exc)) from exc
                 if size > max_bytes:
                     raise MaxBytesExceeded(
                         max_bytes,
                         max_bytes_source,
                         actual_size_bytes=size,
                     )
-                _copy_into_destination(payload, target, is_tree=True)
+                _copy_into_destination(payload, target, is_tree=True, move_tree=wsl_checkout)
                 result = {
                     "status": "success",
                     "kind": kind,

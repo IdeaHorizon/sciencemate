@@ -2459,6 +2459,19 @@ def validate_plan(raw: dict[str, Any]) -> dict[str, Any]:
         errors.extend(validate_preprocessing_request(plan["preprocessing_request"]))
     if plan.get("preprocessing_work_order"):
         errors.extend(validate_preprocessing_work_order(plan["preprocessing_work_order"]))
+        requested_ids = {
+            str(asset_id)
+            for unit in plan["preprocessing_work_order"].get("work_units") or []
+            if isinstance(unit, dict)
+            for asset_id in unit.get("requested_asset_ids") or []
+        }
+        deliverable_ids = {str(item.get("id")) for item in plan["required_deliverables"]
+                           if isinstance(item, dict)}
+        if requested_ids - deliverable_ids:
+            errors.append(
+                "request-bound work order assets missing from required_deliverables: "
+                f"{sorted(requested_ids - deliverable_ids)}"
+            )
     if review_profile not in {"plan_bound", "request_bound"}:
         errors.append("review_profile must be plan_bound or request_bound")
     if not plan["task_summary"]:

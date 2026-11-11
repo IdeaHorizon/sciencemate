@@ -12,7 +12,7 @@ import {
   Info,
   Monitor,
   Search,
-  ShieldCheck,
+  Server,
   SlidersHorizontal,
   UserRound,
   Wrench,
@@ -38,6 +38,7 @@ const PERSONAL_ITEMS: SettingsNavigationItem[] = [
 ];
 
 const RESEARCH_ITEMS: SettingsNavigationItem[] = [
+  { href: "/settings/runtimes", label: { zh: "运行环境", en: "Runtime environments" }, description: { zh: "本机与远程服务器", en: "This computer and remote servers" }, keywords: "ssh server runtime remote backend 服务器 远程 后端 运行 密钥", Icon: Server },
   { href: "/settings/cnki", label: { zh: "知网采集", en: "CNKI collection" }, description: { zh: "后台检索与每日采集", en: "Managed search and daily collection" }, keywords: "cnki 知网 采集 中文", Icon: Search },
   { href: "/settings/skills", label: { zh: "技能库", en: "Skills" }, description: { zh: "导入与管理研究技能", en: "Import and manage research skills" }, keywords: "skill skills import 技能 导入", Icon: BookOpen },
   { href: "/settings/research", label: { zh: "个人指令", en: "Personal instructions" }, description: { zh: "证据要求与回答偏好", en: "Evidence standard and response preferences" }, keywords: "agent citation language instructions reproducibility 指令 偏好", Icon: SlidersHorizontal },

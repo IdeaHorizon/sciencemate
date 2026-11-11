@@ -16,7 +16,7 @@ tools_used:
   - curator_scan
   - draft_knowledge_card
   - propose
-expected_outcome: ORG_MANIFEST.md 更新 + 若干终态晋升候选 + 跨项目 pattern 报告
+expected_outcome: 若干终态晋升候选、持久化 proposals 与 handoff 中的跨项目 pattern 汇总
 status: validated
 relevant_concepts: []
 ---
@@ -89,8 +89,8 @@ search_kb(entity_type='claims', scope='org', limit=200)
 ## 产出
 
 1. 跨项目 propose 列表（org_promotion / dead_end_warning / methodological synthesis）
-2. 更新 ORG_MANIFEST.md（手动 trigger 或由 manifest auto-gen skill 接管）
-3. 写一份 cross_project_report artifact 记录扫描结果
+2. ORG_MANIFEST.md 由现有生成机制维护，不从此 skill 直接写文件。
+3. handoff 汇总扫描结果、来源与 proposal id，随 run transcript 保存；_curator 不产 artifact。
 
 ## Pitfalls
 

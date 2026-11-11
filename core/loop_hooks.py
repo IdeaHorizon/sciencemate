@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .harness import NodeHarness
@@ -73,6 +73,9 @@ class LoopHook:
     # on_turn_start 又够不到最后那一轮。
     on_before_finish: Callable[[HookContext], Any] | None = None
     emits: tuple[str, ...] = ()
+    # A current view rebuilt on each on_turn_start evaluation. None means an
+    # event/delta: it belongs to history and must not replace earlier events.
+    context_slot: str | None = None
 
 
 _HOOKS: dict[str, LoopHook] = {}
@@ -129,7 +132,7 @@ def _as_framework_notices(msgs: list[LLMMessage]) -> list[LLMMessage]:
         elif is_framework_notice(m):
             out.append(m)          # 已经是信封（幂等，别套两层）
         else:
-            out.append(framework_notice(m.content or ""))
+            out.append(replace(framework_notice(m.content or ""), context_slot=m.context_slot))
     return out
 
 
@@ -144,10 +147,19 @@ async def run_on_turn_start(hooks: list[LoopHook], ctx: HookContext) -> list[LLM
         except Exception as e:
             log.warning("Hook %r on_turn_start 失败：%s", h.name, e)
             continue
-        if isinstance(result, list):
-            injected.extend(result)
-        elif isinstance(result, LLMMessage):
-            injected.append(result)
+        new = result if isinstance(result, list) else [result] if isinstance(result, LLMMessage) else []
+        if h.context_slot:
+            from .conversation_store import render_context_change
+
+            # No parallel snapshot registry: the slot lives on its rendered
+            # message, survives persistence, and expires even when now empty.
+            updated = [m for m in ctx.messages
+                       if not (is_framework_notice(m) and m.context_slot == h.context_slot)]
+            render_context_change(ctx.state, ctx.messages, updated,
+                                  turn=ctx.turn, source=h.name)
+            new = [replace(m, context_slot=h.context_slot)
+                   if not m.tool_calls and m.role != "tool" else m for m in new]
+        injected.extend(new)
     return _as_framework_notices(injected)
 
 

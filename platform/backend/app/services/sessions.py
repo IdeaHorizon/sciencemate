@@ -968,7 +968,7 @@ async def interject_active_session(
     text: str,
     author_user_id: str,
     run_id: str | None,
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     """跑轮中插话的**唯一**落地路径（chat 入口分流与 /interrupt 端点共用）。
 
     两步，顺序有讲究：
@@ -1008,22 +1008,30 @@ async def interject_active_session(
         actor_user_id=author_user_id,
         run_id=run_id,
     )
+    message_id = str(message.id)
+    project_id, session_id = str(session.project_id), str(session.session_id)
+    # Commit the user's input before notifying its consumer. The shared socket
+    # reader may ingest a transcript (and allocate a session sequence) before
+    # routing the acknowledgement. Holding this write transaction while awaiting
+    # that reader deadlocks SQLite and can kill an otherwise healthy worker.
+    # An unknown delivery outcome must not roll back input the worker may have seen.
+    await db.commit()
     # message_id 随投递件走：worker 的回执和答复靠它锚回这条消息 —— 否则答复
     # 只能挂进 run 的活动窗口，渲染在提问上面（2026-08-18 实测）。
     receipt = await harness_session_manager.deliver(
-        project_id=str(session.project_id),
-        session_id=str(session.session_id),
+        project_id=project_id,
+        session_id=session_id,
         kind="message",
         text=clean,
         author=author_user_id,
-        message_id=str(message.id),
+        message_id=message_id,
     )
     # 连同**这条消息的 id** 一起交出去：回执要锚回它，否则事后对不上
     # 「平台那句话是在回应谁」（决策呈递那次的教训 —— 编一个 id 当身份，
     # 两边就再也对不上了）。
     return (
         str(receipt.get("item_id") or ""),
-        str(message.id),
+        message_id,
         str(receipt.get("occupancy") or ""),
     )
 

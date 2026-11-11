@@ -1,4 +1,4 @@
-"""打一个 Mac 安装包：双击 `.app` 检测已有版本，安装或升级后出窗口。
+"""打一个 Mac 安装包：拖进“应用程序”，或双击 `.app` 检测已有版本并安装升级。
 
 ## 判据
 
@@ -95,8 +95,8 @@ BUNDLE_ID = "com.ieit.sciencemate"
 PYTHON_VERSION = "3.14"
 
 #: harness 里要随包走的**包**。`platform_runtime` 是 worker 的入口，
-#: `core/ shared/ nodes/` 是它用到的全部包。`tests/ scripts/ docs/` 不在其中
-#: —— 装机的人不跑它们。
+#: `core/ shared/ nodes/` 是它用到的全部包。测试、脚本和说明文档不随包走；
+#: docs/ 中的运行数据由 git_tracked.carry_the_runtime_files 单独带上。
 HARNESS_PACKAGES = ("core", "shared", "nodes")
 
 #: worker 的入口模块。仓库根上还有别的顶层模块（`chat.py` 等），它们**不写在
@@ -162,6 +162,7 @@ def stage_into_the_package(interface: Path) -> None:
             raise SystemExit(f"harness 少了 {package}/ —— 装出来的包跑不了 worker")
     if HARNESS_ENTRY not in shipped:
         raise SystemExit(f"harness 少了 {HARNESS_ENTRY}（git 没跟踪它）—— 装出来的包跑不了 worker")
+    git_tracked.carry_the_runtime_files(REPO, staged_harness)
     modules = git_tracked.carry_the_top_level_modules(REPO, staged_harness)
     if modules:
         print(f"  顺带需要的顶层模块：{', '.join(sorted(modules))}")
@@ -176,7 +177,7 @@ def stage_into_the_package(interface: Path) -> None:
 def unstage_from_the_package() -> None:
     """把装配进去的东西撤走。见 `main()` 里那段注释。"""
     for name in ("static_ui", "harness",
-                 payload_release.VENDOR_DIR, payload_release.SERVER_BUNDLE_DIR):
+                 payload_release.VENDOR_DIR, payload_release.SERVER_BUNDLE_DIR, payload_release.RUNTIME_BUNDLE_DIR):
         shutil.rmtree(BACKEND / "app" / name, ignore_errors=True)
 
 
@@ -207,7 +208,8 @@ def build_the_wheel() -> Path:
     import zipfile
 
     names = zipfile.ZipFile(wheel).namelist()
-    for needed in ("app/harness/core/agent_loop.py", "app/static_ui/index.html"):
+    for needed in ("app/harness/core/agent_loop.py", "app/static_ui/index.html",
+                   "app/harness/docs/xiaohongshu_journal_map.tsv"):
         if needed not in names:
             raise SystemExit(f"wheel 里没有 {needed} —— 装出来的包会缺半边")
     print(f"  {wheel.name}（{len(names)} 个文件，{wheel.stat().st_size // 1024} KB）")
@@ -559,9 +561,13 @@ def make_the_dmg(app: Path, edition: str = "personal") -> Path:
         # 是同一个 inode，`cp -R` 会把它们展开成 143 份实体副本 —— 实测 dmg 因此
         # 从 213 MB 涨到 499 MB，比它装的那个 .app（409 MB）还大。
         run(["ditto", str(app), str(staging / app.name)])
+        # Finder 拖拽安装和双击安装共存；快捷方式必须指向系统目录，不能打进一份目录副本。
+        os.symlink("/Applications", staging / "Applications")
         (staging / "Install.txt").write_text(
-            "双击 ScienceMate，然后选择“安装并打开”。安装器会检测已有版本；新版覆盖升级，相同或更高版本会跳过。\n\n"
-            "Double-click ScienceMate, then choose Install and Open. Setup upgrades the existing installation "
+            "将 ScienceMate 拖到 Applications（应用程序）即可安装，然后从“应用程序”打开。\n"
+            "也可以双击 ScienceMate，选择“安装并打开”；安装器会检测已有版本，新版覆盖升级，相同或更高版本会跳过。\n\n"
+            "Drag ScienceMate to Applications to install, then open it from Applications.\n"
+            "Alternatively, double-click ScienceMate and choose Install and Open. Setup upgrades the existing installation "
             "and skips installation when the same or a newer version is already installed.\n",
             encoding="utf-8",
         )
@@ -590,7 +596,7 @@ HOW_TO_INSTALL = """
                 Windows：  irm {url}/install.ps1 | iex
      两条都不经浏览器，于是文件不带来源标记：Gatekeeper / SmartScreen 根本不会去
      问它签没签名。共享盘拷过来也一样。
-  B. 浏览器下 dmg → 双击 ScienceMate →「安装并打开」（自动检测并升级已有版本）。第一次打开会被拦（未签名）：
+  B. 浏览器下 dmg → 拖进「应用程序」后打开；也可以双击 ScienceMate →「安装并打开」（自动检测并升级已有版本）。第一次打开会被拦（未签名）：
      系统设置 → 隐私与安全性 → 拉到底「仍要打开」→ 再确认一次。每台机器一次。
      Windows 浏览器下 Setup.exe → 「Windows 已保护你的电脑」→ 更多信息 → 仍要运行。
 """
@@ -746,7 +752,9 @@ def the_extras_for_the_payload(app: Path, windows_shell_dir: str | None) -> dict
 #: （`payload_release.stage_the_pro_only_things` —— 自更新上来的安装只能从 `app/` 拿到它们）。
 #: 它们是构建产物、不在 git 里，所以按名字点出来；`app/` 里除此之外只收 git 跟踪的文件。
 #: 界面和 harness 也是装配进去的，但它们走载荷的第一个归档（各自是一个更新单元），不在这里。
-BUILT_INTO_THE_BACKEND_APP = (payload_release.VENDOR_DIR, payload_release.SERVER_BUNDLE_DIR)
+BUILT_INTO_THE_BACKEND_APP = (
+    payload_release.VENDOR_DIR, payload_release.SERVER_BUNDLE_DIR, payload_release.RUNTIME_BUNDLE_DIR,
+)
 
 
 def the_backend_app_for_the_payload() -> Path:

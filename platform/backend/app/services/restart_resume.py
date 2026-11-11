@@ -1,71 +1,27 @@
-"""连续档研究被后端重启打断后，自动从断点续跑 —— 不需要人再开口（Layer B）。
+"""Reconcile continuous work using existing commands, workers and checkpoints.
 
-## 为什么存在（wangd 2026-08-24）
-
-后端重部署会 SIGKILL worker，把一条正在跑的 continuous 研究打断成僵尸。此前平台
-对此的态度是"重启就是中断，等人再发一条消息"（`main.py` 那段注释）——可 continuous
-档的全部意义就是**不需要人**。让"重启"这件纯运维的事把锅甩给用户，正是这里要改的。
-
-## 为什么不是 startup_resume 那个被删掉的补丁
-
-那一版用 `op=turn` 伪造一条**用户消息**推进（"请继续"），假消息进了用户的聊天
-记录，wangd 明确反对。这里两点不同：
-
-  1. **只对 continuous 档**。它的驱动本来就是平台自己的续轮循环（run_unattended），
-     不是用户消息 —— 续跑它天经地义，不是给别人的会话硬塞话。
-  2. 那条驱动消息记成 **`role="system"`**（`execute_local_turn(system_continuation=True)`），
-     显示成系统注记，不冒充用户说过的话。
-
-真正的终极解仍是"worker 不跟着后端死"（RFC 异步运行时 C 层）；在那之前，这一层
-让 continuous 研究**扛得住**重启，而不是每次重启都烂在半路。
-
-## 判据要严 —— 误驱动的代价是烧钱（[[project_hypothesis_node_token_runaway]]）
-
-一条 run 要被自动续跑，五个条件缺一不可：
-
-  · 顶层 run（parent_run_id 为空）——子节点跟着父 run 续，不单独驱动
-  · 现算状态是 `stale_unknown`（`run_liveness.observed_status` 判它运行时真丢了：
-    attempt 已结束 + 没有活 binding + 租约过期）——不是"看着像停了"
-  · 见证写着 `staleReason == "app_server_restart"`——是重启造成的，不是别的
-  · 项目是 continuous 档（autonomous + 预授权全部高危 `"*"`）——只有这一档
-    "不需要人"，assisted / 普通 autonomous 停下等人是**对的**，不能替它做主
-  · 最近才被打断（`updated_at` 在窗口内）——别复活几天前就该放弃的老僵尸
-
-再叠一层进程内幂等：正在续的 run 不重复驱动（`_resuming`）。有活 binding 的 run
-天然不会被选中（那样 observed_status 就不是 stale_unknown 了）。
+One durable run.continue command binds a successor to its predecessor. Command
+updated_at is the bounded dispatch claim until a worker/attempt takes ownership;
+there is no recovery table, job copy, or second scheduler.
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from uuid import NAMESPACE_URL, uuid5
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
-from app.models.execution import ASSERTS_ACTIVE_WORK, Run, RunStatus
+from app.config import settings
+from app.models.execution import ASSERTS_ACTIVE_WORK, Command, Run, RunStatus
+from app.services.run_liveness import ACTIVITY_LEASE_SECONDS
 
 logger = logging.getLogger(__name__)
-
-#: 只续"最近还在真跑"的。恒真：restart 打断的那条，最后一次真实进展就在不久前。
-#:
-#: ⚠️ recency 判据**不能**看 `run.updated_at`：`mark_orphaned_harness_runs` 写见证
-#: 的那一刻把它顶到 now —— 于是几天前就停了的老僵尸在启动后看起来全都"刚更新过"。
-#: 2026-08-24 本地实测：一次重启标了 25 条孤儿，用 updated_at 判据当场误续 3 条旧
-#: 测试 run（[[feedback_run_it_to_find_the_seam]]：真跑一次才照出，单测里 updated_at
-#: 是手设的，照不出这条缝）。
-#:
-#: 正解看 attempt 的 `heartbeat_at` —— 它只在 worker 产出**真实进展**时被续
-#: （D10，execution_ingest._touch_activity_lease），mark_orphaned 一个字不碰。真被
-#: restart 打断的 run 心跳就在不久前；老僵尸的心跳是几小时/几天前。
-RESUME_WINDOW = timedelta(hours=2)
-
-#: 一趟最多同时拉起几条。restart 一般只打断个位数条在跑的 run；设上限是防止
-#: 某次异常状态下把几十条一起点着、瞬间打爆上游。
 MAX_CONCURRENT_RESUMES = 5
-
-#: 本进程正在续的 run —— 幂等。周期性对账每 60s 跑一次，正在续的不能重复点。
-#: 进程重启即清空：那时该续的会由新一轮 reconcile 重新发现（这正是我们要的）。
+MAX_RECOVERY_ATTEMPTS = 3
 _resuming: set[str] = set()
 
 
@@ -76,162 +32,345 @@ class ResumeTarget:
     session_id: str
 
 
+def worker_presence(project_id: str, session_id: str) -> str:
+    """Unconnectable is not dead. A live PID never authorizes replacement."""
+    from app.services.harness_imports import harness_module
+    from app.services.harness_sessions import _session_lock_path
+    from app.services.session_event_log import registry_row
+
+    path = _session_lock_path(project_id, session_id)
+    row = registry_row(path) if path is not None else {}
+    pid = row.get("pid")
+    if not isinstance(pid, int) or pid <= 1:
+        return "unknown"
+    return "live" if harness_module("shared.lib.process_control").alive(pid) else "dead"
+
+
+async def _latest_runs(db) -> list[Run]:
+    rows = (
+        await db.scalars(
+            select(Run)
+            .where(
+                Run.tenant_id == settings.runtime_tenant_id,
+                Run.parent_run_id.is_(None),
+            )
+            .order_by(Run.created_at.desc(), Run.id.desc())
+        )
+    ).all()
+    latest = {}
+    for run in rows:
+        latest.setdefault((run.project_id, run.session_id), run)
+    return list(latest.values())
+
+
+def _retryable_provider_failure(run: Run) -> bool:
+    failure = (run.summary or {}).get("failure") or {}
+    # This is the worker's existing typed classification from
+    # core.llm.is_transient_provider_error, not another HTTP/provider list.
+    return failure.get("code") == "upstream_unavailable" and failure.get("retryable") is True
+
+
 async def find_resumable_continuous_runs(
-    db, *, now: datetime | None = None
+    db,
+    *,
+    now: datetime | None = None,
+    own_reservation: str | None = None,
 ) -> list[ResumeTarget]:
-    """挑出该自动续跑的 continuous run。纯查询 + 现算，无副作用，可单测。"""
-    from app.models.execution import RunAttempt
+    from app.models.execution import RunAttempt, SessionProjection
     from app.models.project import Project, ProjectStatus
     from app.services import run_liveness
+    from app.services.harness_sessions import harness_session_manager
     from app.services.local_execution import project_autonomy_policy
 
     at = now or datetime.now(UTC)
     active = {s.value for s in ASSERTS_ACTIVE_WORK}
-    recency_cutoff = at - RESUME_WINDOW
-
-    # 顶层 + 断言在动的 run。这里**不**按 updated_at 卡新鲜度（它被见证写顶到了
-    # now）；新鲜度在下面按 attempt.heartbeat_at 判。updated_at 只当一个宽松的扫描
-    # 上界，别扫到远古的行。
-    rows = (
-        await db.execute(
-            select(Run).where(
-                Run.parent_run_id.is_(None),
-                Run.status.in_(list(active)),
-                Run.updated_at >= at - timedelta(days=7),
-            )
-        )
-    ).scalars().all()
-    if not rows:
-        return []
-
-    observed = await run_liveness.observed_status_map(db, rows, now=at)
-
-    # 每条候选 run 的最新 attempt —— 要它的 heartbeat_at 判"最近还在真跑吗"。
-    attempts = (
-        await db.execute(
-            select(RunAttempt)
-            .where(RunAttempt.run_id.in_([r.id for r in rows]))
-            .order_by(RunAttempt.run_id, RunAttempt.attempt_no)
-        )
-    ).scalars().all()
-    latest_attempt: dict[str, RunAttempt] = {}
-    for attempt in attempts:
-        latest_attempt[attempt.run_id] = attempt  # 升序到达，末个即最新
-
-    targets: list[ResumeTarget] = []
-    autonomy_cache: dict[str, bool] = {}
-    for run in rows:
-        if run.id in _resuming:
+    targets = []
+    # Pick latest across ALL statuses before eligibility: a later stop or human
+    # pause supersedes interrupted work, even when the old command is unfinished.
+    for run in await _latest_runs(db):
+        summary = run.summary or {}
+        interrupted = bool((summary.get("failure") or {}).get("runtimeInterrupted"))
+        provider_retryable = _retryable_provider_failure(run)
+        recoverable = interrupted or provider_retryable
+        if run.status not in active and not (
+            run.status == RunStatus.STALE_UNKNOWN.value
+            or (run.status == RunStatus.FAILED.value and recoverable)
+        ):
             continue
-        if observed.get(run.id) != RunStatus.STALE_UNKNOWN.value:
-            continue  # 运行时没真丢（还在跑 / 已续上 / 是别的状态）
-        summary = run.summary if isinstance(run.summary, dict) else {}
-        if summary.get("staleReason") != "app_server_restart":
-            continue  # 不是重启打断的（真崩、上游拒绝…各有各的出口，不在这兜）
-        # 最近还在真跑吗 —— 看真实进展心跳，不看被见证顶过的 updated_at。
-        attempt = latest_attempt.get(run.id)
-        heartbeat = attempt.heartbeat_at if attempt is not None else None
-        if heartbeat is None:
-            continue  # 从没产出过真实进展 —— 没有可续的断点
-        if heartbeat.tzinfo is None:
-            heartbeat = heartbeat.replace(tzinfo=UTC)  # SQLite 存的是 naive
-        if heartbeat < recency_cutoff:
-            continue  # 老僵尸：上一次真跑是很久以前，不主动复活
-        # 项目是不是 continuous 档 —— 每个项目只解析一次。
-        if run.project_id not in autonomy_cache:
-            project = await db.get(Project, run.project_id)
-            if project is None or project.status == ProjectStatus.ARCHIVED:
-                # 归档 = 冻结：后台不再替它干活（`project_lifecycle`）。
-                autonomy_cache[run.project_id] = False
-                continue
-            policy = await project_autonomy_policy(db, project)
-            autonomy_cache[run.project_id] = bool(
-                getattr(policy, "unattended", False)
-                and "*" in (getattr(policy, "authorized_risk_classes", ()) or ())
+        session = await db.get(SessionProjection, run.session_id)
+        project = await db.get(Project, run.project_id)
+        if (
+            session is None
+            or session.archived_at is not None
+            or session.lifecycle_status != "active"
+            or project is None
+            or project.status == ProjectStatus.ARCHIVED
+        ):
+            continue
+        policy = await project_autonomy_policy(db, project)
+        if not (policy.unattended and "*" in policy.authorized_risk_classes):
+            continue
+        live = harness_session_manager.has_live_runtime(run.project_id, run.session_id)
+        idle_provider = False
+        if provider_retryable and live:
+            from app.services.harness_sessions import read_worker_activity
+
+            activity = read_worker_activity(run.project_id, run.session_id)
+            idle_provider = bool(
+                activity is not None
+                and activity.declared == "idle"
+                and not harness_session_manager.is_occupied(run.project_id, run.session_id)
+                and harness_session_manager.paused_binding(run.project_id, run.session_id) is None
             )
-        if not autonomy_cache[run.project_id]:
-            continue  # assisted / 普通 autonomous：停下等人是对的，不替它做主
-        targets.append(
-            ResumeTarget(run_id=run.id, project_id=run.project_id, session_id=run.session_id)
+        if live and not idle_provider:
+            continue
+        presence = worker_presence(run.project_id, run.session_id)
+        if presence == "live" and not idle_provider:
+            continue
+        attempt = await db.scalar(
+            select(RunAttempt)
+            .where(
+                RunAttempt.run_id == run.id,
+            )
+            .order_by(RunAttempt.attempt_no.desc())
+            .limit(1)
         )
+        command = await db.scalar(
+            select(Command)
+            .where(
+                Command.run_id == run.id,
+                Command.tenant_id == run.tenant_id,
+                Command.kind.like("run.%"),
+            )
+            .order_by(Command.created_at.desc())
+            .limit(1)
+        )
+        if command is None:
+            continue  # no durable execution intent; an old status alone is not work
+        pending = command.result is None and command.error is None
+        if not pending and not recoverable:
+            continue
+        # No arbitrary task expiry: a silent model heartbeat cannot revoke a
+        # continuous task. Unknown liveness still uses the existing activity lease.
+        if presence != "dead" and not recoverable and attempt is not None:
+            if (
+                run_liveness.activity(run, attempt=attempt, now=at, has_live_binding=False)
+                != "unknown"
+            ):
+                continue
+        target_id = run.id
+        if (
+            pending
+            and command.kind == "run.continue"
+            and (attempt is None or not attempt.sandbox_manifest)
+        ):
+            # The same durable dispatch can outlive the process which reserved
+            # it, including Run-created/attempt-not-created. No worker could have
+            # received an execution without the frozen attempt manifest.
+            target_id = command.payload["predecessorRunId"]
+        if target_id in _resuming and target_id != own_reservation:
+            continue
+        targets.append(ResumeTarget(target_id, run.project_id, run.session_id))
     return targets
 
 
-#: 平台自己接着跑那一轮的驱动语。它以 role="system" 落进会话（不冒充用户），
-#: 内容如实说明发生了什么、要 agent 做什么。
 _CONTINUATION_MESSAGE = (
-    "（平台运行时刚重启）请从断点继续这项研究：先确认当前进度与已经完成的工作，"
-    "再接着往下推进，不要从头重来。"
+    "平台执行进程中断；从本会话已保存的断点继续。先核对现有作业与结果，"
+    "复用仍在运行或已完成的物理作业，不要重新提交。未知副作用必须先对账。"
 )
 
 
+async def _claim_open_command(db, command, *, now: datetime) -> bool:
+    claimed = await db.execute(
+        update(Command)
+        .where(
+            Command.id == command.id,
+            Command.updated_at == command.updated_at,
+            Command.updated_at < now - timedelta(seconds=ACTIVITY_LEASE_SECONDS),
+            Command.result.is_(None),
+            Command.error.is_(None),
+        )
+        .values(updated_at=now)
+    )
+    await db.commit()
+    return claimed.rowcount == 1
+
+
+async def _recovery_depth(db, run_id: str) -> int:
+    depth, seen = 0, set()
+    while run_id not in seen and depth < MAX_RECOVERY_ATTEMPTS:
+        seen.add(run_id)
+        command = await db.scalar(
+            select(Command)
+            .where(
+                Command.run_id == run_id,
+                Command.kind == "run.continue",
+                Command.tenant_id == settings.runtime_tenant_id,
+            )
+            .order_by(Command.created_at.desc())
+            .limit(1)
+        )
+        if command is None:
+            break
+        depth += 1
+        run_id = command.payload.get("predecessorRunId")
+        if not run_id:
+            break
+    return depth
+
+
+async def _claim_continuation(db, target, session, user):
+    key = f"continuation:{target.run_id}"
+    command = await db.scalar(
+        select(Command).where(
+            Command.tenant_id == session.tenant_id,
+            Command.actor_user_id == user.id,
+            Command.idempotency_key == key,
+        )
+    )
+    now = datetime.now(UTC)
+    if command is not None:
+        if command.result is not None or command.error is not None:
+            return None
+        # Compare-and-swap the existing command's dispatch claim. Concurrent
+        # consumers cannot both acquire it, including when no Run was created yet.
+        return command if await _claim_open_command(db, command, now=now) else None
+    depth = await _recovery_depth(db, target.run_id)
+    if depth >= MAX_RECOVERY_ATTEMPTS:
+        from app.services.app_events import record_app_event
+
+        await record_app_event(
+            db,
+            session_id=target.session_id,
+            kind="run.recovery_attention",
+            run_id=target.run_id,
+            payload={"reason": "recovery_attempt_budget", "attempts": depth},
+            dedupe_key=f"recovery-budget:{target.run_id}",
+        )
+        await db.commit()
+        return None
+    command = Command(
+        tenant_id=session.tenant_id,
+        workspace_id=session.workspace_id,
+        project_id=target.project_id,
+        session_id=target.session_id,
+        actor_user_id=user.id,
+        kind="run.continue",
+        idempotency_key=key,
+        run_id="run_" + uuid5(NAMESPACE_URL, key).hex,
+        payload={"predecessorRunId": target.run_id},
+        updated_at=now,
+    )
+    db.add(command)
+    await db.commit()  # unique command key arbitrates two first-time consumers
+    return command
+
+
 async def _resume_one(factory, target: ResumeTarget) -> None:
-    """把一条 run 从断点续起来。开自己的 db 会话，镜像 chat 端点的 run_worker。"""
     from app.models.execution import SessionProjection
     from app.models.project import Project
     from app.models.user import User
     from app.services.local_execution import execute_local_turn
 
-    async def _noop_progress(_event: dict) -> None:
+    async def _noop_progress(_event):
         return None
 
     try:
         async with factory() as db:
-            conversation = await db.get(SessionProjection, target.session_id)
-            if conversation is None or conversation.archived_at is not None:
+            # Recheck current facts without temporarily dropping our reservation.
+            eligible = await find_resumable_continuous_runs(db, own_reservation=target.run_id)
+            if target not in eligible:
                 return
-            driver_id = conversation.initiating_user_id or conversation.created_by_user_id
-            user = await db.get(User, driver_id) if driver_id else None
+            session = await db.get(SessionProjection, target.session_id, with_for_update=True)
+            driver = session.initiating_user_id or session.created_by_user_id
+            user = await db.get(User, driver) if driver else None
             project = await db.get(Project, target.project_id)
             if user is None or project is None:
-                logger.warning(
-                    "cannot resume run %s: missing driver user or project", target.run_id
-                )
                 return
-            logger.info(
-                "auto-resuming continuous run %s after app server restart", target.run_id
-            )
+            run = await db.get(Run, target.run_id)
+            if run is not None and run.status in {s.value for s in ASSERTS_ACTIVE_WORK}:
+                from app.services.harness_sessions import (
+                    _replay_worker_events,
+                    terminal_result_on_disk,
+                )
+                from app.services.local_execution import RejoinTarget, _open_command_for_run
+
+                result, request_id = terminal_result_on_disk(run)
+                if result is not None:
+                    command = await _open_command_for_run(db, run_id=run.id)
+                    if command is None or not await _claim_open_command(
+                        db,
+                        command,
+                        now=datetime.now(UTC),
+                    ):
+                        return
+                    await _replay_worker_events(db, run=run, owner_user_id=user.id)
+                    await db.commit()
+                    await execute_local_turn(
+                        db,
+                        user=user,
+                        conversation=session,
+                        message="",
+                        project=project,
+                        on_progress=_noop_progress,
+                        rejoin=RejoinTarget(
+                            run_id=run.id, request_id=request_id, disk_result=result
+                        ),
+                    )
+                    return
+            command = await _claim_continuation(db, target, session, user)
+            if command is None:
+                return
+            await db.commit()  # no writer may be held while waiting on the worker
             await execute_local_turn(
                 db,
                 user=user,
-                conversation=conversation,
+                conversation=session,
                 message=_CONTINUATION_MESSAGE,
                 project=project,
                 on_progress=_noop_progress,
                 system_continuation=True,
+                continuation=command,
             )
     except asyncio.CancelledError:
         raise
-    except Exception:  # noqa: BLE001 - 一条续跑失败不拖垮别的
-        logger.exception("auto-resume failed for run %s", target.run_id)
+    except Exception:
+        logger.exception("automatic continuation failed for run %s", target.run_id)
     finally:
         _resuming.discard(target.run_id)
 
 
 async def resume_interrupted_continuous_runs(factory) -> list[str]:
-    """发现被重启打断的 continuous run，逐个 fire-and-forget 续起来。
+    from app.models.execution import SessionProjection
+    from app.services.harness_sessions import harness_session_manager
+    from app.services.local_execution import REJOIN_KIND, retain_detached_execution
 
-    返回这一趟**新拉起**的 run_id 列表（供日志/测试）。续跑本身是小时级的长任务，
-    这里只负责点火、不 await —— 与 chat 端点起 execute_local_turn 的方式一致。
-    """
     async with factory() as db:
+        for run in await _latest_runs(db):
+            if run.status not in {
+                s.value for s in ASSERTS_ACTIVE_WORK
+            } and not _retryable_provider_failure(run):
+                continue
+            session = await db.get(SessionProjection, run.session_id)
+            owner = (session.initiating_user_id or session.created_by_user_id) if session else None
+            if owner:
+                await db.commit()
+                await harness_session_manager.adopt_live_worker(
+                    run.project_id,
+                    run.session_id,
+                    owner_user_id=owner,
+                )
         targets = await find_resumable_continuous_runs(db)
-    if not targets:
-        return []
-
-    started: list[str] = []
+    started = []
     for target in targets:
-        if len(started) >= MAX_CONCURRENT_RESUMES:
-            logger.warning(
-                "%d interrupted continuous runs found; resuming first %d this pass",
-                len(targets), MAX_CONCURRENT_RESUMES,
-            )
+        if len(_resuming) >= MAX_CONCURRENT_RESUMES:
             break
         if target.run_id in _resuming:
             continue
         _resuming.add(target.run_id)
-        asyncio.create_task(
+        task = asyncio.create_task(
             _resume_one(factory, target), name=f"resume-{target.run_id[:12]}"
         )
+        retain_detached_execution(task, kind=REJOIN_KIND)
         started.append(target.run_id)
     return started

@@ -2,14 +2,15 @@
 
 > 触发：`_reviewer(node_inputs={'source_node_type': '_project', 'project_id': '<id>'})`。
 > 这是 `_reviewer` 的**第二种 scope**（区别于 single_artifact 单 artifact 审稿）。
-> 用途：进入 `writing` 节点前的硬 gate + loop-internal 复盘。
+> 用途：项目级综合建议与 loop-internal 复盘；不是派发 Writing 的机械门禁。
 
 ## 为什么 reviewer 干这事
 
-老 `analysis` 节点删了（v2.0 后期）。它的 per-experiment verdict 责任移给
-experiment 节点自判；它原本可能承担的"项目级宏观综合"职责本来就空缺 ——
-现在由本 spec 兜底。reviewer 在这层做"PI 视角的科研中枢"：综合所有 hypothesis
-verdict、survey、KB sediment，对项目当前状态下**统一判**该不该写论文了。
+科学终态的 owner 是 **Analysis（hypothesis）**，以
+`nodes/hypothesis/harness.yaml` 的“轮次与裁决权”为准。Experiment / Observation
+交付证据、执行层评估和可信度，不替 Analysis 下 validated/refuted 科学终态。
+reviewer 独立检查这些判断与证据，综合项目的主张、边界和写作准备程度，产出建议；
+不改写研究状态或 KB 中已有科学终态。_curator 按采纳的判断整合 KB。
 
 ## 两种 mode（自动判别，不需要 caller 传）
 
@@ -86,7 +87,7 @@ read_producer_transcript(...)                 # 看 run 流程（transcript 是�
 
 - **跨项目检查**：`search_kb(scope='org', query='<topic>')` 看 org 层是否类似工作已存在 → `kb_evidence_check.duplicate_work_risk`
 - **覆盖度审计**：列出 user_requirement 隐含的 hypothesis 集 vs 实际测过的 → gap
-- **统计严谨度抽查**：随机抽 2-3 个 hypothesis verdict，看 experiment_log 的 reasoning 是否站得住（reviewer 可重算）
+- **统计严谨度抽查**：抽查 Analysis 的科学判断与所引 experiment_log / observation_log，按当前可用工具核对推理；不能重算的部分明确记录，不能声称已独立重算。
 
 ### 4. Material mode 才做的额外步骤
 
@@ -248,7 +249,7 @@ elif verdict == "abort":
 |---|---|---|
 | 输入 | 单个 artifact + lineage | 全项目 artifact + KB + memory |
 | 输出 | review_critique （per-artifact verdict）| review_critique（项目级 verdict + next_steps）|
-| 用 hook | 自动 post-producing 3-step flow | orchestrator 显式触发（writing-gate / N runs since last） |
+| 用 hook | 自动 post-producing flow | orchestrator 显式触发项目综合复盘 |
 | 加载 spec | `nodes/<source>/review_spec.md` | 本文件 |
 | 工具白名单 | read-only KB / 仅写 review_critique + memory_candidate + propose | 同上 + create_claim（写 synthesis claim_type）|
 

@@ -404,7 +404,19 @@ def test_recovery_rejects_cross_run_identity_and_mutating_continuations(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_real_worker_death_and_new_process_resume_the_same_supervised_job(tmp_path, bridge):
+@pytest.mark.parametrize("worker_source", ["checkout", "payload"])
+async def test_real_worker_death_and_new_process_resume_the_same_supervised_job(
+    tmp_path, bridge, monkeypatch, worker_source,
+):
+    worker_root = AGENT.parent.parent
+    if worker_source == "payload":
+        from scripts.package import build_server_bundle
+
+        interface = tmp_path / "interface"
+        interface.mkdir()
+        (interface / "index.html").write_text("offline packaging fixture")
+        monkeypatch.setattr(build_server_bundle, "DIST", tmp_path / "distribution")
+        worker_root = build_server_bundle.stage("0.5.13", interface) / "harness"
     _, receipts = bridge
     state = state_at(tmp_path)
     selected = await execute(
@@ -459,7 +471,9 @@ async def main():
         result = await run_loop(NodeHarness(node_type="_orchestrator", system_prompt="test",
                                 tools=["remote_job"], max_turns=5), state,
                                 [LLMMessage(role="user", content="continue")], model)
-        print(json.dumps({"status": result.status, "model_calls": model.calls}))
+        print(json.dumps({"status": result.status, "model_calls": model.calls,
+                          "source_root": str(
+                              Path(remote_resources.__file__).resolve().parents[1])}))
 asyncio.run(main())
 """)
     argv = [
@@ -470,7 +484,7 @@ asyncio.run(main())
         str(AGENT),
         str(tmp_path / "remote"),
     ]
-    env = {**os.environ, "PYTHONPATH": str(AGENT.parent.parent)}
+    env = {**os.environ, "PYTHONPATH": str(worker_root)}
     first = await asyncio.create_subprocess_exec(
         *argv,
         "wait",
@@ -500,7 +514,9 @@ asyncio.run(main())
         )
         out, err = await asyncio.wait_for(second.communicate(), 10)
         assert second.returncode == 0, err.decode()
-        assert json.loads(out) == {"status": "completed", "model_calls": 1}
+        assert json.loads(out) == {
+            "status": "completed", "model_calls": 1, "source_root": str(worker_root.resolve()),
+        }
         assert original["job_id"] == selected["job_id"]
         assert job_wait.load(state) is None
     finally:
@@ -573,3 +589,209 @@ async def test_permissions_are_rechecked_during_wait_and_retries_are_bounded(
         assert result["wait_outcome"] == "connection_unconfirmed"
     finally:
         (Path(receipts[selected["job_id"]]["cwd"]) / "release").touch()
+
+
+@pytest.mark.asyncio
+async def test_lost_managed_submit_receipt_reconciles_the_same_physical_job(tmp_path, bridge):
+    from core.agent_loop import load_messages_checkpoint
+    requests, receipts = bridge
+    state = state_at(tmp_path)
+    actual = remote_resources._handler
+
+    crashed = False
+    async def accepted_then_died(st, action, params):
+        nonlocal crashed
+        result = await actual(st, action, params)
+        if action == "submit" and not crashed:
+            crashed = True
+            raise asyncio.CancelledError("worker died after physical accept, before receipt")
+        return result
+
+    remote_resources._handler = accepted_then_died
+    llm = ScriptedLLM(reply(remote_call(
+        "submit", command="echo one-physical-effect", idempotency_key="unknown", timeout=10,
+    )))
+    with pytest.raises(asyncio.CancelledError):
+        await run_loop(harness(), state, [LLMMessage(role="user", content="go")], llm)
+    messages, _ = load_messages_checkpoint(state)
+    assert len(receipts) == 1 and len([r for r in requests if r[1] == "submit"]) == 1
+    # Re-enter the managed adapter with the original key. This is a second API
+    # attempt, and one physical supervisor identity/command execution.
+    import chat
+    chat._repair_message_tool_protocol(messages)
+    resumed = ScriptedLLM(reply(content="original receipt reconciled"))
+    await run_loop(harness(), state, messages, resumed)
+    assert resumed.calls == 1 and len([r for r in requests if r[1] == "submit"]) == 2
+    assert len(receipts) == 1
+    assert {r[2] for r in requests if r[1] == "submit"} == {job_id("unknown")}
+    assert any(job_id("unknown") in (m.content or "") for m in resumed.seen)
+    from tests.test_transcript_reconstructs_requests import _rebuild_and_check
+    assert _rebuild_and_check(state) == 2
+
+
+@pytest.mark.asyncio
+async def test_pending_wait_repairs_the_original_tool_result_before_the_next_user_message(
+    tmp_path, bridge,
+):
+    from core.agent_loop import _persist_messages_checkpoint
+    from core.conversation_store import unresolved_tool_calls
+
+    state = state_at(tmp_path)
+    receipt = await execute("remote_job", state, action="submit", resource_id="r",
+                            command="echo original", idempotency_key="repair", timeout=10)
+    call_id = "original-wait-call"
+    state.hook_state["_current_tool_call_id_being_executed"] = call_id
+    await execute("remote_job", state, action="wait", resource_id="r", job_id=receipt["job_id"])
+    messages = [LLMMessage(role="assistant", tool_calls=[{
+        "id": call_id, "type": "function",
+        "function": {"name": "remote_job", "arguments": json.dumps({"action": "wait"})},
+    }]), LLMMessage(role="user", content="system continuation transport")]
+    _persist_messages_checkpoint(state, messages, turn=1)
+    import chat
+    chat._repair_message_tool_protocol(messages)
+    assert unresolved_tool_calls(messages) == {call_id: "remote_job"}
+    await job_wait.resume(state, messages, turn=2)
+    assert unresolved_tool_calls(messages) == {}
+    assert messages[1].role == "tool" and messages[1].tool_call_id == call_id
+    assert json.loads(messages[1].content)["job_id"] == receipt["job_id"]
+    assert messages[2].role == "user"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("placeholder", [False, True])
+@pytest.mark.parametrize("crash_before_ack", [False, True])
+async def test_original_result_restoration_and_ack_loss_preserve_request_replay(
+    tmp_path, bridge, monkeypatch, placeholder, crash_before_ack,
+):
+    from core.agent_loop import load_messages_checkpoint
+    from tests.test_transcript_reconstructs_requests import _rebuild_and_check
+
+    state = state_at(tmp_path)
+    receipt = await execute("remote_job", state, action="submit", resource_id="r",
+                            command="echo replay-once", idempotency_key="replay", timeout=10)
+    call_id = "wait-for-original-replay"
+    state.hook_state["_current_tool_call_id_being_executed"] = call_id
+    arguments = dict(action="wait", resource_id="r", job_id=receipt["job_id"])
+    job_wait.register(state, "remote_job", arguments,
+                      {key: receipt[key] for key in
+                       ("project_id", "resource_id", "job_id", "request_digest")})
+    state.hook_state.pop("_current_tool_call_id_being_executed", None)
+    messages = [LLMMessage(role="user", content="original authorized task"),
+                LLMMessage(role="assistant", tool_calls=[{
+                    "id": call_id, "type": "function",
+                    "function": {"name": "remote_job", "arguments": json.dumps(arguments)},
+                }])]
+    if placeholder:
+        messages.append(LLMMessage(role="tool", name="remote_job", tool_call_id=call_id,
+                                   content=json.dumps({"status": "deferred", "outcome": "unknown",
+                                                       "do_not_resubmit": True})))
+    llm = ScriptedLLM(reply(content="original result consumed"))
+    if crash_before_ack:
+        actual_ack = job_wait.acknowledge
+        def crash(_):
+            raise RuntimeError("crash after result checkpoint")
+        monkeypatch.setattr(job_wait, "acknowledge", crash)
+        with pytest.raises(RuntimeError, match="after result checkpoint"):
+            await run_loop(harness(), state, messages, llm)
+        assert llm.calls == 0
+        messages, _ = load_messages_checkpoint(state)
+        requests, _ = bridge
+        before = len(requests)
+        monkeypatch.setattr(job_wait, "acknowledge", actual_ack)
+        await run_loop(harness(), state, messages, llm)
+        assert len(requests) == before, "committed result was re-observed after lost ack"
+    else:
+        await run_loop(harness(), state, messages, llm)
+    assert _rebuild_and_check(state) == 1
+    assert len([m for m in messages if m.role == "tool" and m.tool_call_id == call_id]) == 1
+    assert len([r for r in bridge[0] if r[1] == "submit"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("future_name", ["read_artifact", "remote_job"])
+async def test_a_blocking_wait_proves_later_calls_in_its_batch_were_not_dispatched(
+    tmp_path, bridge, future_name,
+):
+    from core.conversation_store import unresolved_tool_calls
+    from tests.test_transcript_reconstructs_requests import _rebuild_and_check
+
+    state = state_at(tmp_path)
+    receipt = await execute("remote_job", state, action="submit", resource_id="r",
+                            command="echo batch-once", idempotency_key="batch", timeout=10)
+    wait_id, future_id = "original-blocking-wait", "not-yet-dispatched"
+    arguments = dict(action="wait", resource_id="r", job_id=receipt["job_id"])
+    state.hook_state["_current_tool_call_id_being_executed"] = wait_id
+    job_wait.register(state, "remote_job", arguments,
+                      {key: receipt[key] for key in
+                       ("project_id", "resource_id", "job_id", "request_digest")})
+    state.hook_state.pop("_current_tool_call_id_being_executed", None)
+    messages = [LLMMessage(role="assistant", tool_calls=[
+        {"id": wait_id, "type": "function",
+         "function": {"name": "remote_job", "arguments": json.dumps(arguments)}},
+        {"id": future_id, "type": "function",
+         "function": {"name": future_name, "arguments": "{}"}},
+    ])]
+    import chat
+    chat._repair_message_tool_protocol(messages)
+    llm = ScriptedLLM(reply(content="automatic downstream progress"))
+    result = await run_loop(harness(), state, messages, llm)
+    assert result.status == "completed" and llm.calls == 1
+    assert not unresolved_tool_calls(messages)
+    deferred = next(m for m in messages if m.tool_call_id == future_id)
+    assert json.loads(deferred.content)["executed"] is False
+    assert len([r for r in bridge[0] if r[1] == "submit"]) == 1
+    assert _rebuild_and_check(state) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unmanaged_unknown_external_effect_stops_without_repeating(tmp_path, monkeypatch):
+    from core import tool_registry
+    from core.agent_loop import load_messages_checkpoint
+    from core.conversation_store import UnconfirmedToolOutcome
+
+    bootstrap()
+    state = state_at(tmp_path)
+    effect = tmp_path / "physical-starts"
+    async def unsafe(*, state, **kwargs):
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-c",
+            "import pathlib,sys; p=pathlib.Path(sys.argv[1]); "
+            "p.write_text((p.read_text() if p.exists() else '')+'one\\n')", str(effect),
+        )
+        await process.wait()
+        raise asyncio.CancelledError("external action accepted, receipt unknown")
+    monkeypatch.setitem(tool_registry._REGISTRY.executors, "remote_exec", unsafe)
+    node = NodeHarness(node_type="_orchestrator", system_prompt="test", tools=["remote_exec"], max_turns=2)
+    llm = ScriptedLLM(reply(("remote_exec", {"resource_id": "r", "command": "unmanaged"})))
+    with pytest.raises(asyncio.CancelledError):
+        await run_loop(node, state, [LLMMessage(role="user", content="authorized action")], llm)
+    messages, _ = load_messages_checkpoint(state)
+    import chat
+    chat._repair_message_tool_protocol(messages)
+    resumed = ScriptedLLM(reply(content="must not run"))
+    with pytest.raises(UnconfirmedToolOutcome):
+        await run_loop(node, state, messages, resumed)
+    assert resumed.calls == 0 and effect.read_text() == "one\n"
+
+
+@pytest.mark.asyncio
+async def test_an_old_result_with_a_reused_call_id_cannot_confirm_a_new_effect(tmp_path):
+    from core.agent_loop import _persist_messages_checkpoint
+    from core.conversation_store import UnconfirmedToolOutcome
+
+    bootstrap()
+    state = state_at(tmp_path)
+    call_id = "provider-reused-id"
+    state.append_transcript("tool_result", name="remote_exec", tool_call_id=call_id,
+                            content=json.dumps({"status": "success", "stdout": "older operation"}))
+    messages = [LLMMessage(role="assistant", tool_calls=[{
+        "id": call_id, "type": "function", "function": {"name": "remote_exec",
+        "arguments": json.dumps({"resource_id": "r", "command": "new unmanaged effect"})},
+    }])]
+    state.hook_state["_current_tool_call_id_being_executed"] = call_id
+    _persist_messages_checkpoint(state, messages, turn=1)
+    state.hook_state.pop("_current_tool_call_id_being_executed")
+    llm = ScriptedLLM(reply(content="must not run"))
+    with pytest.raises(UnconfirmedToolOutcome):
+        await run_loop(harness(), state, messages, llm)
+    assert llm.calls == 0

@@ -218,3 +218,71 @@ async def test_no_events_file_is_not_a_failure(execution_db, tmp_path):
     )
     assert report.events_file is False
     assert report.ingested == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw_event", ["interrupt_reply", "user_interrupt_received"])
+async def test_narration_only_records_survive_replay_without_duplicate_or_poisoned_transaction(
+    execution_db, worker_output, raw_event
+):
+    """A durable derived event can be the only projection of one raw record."""
+    from app.services.harness_transcript_ingest import ingest_transcript_wrapper
+
+    project_id, session_id, events, _ = worker_output
+    transcript = events.parent / "narration.jsonl"
+    raw = {
+        "event": raw_event,
+        "at": AT,
+        "text": "Keep the existing work.",
+        "message_id": "input-once",
+        "submission_id": "submission-once",
+    }
+    transcript.write_text(json.dumps(raw) + "\n")
+    wrapper = {
+        "type": "transcript",
+        "transcript_path": str(transcript),
+        "byte_start": 0,
+        "byte_end": transcript.stat().st_size,
+        "event": raw,
+    }
+    events.write_text(json.dumps(wrapper) + "\n")
+    context = _context(project_id, session_id)
+    service = ExecutionIngestService()
+    await ingest_transcript_wrapper(
+        execution_db, service=service, context=context, event=wrapper, harness_states={}
+    )
+    await execution_db.commit()
+    # Older encoders may have a different event ID for the same immutable source.
+    from sqlalchemy import update
+
+    await execution_db.execute(update(ExecutionEvent).values(id="f" * 64))
+    await execution_db.commit()
+    execution_db.expunge_all()
+    historical = list(await execution_db.scalars(select(ExecutionEvent)))
+    assert len(historical) == 1
+    original = (historical[0].id, dict(historical[0].payload), historical[0].sequence)
+    for _ in range(2):
+        report = await replay_missed_events(
+            execution_db, service=ExecutionIngestService(), context=context, events_path=events
+        )
+        assert report.failed == 0
+        await execution_db.commit()
+        rows = list(await execution_db.scalars(select(ExecutionEvent)))
+        assert [(e.id, e.payload, e.sequence) for e in rows] == [original]
+    # The next fact still commits in the same transaction owner after replay.
+    from app.services.app_events import record_app_event
+
+    await record_app_event(
+        execution_db,
+        session_id=session_id,
+        run_id=context.run_id,
+        kind="interject.queued",
+        payload={"messageId": "another-input"},
+        dedupe_key="another-input",
+    )
+    await execution_db.commit()
+    assert await execution_db.scalar(select(func.count()).select_from(ExecutionEvent)) == 2
+    newest = await execution_db.scalar(
+        select(ExecutionEvent).where(ExecutionEvent.kind == "interject.queued")
+    )
+    assert newest.sequence == original[2] + 1

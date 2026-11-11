@@ -81,6 +81,10 @@ class ToolDefinition:
     # replayable_read=True：结果可以用同样参数重调取回（纯读工具）。压缩器可以
     # 把旧结果内容清成占位符 —— 参数还在前一条 assistant 消息里，信息零丢失。
     replayable_read: bool = False
+    # The owner receives arguments plus state/tool_call_id. True permits the
+    # original call's safe re-entry; {"result": receipt} returns verified existing
+    # facts without dispatch. None/False leaves an unknown effect unconfirmed.
+    interrupted_recovery: object | None = None
     # result_compactor：工具声明的"旧结果 → 摘要"函数（输入原 content 字符串，
     # 返回带恢复指针的短摘要）。用于结果不可重读但落了盘的工具（如 run_node：
     # 子 run 的 summary/产物在磁盘上）。压缩器不写工具名单，只扫这两个声明。

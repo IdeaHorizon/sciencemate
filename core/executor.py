@@ -16,9 +16,9 @@ from typing import Any
 from . import artifact_provenance as _provenance
 from . import closure, paths
 from .agent_loop import run_loop
-from .context_engine import build_messages
+from .context_engine import build_messages, render_node_inputs
 from .harness import NodeHarness
-from .llm import LLMClient, LLMMessage
+from .llm import LLMClient, LLMMessage, framework_notice
 from .loader import load_harness
 from .pause import (
     ActiveRunInfo,
@@ -574,27 +574,17 @@ async def execute_node(
         # 这次派发的要求也要送进去 —— 续跑不等于忽略新指令。上次这条 run 可能
         # 由别人派、做的是别的角度；调用方这次说了什么，必须让它看到，否则
         # "续跑"就变成了"吞掉新请求"。
-        fresh_request = ""
-        if node_inputs:
-            try:
-                fresh_request = json.dumps(node_inputs, ensure_ascii=False)[:2000]
-            except (TypeError, ValueError):
-                fresh_request = str(node_inputs)[:2000]
-        messages.append(LLMMessage(
-            role="user",
-            content=(
-                "（系统）上一次执行在第 "
-                f"{resumed_from_turn} 轮之后被进程中断，以上是你当时的完整上下文。"
-                "**接着往下做**：先确认你最后那步工具调用是否已经生效"
-                "（产物可能已保存、KB 可能已注册 —— 别重复做不幂等的操作），"
-                "然后继续推进未完成的部分。不要从头再来。"
-                + (
-                    f"\n\n本次调用方给的要求（若与你原来的任务一致就当作确认，"
-                    f"不一致就以这条为准）：{fresh_request}"
-                    if fresh_request else ""
-                )
-            ),
+        messages.append(framework_notice(
+            "上一次执行在第 "
+            f"{resumed_from_turn} 轮之后被进程中断，以上是你当时的完整上下文。"
+            "**接着往下做**：先确认你最后那步工具调用是否已经生效"
+            "（产物可能已保存、KB 可能已注册 —— 别重复做不幂等的操作），"
+            "然后继续推进未完成的部分。不要从头再来。"
         ))
+        if node_inputs:
+            # The explicit current request uses the fresh-start renderer, not a
+            # separate truncated paraphrase mixed into a framework recovery note.
+            messages.append(LLMMessage(role="user", content=render_node_inputs(node_inputs)))
         state.append_transcript(
             "run_resumed_after_interruption",
             resumed_from_turn=resumed_from_turn,
@@ -1697,6 +1687,14 @@ async def finalize_run(
 
     summary = {
         "run_id": state.run_id,
+        # Persist the exact dispatch contract for foreground/background/pause
+        # completion alike. Automatic REVISE must inherit it, not rediscover it.
+        "dispatch_contract": {
+            "node_type": harness.node_type,
+            "task_instance_uuid": state.task_instance_uuid,
+            "task_contract_digest": state.task_contract_digest,
+            "deliverable": dict(state.hook_state.get("_deliverable_projection") or {}) or None,
+        },
         # #1081：这个 run 是续上去的还是新开的。`requested_run_id` 有值而
         # `resumed` 为 False，就是「请求续跑 X，没续上，换了这个 run」——
         # 调用方据此决定要不要按新开处理，而不是拿参数和返回值人工比对。

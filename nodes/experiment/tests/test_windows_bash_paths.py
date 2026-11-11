@@ -272,7 +272,7 @@ def test_native_paths_never_spawn_and_conversion_cache_ends_with_analysis(tmp_pa
 def test_native_core_coordinate_does_not_use_shell_mount_translation(tmp_path, monkeypatch):
     monkeypatch.setattr(bash_paths, "_msys_absolute_path", lambda _: pytest.fail("native path was translated"))
     assert sb._norm_path("/c/native-tool-path") == os.path.abspath("/c/native-tool-path")
-    with bash_paths.shell_path_resolution(use_msys=False):
+    with bash_paths.shell_path_resolution(remote=True):
         assert bash_paths.normalize_bash_path("/c/remote-path") == os.path.abspath("/c/remote-path")
 
 

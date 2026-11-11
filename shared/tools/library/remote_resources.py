@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 from typing import Any
 
 from core.remote_resources import call
@@ -88,12 +89,44 @@ async def remote_file(
         return dict(status="error", error=str(exc))
 
 
-def register(name, description, properties, required, executor):
+def _can_reconcile_job(arguments, *, state=None, tool_call_id=None):
+    # The existing SSH owner derives job_id and rejects request-digest conflicts.
+    # Core never derives an ID or invents a new key for this recovery.
+    return (
+        arguments.get("action") == "submit"
+        and isinstance(arguments.get("idempotency_key"), str)
+        and bool(arguments["idempotency_key"].strip())
+        and bool(arguments.get("resource_id"))
+    )
+
+
+def _compact_job_result(content: str) -> str:
+    """The job owner chooses the lifecycle facts that survive log eviction."""
+    try:
+        result = json.loads(content)
+    except (ValueError, TypeError):
+        return ""  # ContextView supplies a lossless receipt reference.
+    if not isinstance(result, dict):
+        return ""
+    fields = ("status", "resource_id", "job_id", "state", "exit_code", "reason",
+              "created_at", "started_at", "ended_at", "updated_at", "error", "next_action")
+    keep = {key: result[key] for key in fields if key in result}
+    if isinstance(result.get("jobs"), list):
+        keep["jobs"] = [{key: row[key] for key in fields if key in row}
+                        for row in result["jobs"] if isinstance(row, dict)]
+    return "[远程作业历史回执；status 是调用结果，state/exit_code 是当时的作业状态]\n" + json.dumps(
+        keep, ensure_ascii=False)
+
+
+def register(name, description, properties, required, executor, *, interrupted_recovery=None,
+             result_compactor=None):
     register_tool(
         ToolDefinition(
             name=name,
             description=description,
             risk_level="medium",
+            interrupted_recovery=interrupted_recovery,
+            result_compactor=result_compactor,
             parameters_schema=dict(
                 type="object", properties=properties, required=required, additionalProperties=False
             ),
@@ -146,6 +179,9 @@ register(
     "等待已有任务用 wait，不要用 shell sleep/进程名轮询。list 列出持久任务，cancel 终止进程组。"
     "submit 必须给稳定 idempotency_key，连接失败后复用同一个键或查询返回的 job_id，避免重复启动。"
     "任务由远端监督器守护，平台重启和 SSH 断线后仍可跟踪。timeout 为强制墙钟上限，默认一天。"
+    "status=success 仅表示调用成功；作业完成与否看 state/exit_code。"
+    "command 是 Bash 程序，管道按 Bash 规则返回状态；不要用 tail/head 装饰提交的计算命令，"
+    "日志已有有界返回。需要管道任一步失败即失败时在自己的程序中显式设置 pipefail。"
     "运行记录 analysis_eligible=false；正式研究证据仍须走节点的审计与交付流程。",
     {
         **COMMAND,
@@ -174,6 +210,8 @@ register(
     },
     ["action", "resource_id"],
     remote_job,
+    interrupted_recovery=_can_reconcile_job,
+    result_compactor=_compact_job_result,
 )
 register(
     "remote_file",

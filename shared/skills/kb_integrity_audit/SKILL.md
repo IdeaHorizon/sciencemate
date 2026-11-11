@@ -14,8 +14,8 @@ tools_used:
   - get_kb_record
   - curator_scan
   - propose
-  - save_artifact
-expected_outcome: 写一份 kb_audit_report artifact（含 issue 清单 + propose 列表）；audit log 每条 issue 留痕
+  - curator_audit
+expected_outcome: 持久化的修正 proposals 与 handoff 中的 issue 清单；实际 KB 写入由现有 curator audit 留痕
 status: validated
 relevant_concepts: []
 ---
@@ -28,7 +28,7 @@ search_kb(entity_type='claims', limit=200)
 ```
 对每条 claim：
 - 如果 `concept_ids == [] and not orphan_reason`：违反 v3 schema（应该 validation 早就挡住，但旧数据可能有）
-  → propose(proposal_type='claim_fix', claim_id=..., suggestion='add concept_ids or orphan_reason')
+  → propose(proposal_type='kb_other', target_entity='claims', target_id='<真实 claim id>', proposed_action='add concept_ids or orphan_reason', reasoning='<问题与依据>')
 - 如果 `sources == [] and claim_type not in ('dead_end','conjecture')`：缺证据
   → propose 同上
 
@@ -61,8 +61,8 @@ search_kb(entity_type='claims', status_filter='needs_review', limit=200)
 第一条拉"信心悬在中间"的，第二条拉"上游被 refute 等复审"的。
 没有 review_history 过滤器 —— 命中后自己 `get_kb_record` 看有没有互相矛盾的 review。
 对每条判定为争议的 claim：
-- 在本次 audit_report 里列为 "active dispute"（没有单独写 audit log 的工具；
-  留痕靠 audit_report artifact + propose 记录，`curator_audit(action='log')` 是**读**回来用的）
+- 在 handoff 里列为 "active dispute"，并用 `propose` 记录具体修正建议；
+  `curator_audit(action='log')` 只读已有操作日志，不是保存报告的入口。
 - 如果争议持续 > 30 天且无新 evidence：propose 标记 needs_evidence
 
 ### 6. Scope 错配
@@ -78,21 +78,13 @@ search_kb(entity_type='claims', status_filter='needs_review', limit=200)
 
 ## 产出
 
-最后写 audit_report artifact：
-```
-save_artifact(artifact_type='kb_audit_report', name='<date>',
-  content='## Issues Found (...)
-  - 孤儿 claim: N
-  - 循环引用: N
-  - Provenance 缺失: N
-  - ...')
-```
-
-audit_report artifact 本身就是留痕载体 —— 每条 issue 都要落进它的正文，
-不要指望另有一个写 audit log 的工具（没有）。事后回查用 `curator_audit(action='log')`。
+每个需要修正的 issue 用 `propose` 挂到真实 KB entity，记录依据与建议；handoff 汇总
+issue、proposal id、扫描范围和无法检查的部分，随 run transcript 保存。无 issue 时如实报告。
+_curator 不产 artifact；不请求通用保存工具。实际 KB 写入的审计仍由现有机制记录，
+事后回查用 `curator_audit(action='log')`；Mode 1 的整合收据由现有 integration hook 产生。
 
 ## Pitfalls
 
 - 不要直接修，**全部走 propose**：audit 是诊断，不是治疗。user 在 inbox 决定哪些采纳。
 - 不要每次 dreaming 都全量扫；可按 `last_audit_at` 增量扫（新写入 + 老 stale）
-- audit 跑完后要写 last_audit_at 到项目级 KB metadata，下次基于此判断该跑全量还是增量
+- 扫描范围与时间写入 handoff；没有可消费的历史范围时明确说明，不假定存在 metadata 写入接口。

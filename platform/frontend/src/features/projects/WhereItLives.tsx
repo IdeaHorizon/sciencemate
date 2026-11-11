@@ -19,7 +19,12 @@
  * 的专业版桌面，看到的建项目对话框和从前逐字一样。
  */
 
-import { Building2, Laptop, Plus } from "lucide-react";
+import { Building2, Laptop, Plus, Server } from "lucide-react";
+import Link from "next/link";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api";
+import { qk } from "@/lib/query/keys";
+import { useHasCapability } from "@/features/capabilities";
 import { useEffect, useState } from "react";
 import { otherHomes, type OtherHome } from "./homes";
 import { useT } from "@/shared/i18n";
@@ -34,7 +39,9 @@ export function WhereItLives({
   onAddOne?: () => void;
 }) {
   const t = useT();
+  const canConnectOrganisations = useHasCapability("connections");
   const [held, setHeld] = useState<OtherHome[] | null>(null);
+  const servers = useQuery({ queryKey: qk.remoteServers(), queryFn: () => api.listRemoteServers(), retry: false });
 
   useEffect(() => {
     let alive = true;
@@ -48,19 +55,22 @@ export function WhereItLives({
 
   // 一条连接都没有 = 没有可挑的，这一行不画。问一个只有一个答案的问题，
   // 就是在教育用户。
-  if (!held || held.length === 0) return null;
-
   return (
     <div className="project-home">
-      <span className="project-home-label">{t({ zh: "保存位置", en: "Location" })}</span>
+      <span className="project-home-label">{t({ zh: "后端运行位置", en: "Backend location" })}</span>
       <div className="project-home-choices" role="radiogroup"
-           aria-label={t({ zh: "保存位置", en: "Location" })}>
+           aria-label={t({ zh: "后端运行位置", en: "Backend location" })}>
         <button type="button" role="radio" aria-checked={value === ""}
                 className={cn("project-home-choice", value === "" && "is-chosen")}
                 onClick={() => onChange("")}>
           <Laptop size={13} />{t({ zh: "本机", en: "This computer" })}
         </button>
-        {held.map((one) => (
+        {servers.data?.items.map((server) => <button type="button" key={server.id} role="radio"
+          disabled={server.enabled === false}
+          title={server.enabled === false ? t({ zh: "请先在运行环境设置中连接这台服务器", en: "Connect this server in Runtime environments first" }) : server.host}
+          aria-checked={value === server.id} className={cn("project-home-choice", value === server.id && "is-chosen")}
+          onClick={() => onChange(server.id)}><Server size={13} />{server.name}</button>)}
+        {(held ?? []).map((one) => (
           <button key={one.id} type="button" role="radio" aria-checked={value === one.id}
                   className={cn("project-home-choice", value === one.id && "is-chosen")}
                   disabled={one.needsSignIn}
@@ -72,16 +82,20 @@ export function WhereItLives({
             <Building2 size={13} />{one.name}
           </button>
         ))}
-        {onAddOne && otherHomes.Adder && (
+        {canConnectOrganisations && onAddOne && otherHomes.Adder && (
           <button type="button" className="project-home-choice project-home-add" onClick={onAddOne}>
             <Plus size={13} />{t({ zh: "添加组织", en: "Add an organisation" })}
           </button>
         )}
       </div>
+      <Link className="project-runtime-manage" href="/settings/runtimes">{t({ zh: "添加或管理服务器", en: "Add or manage servers" })}</Link>
+      {servers.error && <p role="alert">{servers.error.message}</p>}
       <small className="project-home-note">
         {value === ""
           ? t({ zh: "项目只保存在这台电脑上。",
                 en: "Stored on this computer only." })
+          : value.startsWith("remote:")
+          ? t({ zh: "个人项目在服务器上运行，关闭桌面后仍可继续。", en: "Your personal project runs on the server and continues after closing the desktop." })
           : t({ zh: "项目保存在组织服务器上，组织成员默认可以看到。",
                 en: "Stored on the organisation's server; members can see it by default." })}
       </small>

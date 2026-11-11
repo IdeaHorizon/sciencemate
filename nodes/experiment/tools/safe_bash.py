@@ -74,7 +74,10 @@ from shared.tools.library.python_exec import (
 try:
     from . import bash_semantics as _bash_semantics
     from . import timeout_escalation as _te
-    from .bash_paths import normalize_bash_path, shell_path_resolution
+    from .bash_paths import (
+        bash_execution_target, is_bash_absolute, normalize_bash_path,
+        shell_path_resolution, uses_wsl_paths,
+    )
     from .build_resource_guard import (
         build_resource_plan_block, classify_resource_health,
         derive_build_limits, filesystem_free_bytes,
@@ -98,7 +101,10 @@ try:
 except ImportError:  # loaded as top-level ``tools.safe_bash`` by node runtime
     from tools import bash_semantics as _bash_semantics
     from tools import timeout_escalation as _te
-    from tools.bash_paths import normalize_bash_path, shell_path_resolution
+    from tools.bash_paths import (
+        bash_execution_target, is_bash_absolute, normalize_bash_path,
+        shell_path_resolution, uses_wsl_paths,
+    )
     from tools.build_resource_guard import (
         build_resource_plan_block, classify_resource_health,
         derive_build_limits, filesystem_free_bytes,
@@ -255,6 +261,24 @@ def _default_run_workdir(state: Any) -> str:
         return str(validate_tool_cwd(state, None))
 
 
+def _host_workdir(cwd: str) -> str | None:
+    """Translate explicit WSL guest coordinates before checking host ownership."""
+    if cwd.startswith("/") and uses_wsl_paths():
+        return normalize_bash_path(cwd)
+    return cwd
+
+
+def _unmapped_workdir(cwd: str) -> dict:
+    return {
+        "status": "error",
+        "reason": WORKDIR_UNAVAILABLE,
+        "blocker": {"kind": WORKDIR_UNAVAILABLE, "target": cwd},
+        "error": f"WSL cwd {cwd!r} cannot be mapped to a Windows project directory. "
+                 "Use a project-relative directory or its mounted Windows path.",
+        "payload_spawned": False,
+    }
+
+
 def resolve_required_workdir(state: Any, cwd: str | None,
                              kind: str = "命令") -> tuple[str | None, dict | None]:
     """解析 ``cwd`` 参数为本次执行的权威工作目录；不可用则返回事前拒绝结果。
@@ -270,20 +294,24 @@ def resolve_required_workdir(state: Any, cwd: str | None,
         return None, None
     from core.project_workspace import validate_tool_cwd
     try:
-        resolved = str(validate_tool_cwd(state, str(cwd)))
+        from .subprocess_policy import overlaps_project_worktree, path_has_local_write_capability
+    except ImportError:
+        from tools.subprocess_policy import overlaps_project_worktree, path_has_local_write_capability
+
+    host_cwd = _host_workdir(str(cwd))
+    if host_cwd is None:
+        return None, _unmapped_workdir(str(cwd))
+    try:
+        resolved = str(validate_tool_cwd(state, host_cwd))
     except Exception as e:
         # 路径角色只描述节点语义，不等于宿主 OS 写能力。外部共享盘目录必须同时
         # 命中可写角色，并由 Core 写根或一次性人工批准签发本地能力。
-        candidate = _norm_path(str(cwd))
+        candidate = _norm_path(host_cwd)
         roles = [
             role for role in matching_path_roles(candidate, state)
             if role.writable and not role.container_only
         ]
-        if roles:
-            try:
-                from .subprocess_policy import path_has_local_write_capability
-            except ImportError:  # pragma: no cover - node runtime import style
-                from tools.subprocess_policy import path_has_local_write_capability
+        if roles and not overlaps_project_worktree(state, candidate):
             if path_has_local_write_capability(state, candidate):
                 resolved = candidate
             else:
@@ -308,8 +336,7 @@ def resolve_required_workdir(state: Any, cwd: str | None,
                 "error": (
                     f"⛔ 声明的工作目录不可用（事前拦截，{kind}未执行，无任何副作用）。\n"
                     f"cwd={cwd}\n原因：{type(e).__name__}: {e}\n\n"
-                    "工作目录必须落在本 run 的目录内，或落在已声明且可写的 "
-                    "run_root / build_root / source_worktree_root / source_patch_root 中。"),
+                    "请使用 Core 分配的节点工作区、本 run 的目录，或已授权的外部执行目录。"),
             }
     if not os.path.isdir(resolved):
         return None, {
@@ -1303,16 +1330,14 @@ def _ensure_hardened_attempt_manifest(state: Any) -> Any:
                 and path not in writable):
             writable.append(path)
 
-    hook_state = getattr(state, "hook_state", None)
-    approved = (
-        hook_state.get("_approved_subprocess_write_roots", [])
-        if isinstance(hook_state, dict) else []
-    )
-    if isinstance(approved, list):
-        for value in approved:
-            path = Path(str(value)).expanduser().resolve(strict=False)
-            if path.exists() and path not in writable:
-                writable.append(path)
+    try:
+        from .subprocess_policy import approved_subprocess_write_roots
+    except ImportError:
+        from tools.subprocess_policy import approved_subprocess_write_roots
+
+    for path in approved_subprocess_write_roots(state):
+        if path.exists() and path not in writable:
+            writable.append(path)
 
     repo_root = Path(__file__).resolve().parents[3]
     if repo_root not in readonly:
@@ -2336,8 +2361,12 @@ def _norm_shell_path(path: str, base: str | None = None, *, raw: bool = False) -
         if len(values) != 1:
             return UNRESOLVED
         operand = values[0]
-    operand = os.path.expandvars(os.path.expanduser(operand))
-    if base == UNRESOLVED and not os.path.isabs(operand):
+    if uses_wsl_paths():
+        if operand.startswith("~"):
+            return UNRESOLVED
+    else:
+        operand = os.path.expandvars(os.path.expanduser(operand))
+    if base == UNRESOLVED and not is_bash_absolute(operand):
         return UNRESOLVED
     return normalize_bash_path(operand, base) or UNRESOLVED
 
@@ -2653,7 +2682,9 @@ def _core_grants_external_write(state: Any, target: str, role_root: str) -> bool
         return False
 
 
-def _classify_write_path(path: str | Path, state: Any, *, remote: bool = False) -> tuple[str, str]:
+def _classify_write_path(
+    path: str | Path, state: Any, *, remote: bool = False, core_file_write: bool = False,
+) -> tuple[str, str]:
     """Classify roles; a Core-resolved Path is literal, not shell syntax."""
     # A target the parser could not pin down is unknown, not absent.  Callers
     # must ask about it; this is the whole point of UNRESOLVED existing.
@@ -2662,10 +2693,17 @@ def _classify_write_path(path: str | Path, state: Any, *, remote: bool = False) 
             "命令的写入目标无法静态证明（未展开变量 / $(...) / 循环 / xargs / "
             "source 外部脚本 / 中间层通配符）")
         if os.name == "nt" and not remote:
-            reason += (
-                "；Windows Bash 路径转换不可用时，检查所选 Git Bash 同目录的 "
-                "cygpath.exe，或使用原生盘符路径；/tmp 等随载荷环境变化的挂载"
-                "须使用已知的实际路径；额外授权不能修复路径转换。")
+            if uses_wsl_paths():
+                reason += (
+                    "；当前执行目标是 WSL，路径按该发行版的挂载映射检查。"
+                    "/home、/tmp 等发行版内路径若不能映射到现有可写目录，"
+                    "不会按 Windows/Git Bash 目录处理。可使用项目内的可写目录，"
+                    "或先取得该 WSL 目录的实际写入能力；批准命令不会扩大实际写权限。")
+            elif bash_execution_target().is_local:
+                reason += (
+                    "；Windows Bash 路径转换不可用时，检查所选 Git Bash 同目录的 "
+                    "cygpath.exe，或使用原生盘符路径；/tmp 等随载荷环境变化的挂载"
+                    "须使用已知的实际路径；额外授权不能修复路径转换。")
         return "unresolved_target", reason
 
     # 调度器分配的节点本地 scratch。远端作业里这是合法且常见的写入面：它不是
@@ -2701,6 +2739,16 @@ def _classify_write_path(path: str | Path, state: Any, *, remote: bool = False) 
 
     if _is_git_metadata(p, remote=remote):
         return "protected_source_tree", ".git metadata"
+
+    worktree = getattr(state, "project_worktree", None)
+    in_project = not remote and worktree is not None and _under(p, str(worktree))
+    if in_project and not core_file_write:
+        from core.project_workspace import ProjectWorkspaceError, resolve_tool_path
+
+        try:
+            resolve_tool_path(state, p, write=True)
+        except ProjectWorkspaceError as exc:
+            return "outside_project_workspace", str(exc)
 
     matches = matching_path_roles(p, state)
     for root in _global_env_roots(remote=remote):
@@ -2739,6 +2787,7 @@ def _classify_write_path(path: str | Path, state: Any, *, remote: bool = False) 
             if (workspace_root is not None
                     and not remote
                     and not _under(p, str(workspace_root))
+                    and not (in_project and core_file_write)
                     and not _core_grants_external_write(state, p, role.path)):
                 return "outside_project_workspace", (
                     "external project writes require an existing Core write grant; "
@@ -2762,7 +2811,9 @@ def _classify_write_path(path: str | Path, state: Any, *, remote: bool = False) 
     # 它也永远成不了输出根（output_dir / output_paths 由 _scheduler_role_guard
     # 限死在 build_root / run_root）。同理见 REMOTE_SCRATCH —— `$TMPDIR` 走的是
     # 同一条判断，只是它的值要到运行期才知道。
-    worktree = getattr(state, "project_worktree", None)
+    if in_project and core_file_write:
+        return "safe", "Core-authorized project file write"
+
     if _under(p, "/tmp") and not (
             worktree is not None and _under(p, str(worktree))):
         return "safe", (
@@ -3160,7 +3211,10 @@ def _register_approved_write_root(state: Any, target: str,
     if path is None:
         return None
     try:
-        from .subprocess_policy import register_approved_subprocess_write_root
+        try:
+            from .subprocess_policy import register_approved_subprocess_write_root
+        except ImportError:
+            from tools.subprocess_policy import register_approved_subprocess_write_root
         register_approved_subprocess_write_root(state, path)
     except Exception:
         return None
@@ -3199,9 +3253,10 @@ def _register_approved_write_root(state: Any, target: str,
 def _scope_authorization_text(*, kind: str, cmd: str, cwd: str | None,
                               target: str, scope: str, op: str | None) -> str:
     """Build a node-local exact grant key without changing framework APIs."""
+    shell_target = f"execution_target={bash_execution_target().spec}\n" if kind == "bash" else ""
     return (
         f"scope_guard:{kind}\ncommand={cmd}\n"
-        f"cwd={_norm_path(cwd) if cwd else ''}\n"
+        f"{shell_target}cwd={_norm_path(cwd) if cwd else ''}\n"
         f"target={_norm_path(target)}\nscope={scope}\nop={op or ''}"
     )
 
@@ -3219,6 +3274,18 @@ def _scope_guard_authorization(
     """
     if scope not in _SCOPE_APPROVAL_SCOPES:
         return False, None
+    if scope in _SCOPE_REGISTRABLE:
+        try:
+            from .subprocess_policy import overlaps_project_worktree
+        except ImportError:
+            from tools.subprocess_policy import overlaps_project_worktree
+
+        grant_root = _registration_candidate(target, op)
+        if grant_root and overlaps_project_worktree(state, grant_root):
+            return False, _scope_guard_error(
+                cmd, "outside_project_workspace",
+                "项目内的写入范围由 Core 分配，请使用已分配的工作区。",
+                target, state=state, kind=kind, op=op, preview=preview)
     from shared.lib import dangerous_commands as _danger
     if _danger.bypass_enabled():
         return False, None
@@ -3324,26 +3391,50 @@ def _scope_guard_error(cmd_or_path: str, scope: str, reason: str, target: str,
                     + ("高风险命令按命令内容匹配授权，不额外承诺 cwd/目标的精确绑定。\n"
                        if approval_text == str(cmd_or_path) else
                        "本请求的授权内容包含命令、cwd 和目标；不能据此跳过其他权限检查。\n"))
+            from core.decision_offer import Choice, Offer
+
+            shell_target = bash_execution_target().spec if kind == "bash" else None
+            target_context = f"执行环境：{shell_target}\n" if shell_target else ""
+            context = (
+                f"工具：{_scope_guard_tool_name(kind)}\n"
+                f"{target_context}目标路径：{target}\n作用域：{scope}\n原因：{reason}\n"
+                f"操作：{op or 'write'}\n"
+                f"内容预览（前 500 字符）：\n"
+                f"{(preview if preview is not None else str(cmd_or_path))[:500]}\n\n"
+                + grant_note + "回复“批准”/“同意”即可。"
+            )
+            # Use Core's one offered choice set for rendering, dialogue and
+            # resume. Bare labels alone cannot be reconstructed by the current
+            # dialogue resolver, so "批准执行" used to be rejected as discussion.
+            from uuid import uuid4
+
+            # A later call of the same command is a new presentation. Use Core's
+            # current call identity; direct non-loop callers get a fresh nonce.
+            # Core persists the resulting payload for replay, not a node cache.
+            call_id = (state.hook_state.get("_current_tool_call_id_being_executed")
+                       or uuid4().hex)
+            identity = [call_id, kind, approval_text, scope, target, op]
+            if shell_target:
+                identity.append(shell_target)
+            binding = json.dumps(identity, ensure_ascii=False)
+            offer = Offer(
+                decision_id=(f"{state.run_id}:scope_guard:"
+                             + hashlib.sha256(binding.encode("utf-8")).hexdigest()),
+                kind="highrisk_confirm", question=question, context=context,
+                choices=(Choice(id="approve", label=_danger.APPROVE_OPTION),
+                         Choice(id="deny", label=_danger.DENY_OPTION)),
+            )
             return {
                 "status": "pause",
                 "pause_event": {
-                    "question": question,
-                    "context": (
-                        f"工具：{_scope_guard_tool_name(kind)}\n"
-                        f"目标路径：{target}\n作用域：{scope}\n原因：{reason}\n"
-                        f"操作：{op or 'write'}\n"
-                        f"内容预览（前 500 字符）：\n"
-                        f"{(preview if preview is not None else str(cmd_or_path))[:500]}\n\n"
-                        + grant_note +
-                        "回复“批准”/“同意”即可。"
-                    ),
-                    "options": list(_danger.HIGHRISK_OPTIONS),
+                    **offer.to_pause_payload(),
                     "asking_node_type": state.node_type,
                     "asking_run_id": state.run_id,
                     "metadata": {
                         "type": "highrisk_confirm",
                         "tool": _scope_guard_tool_name(kind),
                         "scope": scope, "target": target,
+                        **({"execution_target": shell_target} if shell_target else {}),
                         "registers_root": grant_root,
                         "authorization_key": approval_text,
                     },
@@ -3364,12 +3455,12 @@ def _scope_guard_error(cmd_or_path: str, scope: str, reason: str, target: str,
             f"目标路径：{target}\n"
             f"作用域：{scope}\n"
             f"原因：{reason}\n\n"
-            "写权限只由路径角色决定：source_worktree_root/source_patch_root/"
-            "build_root/run_root 可写；experiment_root 仅作容器；"
+            "写权限以 Core 分配的工作区和有效授权为准。路径角色只描述用途；"
+            "experiment_root 仅作容器；"
             "source_baseline_root/dependency_root 默认只读。\n"
             "include/lib 冲突应通过本 run 的环境变量、CPATH/CMAKE_PREFIX_PATH/"
             "PKG_CONFIG_PATH/LD_LIBRARY_PATH 或 case-local 配置解决，不得移动、重命名或删除 "
-            "conda/system 文件。若确需越界修改，工具会暂停并请求这条命令的路径级一次性批准；"
+            "conda/system 文件。项目内写入范围由 Core 分配；可审批的外部操作会明确发起确认。"
             "源码基线和框架状态目录永远不能授权。\n\n"
             "✅ 标准改写模式：在 run/workspace 运行目录内工作——用 `cwd=<运行目录>` 参数"
             "声明工作目录，命令内一律用相对路径；外部大数据/安装目录用只读 symlink 链进运行目录。\n"
@@ -3817,7 +3908,7 @@ def _network_write_targets(op: str, tokens: list[str], base: str) -> list[str]:
             )
         )
         if remote_name and not output_dirs:
-            targets.append(_norm_path(".", base))
+            targets.append(_norm_shell_path(".", base))
         if (
             "K" in curl_seen
             or any(
@@ -3877,7 +3968,7 @@ def _network_write_targets(op: str, tokens: list[str], base: str) -> list[str]:
         )
         spider = "--spider" in tokens[1:]
         if not spider and not documents and not directories:
-            targets.append(_norm_path(".", base))
+            targets.append(_norm_shell_path(".", base))
         if (
             "e" in wget_seen
             or any(
@@ -4087,7 +4178,7 @@ def _compiler_write_targets(tokens: list[str], base: str) -> list[str]:
         targets.append(UNRESOLVED)
     if not targets:
         # 无显式选择器的真实编译默认写 cwd；纯能力探查已在上方排除。
-        targets.append(_norm_path(".", base))
+        targets.append(_norm_shell_path(".", base))
     return targets
 
 
@@ -4322,7 +4413,7 @@ def _known_application_write_targets(
         ]
         if missing:
             targets.append(UNRESOLVED)
-        return targets or [_norm_path(".", base)], True
+        return targets or [_norm_shell_path(".", base)], True
 
     if op in {"gmx", "gmx_mpi"} and "mdrun" in tokens[1:]:
         values, missing = _option_path_values(
@@ -4333,7 +4424,7 @@ def _known_application_write_targets(
         ]
         if missing:
             targets.append(UNRESOLVED)
-        return targets or [_norm_path(".", base)], True
+        return targets or [_norm_shell_path(".", base)], True
 
     if op in _MPI_LAUNCHERS:
         values, missing = _option_path_values(
@@ -4362,7 +4453,7 @@ def _known_application_write_targets(
         if mode not in {"x", "e"}:
             return [], False
         operands = [str(item) for item in tokens[2:] if not str(item).startswith("-")]
-        targets = [_norm_path(".", base)]
+        targets = [_norm_shell_path(".", base)]
         if len(operands) >= 2:
             targets.append(_containment_target(operands[-1], base))
         return targets, True
@@ -4600,7 +4691,7 @@ def _git_destructive_targets(tokens: list[str], base: str) -> list[str] | None:
     worktree = (
         _containment_target(explicit_worktree, effective_base)
         if explicit_worktree is not None
-        else effective_base
+        else _norm_shell_path(".", effective_base)
     )
     if sub == "clone":
         clone_value_options = {
@@ -4659,7 +4750,7 @@ def _find_destructive_targets(tokens: list[str], base: str) -> list[str] | None:
         if tok in _FIND_WRITE_OPERAND_ACTIONS and idx + 1 < len(tokens):
             written.append(tokens[idx + 1])
     targets = [_containment_target(t, base) for t in roots + written]
-    return targets or [_norm_path(".", base)]
+    return targets or [_norm_shell_path(".", base)]
 
 
 def _redirection_write_targets(segment: str, base: str) -> list[str]:
@@ -4905,7 +4996,7 @@ def _unzip_write_targets(
     if missing:
         targets.append(UNRESOLVED)
     if not targets:
-        targets.append(_norm_path(".", base))
+        targets.append(_norm_shell_path(".", base))
     return targets, True
 
 
@@ -5030,7 +5121,7 @@ def _extract_write_targets(
             else:
                 targets = _explicit_build_output_dirs(segment, base)
                 if not targets:
-                    targets = [_norm_path(".", base)]
+                    targets = [_norm_shell_path(".", base)]
     elif op in {"curl", "wget", "scp"}:
         targets = _network_write_targets(op, tokens, base)
     elif _COMPILER_RE.match(op):
@@ -5151,7 +5242,7 @@ def collect_exec_path_targets(
 ) -> list[dict[str, str]]:
     # Scheduler callers retain their execution-host coordinates. Only local
     # Bash diagnostics opt into the selected Windows runtime's mount table.
-    with shell_path_resolution(use_msys=local_shell):
+    with shell_path_resolution(remote=not local_shell):
         return _collect_exec_path_targets(cmd, cwd)
 
 
@@ -5872,7 +5963,7 @@ async def _runtime_abi_preflight_bash(state: Any, cmd: str,
     内的目标不做 ELF/ldd 判定。镜像内路径的 ABI 事实在镜像里，宿主机上同名文件
     是另一个二进制，拿它的 ldd 结果下结论既可能误报也可能漏报。"""
     expanded = _expand_cmd_vars(cmd)
-    with shell_path_resolution(use_msys=local_shell):
+    with shell_path_resolution(remote=not local_shell):
         base = _command_base_dir(expanded, cwd)
     for segment in _split_shell_segments(expanded):
         cd_match = re.match(rf"^cd\s+({_PATH_TOKEN_RE})\s*$", segment)
@@ -6009,7 +6100,7 @@ async def _runtime_abi_preflight_bash(state: Any, cmd: str,
 def _analyze_shell_path_effects(
     cmd: str, cwd: str | None = None, *, remote: bool = False,
 ) -> list[tuple[str, str]]:
-    with shell_path_resolution(use_msys=not remote):
+    with shell_path_resolution(remote=remote):
         return _project_shell_path_effects(cmd, cwd, remote=remote)
 
 
@@ -6034,7 +6125,8 @@ def _project_shell_path_effects(
     )
     effects: list[tuple[str, str]] = []
     dynamic_operand = "*/__hf_dynamic__"
-    # Internal sentinels use host coordinates, never MSYS mount syntax.
+    # The legacy scheduler projection uses host placeholders. WSL operands
+    # can be resolved against an unknown cwd directly without fabricating one.
     remote_projection_root = os.path.abspath("/__hf_remote_scratch__")
     unknown_projection_root = os.path.abspath("/__hf_unknown_cwd__")
 
@@ -6065,7 +6157,7 @@ def _project_shell_path_effects(
         if event_cwd == REMOTE_SCRATCH:
             projection_root = remote_projection_root
             marker = REMOTE_SCRATCH
-        elif event_cwd == UNRESOLVED:
+        elif event_cwd == UNRESOLVED and not uses_wsl_paths():
             projection_root = unknown_projection_root
             marker = UNRESOLVED
         else:
@@ -6138,7 +6230,7 @@ def _project_shell_path_effects(
                 projected = _containment_target(value, remote_projection_root)
                 targets.append(normalize_projected(
                     projected, remote_projection_root, REMOTE_SCRATCH))
-            elif event_cwd == UNRESOLVED:
+            elif event_cwd == UNRESOLVED and not uses_wsl_paths():
                 projected = _containment_target(value, unknown_projection_root)
                 targets.append(normalize_projected(
                     projected, unknown_projection_root, UNRESOLVED))
@@ -6193,15 +6285,19 @@ def _project_shell_path_effects(
 def _bash_path_effects_guard(
     state: Any, cmd: str, cwd: str | None = None, *,
     remote: bool = False, allow_authorization: bool = True,
+    effects: list[tuple[str, str]] | None = None,
 ) -> dict | None:
-    with shell_path_resolution(use_msys=not remote):
+    with shell_path_resolution(remote=remote):
+        if effects is None:
+            effects = _project_shell_path_effects(cmd, cwd, remote=remote)
         return _check_bash_path_effects(
-            state, cmd, cwd, remote=remote, allow_authorization=allow_authorization,
+            state, cmd, cwd, effects, remote=remote,
+            allow_authorization=allow_authorization,
         )
 
 
 def _check_bash_path_effects(
-    state: Any, cmd: str, cwd: str | None = None, *,
+    state: Any, cmd: str, cwd: str | None, effects: list[tuple[str, str]], *,
     remote: bool = False, allow_authorization: bool = True,
 ) -> dict | None:
     """把 shell 可见写目标投影到既有 path-role 真相源。
@@ -6216,8 +6312,7 @@ def _check_bash_path_effects(
             "<path_roles>", state=state)
     from shared.lib import dangerous_commands as danger
     remote_lookup_heads: list[str] = []
-    for op, target in _analyze_shell_path_effects(
-            cmd, cwd, remote=remote):
+    for op, target in effects:
         if op == "remote_path_lookup":
             # 裸命令名靠远端 PATH：放行 + 留痕，绝不参与拒绝——提交机上
             # 无法证明远端 PATH，硬拒只会逼出更差的绝对路径写死。
@@ -9768,6 +9863,16 @@ def _declared_workdir(cwd: str | None, workdir: str | None) -> tuple[str | None,
             "error": "workdir must be a non-empty directory path; use cwd or workdir.",
             "payload_spawned": False,
         }
+    if has_cwd:
+        host_cwd = _host_workdir(str(cwd))
+        if host_cwd is None:
+            return None, None, _unmapped_workdir(str(cwd))
+        cwd = host_cwd
+    if workdir is not None:
+        host_workdir = _host_workdir(workdir)
+        if host_workdir is None:
+            return None, None, _unmapped_workdir(workdir)
+        workdir = host_workdir
     if workdir is not None and has_cwd:
         if os.path.normcase(os.path.normpath(str(cwd))) != os.path.normcase(os.path.normpath(workdir)):
             return None, None, {
@@ -9935,8 +10040,11 @@ async def _safe_run_bash(state: Any, cmd: str, timeout: int = 600,
                 pass
             return workdir_error
         try:
-            path_effect_block = _bash_path_effects_guard(
-                state, cmd, cwd=cwd)
+            with shell_path_resolution(remote=False):
+                effects = _project_shell_path_effects(cmd, cwd)
+                path_effect_block = _bash_path_effects_guard(
+                    state, cmd, cwd=cwd, effects=effects,
+                )
         except Exception as exc:
             return {
                 "status": "error",
@@ -9950,11 +10058,11 @@ async def _safe_run_bash(state: Any, cmd: str, timeout: int = 600,
             }
         if path_effect_block is not None:
             return path_effect_block
-        # Reuse the same tree-sitter projection that just passed the path gate.
+        # Reuse the same projection that just passed the path gate.
         # These are capabilities already validated/confirmed above, never paths
         # inferred from payload text inside the executor.
         bash_write_targets = [
-            target for op, target in _analyze_shell_path_effects(cmd, cwd)
+            target for op, target in effects
             if op != "remote_visible_path"
             and target not in {UNRESOLVED, REMOTE_SCRATCH}
         ]
@@ -10358,7 +10466,7 @@ async def _safe_write_file(state: Any, path: str, content: str,
         scope, reason = (
             "invalid_path_role_contract", "; ".join(contract["errors"]))
     else:
-        scope, reason = _classify_write_path(resolved_target, state)
+        scope, reason = _classify_write_path(resolved_target, state, core_file_write=True)
     if scope == "safe":
         vc_error = _worktree_requires_version_control(target, state)
         if vc_error:
@@ -11591,10 +11699,16 @@ async def _safe_execute_python(state: Any, code: str, timeout: int = 300,
             return _sandbox_roots_error(exc)
 
     repo_root_path = Path(__file__).resolve().parents[3]
-    repo_root = str(repo_root_path)
-    pythonpath_roots = [repo_root]
+    wsl_python = uses_wsl_paths()
+    python = "python3" if wsl_python else the_interpreter_for_model_code()
+    target_path = str
+    if wsl_python:
+        from core.isolation import target_paths
+
+        target_path = target_paths().to_linux
+    pythonpath_roots = [target_path(repo_root_path)]
     venv_lib = repo_root_path / ".venv" / "lib"
-    if venv_lib.is_dir():
+    if not wsl_python and venv_lib.is_dir():
         pythonpath_roots.extend(
             str(path) for path in sorted(venv_lib.glob("python*/site-packages"))
             if path.is_dir()
@@ -11609,27 +11723,27 @@ async def _safe_execute_python(state: Any, code: str, timeout: int = 300,
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PATH": "/usr/local/bin:/usr/bin:/bin",
-        "PYTHONPATH": os.pathsep.join(pythonpath_roots),
-        "TMPDIR": str(scratch_tmp),
-        "TMP": str(scratch_tmp),
-        "TEMP": str(scratch_tmp),
-        "XDG_CACHE_HOME": str(scratch_cache),
-        "MPLCONFIGDIR": str(scratch_cache / "matplotlib"),
-        "PYTHONPYCACHEPREFIX": str(scratch_cache / "pycache"),
-        "EXPERIMENT_REPRO_ROOT": str(repro_root),
-        "EXPERIMENT_REPRO_EVIDENCE": str(
+        "PYTHONPATH": (":" if wsl_python else os.pathsep).join(pythonpath_roots),
+        "TMPDIR": target_path(scratch_tmp),
+        "TMP": target_path(scratch_tmp),
+        "TEMP": target_path(scratch_tmp),
+        "XDG_CACHE_HOME": target_path(scratch_cache),
+        "MPLCONFIGDIR": target_path(scratch_cache / "matplotlib"),
+        "PYTHONPYCACHEPREFIX": target_path(scratch_cache / "pycache"),
+        "EXPERIMENT_REPRO_ROOT": target_path(repro_root),
+        "EXPERIMENT_REPRO_EVIDENCE": target_path(
             repro_root / "min_run_evidence.jsonl"),
         "EXPERIMENT_SOURCE_WORKTREE_ROOTS": _json.dumps([
-            role.path for role in roles
+            target_path(role.path) for role in roles
             if role.role == "source_worktree_root" and role.writable
         ]),
         "EXPERIMENT_SOURCE_PATCH_ROOTS": _json.dumps([
-            role.path for role in roles
+            target_path(role.path) for role in roles
             if role.role == "source_patch_root" and role.writable
         ]),
     }
     if run_roots:
-        child_env["EXPERIMENT_RUN_ROOT"] = run_roots[0]
+        child_env["EXPERIMENT_RUN_ROOT"] = target_path(run_roots[0])
     for name in _SAFE_PYTHON_THREAD_ENV:
         child_env[name] = str(_SAFE_PYTHON_THREAD_LIMIT)
 
@@ -11650,14 +11764,9 @@ async def _safe_execute_python(state: Any, code: str, timeout: int = 300,
         code_to_run = _with_no_child_process_audit(
             _with_matplotlib_font_preamble(code)
         )
-        # 用**跑着 harness 的那个解释器**，不是一个绝对路径。
-        # 为什么，见 `the_interpreter_for_model_code` 的注释 —— 一句话：
-        # 硬编码的 /usr/bin/python3 在 macOS 上是 Xcode 的 3.9，没有 numpy，
-        # 模型只能满硬盘找；而模型代码要的依赖与 harness 自己的是同一套。
-        python_cmd = (
-            f"{shlex.quote(the_interpreter_for_model_code())} "
-            f"-c {shlex.quote(code_to_run)}"
-        )
+        # WSL Bash receives command text. Core can translate argv executables,
+        # but cannot replace a Windows interpreter embedded in that text.
+        python_cmd = f"{shlex.quote(python)} -c {shlex.quote(code_to_run)}"
         result = await _exec_and_log(
             state,
             python_cmd,

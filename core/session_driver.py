@@ -228,6 +228,7 @@ async def run_turn(
     user_text: str,
     *,
     frontend: SessionFrontend,
+    framework_continuation: bool = False,
 ) -> TurnOutcome:
     """一轮会话的完整编排 —— CLI 与平台都调这一份。
 
@@ -264,12 +265,13 @@ async def run_turn(
     # 与空轮重放不是新请求 —— 承诺照旧在场。
     from core.side_effect_contract import append_statement, end_read_only
 
-    if not _chat._is_continuous_turn(user_text):
+    if not framework_continuation and not _chat._is_continuous_turn(user_text):
         end_read_only(state, reason="new_user_message")
 
     try:
         loop_result = await _chat._run_one_turn_raw(
-            state, harness, messages, llm, user_text)
+            state, harness, messages, llm, user_text,
+            **({"framework_continuation": True} if framework_continuation else {}))
         status = str(loop_result.status or "completed")
         reply = ""
         if status == "paused" and frontend.ask_pause is None:

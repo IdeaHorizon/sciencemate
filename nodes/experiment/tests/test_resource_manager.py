@@ -40,6 +40,150 @@ def _fixture_node_inputs(purpose: str) -> dict[str, str]:
     }
 
 
+@pytest.fixture
+def wsl_submission_paths(monkeypatch):
+    from core import execution_target
+    from core.isolation import wsl
+
+    backend = wsl.WslBackend("Ubuntu")
+    backend._mount_prefix = "/mnt/"
+    monkeypatch.setattr(
+        execution_target, "current",
+        lambda: execution_target.parse("wsl:Ubuntu"),
+    )
+    monkeypatch.setattr(wsl, "WslBackend", lambda _name: backend)
+    monkeypatch.setattr("core.isolation._target_backend", lambda: backend)
+    return backend
+
+
+@pytest.mark.skipif(os.name != "nt", reason="WSL requires Windows")
+@pytest.mark.parametrize("guest_field", ["workdir", "output_dir", "output_paths"])
+def test_wsl_local_submission_maps_declared_paths_before_admission(
+    tmp_path, wsl_submission_paths, guest_field,
+):
+    state = _planned_state(tmp_path)
+    run_root = rm.experiment_output_dir(state, "runtime", create=True)
+    state.hook_state["path_roles"] = {"run_root": str(run_root)}
+    output = run_root / "logs"
+    fields = {"workdir": str(run_root), "output_dir": str(output),
+              "output_paths": [str(run_root)]}
+    if guest_field == "output_paths":
+        fields[guest_field] = [wsl_submission_paths.to_linux(run_root)]
+    else:
+        fields[guest_field] = wsl_submission_paths.to_linux(fields[guest_field])
+
+    result = asyncio.run(_submit_job(
+        state, command="echo deployment-check > result.txt", scheduler="local",
+        dry_run=True, route_step_id="submit_echo", **fields,
+    ))
+
+    assert result["status"] == "success", result
+    assert not (run_root / "result.txt").exists(), "dry-run must not run the payload"
+    script = Path(result["script_path"]).read_text(encoding="utf-8")
+    assert "C:/mnt/" not in script.replace("\\", "/")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="WSL requires Windows")
+@pytest.mark.parametrize("guest_field", ["workdir", "output_dir", "output_paths"])
+@pytest.mark.parametrize("destination", ["outside", "guest_only", "readonly"])
+def test_wsl_local_submission_mapping_preserves_path_authority(
+    tmp_path, wsl_submission_paths, guest_field, destination,
+):
+    state = _planned_state(tmp_path)
+    run_root = rm.experiment_output_dir(state, "runtime", create=True)
+    readonly = tmp_path / "readonly"
+    readonly.mkdir()
+    state.hook_state["path_roles"] = {
+        "run_root": str(run_root), "source_baseline_root": str(readonly),
+    }
+    native = readonly if destination == "readonly" else tmp_path / "outside"
+    guest = "/home/fixture/result" if destination == "guest_only" else (
+        wsl_submission_paths.to_linux(native)
+    )
+    fields = {"workdir": str(run_root), "output_dir": str(run_root / "logs"),
+              "output_paths": [str(run_root)]}
+    fields[guest_field] = [guest] if guest_field == "output_paths" else guest
+
+    result = asyncio.run(_submit_job(
+        state, command="echo blocked > result.txt", scheduler="local",
+        dry_run=True, route_step_id="submit_echo", **fields,
+    ))
+
+    assert result["status"] == "error", result
+    assert result["blocker"]["field"] == guest_field
+    assert "script_path" not in result
+    assert not (native / "result.txt").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="WSL requires Windows")
+def test_wsl_submission_mapping_uses_core_mount_prefix(
+    tmp_path, wsl_submission_paths,
+):
+    wsl_submission_paths._mount_prefix = "/host-drives/"
+    state = _planned_state(tmp_path)
+    run_root = rm.experiment_output_dir(state, "runtime", create=True)
+    state.hook_state["path_roles"] = {"run_root": str(run_root)}
+
+    result = asyncio.run(_submit_job(
+        state, command="echo check", scheduler="local", dry_run=True,
+        route_step_id="submit_echo",
+        workdir=wsl_submission_paths.to_linux(run_root),
+    ))
+
+    assert result["status"] == "success", result
+
+
+def test_remote_submission_does_not_use_local_wsl_mapping(
+    tmp_path, monkeypatch, wsl_submission_paths,
+):
+    from nodes.experiment.tools import safe_bash
+
+    def no_local_mapping(_path):
+        pytest.fail("remote scheduler path reached local WSL mapping")
+
+    monkeypatch.setattr(safe_bash, "_host_workdir", no_local_mapping)
+    state = _planned_state(tmp_path)
+    run_root = rm.experiment_output_dir(state, "runtime", create=True)
+    state.hook_state["path_roles"] = {"run_root": str(run_root)}
+    result = asyncio.run(_submit_job(
+        state, command="echo remote", scheduler="slurm", dry_run=True,
+        route_step_id="submit_echo", workdir=str(run_root),
+        output_dir=str(run_root / "logs"),
+    ))
+
+    assert result["status"] == "success", result
+
+
+def test_local_submission_uses_the_workdir_returned_by_validation(
+    tmp_path, monkeypatch,
+):
+    from nodes.experiment.tools import safe_bash
+
+    state = _planned_state(tmp_path)
+    run_root = rm.experiment_output_dir(state, "runtime", create=True)
+    state.hook_state["path_roles"] = {"run_root": str(run_root)}
+    requested = run_root / "requested"
+    canonical = run_root / "validated"
+    requested.mkdir()
+    canonical.mkdir()
+    monkeypatch.setattr(
+        safe_bash, "resolve_required_workdir",
+        lambda _state, cwd: (str(canonical), None),
+    )
+
+    result = asyncio.run(_submit_job(
+        state, command="echo check", scheduler="local", dry_run=True,
+        route_step_id="submit_echo", workdir=str(requested),
+        output_dir=str(run_root / "logs"),
+    ))
+
+    assert result["status"] == "success", result
+    assert Path(result["workdir"]).resolve() == canonical.resolve()
+    script = Path(result["script_path"]).read_text(encoding="utf-8")
+    assert str(canonical) in script
+    assert str(requested) not in script
+
+
 def _planned_state(tmp_path):
     state = State.new("experiment", tmp_path)
     saved = state.save_artifact("pre_registration", "plan", "# prereg", metadata={

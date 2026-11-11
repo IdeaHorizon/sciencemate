@@ -696,8 +696,9 @@ async def run_summarizer(harness: NodeHarness, state: State,
             # 去重会静默失效 —— 于是每压一次多留一份旧快照，正是 PR #351 那个
             # 累积 bug 原样复发。framework_notice_body 对非信封消息返回原文，
             # 所以两种形态都能认。
-            new_msgs = [m for m in new_msgs
-                        if not framework_notice_body(m).startswith(ORIENTATION_PREFIX)]
+            new_msgs = [m for i, m in enumerate(new_msgs)
+                        if not ((is_framework_notice(m) or (m.role == "system" and i > 0))
+                                and framework_notice_body(m).startswith(ORIENTATION_PREFIX))]
             new_msgs = [*new_msgs, framework_notice(
                 fresh + "\n\n（压缩后重扫 —— 以本快照为准，账本中的状态性描述可能已过期。）"
             )]
@@ -766,15 +767,26 @@ def split_for_compression(
     """
     # 找出每条 assistant 消息的位置
     assistant_idxs = [i for i, m in enumerate(messages) if m.role == "assistant"]
-    if len(assistant_idxs) <= keep_last_n_turns:
-        # 不够，整个都保留
+    head_end = assistant_idxs[0] if assistant_idxs else len(messages)
+    tail_start = (assistant_idxs[-keep_last_n_turns]
+                  if len(assistant_idxs) > keep_last_n_turns else head_end)
+    # Position is not authority. Older compactors moved framework notices ahead
+    # of the first assistant, making thousands of derived snapshots immortal.
+    # Only the opening system, real caller inputs and the running ledger belong
+    # to the prefix. Reclassify restored notices too, without editing their log.
+    head, prefix_history = [], []
+    for i, msg in enumerate(messages[:head_end]):
+        if (_is_compression_notice(msg)
+                or (msg.role == "system" and i == 0)
+                or (msg.role == "user" and not is_framework_notice(msg))):
+            head.append(msg)
+        else:
+            prefix_history.append(msg)
+    if not prefix_history and len(assistant_idxs) <= keep_last_n_turns:
         return messages, [], []
-
-    head_end = assistant_idxs[0]              # 第一条 assistant 之前的索引
-    tail_start = assistant_idxs[-keep_last_n_turns]
     return (
-        messages[:head_end],
-        messages[head_end:tail_start],
+        head,
+        [*prefix_history, *messages[head_end:tail_start]],
         messages[tail_start:],
     )
 
@@ -838,8 +850,9 @@ async def _strategy_truncate(ctx: SummarizerContext) -> list[LLMMessage]:
     keep_from_middle = extract_keep_tool_pairs(middle, cfg.keep_tool_calls)
 
     dropped = len(middle) - len(keep_from_middle)
-    notice = build_compression_notice(ctx.turn, "truncate 策略。丢弃了中间 {dropped} 条 messages，保留了 head/tail 和 ")
-    return [*head, notice, *keep_from_middle, *tail]
+    notice = build_compression_notice(ctx.turn, f"truncate 策略。丢弃了中间 {dropped} 条 messages。")
+    return [*_head_without_superseded_notices(head), notice,
+            *_preserve_user_messages(middle, keep_from_middle), *keep_from_middle, *tail]
 
 
 register_strategy("truncate", _strategy_truncate)
@@ -1047,6 +1060,8 @@ def _preserve_user_messages(
         if id(m) in kept_ids:
             continue
         if getattr(m, "role", None) != "user":
+            continue
+        if is_framework_notice(m):
             continue
         if getattr(m, "tool_call_id", None):        # tool_result 走 user role 的情况
             continue
@@ -1393,7 +1408,8 @@ def _render_messages_for_compression(messages: list[LLMMessage]) -> str:
             # 框架注入的提示走的是 role="user" 信封（见 loop_hooks._as_framework_notices）。
             # 在摘要里把它标成 `[user]`，等于让下一轮把框架自己说的话当成用户诉求 ——
             # 摘要是会被反复喂回模型的，这个错标会一路传下去。
-            tag = "framework-notice" if is_framework_notice(m) else "user"
+            tag = ("framework-notice" if is_framework_notice(m) else
+                   "legacy-unknown" if m.origin == "legacy_unknown" else "user")
             lines.append(f"[{tag}]: {(m.content or '')[:500]}")
         elif role == "system":
             lines.append(f"[system]: {(m.content or '')[:300]}")

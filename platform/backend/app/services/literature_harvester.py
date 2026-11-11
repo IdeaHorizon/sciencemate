@@ -25,6 +25,10 @@ MAX_JOURNALS_PER_DOMAIN = 10
 MAX_DOMAINS_PER_JOURNAL = 5
 
 
+class JournalMappingUnavailable(RuntimeError):
+    """The installed journal mapping could not be read."""
+
+
 def _normal_journal(value: object) -> str:
     from app.services.feed.profile import journal_key
     return journal_key(value)
@@ -90,17 +94,30 @@ def _recent_publication(
 
 def _journal_targets(
     domain_codes: set[str] | None = None,
+    *,
+    required: bool = False,
 ) -> dict[str, dict[str, object]]:
     """读取收敛后的离线期刊映射，而不是直接执行整张候选关系表。"""
     if domain_codes is not None:
         from app.services.feed.domains import expand_cas_domains
         domain_codes = set(expand_cas_domains(domain_codes))
     configured = os.environ.get("HARNESS_JOURNAL_DOMAIN_MAP", "").strip()
-    path = Path(configured).expanduser() if configured else Path(__file__).resolve().parents[4] / "docs" / "xiaohongshu_journal_map.tsv"
+    if configured:
+        path = Path(configured).expanduser()
+    else:
+        from app.launcher import find_the_harness
+
+        root = Path(settings.harness_root).expanduser() if settings.harness_root else find_the_harness()
+        path = root / "docs" / "xiaohongshu_journal_map.tsv" if root else None
     candidates: list[dict[str, object]] = []
     try:
+        if path is None:
+            raise FileNotFoundError("The journal mapping has no configured or bundled harness root")
         with path.open("r", encoding="utf-8", newline="") as handle:
-            for row in csv.DictReader(handle, delimiter="\t"):
+            reader = csv.DictReader(handle, delimiter="\t")
+            if not {"journal_name", "二级学科代码"}.issubset(reader.fieldnames or ()):
+                raise csv.Error("The journal mapping is missing required columns")
+            for row in reader:
                 name = " ".join(str(row.get("journal_name") or "").split())
                 code = str(row.get("二级学科代码") or "").strip()
                 key = _normal_journal(name)
@@ -136,8 +153,10 @@ def _journal_targets(
                         name.casefold(),
                     ),
                 })
-    except (OSError, csv.Error):
+    except (OSError, csv.Error, UnicodeError) as exc:
         logger.exception("Cannot load Xiaohongshu journal map: %s", path)
+        if required:
+            raise JournalMappingUnavailable(f"Cannot load journal mapping: {path}") from exc
         return {}
 
     by_domain: dict[str, list[dict[str, object]]] = {}
@@ -235,7 +254,7 @@ class LiteratureIndexHarvester:
         self._stop = asyncio.Event()
         self._asset_task: asyncio.Task[None] | None = None
         self._openalex_blocked_until: datetime | None = None
-        self._online_tasks: dict[str, asyncio.Task[None]] = {}
+        self._online_tasks: dict[str, asyncio.Task] = {}
         self._online_domains: dict[str, tuple[str, ...]] = {}
         self._last_online_refresh: dict[str, tuple[tuple[str, ...], datetime]] = {}
 
@@ -442,13 +461,13 @@ class LiteratureIndexHarvester:
         return True
 
     def _online_finished(
-        self, key: str, signature: tuple[str, ...], task: asyncio.Task[None]
+        self, key: str, signature: tuple[str, ...], task: asyncio.Task[bool]
     ) -> None:
         if self._online_tasks.get(key) is not task:
             return
         self._online_tasks.pop(key, None)
         self._online_domains.pop(key, None)
-        if not task.cancelled() and task.exception() is None:
+        if not task.cancelled() and task.exception() is None and task.result():
             self._last_online_refresh[key] = (signature, datetime.now(UTC))
 
     def is_online_refreshing(self, user_id: object) -> bool:
@@ -457,7 +476,7 @@ class LiteratureIndexHarvester:
 
     async def _run_online_refresh(
         self, *, user_id: object, domains: list[str]
-    ) -> None:
+    ) -> bool:
         """Fetch selected journals first, then the selected-domain + Project route."""
         from app.services.feed import domain_progress
         started = asyncio.get_running_loop().time()
@@ -493,11 +512,13 @@ class LiteratureIndexHarvester:
                 user_id, domains, journal, project, journal_seconds, project_seconds,
                 asyncio.get_running_loop().time() - started,
             )
+            return not bool(journal.get("failed"))
         except asyncio.CancelledError:
             raise
         except Exception:
             domain_progress.mark(user_id, domains, "failed")
             logger.exception("Online literature refresh failed for user=%s", user_id)
+            return False
 
     async def run_once(
         self,
@@ -524,7 +545,7 @@ class LiteratureIndexHarvester:
         })
         if manager.local_index is None:
             return {"queries": 0, "papers": 0, "failed": 0}
-        targets = _journal_targets(domain_codes) if domain_codes else {}
+        targets = _journal_targets(domain_codes, required=True) if domain_codes else {}
         for raw in explicit_journals or []:
             name = " ".join(str(raw.get("name") or "").split())
             issns = [str(value).strip().upper() for value in (raw.get("issn"), raw.get("eissn")) if str(value or "").strip()]

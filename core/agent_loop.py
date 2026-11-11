@@ -53,6 +53,7 @@ from .pause import (
     register_pause,
 )
 from .state import State
+from .conversation_store import msg_to_jsonable, render_context_change, restore_messages
 
 log = logging.getLogger("agent_loop")
 
@@ -183,7 +184,9 @@ _DIGEST_FIELDS = ("role", "content", "tool_calls", "tool_call_id",
 
 
 def digest_messages(messages: list) -> tuple[int, str]:
-    """canonical 序列化 + sha256。任何一层想核对"模型到底收到了什么"，
+    """Provider-facing message fields only, excluding local rendering identity.
+
+    canonical 序列化 + sha256。任何一层想核对"模型到底收到了什么"，
     用同一个函数算，别各自近似（同一个问题一个真相源）。"""
     import hashlib
     canon = json.dumps(
@@ -559,8 +562,7 @@ async def _run_loop_body(
     state.append_transcript(
         "loop_seed", n_messages=len(messages),
         seed_bytes=_seed_bytes, seed_digest=_seed_digest,
-        messages=[{k: getattr(m, k, None) for k in _DIGEST_FIELDS}
-                  for m in messages])
+        messages=[msg_to_jsonable(m) for m in messages])
 
     for turn in range(1, _max_turns + 1):
         # 咽喉拦截（#284）发生在**轮中**（工具派发/模型请求那一刻），它拿不到
@@ -588,7 +590,7 @@ async def _run_loop_body(
             m.content for m in messages
             if getattr(m, "role", "") == "user"
             and (m.content or "").strip()
-            and not is_framework_notice(m)
+            and m.origin == "caller"  # unknown legacy provenance is retained, not certified as human speech
         ]
         ctx = loop_hooks.HookContext(
             harness=harness, state=state, messages=messages, turn=turn,
@@ -636,7 +638,39 @@ async def _run_loop_body(
         # model turn. Submission and ordinary status queries remain nonblocking.
         from core import job_wait
 
+        recovery_checkpoint = None
+        selected_wait = None
+        if turn == 1:
+            try:
+                recovery_checkpoint = json.loads(_checkpoint_path(state).read_text())
+            except (OSError, ValueError):
+                pass
+            selected_wait = job_wait.load(state)
         await job_wait.resume(state, messages, turn=turn)
+        if turn == 1:
+            from core.conversation_store import (
+                UnconfirmedToolOutcome, reconcile_reentrant_calls, restore_recorded_tool_results,
+                retire_undispatched_calls,
+                unresolved_tool_calls,
+            )
+
+            restore_recorded_tool_results(state, messages, turn=turn,
+                                          checkpoint=recovery_checkpoint)
+            retired = retire_undispatched_calls(
+                state, messages, checkpoint=recovery_checkpoint, selected_wait=selected_wait,
+                turn=turn,
+            )
+            await reconcile_reentrant_calls(state, messages, turn=turn)
+            unresolved = unresolved_tool_calls(messages)
+            if unresolved:
+                state.append_transcript("tool_outcome_unconfirmed", calls=unresolved,
+                                        do_not_resubmit=True)
+                raise UnconfirmedToolOutcome(
+                    "Saved tool intent has no confirmed result; reconcile before continuing: "
+                    + json.dumps(unresolved, ensure_ascii=False)
+                )
+            if retired:
+                _persist_messages_checkpoint(state, messages, turn=turn)
 
         # ── (-0.5) 外部 injected_messages 注入 ────────────────────────
         # 写法：上层 / 主 harness 用 `inject_into_node` 工具往本 run 的
@@ -738,6 +772,7 @@ async def _run_loop_body(
         # 一次尝试"而是"更难的一次"（hook 重灌 + 空 assistant 追加，实测每轮
         # +2118 token 单调发散，症状是上下文太大、重试却把上下文做得更大）。
         # 快照点在 summarizer 之后：压缩是朝解走的状态改进，回滚要保留它。
+        _turn_rollback_messages = list(messages)
         _turn_rollback_len = len(messages)
 
         # ── (0.5) 工作集预算：机械 LRU，不问内容重要不重要 ─────────────
@@ -767,8 +802,11 @@ async def _run_loop_body(
                 previews=[(m.content or "")[:200] for m in pre_msgs],
                 roles=[m.role for m in pre_msgs],
                 contents=[m.content or "" for m in pre_msgs],   # #734 全文
+                messages=[msg_to_jsonable(m) for m in pre_msgs],
             )
-            _local_prompt_est += _summarizer.estimate_tokens(pre_msgs)
+        # Snapshot hooks replace previous rendered values, including with an
+        # empty view. Measure the request that will actually be sent.
+        _local_prompt_est = _summarizer.estimate_tokens(messages)
 
         # ── (1.5) 发送前不变量：这份请求必须装得下 ──────────────────────
         # 渲染出的 context ≤ 窗口是本框架的可证性质，不是撞上 400 再救的火。
@@ -804,7 +842,8 @@ async def _run_loop_body(
                 # 不发。非工具部分独自超窗 —— 驱逐与收缩输出都救不了。
                 # 明确失败、指名框架侧成因，好过发一个注定 400 的请求让
                 # 网关替我们把 run 杀了、报错还指着 provider（issue #710）。
-                del messages[_turn_rollback_len:]
+                render_context_change(state, messages, _turn_rollback_messages,
+                                      turn=turn, source="presend_rollback")
                 _msg = (
                     f"⛔ context 装不下：有效 prompt ≈{_eff} tokens ≥ 窗口 {_window}"
                     f"（输出预算已收缩到下限仍差 {_over} tokens）。"
@@ -859,7 +898,8 @@ async def _run_loop_body(
                 _new_cap = (min(int(_old_cap), _server_window)
                             if _old_cap else _server_window)
                 state.hook_state[_summarizer.PROVIDER_HARD_CAP_KEY] = _new_cap
-            del messages[_turn_rollback_len:]          # 失败的转移不许提交状态
+            render_context_change(state, messages, _turn_rollback_messages,
+                                  turn=turn, source="context_overflow_rollback")
             state.append_transcript(
                 "context_overflow_rolled_back", turn=turn,
                 attempt=_ctx400_retries, max_attempts=_CTX400_MAX_RETRIES,
@@ -882,7 +922,7 @@ async def _run_loop_body(
             # `content_preview` 保留原样不动：`nodes/experiment/tools/watch_run.py`
             # 在读它，那是节点 owner 的代码。两个字段在同一条语句里由同一个值
             # 派生，不会各自演化 —— `content` 是权威，preview 只是老读者的入口。
-            content=response.content or "",
+            content=response.content,  # preserve None versus "" for exact request replay
             content_preview=(response.content or "")[:500],
             tool_calls=[_tc_brief(tc) for tc in response.tool_calls],
             # #734：args_preview 截 200 字重建不出 assistant 消息；全文另给一列，
@@ -1230,7 +1270,8 @@ async def _run_loop_body(
                     _wait_s = _VOID_RETRY_DELAYS[_void_retries]
                     _void_retries += 1
                     _removed = len(messages) - _turn_rollback_len
-                    del messages[_turn_rollback_len:]          # ← 回滚：本轮归零
+                    render_context_change(state, messages, _turn_rollback_messages,
+                                          turn=turn, source="void_turn_rollback")
                     _will_compress, _ = _summarizer.should_compress(
                         harness, messages, turn + 1, state=state)
                     state.append_transcript(
@@ -1249,7 +1290,8 @@ async def _run_loop_body(
                     continue
                 # 重试用尽：回滚仍然生效（不把失败提交进历史），亮出结构化标记
                 # 供上层消费（executor 失败分类 / chat continuous 驻定重放）。
-                del messages[_turn_rollback_len:]
+                render_context_change(state, messages, _turn_rollback_messages,
+                                      turn=turn, source="void_turn_final_rollback")
                 state.hook_state["_void_turn_final"] = {
                     "turn": turn, "retries": _void_retries,
                     "prompt_tokens": _pt, "completion_tokens": _ct,
@@ -1303,6 +1345,9 @@ async def _run_loop_body(
         _malformed_this_turn: list[str] = []   # #184：本 turn args 崩坏的工具名
         paused_at_call: dict | None = None  # 设为非 None 时 = 本 turn 触发了 pause
         # ── (4a) 安全前缀并行预执行（#736）——记账仍走下面的串行循环 ──────
+        # Intent precedes effects. A crash before a result checkpoint is an
+        # unknown outcome, never permission for the model to resubmit a call.
+        _persist_messages_checkpoint(state, messages, turn=turn)
         _pre_executed = await _pre_execute_safe_prefix(
             state, harness, response.tool_calls, turn=turn)
         for call in response.tool_calls:
@@ -1369,6 +1414,7 @@ async def _run_loop_body(
                             # 给嵌套调用（run_node）看见当前父级的 tool_call_id —— cascade resume 用
                             state.hook_state["_current_tool_call_id_being_executed"] = call["id"]
                             try:
+                                _persist_messages_checkpoint(state, messages, turn=turn)
                                 result = await tool_registry.execute(tool_name, state, **args)
                             finally:
                                 state.hook_state.pop("_current_tool_call_id_being_executed", None)
@@ -1397,6 +1443,9 @@ async def _run_loop_body(
                 name=tool_name,
                 content=_tool_content,
             ))
+            # Each completed result is durable before the next tool can act.
+            _persist_messages_checkpoint(state, messages, turn=turn)
+            job_wait.acknowledge(state)
             # 登记进工作集：原文落 run log（权威、永不编辑），同 key 的旧副本
             # **立刻**变墓碑。所以"读一百次"和"读一次"占一样的 context ——
             # 控体积不再需要任何"惩罚重复"的机制。
@@ -1525,6 +1574,7 @@ async def _run_loop_body(
                 previews=[(m.content or "")[:200] for m in post_msgs],
                 roles=[m.role for m in post_msgs],
                 contents=[m.content or "" for m in post_msgs],   # #734 全文
+                messages=[msg_to_jsonable(m) for m in post_msgs],
             )
 
         # A deterministic owner hook may discover that continuing cannot change
@@ -1675,24 +1725,19 @@ def _persist_messages_checkpoint(state, messages: list[LLMMessage],
     path = _checkpoint_path(state)
     payload = {
         "turn": turn,
+        "tool_dispatch": state.hook_state.get("_current_tool_call_id_being_executed"),
         "written_at": datetime.utcnow().isoformat() + "Z",
-        "messages": [
-            {
-                "role": m.role,
-                "content": m.content,
-                "tool_call_id": getattr(m, "tool_call_id", None),
-                "name": getattr(m, "name", None),
-                "tool_calls": getattr(m, "tool_calls", None),
-                "reasoning_content": getattr(m, "reasoning_content", None),
-            }
-            for m in messages
-        ],
+        "messages": [msg_to_jsonable(m) for m in messages],
     }
     tmp = path.with_suffix(path.suffix + ".tmp")
     from core.secrets import redact
     payload = redact(payload)
-    tmp.write_text(json.dumps(payload, ensure_ascii=False),
-                    encoding="utf-8")
+    import os
+
+    with tmp.open("w", encoding="utf-8") as stream:
+        stream.write(json.dumps(payload, ensure_ascii=False))
+        stream.flush()
+        os.fsync(stream.fileno())
     tmp.replace(path)
 
 
@@ -1709,17 +1754,9 @@ def load_messages_checkpoint(state) -> tuple[list[LLMMessage], int] | None:
     except (json.JSONDecodeError, OSError) as e:
         log.warning("messages checkpoint 读取失败：%s", e)
         return None
-    msgs = [
-        LLMMessage(
-            role=m["role"],
-            content=m.get("content"),
-            tool_call_id=m.get("tool_call_id"),
-            name=m.get("name"),
-            tool_calls=m.get("tool_calls"),
-            reasoning_content=m.get("reasoning_content"),
-        )
-        for m in data.get("messages") or []
-    ]
+    msgs = restore_messages(
+        state, data.get("messages") or [],
+        through=data.get("written_at"))
     return msgs, int(data.get("turn") or 0)
 
 
@@ -1915,6 +1952,9 @@ async def resume_loop(ctx: PausedRunContext, response_text: str,
     """
     # 1. 找到 pending tool_result 并替换 content
     target_id = ctx.pending_tool_call_id
+    from core.pause_driver import AutomaticAnswer
+
+    answered_by = "auto" if isinstance(response_text, AutomaticAnswer) else "person"
     found = False
     for i in range(len(ctx.messages) - 1, -1, -1):
         m = ctx.messages[i]
@@ -1923,7 +1963,13 @@ async def resume_loop(ctx: PausedRunContext, response_text: str,
                 "status": "success",
                 "response": response_text,
                 "asked_by": ctx.pause_event.asking_node_type,
+                "answered_by": answered_by,
+                "automatic": answered_by == "auto",
             }
+            if answered_by == "auto":
+                new_payload["answer_source_note"] = (
+                    "运行时按自主模式选择的推荐项；这是自动选择，不能表述为用户确认。"
+                )
             if recorded_decision:
                 # 权威字段放在 response 之后，且措辞明确压过原始文本的歧义。
                 new_payload["recorded_decision"] = recorded_decision

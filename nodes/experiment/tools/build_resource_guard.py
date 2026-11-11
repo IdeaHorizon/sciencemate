@@ -8,12 +8,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import re
-import selectors
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -1168,9 +1169,36 @@ def supervise_local_build(
     def fallback_kill() -> None:
         _kill_process_group(proc.pid)
 
-    selector = selectors.DefaultSelector()
-    selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
-    selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
+    # select() cannot wait on Windows pipes. Bounded readers preserve streaming
+    # backpressure while the supervisor continues sampling resources on time.
+    chunks: queue.Queue = queue.Queue(maxsize=16)
+    readers_done = threading.Event()
+
+    def enqueue(name: str, chunk: bytes | OSError | None) -> None:
+        while not readers_done.is_set():
+            try:
+                chunks.put((name, chunk), timeout=0.1)
+                return
+            except queue.Full:
+                continue
+
+    def drain(name: str, stream) -> None:
+        try:
+            while not readers_done.is_set():
+                data = _read_build_pipe(stream)
+                if not data:
+                    break
+                enqueue(name, data)
+        except OSError as exc:
+            enqueue(name, exc)
+        finally:
+            enqueue(name, None)
+
+    readers = [threading.Thread(target=drain, args=(name, stream), daemon=True)
+               for name, stream in (("stdout", proc.stdout), ("stderr", proc.stderr))]
+    for reader in readers:
+        reader.start()
+    active_streams = {"stdout", "stderr"}
     started = time.monotonic()
     next_probe = started
     written = 0
@@ -1329,18 +1357,29 @@ def supervise_local_build(
                 host_snapshot=None, probe_failures=probe_failures,
             ))
 
-            while selector.get_map():
-                for key, _ in selector.select(timeout=0.5):
+            while True:
+                try:
+                    ready_chunks = [chunks.get(timeout=0.5)]
+                except queue.Empty:
+                    ready_chunks = []
+                for _ in range(15):
                     try:
-                        chunk = os.read(key.fileobj.fileno(), 64 * 1024)
-                    except OSError:
-                        chunk = b""
-                    if not chunk:
-                        selector.unregister(key.fileobj)
+                        ready_chunks.append(chunks.get_nowait())
+                    except queue.Empty:
+                        break
+                for stream_name, chunk in ready_chunks:
+                    if chunk is None:
+                        active_streams.discard(stream_name)
+                        continue
+                    if isinstance(chunk, OSError):
+                        if not stop:
+                            stop.update(
+                                reason="build_log_read_failed", resource=stream_name,
+                                detail=f"{type(chunk).__name__}: {chunk}")
                         continue
                     try:
-                        files[key.data].write(chunk)
-                        files[key.data].flush()
+                        files[stream_name].write(chunk)
+                        files[stream_name].flush()
                         written += len(chunk)
                     except OSError as exc:
                         if not stop:
@@ -1348,7 +1387,7 @@ def supervise_local_build(
                                 reason="build_log_write_failed",
                                 resource="disk_free_bytes",
                                 detail=f"{type(exc).__name__}: {exc}")
-                    if key.data == "stderr":
+                    if stream_name == "stderr":
                         resource_event_tail.extend(chunk)
                         if len(resource_event_tail) > 4096:
                             del resource_event_tail[:-4096]
@@ -1480,7 +1519,7 @@ def supervise_local_build(
                     emit("HARNESS_BUILD_RESOURCE_STOP " + " ".join(
                         f"{key}={value}" for key, value in stop.items()))
                     break
-                if proc.poll() is not None and not selector.get_map():
+                if proc.poll() is not None and not active_streams:
                     break
 
             if stop:
@@ -1498,7 +1537,22 @@ def supervise_local_build(
                         f"{key}={value}" for key, value in stop.items()))
                     kill_guarded_tree(unit, fallback_kill)
     finally:
-        selector.close()
+        readers_done.set()
+        if proc.poll() is None:
+            kill_guarded_tree(unit, fallback_kill)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                fallback_kill()
+                proc.wait(timeout=5)
+        for reader in readers:
+            reader.join(timeout=1)
+        for reader, stream in zip(readers, (proc.stdout, proc.stderr)):
+            if reader.is_alive():
+                if not stop:
+                    stop.update(reason="build_log_reader_not_quiescent", resource="log_reader")
+            else:
+                stream.close()
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
 
@@ -1545,6 +1599,10 @@ def supervise_local_build(
     if stop:
         return 125
     return int(returncode or 0)
+
+
+def _read_build_pipe(stream) -> bytes:
+    return os.read(stream.fileno(), 64 * 1024)
 
 
 def _kill_process_group(pgid: int) -> None:

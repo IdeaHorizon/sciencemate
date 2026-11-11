@@ -9,7 +9,7 @@ asked_by}`，与真人答复回填的 `{status: success, response, asked_by}` �
 没有任何一条这样的用户消息。
 
 判据落在**模型实际收到的那条 tool 消息**上，走真 agent loop：代答路径带
-`answered_by`，真人答复路径没有。
+`answered_by`，真人答复明确标为 `person`（#1325）。
 """
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ async def test_a_continuous_mode_answer_carries_who_answered_it() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_real_user_answer_carries_no_default_provenance() -> None:
+async def test_a_real_user_answer_carries_person_provenance() -> None:
     clear_all()
     state = State.new(node_type="test_node", base_dir=Path(tempfile.mkdtemp()))
     messages = [LLMMessage(role="user", content="go")]
@@ -103,4 +103,5 @@ async def test_a_real_user_answer_carries_no_default_provenance() -> None:
     assert final.status == "completed"
     seen = _seen_by_model(messages)
     assert seen["response"] == "继续找数据源"
-    assert "answered_by" not in seen and "answer_note" not in seen and "bypassed" not in seen
+    assert seen["answered_by"] == "person" and seen["automatic"] is False
+    assert "answer_note" not in seen and "bypassed" not in seen

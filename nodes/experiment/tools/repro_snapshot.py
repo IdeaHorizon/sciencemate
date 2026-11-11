@@ -21,6 +21,7 @@ import platform
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 import uuid
@@ -264,7 +265,11 @@ def _existing_file_candidate(
 ) -> tuple[Path, str] | None:
     def _probe() -> tuple[Path, str] | None:
         path = Path(candidate).expanduser()
-        if not path.is_file():
+        try:
+            mode = path.stat().st_mode
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(mode):
             return None
         return path, str(path.resolve())
 
@@ -296,8 +301,14 @@ def _git_root(path: str | Path) -> str | None:
 
 def _existing_parent(path: str | Path) -> Path | None:
     p = Path(os.path.expanduser(str(path)))
-    if p.exists():
-        return p.parent if p.is_file() else p
+    # Python 3.14's exists/is_file suppress all OSError, including ENAMETOOLONG.
+    # Optional candidates must retain that diagnostic rather than look absent.
+    try:
+        mode = p.stat().st_mode
+    except FileNotFoundError:
+        mode = None
+    if mode is not None:
+        return p.parent if stat.S_ISREG(mode) else p
     for parent in p.parents:
         if parent.exists():
             return parent

@@ -98,6 +98,16 @@ def test_no_worktree_no_orientation_refresh(tmp_path: Path) -> None:
                    if framework_notice_body(m).startswith(ORIENTATION_PREFIX))
 
 
+def test_a_caller_quoting_orientation_text_is_not_replaced(tmp_path: Path) -> None:
+    state = _State(worktree=_worktree(tmp_path))
+    caller = LLMMessage(role="user", content=ORIENTATION_PREFIX + "：这是用户粘贴的原文")
+    messages = _msgs()
+    messages.insert(3, caller)
+    out = _compress(state, messages)
+    assert caller in out
+    assert any("压缩后重扫" in (m.content or "") for m in out)
+
+
 # ── P6 ───────────────────────────────────────────────────────────────────
 def test_rotation_advised_when_compression_cannot_win(tmp_path: Path) -> None:
     """窗口小到压完仍超 90% → 必须亮牌，且只亮一次。"""

@@ -81,7 +81,7 @@ async def test_init_carries_the_edition_and_ready_capabilities_stay_on_the_sessi
         assert kept[key] == value
     assert set(kept) >= {"facts", "holders", "token", "repair", "data_root"}
     assert kept["facts"]["exists"] is False, "路径不存在也是事实，不是缺席"
-    assert kept["repair"]["kind"] == "reset_data_root_permissions", "权限形状的读不到 → 恢复数据根权限的提案"
+    assert kept["repair"] is None, "数据根外的 worker 路径只诊断，不生成递归重置数据根的提案"
     logged = [r.getMessage() for r in caplog.records if "started degraded" in r.getMessage()]
     assert len(logged) == 1
     assert "home_marker_unreadable" in logged[0]

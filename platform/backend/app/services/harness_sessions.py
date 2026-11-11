@@ -773,7 +773,7 @@ class _SocketChannel(_WorkerChannel):
 
     @property
     def usable(self) -> bool:
-        return not self._writer.is_closing()
+        return not self._writer.is_closing() and not self._reader.at_eof()
 
     async def send_line(self, line: str) -> None:
         self._writer.write(line.encode())
@@ -1353,6 +1353,7 @@ class _ProjectHarnessSession:
         #: 一轮几小时的对话后面，三个补偿机制都是为这件事存在的。
         self._reader: asyncio.Task | None = None
         self._pending: dict[str, asyncio.Queue] = {}
+        self._ingest_errors: dict[str, dict] = {}
         #: worker 起来时每项持久化前提成立与否 + 降级的事实（ready 的 capabilities / warnings）。
         #: None = 还没 init 或老 worker 没报。
         self.start_report: dict[str, Any] | None = None
@@ -1479,12 +1480,14 @@ class _ProjectHarnessSession:
                 self.process.wait(), timeout=self._EXIT_CODE_WAIT_S
             )
         except TimeoutError:
-            return HarnessSessionProcessError(
+            error = HarnessSessionProcessError(
                 f"Harness worker (pid {self.process.pid}) is still running, but its "
                 "control connection closed before it replied",
                 exit_code=None,
                 code="harness_worker_unreachable",
             )
+            error.details = {"worker_alive": True, "safe_to_resubmit": False}
+            return error
         stderr = self._redact(await self.stderr_task).strip()
         message = f"Harness runtime process exited before replying (exit code {exit_code})"
         if stderr:
@@ -1540,8 +1543,26 @@ class _ProjectHarnessSession:
                 sink = self._conversation_sink
                 if sink is not None and event.get("request_id") not in self._management_ids():
                     on_progress, on_protocol_event = sink
-                    await on_protocol_event(event)
-                    await self._emit_progress(event, on_progress)
+                    try:
+                        await on_protocol_event(event)
+                        await self._emit_progress(event, on_progress)
+                    except Exception as exc:
+                        # A rejected record is not a dead worker or a dead
+                        # transport. Keep routing control replies and subsequent
+                        # valid facts. Reject this conversation's completion
+                        # explicitly, after the worker's actual terminal reply.
+                        request_id = str(self._conversation_request_id or event.get("request_id") or "")
+                        self._ingest_errors.setdefault(request_id, {
+                            "cause": self._redact(f"{type(exc).__name__}: {exc}"),
+                            "event_id": event.get("event_id"),
+                            "source_run_id": event.get("source_run_id"),
+                            "byte_start": event.get("byte_start"),
+                            "byte_end": event.get("byte_end"),
+                        })
+                        logger.exception(
+                            "Harness record ingestion for %s/%s failed; control reader remains available",
+                            self.project_id, self.session_id,
+                        )
                 queue = self._pending.get(str(event.get("request_id") or ""))
                 if queue is not None:
                     queue.put_nowait(event)
@@ -1651,6 +1672,7 @@ class _ProjectHarnessSession:
             yield queue
         finally:
             self._pending.pop(request_id, None)
+            self._ingest_errors.pop(request_id, None)
             if conversation and self._conversation_request_id == request_id:
                 self._conversation_sink = None
                 self._conversation_request_id = ""
@@ -1663,16 +1685,23 @@ class _ProjectHarnessSession:
         timeout_seconds: float | None,
     ) -> dict:
         async def read_terminal() -> dict:
+            reconnects = 0
             while True:
                 event = await queue.get()
                 if event is self._EOF:
+                    if timeout_seconds is None and self.worker.alive and reconnects < 3:
+                        reconnects += 1
+                        if await self._reconnect_conversation(queue):
+                            continue
                     # 通道没了。是我们 spawn 的、句柄还在手上 → 报它**为什么**退出；
                     # 接回来的（只有 pid、没有句柄）→ 如实说连接丢了。此前这里对
                     # 后者会去 `self.process.wait()` 一个 None，rejoin 死在
                     # AttributeError 上而不是一句干净的 stale（#785）。
                     if self.process is None or self.stderr_task is None:
                         raise HarnessSessionStaleError(
-                            "The Harness worker connection was lost before it replied"
+                            "The Harness worker connection was lost before it replied",
+                            details={"worker_alive": self.worker.alive,
+                                     "safe_to_resubmit": False},
                         )
                     raise await self._process_exit_error()
                 if event.get("type") == "error":
@@ -1691,6 +1720,17 @@ class _ProjectHarnessSession:
                         cause=self._redact(str(event.get("cause") or "")),
                     )
                 if event.get("type") in terminal_types:
+                    failure = self._ingest_errors.get(str(event.get("request_id") or ""))
+                    if failure:
+                        raise HarnessSessionError(
+                            "The worker replied, but a transcript record could not be ingested. "
+                            "Inspect this session's existing execution before retrying; the control "
+                            "connection remains available and no task termination is inferred.",
+                            code="harness_transcript_ingest_failed",
+                            error_type="TranscriptIngestError",
+                            cause=failure["cause"],
+                            details={**failure, "control_connected": True, "safe_to_resubmit": False},
+                        )
                     return event
 
         if timeout_seconds is None:
@@ -1705,6 +1745,51 @@ class _ProjectHarnessSession:
         except TimeoutError as exc:
             await self._kill()
             raise HarnessSessionStaleError("Harness control operation timed out") from exc
+
+    async def _reconnect_conversation(self, queue: asyncio.Queue) -> bool:
+        """Repair this transport without replaying an RPC or replacing its worker.
+
+        The existing operation claim remains held. Registering the reader before
+        replay closes the socket/file gap; ingestion and terminal delivery retain
+        their existing source/request identities.
+        """
+        from app.services.session_event_log import read_events, registry_row
+
+        lock_path = _session_lock_path(self.project_id, self.session_id)
+        if lock_path is None:
+            return False
+        row = registry_row(lock_path)
+        if (row.get("pid") != (self.process.pid if self.process is not None else self.worker.pid)
+                or row.get("spawn_token") != self.spawn_token
+                or not self.spawn_token):
+            return False
+        self.channel.close()
+        try:
+            channel = await _connect_control_address(
+                str(row.get("control_socket") or ""),
+                spawn_token=self.spawn_token,
+                timeout_seconds=3.0,
+                handshake=int(row.get("protocol_version") or 1) >= 2,
+            )
+        except (OSError, HarnessSessionError):
+            return False
+        self.channel = channel
+        self._ensure_reader()
+        events_path = str(row.get("events_path") or "")
+        offset = 0
+        while events_path:
+            batch = read_events(Path(events_path), offset=offset)
+            if not batch.events:
+                break
+            offset = batch.offset
+            for event in batch.events:
+                if event.get("request_id") != self._conversation_request_id:
+                    continue
+                if self._conversation_sink is not None:
+                    await self._conversation_sink[1](event)
+                if event.get("type") in {"result", "error"}:
+                    queue.put_nowait(event)
+        return True
 
     async def rejoin(
         self,
@@ -1831,6 +1916,7 @@ class _ProjectHarnessSession:
         on_progress: ProtocolCallback,
         on_protocol_event: ProtocolCallback,
         unattended: bool = False,
+        system_continuation: bool = False,
         max_turns: int = 200,
     ) -> dict:
         """一次平台操作。
@@ -1848,14 +1934,16 @@ class _ProjectHarnessSession:
         op_payload: dict = (
             {
                 "op": "run_unattended",
-                "request_id": f"unattended-{uuid4().hex}",
+                "request_id": f"unattended-{binding.run_id}",
                 "message": message,
                 "max_turns": max_turns,
             }
             if unattended
-            else {"op": "turn", "request_id": f"turn-{uuid4().hex}", "message": message}
+            else {"op": "turn", "request_id": f"turn-{binding.run_id}", "message": message}
         )
         # 占用由调用方的 `claim()` 持有 —— 这里不再自己加锁、也没有标志要清。
+        if system_continuation:
+            op_payload["system_continuation"] = True
         if self.paused:
             raise HarnessSessionError("The project is waiting for an answer")
         self.binding = binding
@@ -2465,7 +2553,12 @@ class HarnessSessionManager:
         key = self._key(project_id, session_id)
         existing = self._sessions.get(key)
         if existing is not None:
-            return existing
+            if existing.alive and getattr(existing.channel, "usable", False):
+                return existing
+            if existing.conversation_in_flight:
+                return existing
+            self._sessions.pop(key, None)
+            await existing.detach()
         try:
             session = await reattach_session(
                 project_id, session_id, owner_user_id=owner_user_id
@@ -2881,6 +2974,7 @@ class HarnessSessionManager:
         on_protocol_event: ProtocolCallback,
         autonomy: object | None = None,
         sandbox_attempt: RunAttempt | None = None,
+        system_continuation: bool = False,
     ) -> dict:
         # 一个对象带两个事实（要不要无人值守 / 预授权哪些高危类别），
         # 因为它们来自**同一次**配置读取。拆成两个参数就会出现"模式开着、
@@ -2915,6 +3009,7 @@ class HarnessSessionManager:
                 # autonomous 的完整语义 = 自动批准 **且** 自己往下推。
                 # 只接前半句，就是 UI 上写着"自主"而实际每轮等人推。
                 unattended=autonomous,
+                system_continuation=system_continuation,
             )
 
     async def answer(
@@ -3331,6 +3426,16 @@ async def mark_orphaned_harness_runs(
                     _created = _created.replace(tzinfo=UTC)
                 if (_now - _created).total_seconds() < _liveness.ACTIVITY_LEASE_SECONDS:
                     continue
+        if reap_workers:
+            from app.services.restart_resume import worker_presence
+
+            from app.services.session_event_log import registry_row
+
+            path = _session_lock_path(run.project_id, run.session_id)
+            row = registry_row(path) if path is not None else {}
+            if (row.get("control_socket") and int(row.get("protocol_version") or 0) >= 2
+                    and worker_presence(run.project_id, run.session_id) == "live"):
+                continue  # an unconnectable modern worker is not an orphan
         previous_status = run.status
         # ── D11：见证，不判决 ────────────────────────────────────────────
         #

@@ -84,10 +84,17 @@ def test_a_notice_is_recognised_and_a_normal_system_message_is_not() -> None:
     assert not sm._is_compression_notice(LLMMessage(role="user", content="📦 历史压缩"))
 
 
-def test_system_prompt_and_orientation_survive_compression() -> None:
+def test_system_and_caller_stay_protected_while_old_orientation_is_compressible() -> None:
     msgs = _conversation(12)
-    msgs.insert(1, LLMMessage(role="system", content="🗺️ 项目现状：不能被删"))
-    head, _, tail = sm.split_for_compression(msgs, 3)
+    orientation = LLMMessage(role="system", content="🗺️ 项目现状：旧快照")
+    msgs.insert(1, orientation)
+    head, middle, tail = sm.split_for_compression(msgs, 3)
     kept = sm._head_without_superseded_notices(head)
     assert any("SYSTEM PROMPT" in (m.content or "") for m in kept)
-    assert any("项目现状" in (m.content or "") for m in kept)
+    assert any(m.content == "开始干活" for m in kept)
+    # A historical snapshot must reach the summarizer, not become a second
+    # immutable authority. run_summarizer refreshes orientation from real state
+    # (covered by test_summarizer_reorient_and_rotation).
+    assert orientation in middle
+    assert orientation not in kept
+    assert len(head) + len(middle) + len(tail) == len(msgs)

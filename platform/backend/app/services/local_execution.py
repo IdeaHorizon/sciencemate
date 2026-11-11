@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from sqlalchemy import inspect as sa_inspect
@@ -48,6 +48,10 @@ from app.services.harness_sessions import (
     harness_session_manager,
     reasoning_backend,
 )
+
+if TYPE_CHECKING:
+    from app.services.harness_sessions import _ProjectHarnessSession
+
 
 # 这四个的实现在 `harness_transcript_ingest`：同一件事有实时与补齐两条到达
 # 路径，实现只许有一份（补齐路径见 `session_event_replay`）。名字保持不变 ——
@@ -924,6 +928,10 @@ def _sanitized_platform_failure(exc: Exception, *, run_id: str = "", lang: str =
             failure.get("code"),
             type(exc).__name__,
         )
+    from app.services.harness_sessions import HarnessSessionProcessError
+
+    if isinstance(exc, (HarnessSessionStaleError, HarnessSessionProcessError)):
+        failure["runtimeInterrupted"] = True
     exit_code = getattr(exc, "exit_code", None)
     if isinstance(exit_code, int):
         failure["exitCode"] = exit_code
@@ -972,6 +980,7 @@ async def _model_reply(
     choice: dict | None = None,
     rejoin: "RejoinTarget | None" = None,
     language: str = "zh",
+    system_continuation: bool = False,
 ):
     if rejoin is not None:
         # 接回在飞那一轮（#785）：请求不由本进程发出，只接它的终止 result。
@@ -1041,6 +1050,7 @@ async def _model_reply(
             on_protocol_event=on_protocol_event,
             autonomy=autonomy,
             sandbox_attempt=sandbox_attempt,
+            system_continuation=system_continuation,
         )
     status = str(result.get("status") or "")
     if status not in {"completed", "paused", "cancelled", "void", "failed"}:
@@ -1153,6 +1163,7 @@ async def execute_local_turn(
     choice: dict | None = None,
     system_continuation: bool = False,
     rejoin: "RejoinTarget | None" = None,
+    continuation: Command | None = None,
 ) -> dict:
     """`system_continuation=True`：这一轮不是用户开口，是平台自己接着跑（重启后
     从断点续 continuous 研究）。它只改一件事 —— 那条驱动消息记成 `role="system"`
@@ -1258,6 +1269,8 @@ async def execute_local_turn(
     is_answer = paused_binding is not None
     if rejoin is not None:
         run_id = rejoin.run_id
+    elif continuation is not None:
+        run_id = str(continuation.run_id)
     else:
         run_id = paused_binding.run_id if paused_binding else f"run_{uuid4().hex}"
     session_id = paused_binding.session_id if paused_binding else str(conversation.session_id)
@@ -1280,7 +1293,7 @@ async def execute_local_turn(
     state: dict = {}
     harness_states: dict[str, dict] = {}
     offset = 0
-    command: Command | None = None
+    command: Command | None = continuation
 
     async def ingest(raw: dict) -> None:
         nonlocal context, offset
@@ -1586,7 +1599,7 @@ async def execute_local_turn(
                 if sandbox_attempt is not None:
                     context = replace(context, attempt_no=int(sandbox_attempt.attempt_no or 1))
                 await db.commit()
-            await ingest({"event": "session_message", "role": "user", "content": message})
+            await ingest({"event": "session_message", "role": incoming_role, "content": message})
             await ingest({"event": "loop_resume"})
             await on_progress(
                 {
@@ -1599,6 +1612,14 @@ async def execute_local_turn(
                 }
             )
         else:
+            if continuation is not None and await db.get(Run, run_id) is None:
+                db.add(Run(
+                    id=run_id, tenant_id=context.tenant_id, workspace_id=context.workspace_id,
+                    project_id=project_id, session_id=session_id,
+                    created_at=datetime.now(UTC),
+                    summary={"continuationOf": continuation.payload["predecessorRunId"]},
+                ))
+                await db.flush()
             await ingest(
                 {
                     "event": "run_start",
@@ -1615,8 +1636,20 @@ async def execute_local_turn(
                     execution_target=autonomy.execution_target,
                 )
                 await db.commit()
+        if continuation is not None:
+            continuation_run = await db.get(Run, run_id)
+            continuation_run.summary = {
+                **(continuation_run.summary or {}),
+                "continuationOf": continuation.payload["predecessorRunId"],
+            }
+            await record_app_event(
+                db, session_id=session_id, kind="run.continued", run_id=run_id,
+                payload={"predecessorRunId": continuation.payload["predecessorRunId"],
+                         "commandId": continuation.id},
+                dedupe_key=f"continuation:{continuation.id}",
+            )
         if rejoin is None:
-            command = await service.create_command(
+            command = continuation or await service.create_command(
                 db,
                 context=context,
                 kind="run.answer" if is_answer else "run.start",
@@ -1657,7 +1690,7 @@ async def execute_local_turn(
                 backend=backend,
             )
             if not is_answer:
-                await ingest({"event": "session_message", "role": "user", "content": message})
+                await ingest({"event": "session_message", "role": incoming_role, "content": message})
                 await on_progress(
                     {
                         "event": "run.started",
@@ -1668,6 +1701,34 @@ async def execute_local_turn(
                         "projectId": project_id,
                     }
                 )
+        if continuation is not None:
+            from app.models.execution import ASSERTS_ACTIVE_WORK
+            from app.models.project import ProjectStatus
+            from app.services.restart_resume import _latest_runs
+
+            latest = next((r for r in await _latest_runs(db)
+                           if r.session_id == session_id and r.project_id == project_id), None)
+            if latest is not None:
+                await db.refresh(latest)
+            await db.refresh(conversation)
+            await db.refresh(project)
+            current_policy = await project_autonomy_policy(db, project, lang=language)
+            if (latest is None or latest.id != run_id
+                    or latest.status not in {s.value for s in ASSERTS_ACTIVE_WORK}
+                    or conversation.archived_at is not None
+                    or conversation.lifecycle_status != "active"
+                    or project.status == ProjectStatus.ARCHIVED
+                    or not current_policy.unattended
+                    or "*" not in current_policy.authorized_risk_classes):
+                await ingest({"event": "run_end", "status": "cancelled"})
+                await service.complete_command(
+                    db, tenant_id=settings.runtime_tenant_id, command_id=continuation.id,
+                    error={"code": "cancelled", "message": "Continuation superseded before dispatch"},
+                )
+                await db.commit()
+                return {"reply": "Continuation superseded before dispatch.", "status": "cancelled",
+                        "run_id": run_id, "command_id": continuation.id, "session_id": session_id}
+            await db.commit()
         reply, usage, harness_result = await _model_reply(
             role_bindings,
             message,
@@ -1686,6 +1747,7 @@ async def execute_local_turn(
             choice=choice,
             rejoin=rejoin,
             language=language,
+            system_continuation=system_continuation,
         )
         # 终止事件到达 ≠ reader 读完了。`_read_forever` 每读一行是"先摄取、再
         # 把事件放进等它的那个队列"，所以主协程被唤醒时，队列后面还排着几行 ——
@@ -1905,6 +1967,7 @@ async def execute_local_turn(
         primary_artifact_id = None
         if run:
             run.summary = {
+                **(run.summary or {}),
                 "title": (
                     "Permission required"
                     if harness_paused and pause_reason == "waiting_permission"
@@ -2057,6 +2120,18 @@ async def execute_local_turn(
                 # 没有 `view`：这条路径上库里的事务未必还能查。缺席是诚实的
                 # ——客户端据此重新查一次会话，而不是拿一份编出来的局面往下走。
             }
+        if getattr(exc, "details", {}).get("worker_alive"):
+            # The worker still owns its run. Preserve the open command so the
+            # ordinary reconciler can adopt/rejoin the exact RPC on its next pass.
+            await record_app_event(
+                db, session_id=session_id, kind="run.transport_disconnected", run_id=run_id,
+                payload={"workerAlive": True, "safeToResubmit": False},
+                dedupe_key=f"transport-disconnected:{run_id}:{operation_id}",
+            )
+            await db.commit()
+            return {"reply": "Execution is continuing while its control connection is restored.",
+                    "command_id": command_id, "run_id": run_id, "session_id": session_id,
+                    "status": "running", "model_backend_id": backend_id}
         if is_answer:
             # ⚠️ 不变量：**任何一条失败路径都必须给 run 一个终态**，不是"大部分路径"。
             #
@@ -2148,7 +2223,7 @@ async def execute_local_turn(
                     },
                 )
                 await db.commit()
-                await ingest({"event": "session_message", "role": "user", "content": message})
+                await ingest({"event": "session_message", "role": incoming_role, "content": message})
             # 终态只判一次（`terminal_state_for`），这里的 step 结论必须跟着它。
             # 写死 "failed" 是 2026-08-13 那次的直接凶手：run 已经如实 paused，
             # 47ms 后这条路径又把同一个 step 标成 failed，成品被判废。
@@ -2189,6 +2264,7 @@ async def execute_local_turn(
                     # 标题跟着失败本身走 —— 平台重启打断时写 "Execution failed"
                     # 是在陈述一件没发生的事。
                     "title": str(failure.get("title") or "Execution failed"),
+                    **(run.summary or {}),
                     "staleReason": terminal_state_for(exc)[1],
                     "failure": failure,
                     "assistantMessage": None,

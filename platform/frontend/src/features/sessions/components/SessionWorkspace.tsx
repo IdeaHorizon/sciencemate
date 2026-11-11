@@ -63,6 +63,7 @@ import type { ResearchSession } from "../types";
 import { canUseComposer, sessionInputPlan } from "../lib/answer-affordance";
 import { latestContextWindow } from "../lib/context-window";
 import { runFreshSessionPublish } from "../lib/publish-error-policy";
+import { canKeepCachedSession } from "@/lib/remote-runtime";
 import { WorkspacePanelHost } from "@/features/file-preview/components/WorkspacePanelHost";
 import { WorkspaceFileOpenerProvider } from "@/features/file-preview/components/WorkspaceFileOpener";
 import { useWorkspacePanel } from "@/stores/workspace-panel";
@@ -693,7 +694,8 @@ export function SessionWorkspace({
     );
   }
 
-  if (sessionQuery.isError || messageQuery.isError || !session) {
+  if (!session || ((sessionQuery.isError || messageQuery.isError)
+    && !canKeepCachedSession(session, messageQuery.data))) {
     const problem = sessionQuery.error ?? messageQuery.error;
     return (
       <div className="session-workspace-error" role="alert">
@@ -888,7 +890,12 @@ export function SessionWorkspace({
           )}
           <details>
             <summary aria-label={t({ zh: "会话操作", en: "Session actions" })}><MoreHorizontal size={15} /></summary>
-            <div>
+            <div onClick={(event) => {
+              if (!(event.target instanceof Element) || !event.target.closest("a, button")) return;
+              const menu = event.currentTarget.closest("details");
+              menu?.removeAttribute("open");
+              menu?.querySelector("summary")?.focus();
+            }}>
               <Link href={`?${mode === "fixture" ? "mode=demo&" : ""}view=execution`}><History size={13} />{t({ zh: "执行历史", en: "Execution history" })}</Link>
               <button type="button" onClick={() => setAboutOpen(true)}>
                 <Info size={13} />{t({ zh: "会话信息", en: "Session details" })}</button>

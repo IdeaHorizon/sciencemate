@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -54,12 +55,7 @@ class _StubLLM:
         self.calls: list[list[LLMMessage]] = []
 
     async def chat(self, messages, **kw):
-        self.calls.append([
-            LLMMessage(role=m.role, content=m.content,
-                        tool_calls=m.tool_calls, tool_call_id=m.tool_call_id,
-                        name=m.name)
-            for m in messages
-        ])
+        self.calls.append(copy.deepcopy(messages))
         if not self.responses:
             return LLMResponse(content="(done)", tool_calls=[],
                                 finish_reason="stop", usage={})

@@ -52,6 +52,16 @@ def test_the_v26_contradiction_is_caught():
         f"报错没有把两个数一起说出来，人还得自己去翻：{conflicts[0]}")
 
 
+@pytest.mark.parametrize("field", ["value", "tolerance"])
+@pytest.mark.parametrize("number", [float("nan"), float("inf")])
+def test_nonfinite_annotations_cannot_bypass_the_value_check(field, number):
+    annotation = {**_annotation(2.2692871655836173), field: number}
+    assert annotated_value_conflicts(
+        {"annotated_values": [annotation]},
+        {"clean_results__2D_Ising_Tc_CleanResults": _FROZEN},
+    )
+
+
 def test_a_figure_that_agrees_passes():
     """反作弊：对得上的图必须放行，否则上一条可以靠「一律拒绝」通过。"""
     assert annotated_value_conflicts(

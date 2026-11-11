@@ -39,14 +39,23 @@ from app.services.redaction import DEFAULT_REDACTION_POLICY, RedactionPolicy
 from app.services.say import in_either_language, say
 from app.services.run_status import project_run_status
 
-#: 一条记录的 `file_identity` 有三种来源，两种由平台自己命名。名字在这里
+#: `file_identity` 含物理 transcript 与平台派生的存储身份。名字在这里
 #: 定义一次，读它的判据 import 它 —— 判据自己拼字面量，就是第二个真相源。
 #:
 #: - worker transcript：`file_identity_of()` 给的 `(设备:inode)`
 #: - 同一行派生的叙述：transcript 身份 + `NARRATION_IDENTITY_SUFFIX`
 #: - 平台自己写的记录（run_start / session_message…）：`LOCAL_RECORD_IDENTITY_PREFIX` 打头
 NARRATION_IDENTITY_SUFFIX = "#narration"
+STANDBY_TOOL_IDENTITY_SUFFIX = "#standby-tool-start"
+STANDBY_RESULT_IDENTITY_SUFFIX = "#standby-tool-result"
 LOCAL_RECORD_IDENTITY_PREFIX = "local-worker:"
+
+
+def transcript_file_identities(file_identity: str) -> list[str]:
+    """Storage identities derived from the same physical transcript file."""
+    return [file_identity, *(file_identity + suffix for suffix in (
+        NARRATION_IDENTITY_SUFFIX, STANDBY_TOOL_IDENTITY_SUFFIX, STANDBY_RESULT_IDENTITY_SUFFIX,
+    ))]
 
 # 跨进程线协议：harness 把「这一次呈递」整份挂在 pause 事件的这个键下
 # （core/decision_offer.py 的 PAUSE_OFFER_KEY）。backend 不 import harness 包
@@ -59,6 +68,10 @@ PAUSE_OFFER_KEY = "offer"
 log = logging.getLogger(__name__)
 
 ADAPTER_VERSION = "1.0.0"
+try:
+    ADAPTER_SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+except OSError:
+    ADAPTER_SOURCE_SHA256 = None
 NORMAL_DECISION_CHOICES = [
     {"choiceId": "proceed", "label": "Continue"},
     {"choiceId": "revise", "label": "Revise this step"},
@@ -555,6 +568,21 @@ class TranscriptAdapter:
         at = _parse_time(raw.get("at"))
         attempt_no = int(raw.get("attempt_no") or context.attempt_no)
 
+        if raw_event == "interrupt_tool":
+            # Standby observations are atomic legacy records. Reuse the same
+            # tool lifecycle, in isolated adapter state: the foreground call
+            # can still be waiting for its own result.
+            standby_state = dict(adapter_state)
+            self.adapt(
+                {**raw, "event": "tool_call", "args": raw.get("arguments")},
+                context=context, adapter_state=standby_state,
+                event_id=_hash_parts(event_id, "standby-start"),
+            )
+            return self.adapt(
+                {**raw, "event": "tool_result", "result_preview": raw.get("result")},
+                context=context, adapter_state=standby_state, event_id=event_id,
+            )
+
         if raw_event == "run_resumed_after_interruption":
             # 死亡续跑：**同一条**节点 run 接上 checkpoint 继续（2026-08-18）。
             # 平台的 run id 按轮次前缀，所以续跑的活动落在新一轮的 run 下 ——
@@ -867,10 +895,12 @@ class TranscriptAdapter:
                 and _TRUNCATED_ERROR_ENVELOPE.match(result) is not None
             )
             if is_error:
+                result_status = _tool_result_status(raw, result)
                 return EventDraft(
                     "tool.failed",
                     EventVisibility.STANDARD,
-                    {**common, **_tool_failure_fields(raw, result)},
+                    {**common, **_tool_failure_fields(raw, result),
+                     **({"resultStatus": result_status} if result_status else {})},
                     at,
                 )
             payload = {**common, "resultSummary": _result_summary(result)}
@@ -1694,6 +1724,12 @@ class ExecutionIngestService:
         sanitized = redaction.value if isinstance(redaction.value, dict) else {"redacted": True}
         raw_line_hash = hashlib.sha256(raw_line).hexdigest()
         source_identity = _hash_parts(context.run_id, file_identity, byte_offset, raw_line_hash)
+        projection_file_identity = file_identity
+        if sanitized.get("event") == "interrupt_tool":
+            # Add business projections beside legacy warning-only ingestion.
+            # Historical warnings keep their IDs and source bytes unchanged.
+            source_identity = _hash_parts(source_identity, "standby-result")
+            projection_file_identity += STANDBY_RESULT_IDENTITY_SUFFIX
         event_id = _hash_parts(context.session_id, source_identity, ADAPTER_VERSION)
 
         session, run = await self._lock_scope(db, context)
@@ -1701,7 +1737,7 @@ class ExecutionIngestService:
             select(ExecutionEvent).where(
                 ExecutionEvent.tenant_id == context.tenant_id,
                 ExecutionEvent.run_id == context.run_id,
-                ExecutionEvent.file_identity == file_identity,
+                ExecutionEvent.file_identity == projection_file_identity,
                 ExecutionEvent.byte_offset == byte_offset,
                 ExecutionEvent.raw_line_hash == raw_line_hash,
             )
@@ -1716,7 +1752,7 @@ class ExecutionIngestService:
 
         emitted_ids: list[str] = []
         raw_event_name = sanitized.get("event")
-        if raw_event_name == "tool_call":
+        if raw_event_name in {"tool_call", "interrupt_tool"}:
             root = await self._ensure_root_step(
                 db,
                 session=session,
@@ -1742,6 +1778,31 @@ class ExecutionIngestService:
             )
             if closed:
                 emitted_ids.append(closed.id)
+
+        if raw_event_name == "interrupt_tool":
+            start_id = _hash_parts(event_id, "standby-start")
+            start = self.adapter.adapt(
+                {**sanitized, "event": "tool_call", "args": sanitized.get("arguments")},
+                context=context, adapter_state=dict(adapter_state), event_id=start_id,
+            )
+            if start is not None:
+                started = await self._insert_event(
+                    db, session=session, context=context,
+                    adapter_state_submission_id=str(adapter_state.get("submissionId") or ""),
+                    event_id=start_id, draft=start, origin=EventOrigin.RAW_TRANSCRIPT,
+                    source={
+                        "rawEvent": "interrupt_tool",
+                        "fileRef": "file_" + _hash_parts(
+                            context.tenant_id, context.run_id, file_identity,
+                        )[:24],
+                        "byteOffset": byte_offset,
+                    },
+                    source_identity=_hash_parts(source_identity, "standby-start"),
+                    file_identity=f"{file_identity}{STANDBY_TOOL_IDENTITY_SUFFIX}",
+                    byte_offset=byte_offset,
+                    raw_line_hash=_hash_parts(raw_line_hash, "standby-start"),
+                )
+                emitted_ids.append(started.id)
 
         # ── agent 每轮写的话，额外落一条（2026-08-11）────────────────────
         #
@@ -1834,6 +1895,11 @@ class ExecutionIngestService:
                 emitted_ids.append(warning.id)
                 return IngestOutcome(warning, False, tuple(emitted_ids))
             return IngestOutcome(None, False, tuple(emitted_ids))
+        if isinstance(sanitized.get("runtime_build"), dict):
+            draft.payload["runtimeBuild"] = {
+                **sanitized["runtime_build"], "adapterVersion": ADAPTER_VERSION,
+                "adapterSourceSha256": ADAPTER_SOURCE_SHA256,
+            }
         if draft.kind == "decision.required" and not context.decision_authority:
             raise DecisionAuthorityRequiredError(
                 "DecisionAuthority snapshot is required before allocating a Decision event"
@@ -1860,7 +1926,7 @@ class ExecutionIngestService:
             origin=EventOrigin.RAW_TRANSCRIPT,
             source=source,
             source_identity=source_identity,
-            file_identity=file_identity,
+            file_identity=projection_file_identity,
             byte_offset=byte_offset,
             raw_line_hash=raw_line_hash,
         )
@@ -2008,7 +2074,8 @@ class ExecutionIngestService:
             }
             return
         if existing.kind in {"tool.completed", "tool.failed"}:
-            adapter_state.pop("activeTool", None)
+            if raw.get("event") != "interrupt_tool":
+                adapter_state.pop("activeTool", None)
             return
         if existing.kind == "usage.updated" and isinstance(raw.get("usage"), dict):
             self.adapter._usage_payload(raw, adapter_state)
@@ -2192,6 +2259,7 @@ class ExecutionIngestService:
                 project_id=context.project_id,
                 session_id=context.session_id,
                 parent_run_id=context.parent_run_id,
+                created_at=datetime.now(UTC),
             )
             try:
                 async with db.begin_nested():
@@ -2271,6 +2339,23 @@ class ExecutionIngestService:
     ) -> ExecutionEvent:
         _reject_unserializable_source(source)
         _reject_inconsistent_origin(origin, source)
+        # A raw record can project only a derived event (for example an
+        # interrupt reply's narration). There is then no base-identity event
+        # for the caller's raw-record dedupe check to find on restart.
+        # Reuse the persisted source fact before allocating another sequence;
+        # its original event ID and payload remain authoritative.
+        if file_identity is not None and byte_offset is not None and raw_line_hash is not None:
+            existing = await db.scalar(
+                select(ExecutionEvent).where(
+                    ExecutionEvent.tenant_id == context.tenant_id,
+                    ExecutionEvent.run_id == context.run_id,
+                    ExecutionEvent.file_identity == file_identity,
+                    ExecutionEvent.byte_offset == byte_offset,
+                    ExecutionEvent.raw_line_hash == raw_line_hash,
+                )
+            )
+            if existing is not None:
+                return existing
         # ── 这一次提交的身份，跟着每一条事件走（RFC P1-5 / 附录 S1）─────────
         #
         # worker 把它盖在每条 transcript 记录上（`State.append_transcript`），

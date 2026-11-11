@@ -16,7 +16,6 @@ search_papers 仍返回 total=20、首条 source=crossref。三条根因路径�
 from __future__ import annotations
 
 import hashlib
-import pickle
 
 import httpx
 import pytest
@@ -400,9 +399,8 @@ async def test_stale_polluted_cache_is_invalidated_and_researched():
     mgr = make_manager(remote_papers=[])
     key = cache_key_for(query, 50, "auto", {"cnki"})
     path = mgr._cache_path(key)
-    with open(path, "wb") as f:
-        # 白名单修好之前落盘的脏缓存：CNKI-only 的 key 下存着 crossref
-        pickle.dump([make_paper("crossref", "cached crossref", doi="10.1000/aaa")], f)
+    # Simulate a stale source policy using the current safe cache envelope.
+    mgr._save_cached_results(key, [make_paper("crossref", "cached crossref", doi="10.1000/aaa")])
 
     with pytest.MonkeyPatch.context() as mp:
         patch_cnki(mp, FakeCnki([make_paper("cnki/学术期刊", "重搜到的中文文献")]))
@@ -413,8 +411,7 @@ async def test_stale_polluted_cache_is_invalidated_and_researched():
     assert list(results) == []
     # 脏文件必须被替换掉：不能留在盘上等下次再命中
     if path.exists():
-        with open(path, "rb") as f:
-            assert [canonical_source(p.source) for p in pickle.load(f)] == []
+        assert [canonical_source(p.source) for p in mgr._load_cached_results(key)] == []
 
     # 第二次调用（缓存已干净/已删）同样不得出现 crossref
     with pytest.MonkeyPatch.context() as mp:
@@ -428,8 +425,7 @@ async def test_clean_cache_still_hits():
     query = "机器学习势函数"
     mgr = make_manager()
     key = cache_key_for(query, 50, "auto", {"cnki"})
-    with open(mgr._cache_path(key), "wb") as f:
-        pickle.dump([make_paper("cnki/学术期刊", "缓存的中文文献")], f)
+    mgr._save_cached_results(key, [make_paper("cnki/学术期刊", "缓存的中文文献")])
 
     results = await mgr.search_all(query, enabled_sources={"cnki"})
     assert [p.title for p in results] == ["缓存的中文文献"]

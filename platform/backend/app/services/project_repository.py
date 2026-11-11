@@ -1125,7 +1125,8 @@ class GitProjectRepository:
             raise ProjectRepositoryError(
                 f"git {' '.join(args)} failed ({result.returncode}): {detail}"
             )
-        return result.stdout.strip()
+        # NUL-delimited Git output carries literal filenames, including whitespace.
+        return result.stdout if "-z" in args else result.stdout.strip()
 
     #: 未跟踪的瞬时文件后缀 —— 内容无关，不该 wedge 整条 stage→publish 交付链。
     #: 2026-08-23 实测（E2E v30）：一个残留 `MEMORY.md.lock` 让 stage_artifact_candidate
@@ -2529,11 +2530,12 @@ class GitProjectRepository:
                     root,
                     "diff",
                     "--name-only",
+                    "-z",
                     f"{DEFAULT_BRANCH}...HEAD",
                     "--",
                     ".",
-                ).splitlines()
-                if path.strip() and path != session_record
+                ).split("\0")
+                if path and path != session_record
             }
         )
 
@@ -2544,9 +2546,10 @@ class GitProjectRepository:
             b"-----BEGIN PRIVATE KEY-----",
             b"-----BEGIN RSA PRIVATE KEY-----",
             b"-----BEGIN OPENSSH PRIVATE KEY-----",
-            b"AKIA",
         )
-        return any(pattern in sample for pattern in patterns)
+        return any(pattern in sample for pattern in patterns) or bool(
+            re.search(rb"(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9_])", sample)
+        )
 
     def _validate_checkpoint_paths(
         self,
@@ -3202,6 +3205,12 @@ class GitProjectRepository:
             for relative in safe_paths:
                 source_path = source / relative
                 target_path = repo / relative
+                if not source_path.is_file() and self._git(
+                    source, "ls-tree", "-z", workspace.head_commit, "--", relative
+                ):
+                    raise ProjectRepositoryError(
+                        f"Committed Session file is missing or unreadable: {relative}"
+                    )
                 if source_path.is_file():
                     target_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(source_path, target_path)

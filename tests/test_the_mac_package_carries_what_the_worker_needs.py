@@ -137,7 +137,9 @@ def test_the_dmg_is_assembled_with_a_tool_that_keeps_hardlinks(packaging) -> Non
     assert '"cp", "-R"' not in code, "cp -R 不保留硬链接"
 
 
-def test_a_build_leaves_one_app_and_spotlight_does_not_list_it(packaging, tmp_path, monkeypatch) -> None:
+@pytest.mark.requires_symlink
+@pytest.mark.parametrize("edition", ["personal", "pro"])
+def test_a_build_leaves_one_app_and_spotlight_does_not_list_it(packaging, tmp_path, monkeypatch, edition) -> None:
     """打一次包只留一份 `.app`，而且在 Spotlight 不进的目录里。
 
     2026-11-03：打包机上 Spotlight 搜 ScienceMate 列出 16 份，只有 /Applications 那份是装的。
@@ -166,6 +168,7 @@ def test_a_build_leaves_one_app_and_spotlight_does_not_list_it(packaging, tmp_pa
     (app / "Contents" / "MacOS").mkdir(parents=True)
     (app / "Contents" / "MacOS" / packaging.BINARY_NAME).write_bytes(b"shell")
     seen_in_staging: list[str] = []
+    install_guide: list[str] = []
 
     def run(command, **kwargs):
         if command[0] == "ditto":
@@ -173,15 +176,24 @@ def test_a_build_leaves_one_app_and_spotlight_does_not_list_it(packaging, tmp_pa
         elif command[0] == "hdiutil":
             staging = Path(command[command.index("-srcfolder") + 1])
             seen_in_staging.extend(sorted(p.name for p in staging.iterdir()))
+            applications = staging / "Applications"
+            assert applications.is_symlink(), "dmg 缺少 Finder 拖拽安装入口"
+            assert applications.readlink() == Path("/Applications"), "拖拽入口没有指向系统应用程序目录"
+            install_guide.append((staging / "Install.txt").read_text(encoding="utf-8"))
             Path(command[-1]).write_bytes(b"dmg")
         else:
             raise AssertionError(f"make_the_dmg 跑了意料之外的命令：{command}")
 
     monkeypatch.setattr(packaging, "run", run)
-    dmg = packaging.make_the_dmg(app)
+    dmg = packaging.make_the_dmg(app, edition=edition)
 
     assert dmg.read_bytes() == b"dmg"
-    assert seen_in_staging == ["Install.txt", app.name], f"dmg 里装的不对：{seen_in_staging}"
+    suffix = "-Pro" if edition == "pro" else ""
+    assert dmg.name == f"ScienceMate{suffix}-9.9.9-arm64.dmg"
+    assert seen_in_staging == ["Applications", "Install.txt", app.name], f"dmg 里装的不对：{seen_in_staging}"
+    assert "拖到 Applications（应用程序）" in install_guide[0]
+    assert "Drag ScienceMate to Applications" in install_guide[0]
+    assert "安装并打开" in install_guide[0] and "Install and Open" in install_guide[0]
     leftover = [p.relative_to(dist).as_posix() for p in dist.rglob("*.app") if p != app]
     assert not leftover, f"打完 dmg 还留着别的 .app（每次打包多一份）：{leftover}"
 

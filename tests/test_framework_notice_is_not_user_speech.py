@@ -58,8 +58,8 @@ def test_agent_loop_actually_applies_that_filter():
     marker = '_user_utterances'
     idx = src.index(marker)
     window = src[idx: idx + 400]
-    assert "is_framework_notice" in window, (
-        "agent_loop 组装 _user_utterances 时没有排除 framework-notice"
+    assert 'm.origin == "caller"' in window, (
+        "agent_loop 组装 _user_utterances 时没有检查明确的 caller 来源"
     )
 
 

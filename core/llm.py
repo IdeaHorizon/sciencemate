@@ -259,6 +259,17 @@ class LLMMessage:
     # Reasoning model 支持（DeepSeek V4-Pro / V4-Flash 等）：每条 assistant
     # 消息可能带 reasoning_content；下一轮请求时必须原样回传给 API，否则 400。
     reasoning_content: str | None = None
+    # Local rendering identity for a replaceable framework snapshot. Never sent
+    # as a provider field; the owning hook rebuilds it from authoritative state.
+    context_slot: str | None = None
+    # Local authorship, independent of provider role and envelope text.
+    origin: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.origin is None:
+            self.origin = ("tool" if self.tool_call_id or self.role == "tool" else
+                           "caller" if self.role == "user" else
+                           "model" if self.role == "assistant" else "framework")
 
 
 # ── 框架中途发声的唯一形态：user 角色 + 闭合信封 ──────────────────────────
@@ -275,7 +286,8 @@ class LLMMessage:
 #
 # 为什么要信封（而不是裸 user 消息）：换成 user 角色之后，框架的话和**人类
 # 用户的话**混在同一个角色里了 —— 这正是"身份/上下文两件事一条规则"那类
-# 事故的温床。信封是机械可辨的归属标记：闭合块 + 明写非用户发言。
+# 事故的温床。信封供模型阅读；机械来源事实是 LLMMessage.origin。用户也能
+# 粘贴完整信封，因此文本样式不能决定来源、权威或保留资格。
 FRAMEWORK_NOTICE_OPEN = "<framework-notice>"
 FRAMEWORK_NOTICE_CLOSE = "</framework-notice>"
 _FRAMEWORK_NOTICE_ATTRIBUTION = "（研究框架自动注入的状态与提示，不是用户发言）"
@@ -340,6 +352,7 @@ def framework_notice(content: str) -> LLMMessage:
     body = (content or "").strip()
     return LLMMessage(
         role="user",
+        origin="framework",
         content=(
             f"{FRAMEWORK_NOTICE_OPEN}\n{_FRAMEWORK_NOTICE_ATTRIBUTION}\n"
             f"{body}\n{FRAMEWORK_NOTICE_CLOSE}"
@@ -348,7 +361,8 @@ def framework_notice(content: str) -> LLMMessage:
 
 
 def is_framework_notice(msg: LLMMessage) -> bool:
-    return bool(msg.content) and msg.content.lstrip().startswith(FRAMEWORK_NOTICE_OPEN)
+    """Authorship comes from the construction boundary, never from copied text."""
+    return getattr(msg, "role", None) == "user" and getattr(msg, "origin", None) == "framework"
 
 
 def framework_notice_body(msg: LLMMessage) -> str:
@@ -357,7 +371,7 @@ def framework_notice_body(msg: LLMMessage) -> str:
     取证/去重都必须对**正文**做，不能对整条消息做：模型复述的是正文，
     信封与归属行是框架自己加的壳，混进证据池只会稀释判据。
     """
-    if not is_framework_notice(msg):
+    if not is_framework_notice(msg) or not (msg.content or "").lstrip().startswith(FRAMEWORK_NOTICE_OPEN):
         return msg.content or ""
     inner = (msg.content or "").strip()
     inner = inner[len(FRAMEWORK_NOTICE_OPEN):]

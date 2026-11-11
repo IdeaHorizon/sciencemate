@@ -3203,7 +3203,11 @@ def _validate_stage_in(state: State, stage_in: Any, *, remote: bool = False,
         source_stat = source.stat()
         if max_bytes is not None and source_stat.st_size > max_bytes:
             raise ValueError(f"stage_in[{index}].src exceeds the {max_bytes}-byte per-file limit")
-        mode = "0755" if source_stat.st_mode & 0o111 else "0644"
+        mode = item.get("mode")
+        if mode is None:
+            mode = "0755" if source_stat.st_mode & 0o111 else "0644"
+        if not isinstance(mode, str) or mode not in {"0644", "0755"}:
+            raise ValueError(f"stage_in[{index}].mode must be 0644 or 0755")
         with source.open("rb") as stream:
             content = stream.read() if max_bytes is None else stream.read(max_bytes + 1)
         if max_bytes is not None and len(content) > max_bytes:
@@ -3214,7 +3218,8 @@ def _validate_stage_in(state: State, stage_in: Any, *, remote: bool = False,
     return validated
 
 
-def _stage_in_lines(workdir: str | None, stage_in: list[dict[str, str]], *, remote: bool = False) -> list[str]:
+def _stage_in_lines(workdir: str | None, stage_in: list[dict[str, str]], *,
+                    remote: bool = False, path_mapper: Any = None) -> list[str]:
     if not workdir or not stage_in:
         return []
     if remote:
@@ -3274,8 +3279,13 @@ finally:
         return ["python3 -c " + shlex.quote(program) + " " + shlex.quote(payload) + " || exit 89"]
     lines: list[str] = []
     for item in stage_in:
-        src = shlex.quote(item["src"])
-        dst = shlex.quote(os.path.join(os.path.expanduser(workdir), item["dst"]))
+        source = item["src"]
+        destination = os.path.join(os.path.expanduser(workdir), item["dst"])
+        if path_mapper is not None:
+            source = path_mapper(source)
+            destination = path_mapper(destination)
+        src = shlex.quote(source)
+        dst = shlex.quote(destination)
         lines += [f'test ! -L {dst} || exit 89', f'install -D -m {item.get("mode", "0644")} {src} {dst}']
     return lines
 
@@ -3685,7 +3695,19 @@ def _script_for(
     remote: bool = False,
 ) -> str:
     quoted = command.strip()
-    stage_lines = _stage_in_lines(workdir, stage_in or [], remote=remote)
+    path_mapper = None
+    if scheduler == "local":
+        from core import execution_target, isolation
+
+        if execution_target.current().kind == "wsl":
+            path_mapper = isolation.target_paths().to_linux
+    stage_lines = _stage_in_lines(
+        workdir, stage_in or [], remote=remote, path_mapper=path_mapper,
+    )
+    if path_mapper is not None:
+        workdir = path_mapper(workdir) if workdir else None
+        output_dir = path_mapper(output_dir) if output_dir else None
+        bootstrap_dir = path_mapper(bootstrap_dir) if bootstrap_dir else None
     bootstrap = _bootstrap_lines(workdir, output_dir, scheduler, job_name)
     cd_line = f"cd {shlex.quote(os.path.expanduser(workdir))}" if workdir else None
     boot_dir = shlex.quote(os.path.expanduser(bootstrap_dir)) if bootstrap_dir else None
@@ -7315,6 +7337,32 @@ async def _submit_job(
         for value in values:
             if isinstance(value, str) and _has_unresolved_path_placeholder(value):
                 return _unresolved_scheduler_path_block(label=label, value=value)
+    if scheduler == "local":
+        from .safe_bash import _host_workdir
+
+        # Local WSL jobs use host paths for ownership, existence and persistence.
+        # Map guest coordinates before any Windows path normalization; remote
+        # scheduler fields retain their own execution host's coordinates.
+        local_paths = {
+            "workdir": [workdir] if workdir is not None else [],
+            "output_dir": [output_dir] if output_dir is not None else [],
+            "output_paths": list(output_paths or []),
+        }
+        for label, values in local_paths.items():
+            for index, value in enumerate(values):
+                mapped = _host_workdir(value)
+                if mapped is None:
+                    allowed_roles = {"build_root", "run_root"}
+                    if label == "workdir":
+                        allowed_roles.add("source_worktree_root")
+                    return _scheduler_path_block(
+                        label=label, value=value,
+                        allowed_roles=allowed_roles, state=state,
+                    )
+                values[index] = mapped
+        workdir = next(iter(local_paths["workdir"]), None)
+        output_dir = next(iter(local_paths["output_dir"]), None)
+        output_paths = local_paths["output_paths"]
     explicit_output_dir = bool(output_dir)
     explicit_workdir = workdir is not None
     route_action = _submission_route_action(
@@ -7388,7 +7436,7 @@ async def _submit_job(
                 from .safe_bash import resolve_required_workdir
             except ImportError:
                 from tools.safe_bash import resolve_required_workdir
-            workdir_error = resolve_required_workdir(state, workdir)[1]
+            workdir, workdir_error = resolve_required_workdir(state, workdir)
         except Exception as exc:
             return {
                 "status": "error",
@@ -9109,11 +9157,19 @@ def _external_job_record(
     process_group_id: str | None = None,
     process_start_ticks: int | str | None = None,
     container_runtime_id: str | None = None,
+    *, current_run_only: bool = False,
 ) -> dict[str, Any] | None:
     """Resolve one managed job without guessing across scheduler scopes."""
     scheduler_text, job_id_text = str(scheduler or ""), str(job_id or "")
+    # Destructive authority comes from the artifact ledger's producer, never
+    # from a project task or a payload's model-writable owner declaration.
+    records = (
+        read_owed_submission_receipts(state) if current_run_only
+        else _submission_payloads(state) + _task_external_jobs(state)
+    )
     candidates = [
-        row for row in _submission_payloads(state) + _task_external_jobs(state)
+        row for row in records
+        if not current_run_only or _accepted_job_payload(row)
         if str(row.get("scheduler") or "").casefold() == scheduler_text.casefold()
         and str(row.get("job_id") or "") == job_id_text
     ]
@@ -13794,7 +13850,13 @@ async def _cancel_job(
         from .managed_ssh import status
 
         return await status(state, job_id, submission_nonce, cancel_reason=reason)
-    record = _external_job_record(state, scheduler, job_id, namespace, **_nonce_kwargs(submission_nonce))
+    try:
+        record = _external_job_record(
+            state, scheduler, job_id, namespace, current_run_only=True,
+            **_nonce_kwargs(submission_nonce),
+        )
+    except SubmissionLedgerError as exc:
+        return {"status": "error", "reason": "submission_ledger_unreadable", "error": str(exc)}
     if record is None:
         return {"status": "error",
                 "error": ("未找到唯一受管 external job 记录；同 scheduler/job_id "
@@ -14352,10 +14414,16 @@ register_tool(
                 },
                 "stage_in": {
                     "type": "array",
-                    "description": "Optional file-only staging into workdir before payload; each item is {src: absolute readable file, dst: relative path}. Kubernetes requires a separate volume/PVC contract and rejects this parameter.",
+                    "description": "Optional file-only staging before payload. src is an absolute readable file in the submitting host's Core tool coordinates, including for local WSL jobs (use the Windows host path, not /mnt/...); dst is a relative POSIX path inside the execution target's workdir. Kubernetes requires a separate volume/PVC contract and rejects this parameter.",
                     "items": {
                         "type": "object",
-                        "properties": {"src": {"type": "string"}, "dst": {"type": "string"}},
+                        "properties": {
+                            "src": {"type": "string"}, "dst": {"type": "string"},
+                            "mode": {
+                                "type": "string", "enum": ["0644", "0755"],
+                                "description": "Explicit target mode; use 0755 for scripts staged from Windows. Omit to preserve source executable bits.",
+                            },
+                        },
                         "required": ["src", "dst"],
                     },
                 },

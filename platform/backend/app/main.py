@@ -18,6 +18,8 @@ from app.config import settings
 from app.services.say import in_both_languages
 from app.core.logging import get_logger, setup_logging
 from app.middleware import RequestBodyCapMiddleware, RequestLoggingMiddleware
+from app.services.remote_relay import PersonalProjectsRelay, RuntimeAuthentication
+from app.services.remote_servers import register_provider
 from app import assembly
 
 logger = get_logger("app")
@@ -217,11 +219,11 @@ async def _refuse_to_serve_where_the_data_is_not() -> None:
                 (
                     await db.execute(
                         text(
-                            "SELECT git_worktree_path FROM sessions "
+                            "SELECT project_id, session_id, git_worktree_path FROM sessions "
                             "WHERE archived_at IS NULL AND git_worktree_path IS NOT NULL"
                         )
                     )
-                ).scalars()
+                ).all()
             )
     except Exception:
         # 连不上库、表还没建（全新部署跑 alembic 之前）都不是"根不对"。别把
@@ -229,7 +231,20 @@ async def _refuse_to_serve_where_the_data_is_not() -> None:
         logger.info("Could not read recorded worktree roots; skipping data-root check")
         return
 
-    stranded = stranded_by_root(configured, recorded)
+    from app.services.project_repository import get_project_repository
+
+    repository = get_project_repository()
+    default_paths = []
+    custom_stranded: dict[str, int] = {}
+    for project_id, session_id, path in recorded:
+        if repository.locations.custom_root(project_id) is None:
+            default_paths.append(path)
+        elif Path(path).resolve() != repository.session_path(project_id, session_id).resolve():
+            root = str(Path(path).parent.parent)
+            custom_stranded[root] = custom_stranded.get(root, 0) + 1
+    stranded = stranded_by_root(configured, default_paths)
+    for root, count in custom_stranded.items():
+        stranded[root] = stranded.get(root, 0) + count
     if not stranded:
         return  # 空库（全新部署）也走这条：配的根就是将来的根。
 
@@ -602,6 +617,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # "我们自己在关机"。旗立晚了，第一条被撤销的 run 就会被记成 failed
         # 并告诉用户"改改请求再试" —— 对着一件没发生的事给建议。
         begin_shutdown()
+        from app.services.remote_transport import tunnels
+        await tunnels.close()
         await shutdown_detached_executions()
         # 放手，不终止（RFC 异步运行时 P0）：worker 自成进程组、事件落盘、命令面
         # 是 socket —— 后端退场只是"没人在说话"，不是任何一个会话的结束。下一个
@@ -633,6 +650,9 @@ app = FastAPI(
 # 转交中间件由专业版挂（`app/pro`）；这一句同时把它的路由、家、策略钩子接上。
 # 个人版没有 app/pro，这一句是空操作。
 assembly.wire_the_edition(app)
+register_provider()
+app.add_middleware(PersonalProjectsRelay)
+app.add_middleware(RuntimeAuthentication)
 app.add_middleware(RequestLoggingMiddleware)
 # 体积闸在日志之后加 = 在请求路径上**更靠外**（Starlette 按注册倒序包裹），
 # 所以被它拒掉的请求仍然进访问日志。

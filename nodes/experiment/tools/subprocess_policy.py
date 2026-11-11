@@ -57,11 +57,29 @@ def _nearest_existing_overlay(path: Path | None) -> Path | None:
 _APPROVED_WRITE_CAPABILITIES_KEY = "_approved_subprocess_write_roots"
 
 
+def overlaps_project_worktree(state: Any, path: str | Path) -> bool:
+    worktree = _canonical_path(getattr(state, "project_worktree", None))
+    candidate = _canonical_path(path)
+    return _inside(candidate, worktree) or _inside(worktree, candidate)
+
+
+def approved_subprocess_write_roots(state: Any) -> list[Path]:
+    hook_state = getattr(state, "hook_state", None)
+    entries = hook_state.get(_APPROVED_WRITE_CAPABILITIES_KEY) if isinstance(hook_state, dict) else None
+    if not isinstance(entries, list):
+        return []
+    return [path for value in entries
+            if (path := _canonical_path(value)) is not None
+            and not overlaps_project_worktree(state, path)]
+
+
 def register_approved_subprocess_write_root(state: Any, value: str) -> Path:
     """记录由本进程消费人工确认后签发的 run-local 路径能力。"""
     path = _canonical_path(value)
     if path is None or not path.is_absolute():
         raise PathRoleSandboxContractError("人工批准路径不是有效绝对路径")
+    if overlaps_project_worktree(state, path):
+        raise PathRoleSandboxContractError("项目目录的写入范围由 Core 分配")
     hook_state = getattr(state, "hook_state", None)
     if not isinstance(hook_state, dict):
         raise PathRoleSandboxContractError("run 缺少可持久化 capability 状态")
@@ -82,11 +100,7 @@ def _local_write_capability_roots(state: Any) -> list[Path]:
     if writable is None:
         writable = sandbox.write_roots_for(state)
     values = list(writable or [])
-    hook_state = getattr(state, "hook_state", None)
-    if isinstance(hook_state, dict):
-        approved = hook_state.get(_APPROVED_WRITE_CAPABILITIES_KEY, [])
-        if isinstance(approved, list):
-            values.extend(approved)
+    values.extend(approved_subprocess_write_roots(state))
     roots: list[Path] = []
     for value in values:
         path = _canonical_path(value)

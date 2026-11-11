@@ -3808,3 +3808,25 @@ pre {
 :root[data-reduce-motion="true"] .update-progress .is-spinning { animation: none; }
 @keyframes update-progress-spin { to { transform: rotate(360deg); } }
 .update-banner a { color: var(--blue); text-decoration: underline; }
+.runtime-settings { max-width: 880px; }
+.runtime-card, .runtime-connection-form { border: 1px solid var(--color-border); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+.runtime-card h2 { display: flex; align-items: center; gap: 9px; font-size: 15px; margin: 0 0 10px; }
+.runtime-card h2 small { margin-left: auto; font-size: 12px; font-weight: 400; color: var(--color-fg-muted); }
+.runtime-card p, .runtime-connection-form p { font-size: 13px; line-height: 1.7; color: var(--color-fg-muted); }
+.runtime-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.runtime-connection-form h2 { font-size: 17px; margin: 0 0 8px; }
+.runtime-connection-form fieldset { display: grid; gap: 15px; border: 0; padding: 12px 0 20px; margin: 0; min-width: 0; }
+.runtime-connection-form label { display: grid; gap: 7px; font-size: 13px; }
+.runtime-connection-form input:not([type="checkbox"]), .runtime-connection-form select { width: 100%; box-sizing: border-box; border: 1px solid var(--color-border); border-radius: 7px; padding: 9px 11px; color: var(--color-fg); background: var(--color-bg-input); font: inherit; }
+.runtime-connection-form .runtime-check { display: flex; align-items: flex-start; gap: 8px; }
+.runtime-connection-form summary { cursor: pointer; font-size: 13px; margin-bottom: 12px; }
+.runtime-host-key { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--color-border); border-radius: 8px; margin-bottom: 16px; }
+.runtime-host-key code { overflow-wrap: anywhere; font-size: 12px; }
+.runtime-models { border-top: 1px solid var(--color-border); margin-top: 20px; padding-top: 16px; }
+.runtime-models h3 { font-size: 14px; }
+.project-runtime-manage { display: inline-block; font-size: 12px; margin: 10px 0; }
+.project-runtime-status { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 8px 16px; border-bottom: 1px solid var(--color-border); color: var(--color-fg-muted); font-size: 12px; }
+.project-runtime-status a { margin-left: auto; }
+.project-runtime-status.is-unavailable { background: var(--color-warning-bg); color: var(--color-fg); }
+.project-runtime-status strong { font-weight: 500; }
+.runtime-stale-note { flex-basis: 100%; order: 1; color: var(--color-fg-muted); line-height: 1.6; }

@@ -74,21 +74,46 @@ def test_the_windows_repair_says_it_needs_an_administrator(tmp_path, monkeypatch
     连改权限的资格都没有。提案要如实说会弹一次管理员确认，并标成提权执行。"""
     monkeypatch.setattr(facts.sys, "platform", "win32")
     got = facts.repair_proposal("home_marker_unreadable", error="PermissionError: [WinError 5] 拒绝访问。",
-                                data_root=tmp_path)
+                                data_root=tmp_path, path=tmp_path / 'marker.json')
     assert got["argv"][0] == "icacls" and got["elevated"] is True
     assert "管理员" in got["changes"]["zh"] and "administrator" in got["changes"]["en"]
     monkeypatch.setattr(facts.sys, "platform", "linux")
-    got = facts.repair_proposal("home_marker_unreadable", error="PermissionError: [Errno 13]", data_root=tmp_path)
+    got = facts.repair_proposal("home_marker_unreadable", error="PermissionError: [Errno 13]",
+                                data_root=tmp_path, path=tmp_path / 'marker.json')
     assert got["argv"][0] == "chmod" and got["elevated"] is False
 
 
-def test_a_permission_shaped_failure_proposes_resetting_the_data_root(tmp_path):
+def test_a_marker_failure_only_proposes_repairing_that_marker(tmp_path):
     got = facts.repair_proposal("home_marker_unreadable", error="PermissionError: [WinError 5] 拒绝访问。",
-                                data_root=tmp_path)
-    assert got["kind"] == "reset_data_root_permissions" and got["needs_consent"] is True
-    assert str(tmp_path) in got["argv"] and got["command"]
+                                data_root=tmp_path, path=tmp_path / 'marker.json')
+    assert got["kind"] == "reset_identity_marker_permissions" and got["needs_consent"] is True
+    assert str(tmp_path / 'marker.json') in got["argv"] and got["command"]
+    assert '/T' not in got['argv'] and '-R' not in got['argv']
     if sys.platform != "win32":
         assert got["argv"][0] == "chmod"
+
+
+def test_marker_repair_requires_a_server_owned_path(tmp_path):
+    for path in [None, tmp_path.parent / 'outside-marker.json']:
+        assert facts.repair_proposal('home_marker_unreadable', error='PermissionError',
+                                    data_root=tmp_path, path=path) is None
+
+
+def test_cancelling_uac_is_reported_as_not_executed(monkeypatch):
+    import ctypes
+    from types import SimpleNamespace
+    class Function:
+        def __call__(self, *args):
+            return 0
+    shell = SimpleNamespace(ShellExecuteExW=Function())
+    kernel = SimpleNamespace(WaitForSingleObject=Function(), GetExitCodeProcess=Function(),
+                             CloseHandle=Function())
+    monkeypatch.setattr(ctypes, 'WinDLL',
+        lambda name, **kwargs: shell if name == 'shell32' else kernel, raising=False)
+    monkeypatch.setattr(ctypes, 'get_last_error', lambda: 1223, raising=False)
+    result = env._run_argv_elevated(['icacls', 'unused-marker', '/reset'])
+    assert result['status'] == 'cancelled'
+    assert result['returncode'] is None
 
 
 def test_a_conflict_has_no_command_only_advice(tmp_path):
@@ -257,7 +282,7 @@ async def test_an_elevated_proposal_goes_through_the_elevated_runner(runtime_cli
     client, factory = runtime_client
     token = await _token(client, "researcher@atrium.local")
     warning = {"type": "environment_warning", "code": "home_marker_unreadable", "severity": "degraded",
-               "path": str(tmp_path / "home" / ".platform-tenant-identity.json"),
+               "path": str(Path(the_data_root()) / "home" / ".platform-tenant-identity.json"),
                "error": "PermissionError: [WinError 5] 拒绝访问。", "consequences": []}
     async with factory() as db:
         run = await _seed(db, run_id="run_env_9", environment={"warnings": [warning], "repeated": 0,
@@ -276,7 +301,8 @@ async def test_an_elevated_proposal_goes_through_the_elevated_runner(runtime_cli
     done = await client.post(f"/api/v1/projects/{project_id}/sessions/{session_id}/environment/repair",
                              headers=_headers(token), json={"code": "home_marker_unreadable", "path": warning["path"]})
     assert done.status_code == 200, done.text
-    assert elevated and elevated[0][0] == "icacls" and str(the_data_root()) in elevated[0]
+    assert elevated and elevated[0][0] == "icacls" and warning['path'] in elevated[0]
+    assert '/T' not in elevated[0]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="ShellExecuteEx 只在 Windows 上")

@@ -1083,6 +1083,7 @@ async def _render_figure(
     timeout: int = 300,
     contract_id: str | None = None,
     backend: str | None = None,
+    annotated_values: list[dict[str, Any]] | None = None,
     **_: Any,
 ) -> dict[str, Any]:
     attempt: dict[str, Any] | None = None
@@ -1164,6 +1165,10 @@ async def _render_figure(
         if isinstance(source_artifact_ids, str):
             source_artifact_ids = [source_artifact_ids]
         source_ids = list(dict.fromkeys(str(item) for item in source_artifact_ids or []))
+        for annotation in annotated_values or []:
+            source = str(annotation.get("source_artifact_id") or "")
+            if source and source not in source_ids:
+                source_ids.append(source)
         source_records = []
         for artifact_id in source_ids:
             record = state.read_artifact(artifact_id)
@@ -1616,6 +1621,9 @@ async def _render_figure(
             "generative_content": generative_content,
             "replay": replay,
         }
+        if annotated_values is not None:
+            metadata["annotated_values"] = [dict(item) for item in annotated_values]
+            metadata["annotated_values_hash_version"] = 1
         metadata["figure_hash"] = figure_binding_hash(metadata)
         reject_verdict_fields(metadata)
 
@@ -1816,6 +1824,25 @@ register_tool(
                         "这张图读取的上游数据 artifact id；示意图可为空数组"
                         "（记录会如实披露「无上游数据绑定」）"
                     ),
+                },
+                "annotated_values": {
+                    "type": "array",
+                    "description": (
+                        "图面打印的科学估计量/拟合参数/误差及其精确源字段；自动轴刻度不计。"
+                        "直接引用上游冻结字段，不要在画图时重新拟合或重算派生量。"
+                        "独立重算用于敏感性分析时另出明确标注的对照图。"
+                    ),
+                    "items": {
+                        "type": "object",
+                        "required": ["value", "source_artifact_id", "source_field"],
+                        "properties": {
+                            "label": {"type": "string"},
+                            "value": {"type": "number"},
+                            "source_artifact_id": {"type": "string", "minLength": 1},
+                            "source_field": {"type": "string", "minLength": 1},
+                            "tolerance": {"type": "number", "minimum": 0},
+                        },
+                    },
                 },
                 "request_id": {"type": "string", "description": "开局 briefing 列出的调用方请求 id"},
                 "purpose": {"type": "string", "enum": sorted(PURPOSES)},

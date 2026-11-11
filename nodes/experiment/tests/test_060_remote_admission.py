@@ -61,18 +61,6 @@ def test_a_local_run_does_not_trigger_the_first_external_submission_question(tmp
     assert out["decision"] == "allowed"
 
 
-def test_cancel_is_refused_for_a_job_this_run_never_submitted_and_says_why(tmp_path):
-    state = _state(tmp_path, {"cpus": 8})
-    ledger.record(state, "intent", nonce="mine", scheduler="slurm", output_root="r")
-    ledger.record(state, "job_bound", nonce="mine", external_id="100")
-    ok = ra.cancel_admission(state, scheduler="slurm", job_id="100")
-    assert ok["decision"] == "allowed" and ok["nonce"] == "mine"
-    refused = ra.cancel_admission(state, scheduler="slurm", job_id="999")
-    assert refused["decision"] == "refused" and refused["reason"] == "not_owned_by_this_run"
-    assert "高危确认" in refused["exit"] and "ownership" in refused["exit"]
-    assert refused["owned"] == [{"nonce": "mine", "external_id": "100", "state": "submitted"}]
-    # 同一个作业号、别的调度器，也不是本 run 的
-    assert ra.cancel_admission(state, scheduler="pbs", job_id="100")["decision"] == "refused"
 
 
 def test_a_missing_remote_isolation_is_never_disclosed_as_enforced(tmp_path):
@@ -92,23 +80,6 @@ def test_the_envelope_is_frozen_once_and_the_model_cannot_widen_it(tmp_path):
     assert ra.frozen_envelope(state)["limits"] == {"cpus": 8}
 
 
-def test_ownership_is_disclosed_but_is_not_yet_a_cancel_gate(tmp_path):
-    """归属判定当前只作披露。
-
-    2026-09-23 实测：把它接成 cancel 的门，7 个既有用例转红——它们的受管作业是
-    直接构造提交记录建起来的，账本里没有绑定，于是本 run 自己的作业被判成别人的。
-    账本成为唯一归属权威之前（S1d），这道门只会多拒一种情况。这条用例钉住"现在
-    还不是门"，S1d 接上时它会红，那正是该改它的时候。
-    """
-    import asyncio
-    from nodes.experiment.tools import resource_manager as rm
-
-    state = _state(tmp_path, {"cpus": 8})
-    ledger.record(state, "intent", nonce="mine", scheduler="slurm", output_root="r")
-    ledger.record(state, "job_bound", nonce="mine", external_id="100")
-    assert ra.cancel_admission(state, scheduler="slurm", job_id="999")["decision"] == "refused"
-    out = asyncio.run(rm._cancel_job(state, scheduler="slurm", job_id="999"))
-    assert out.get("reason") != "not_owned_by_this_run"  # 入口还没挂这道门
 
 
 def test_finish_discloses_the_write_boundary_it_actually_had(tmp_path):

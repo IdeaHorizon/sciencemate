@@ -152,6 +152,28 @@ _FALLS_TO_GENERIC: dict[str, str] = {
 #: `execution_failed` 一模一样，那就别加 —— 多一个条目只是多一句同义的话，
 #: 不会让任何人多做对一件事。
 _COPY: dict[str, _Copy] = {
+    "unconfirmed_tool_outcome": _Copy(
+        title={"zh": "先核对中断的动作", "en": "Reconcile the interrupted action"},
+        body={"zh": "断点保存了工具调用，但没有确认结果；该动作可能已经执行。自动续跑已停止。",
+              "en": "A tool call was saved without its confirmed result. It may already have "
+                    "taken effect. Automatic continuation stopped."},
+        recovery={"zh": "请核对原作业或外部系统的记录，再继续。核对前不要重复提交。",
+                  "en": "Inspect the original job or external system before continuing. "
+                        "Do not resubmit before reconciling it."},
+        retryable=False,
+    ),
+    "harness_transcript_ingest_failed": _Copy(
+        title={"zh": "执行记录未完整接收", "en": "Execution records were not fully received"},
+        body={"zh": "部分执行记录无法读取。命令通道当时仍然可用，不能据此判断任务已经停止。",
+              "en": "Some execution records could not be read. The control channel was still "
+                    "available; this does not establish that the task stopped."},
+        recovery={"zh": "请先检查原会话的作业状态与日志；仍在运行时使用停止操作。核对前不要重复提交计算，"
+                        "并保留诊断记录。",
+                  "en": "Inspect the original session's jobs and logs first, and use Stop for work "
+                        "that is still running. Do not resubmit computation before reconciling it; "
+                        "keep the diagnostics."},
+        retryable=False,
+    ),
     "strategy_generation_failed": _Copy(
         title={"zh": "生成检索计划失败", "en": "Could not create a search plan"},
         body={"zh": "模型没有返回有效的检索计划，本次检索已停止。",

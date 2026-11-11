@@ -36,6 +36,7 @@ TRACKED = {
     "chat.py": "x = 1\n",
     "unimported.py": "x = 1\n",
     "docs/readme.md": "x\n",
+    "docs/xiaohongshu_journal_map.tsv": "journal_name\t二级学科代码\nApplied Linguistics\t050201\n",
     "platform/backend/app/launcher.py": "x = 1\n",
     "platform/backend/app/api/routes.py": "x = 1\n",
     "platform/backend/app/tests/test_app.py": "x = 1\n",
@@ -126,9 +127,21 @@ def test_the_harness_in_the_desktop_package_is_what_git_tracks(
     # 不带）—— 各自都是 git 跟踪的那份。
     expected = {name for name in set(TRACKED) - DELETED
                 if name.split("/")[0] in packager.HARNESS_PACKAGES
-                and "tests" not in PurePosixPath(name).parts} | {"platform_runtime.py", "chat.py"}
+                and "tests" not in PurePosixPath(name).parts} | {
+                    "platform_runtime.py", "chat.py", "docs/xiaohongshu_journal_map.tsv"}
     assert shipped == expected, (
         f"多出来的：{sorted(shipped - expected)}；少了的：{sorted(expected - shipped)}")
+
+
+@pytest.mark.parametrize("name", ["build_mac_app", "build_windows_app"])
+def test_a_desktop_package_cannot_omit_the_journal_mapping(checkout, tmp_path, name):
+    packager = _load(name)
+    _point_at(packager, checkout, tmp_path)
+    (checkout / "docs/xiaohongshu_journal_map.tsv").unlink()
+    interface = tmp_path / "ui"
+    interface.mkdir()
+    with pytest.raises(SystemExit, match="xiaohongshu_journal_map.tsv"):
+        packager.stage_into_the_package(interface)
 
 
 def test_the_backend_app_in_the_update_is_what_git_tracks_plus_the_pro_things(

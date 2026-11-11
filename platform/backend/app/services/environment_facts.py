@@ -269,7 +269,8 @@ def own_holders(project_id: str, session_id: str) -> list[dict[str, Any]]:
 # ── 修复提案 ──────────────────────────────────────────────────────────────────
 
 
-def repair_proposal(code: str, *, error: str | None, data_root: Path | str) -> dict[str, Any] | None:
+def repair_proposal(code: str, *, error: str | None, data_root: Path | str,
+                    path: Path | str | None = None) -> dict[str, Any] | None:
     """按 code 与错误形状查表。表里没有 → None（只有事实，没有提案）。
 
     `changes` 两种语言都写：提案跟着事件存下来，之后谁用哪种语言看，写的这一刻不知道 ——
@@ -286,6 +287,35 @@ def repair_proposal(code: str, *, error: str | None, data_root: Path | str) -> d
             "reversible": None, "needs_consent": True, "automatic": False,
         }
     if code in _PERMISSION_SHAPED_CODES and _looks_like_permission_denial(error):
+        # A single unreadable identity marker does not establish that every
+        # application's file needs a recursive ACL reset. Only repair the
+        # diagnosed object, under the server's data root.
+        if code in {"home_marker_unreadable", "state_marker_unreadable"}:
+            if not path:
+                return None
+            try:
+                target = Path(path).resolve()
+                target.relative_to(Path(data_root).resolve())
+            except (OSError, ValueError):
+                return None
+            root = str(target)
+            if sys.platform == "win32":
+                argv = ["icacls", root, "/reset", "/C"]
+            else:
+                argv = ["chmod", "u+rw", root]
+            return {
+                "kind": "reset_identity_marker_permissions", "argv": argv,
+                "command": _shell_text(argv),
+                "changes": {
+                    "zh": "仅恢复上述身份标记文件的访问权限；不会递归修改数据目录。"
+                          "Windows 可能需要管理员确认，原权限的形成原因尚未确认。",
+                    "en": "Restores access only to the identity marker above, without recursively "
+                          "changing the data folder. Windows may ask for administrator approval; "
+                          "the original permission cause has not been established.",
+                },
+                "reversible": False, "needs_consent": True, "automatic": False,
+                "elevated": sys.platform == "win32",
+            }
         root = str(data_root)
         if sys.platform == "win32":
             argv = ["icacls", root, "/reset", "/T", "/C"]
@@ -330,7 +360,7 @@ def enrich_warning(warning: dict[str, Any], *, project_id: str, session_id: str,
     enriched["holders"] = own_holders(project_id, session_id)
     enriched["token"] = probe_token()
     enriched["repair"] = repair_proposal(str(warning.get("code") or ""), error=warning.get("error"),
-                                         data_root=data_root)
+                                         data_root=data_root, path=warning.get("path"))
     enriched["data_root"] = str(data_root)
     return enriched
 

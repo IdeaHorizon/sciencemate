@@ -3542,6 +3542,10 @@ class PlatformSession:
         payload["project_id"] = self.project_id
         payload["session_id"] = self.session_id
         payload["runtime_identity"] = dict(self.runtime_identity)
+        if event_type in {"ready", "status"}:
+            from core.runtime_build import facts
+
+            payload["runtime_build"] = {"codeVersion": _code_version(), **facts(components=True)}
         self._event_sink(event_type, **payload)
         # ── 心跳（D10）──────────────────────────────────────────────────────
         #
@@ -4190,7 +4194,8 @@ class PlatformSession:
 
         return await auto_resume_pauses()
 
-    async def turn(self, request_id: str, message: str) -> dict[str, Any]:
+    async def turn(self, request_id: str, message: str, *,
+                   system_continuation: bool = False) -> dict[str, Any]:
         """一轮 = RPC 入口翻译 + 共享脊柱（session_driver.run_turn）。
 
         脊柱（run_loop → 回复整形 → 等后台 → pause 归宿 → checkpoint+存盘的
@@ -4238,6 +4243,7 @@ class PlatformSession:
                     self.client,
                     message,
                     frontend=self._frontend,
+                    **({"framework_continuation": True} if system_continuation else {}),
                 )
             return await self._operation_end(
                 operation="turn",
@@ -4667,6 +4673,7 @@ class PlatformSession:
         message: str,
         *,
         max_turns: int = 200,
+        system_continuation: bool = False,
     ) -> dict[str, Any]:
         """无人值守：一次调用，跑到真正做完（或需要人）为止。
 
@@ -4727,7 +4734,10 @@ class PlatformSession:
         # 内层 `turn` 用同一个上下文管理器，按计数认出自己不是最外层。
         try:
             async with self._inbox_consumer():
-                result = await self.turn(request_id, message)
+                result = await self.turn(
+                    request_id, message,
+                    **({"system_continuation": True} if system_continuation else {}),
+                )
                 turns = 1
                 while turns < max_turns:
                     status = str(result.get("status") or "")
@@ -5094,7 +5104,10 @@ def _error_code_for(exc: BaseException) -> str:
     后端不用猜。
     """
     from core.llm import is_transient_provider_error
+    from core.conversation_store import UnconfirmedToolOutcome
 
+    if isinstance(exc, UnconfirmedToolOutcome):
+        return exc.code
     try:
         if is_transient_provider_error(exc):
             return "upstream_unavailable"
@@ -5212,7 +5225,10 @@ async def serve_jsonl(
                 message = raw.get("message")
                 if not isinstance(message, str) or not message.strip():
                     raise RequestError("invalid_message", "message must be a non-empty string")
-                await session.turn(request_id, message)
+                await session.turn(
+                    request_id, message,
+                    **({"system_continuation": True} if raw.get("system_continuation") is True else {}),
+                )
             elif op == "run_unattended":
                 message = raw.get("message")
                 if not isinstance(message, str) or not message.strip():
@@ -5224,7 +5240,10 @@ async def serve_jsonl(
                     raise RequestError(
                         "invalid_max_turns", "max_turns must be an integer in [1, 1000]"
                     )
-                await session.run_unattended(request_id, message, max_turns=max_turns)
+                await session.run_unattended(
+                    request_id, message, max_turns=max_turns,
+                    **({"system_continuation": True} if raw.get("system_continuation") is True else {}),
+                )
             elif op == "reset":
                 # 换届：清掉这一趟的授权。下一趟要重新声明。
                 session._authorized_risk_classes = []
@@ -5491,6 +5510,11 @@ async def serve_jsonl(
                         payload["run_id"] = getattr(session.state, "run_id", "")
                         session.emit("status", request_id=request_id, **payload)
                     else:
+                        from core.runtime_build import facts
+
+                        payload["runtime_build"] = {
+                            "codeVersion": _code_version(), **facts(components=True),
+                        }
                         emit("status", request_id=request_id, **payload)
                     continue
                 if session is None:

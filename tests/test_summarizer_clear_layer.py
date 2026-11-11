@@ -53,20 +53,42 @@ def _msgs(*, big_tool: str, n_turns: int = 6, big_chars: int = 200_000) -> list[
     return out
 
 
-def _run(msgs, harness=None):
-    ctx = sm.SummarizerContext(harness=harness or _H(), state=None, messages=msgs,
+def _run(msgs, harness=None, state=None):
+    ctx = sm.SummarizerContext(harness=harness or _H(), state=state, messages=msgs,
                                estimated_tokens=sm.estimate_tokens(msgs), llm=None, turn=9)
     return asyncio.run(sm._strategy_clear_tool_results(ctx))
 
 
-def test_replayable_results_get_cleared_with_pointer() -> None:
+def test_unarchived_replayable_results_offer_a_new_observation() -> None:
     msgs = _msgs(big_tool="t_read")
     out = _run(msgs)
     cleared = [m for m in out if (m.content or "").startswith(sm._CLEARED_MARKER)]
     assert cleared, "可重读结果必须被清"
-    # 判据抓语义不抓逐字：墓碑必须说明"原文还在 + 怎么拿回来"。
-    assert "没有丢" in cleared[0].content and "再调用一次" in cleared[0].content
+    # state=None has no archive. Re-executing a read is a fresh observation,
+    # and cannot honestly be called a recovery of the historical result.
+    assert "未找到" in cleared[0].content and "新的观察" in cleared[0].content
+    assert "没有丢" not in cleared[0].content
     assert sm.estimate_tokens(out) < sm.estimate_tokens(msgs) / 3
+
+
+def test_archived_results_get_a_working_exact_receipt_pointer(tmp_path) -> None:
+    from core.context_view import get
+    from core.state import State
+
+    state = State.new("literature", tmp_path)
+    msgs = _msgs(big_tool="t_read")
+    view = get(state)
+    originals = []
+    for i, msg in enumerate(m for m in msgs if m.role == "tool"):
+        view.note_result(tool_name="t_read", args={}, tool_call_id=msg.tool_call_id,
+                         content=msg.content, turn=i, replayable=True)
+        originals.append(msg.content)
+    out = _run(msgs, state=state)
+    cleared = [m for m in out if (m.content or "").startswith(sm._CLEARED_MARKER)]
+    assert cleared and "没有丢" in cleared[0].content
+    ref = view.entries[cleared[0].tool_call_id]["result_ref"]
+    assert ref in cleared[0].content
+    assert view.read_result(ref)["content"] == originals[0][:16000]
 
 
 def test_structure_and_prefix_are_untouched() -> None:

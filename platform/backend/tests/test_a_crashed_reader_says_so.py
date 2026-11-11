@@ -37,7 +37,7 @@ def _session(channel) -> hs._ProjectHarnessSession:
     )
 
 
-async def test_an_exception_in_the_sink_is_logged_before_pending_rpcs_see_eof(caplog):
+async def test_an_exception_in_the_sink_is_logged_without_destroying_control(caplog):
     session = _session(_Channel([json.dumps({"type": "transcript", "request_id": "r1", "event": {}}).encode() + b"\n"]))
 
     async def explode(_event: dict) -> None:
@@ -49,9 +49,13 @@ async def test_an_exception_in_the_sink_is_logged_before_pending_rpcs_see_eof(ca
     with caplog.at_level(logging.ERROR, logger=hs.logger.name):
         async with session._awaiting("r1", noop, explode, conversation=True) as queue:
             got = await asyncio.wait_for(queue.get(), timeout=5)
-    assert got is session._EOF
-    crashed = [r for r in caplog.records if "reader for p/s crashed" in r.getMessage()]
-    assert crashed and "ingest blew up" in (crashed[0].exc_text or "")
+            assert got['type'] == 'transcript'
+            assert not session._reader.done()
+    session._reader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await session._reader
+    errors = [r for r in caplog.records if "control reader remains available" in r.getMessage()]
+    assert errors and "ingest blew up" in (errors[0].exc_text or "")
 
 
 async def test_a_clean_eof_does_not_cry_wolf(caplog):
@@ -65,6 +69,53 @@ async def test_a_clean_eof_does_not_cry_wolf(caplog):
             got = await asyncio.wait_for(queue.get(), timeout=5)
     assert got is session._EOF
     assert not [r for r in caplog.records if "crashed" in r.getMessage()]
+
+
+async def test_invalid_wrapper_preserves_management_rpc_and_never_claims_completion(tmp_path, monkeypatch):
+    from app.services import harness_transcript_ingest as ingest
+
+    class Channel(_Channel):
+        def __init__(self):
+            self.queue = asyncio.Queue()
+        async def read_line(self):
+            return await self.queue.get()
+        def emit(self, value):
+            self.queue.put_nowait(json.dumps(value).encode() + b'\n')
+
+    path = tmp_path / 'transcript.jsonl'
+    path.write_text('{}\n')
+    monkeypatch.setattr(ingest, '_approved_runtime_root', lambda *args: tmp_path)
+    channel = Channel()
+    session = _session(channel)
+    async def sink(event):
+        if event.get('type') == 'transcript':
+            ingest.resolve_wrapper(event, project_id='p', session_id='s')
+    async def noop(event):
+        return None
+
+    try:
+        async with session._awaiting('turn', noop, sink, conversation=True) as turn:
+            async with session._awaiting('stop', noop, noop, conversation=False) as control:
+                channel.emit({'type': 'transcript', 'request_id': 'turn', 'event': {},
+                    'transcript_path': str(path), 'byte_start': 10, 'byte_end': 5})
+                channel.emit({'type': 'result', 'request_id': 'stop', 'data': {'delivered': True}})
+                result = await session._await_terminal(control, terminal_types={'result'}, timeout_seconds=2)
+                assert result['data']['delivered'] is True
+                assert not session._reader.done()
+            channel.emit({'type': 'result', 'request_id': 'turn', 'data': {'status': 'completed'}})
+            with pytest.raises(hs.HarnessSessionError) as caught:
+                await session._await_terminal(turn, terminal_types={'result'}, timeout_seconds=2)
+            assert caught.value.code == 'harness_transcript_ingest_failed'
+            assert caught.value.details['byte_start'] == 10
+            assert caught.value.details['byte_end'] == 5
+            assert caught.value.details['safe_to_resubmit'] is False
+            assert caught.value.details['control_connected'] is True
+            assert 'invalid byte range' in caught.value.cause
+    finally:
+        session._reader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await session._reader
+    assert not session._ingest_errors
 
 
 async def test_an_unreadable_worker_record_means_no_live_worker_not_a_dead_turn(monkeypatch, caplog):

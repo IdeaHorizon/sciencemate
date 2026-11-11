@@ -23,14 +23,6 @@ GENRES_DIR = NODE_DIR / "genres"
 CRAFT_DIR = NODE_DIR / "craft"
 RENDERERS_DIR = NODE_DIR / "renderers"
 
-PROCESS_VOCAB: tuple[str, ...] = (
-    "artifact", "上游", "revision item", "revision_items", "机械审计", "用户交来",
-    "本平台", "not provided", "占位", "待补充", "投稿前需", "列入修订", "预检",
-    "preflight", "receipt", "adequacy", "模板", "调度器", "orchestrator",
-    "审计", "暂由", "留供", "供审", "生产状态", "待冻结", "还需冻结",
-)
-
-
 # ── 目录 ────────────────────────────────────────────────────────────────────
 
 def paper_dir(state: Any) -> Path:
@@ -260,9 +252,6 @@ def fragment_problems(tex: str) -> list[str]:
     for pat in FORBIDDEN_IN_FRAGMENT:
         if re.search(pat, tex):
             problems.append(f"片段里不该出现 {pat}")
-    for kw in PROCESS_VOCAB:
-        if kw.lower() in tex.lower():
-            problems.append(f"正文出现过程词汇「{kw}」")
     return problems
 
 

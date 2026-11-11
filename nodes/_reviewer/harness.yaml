@@ -17,9 +17,9 @@ system_prompt: |
 
   - **single_artifact**（默认）：审单个 artifact，按 owner spec
     （`nodes/<source>/review_spec.md`）走。这是 post-producing flow 的第 1 步。
-  - **project_synthesis**：项目级宏观综合评估（writing 前硬 gate / loop-internal
+  - **project_synthesis**：项目级宏观综合建议（写作准备评估 / loop-internal
     复盘）。按 `nodes/_reviewer/specs/project_synthesis.md` 走。`source_node_type
-    = "_project"` 时进入此 scope。**老 analysis 节点的"项目级思考"职责由本 scope 兜底**。
+    = "_project"` 时进入此 scope。科学终态归 Analysis（hypothesis），以其 harness 的“轮次与裁决权”为准。
 
   ## scope 切换
 
@@ -64,8 +64,8 @@ system_prompt: |
 
   常见 lineage（按 source_node_type）：
   - manuscript → 拉 experiment_log + pre_registration + survey_report
-  - experiment_log → 拉 dataset + pre_registration（experiment 节点自判 verdict
-    后，experiment_log 的 review 也评 verdict 推断质量 + methodological sediment）
+  - experiment_log / observation_log → 拉 dataset / sources + pre_registration，
+    检查执行证据、可信度与执行层评估；科学终态读取 Analysis 的研究状态，不由执行节点自判。
   - pre_registration → 拉 survey_report
   - 其它 → 你自己判断
 
@@ -302,9 +302,8 @@ system_prompt: |
         `redirect_upstream`, target_node="hypothesis",
         feedback="把 experimental_design 扩到覆盖 novelty / complexity /
         neutral_zone 三组的对照设计"
-      * experiment_log 缺关键 metric 无法判 verdict（这是 experiment 节点
-        v2.0 起的自判责任）→ `redirect_upstream`, target_node="experiment",
-        feedback="补跑 N=30 用例并记录 UPC，重判 H1"
+      * experiment_log 缺关键 metric → `revise` 当前 experiment 产物，
+        feedback="补齐原协议要求的测量与证据；科学终态交给 Analysis"
 
   **target_node 只能是科研产出节点**。文献检索、数据前处理、出图这些是**服务**
   （`post_run_flow: none`）：它们被产出节点随时调用，没有独立的审查义务，因此
@@ -378,7 +377,7 @@ system_prompt: |
   finalize 由框架拼 JSON 落盘并绑定被审 artifact 的精确版本与内容哈希；被审对象
   是 manuscript 时还会绑定两份 PDF 哈希。`source_node_type='_project'` 时，finalize
   会把 `scope/project_verdict/mode/summaries/actionable_next_steps/scores` 同时写入
-  content 与 metadata，供 writing-gate 机械读取。不存在 `save_artifact` 直写旁路。
+  content 与 metadata，供 Writing 读取综合建议与证据缺口。不存在 `save_artifact` 直写旁路。
 
   ### 8. (research mode) 可选：写 synthesis claim
 

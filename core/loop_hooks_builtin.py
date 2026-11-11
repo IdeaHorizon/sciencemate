@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import closure as _closure
-from .llm import LLMMessage
+from .llm import LLMMessage, framework_notice_body, is_framework_notice
 from .loop_hooks import HookContext, LoopHook, register_loop_hook
 
 #: 本模块的四处 `except` 都用它记账。它此前**根本不存在** —— 于是那几个
@@ -230,6 +230,7 @@ def _scratchpad_on_turn_start(ctx: HookContext) -> list[LLMMessage] | None:
 
 register_loop_hook(LoopHook(
     name="scratchpad",
+    context_slot="scratchpad",
     description=(
         "每轮 inject 白板（run 内跨轮工作状态，来自 write_scratchpad 工具）。"
         "容量有硬上限，注入体积因此有界；附一行'上次改写在第几轮'的事实。"
@@ -679,6 +680,7 @@ def _post_node_review_flow_reminder_on_turn_start(ctx: HookContext) -> list[LLMM
 
 register_loop_hook(LoopHook(
     name="post_node_review_flow_reminder",
+    context_slot="post_node_review_flow",
     description=(
         "producing 节点完后强制提醒 orchestrator 走完整 3-step post-producing flow："
         "_reviewer → _curator → present_decision_package。"
@@ -1559,6 +1561,7 @@ def _turn_budget_on_turn_start(ctx: HookContext) -> list[LLMMessage] | None:
 
 register_loop_hook(LoopHook(
     name="turn_budget",
+    context_slot="turn_budget",
     description=(
         "快没轮次时提醒节点收尾（过半 / 剩 1/4 / 剩 5 轮三档，越紧越具体）。"
         "用途：撞上限从'意外'变成'可以提前避开的事'——被切断在半途的产物"
@@ -1587,7 +1590,6 @@ register_loop_hook(LoopHook(
 #     时整体 no-op（保 byte-identity → 驻定重放与 prompt cache 不被打扰）。
 
 _SITUATION_MARKER = "📍 **局面**"
-_SITUATION_LAST_KEY = "_situation_router_last"
 
 
 def _latest_research_state(state) -> tuple[str | None, str | None]:
@@ -1730,18 +1732,23 @@ def _situation_router_on_turn_start(ctx: HookContext) -> list[LLMMessage] | None
     text = (f"{_SITUATION_MARKER}（框架机械判定：`{situation}`）\n"
             + "\n".join(lines))
 
-    marker_alive = any(
-        m.role == "system" and (m.content or "").startswith(_SITUATION_MARKER)
-        for m in ctx.messages)
-    if marker_alive and state.hook_state.get(_SITUATION_LAST_KEY) == text:
+    current = [m for m in ctx.messages
+               if (is_framework_notice(m) or m.role == "system")
+               and framework_notice_body(m).startswith(_SITUATION_MARKER)]
+    # The rendered view is the only evidence of what is present. A second
+    # last-text cache survives message rollback and can hide a stale snapshot.
+    if len(current) == 1 and framework_notice_body(current[0]) == text:
         return None            # 局面没变且旧消息还在 —— 整体 no-op，保 byte-identity
 
     # 覆盖式：移除旧的局面消息（不管几条），再注入新的
-    ctx.messages[:] = [
+    from .conversation_store import render_context_change
+
+    updated = [
         m for m in ctx.messages
-        if not (m.role == "system" and (m.content or "").startswith(_SITUATION_MARKER))
+        if not ((is_framework_notice(m) or m.role == "system")
+                and framework_notice_body(m).startswith(_SITUATION_MARKER))
     ]
-    state.hook_state[_SITUATION_LAST_KEY] = text
+    render_context_change(state, ctx.messages, updated, turn=ctx.turn, source="situation_router")
     state.append_transcript("situation_routed", situation=situation)
     return [LLMMessage(role="system", content=text)]
 

@@ -15,7 +15,6 @@ tools_used:
   - search_kb
   - data_web_search
   - data_web_download
-  - save_artifact
 expected_outcome: 可复现的 dataset artifact，包含真实资产、完整 manifest、质量证据、lineage、assumptions 和 downstream contract
 node_type: data
 status: validated
@@ -56,7 +55,7 @@ skill。具体求解器在具体计算阶段需要哪些文件，必须
    后者才对选定 URL 执行下载、类型验证、hash 和 lineage。搜索摘要不得直接冒充本地科学输入。
 4. 对真实资产执行可复用的机械质量检查；再由模型把完整产物对照锁定 authority 审核需求兑现，
    不新增领域偏好或未声明参数。失败时按结构化证据只修复对应资产。
-5. 调用 `build_scientific_preprocessing_package` 生成 staged assets，由 executor 统一审核、写 manifest 并发布。
+5. 调用 `build_scientific_preprocessing_package` 生成 staged assets，由 executor 统一审核、写 manifest 并发布 dataset / preprocessing_document / blocked_report。模型消费包与交付收据，不直接保存正式 artifact。
 6. Gate Registry 只汇总需求兑现、质量证据和交付完整性；两种 review profile 共用同一审核链，
    差异仅来自锁定 authority 的内容。模型不得重复解析已由原生工具验证的格式。
 

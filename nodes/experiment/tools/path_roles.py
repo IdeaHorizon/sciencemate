@@ -540,6 +540,17 @@ def _collect_with_issues(
             if role:
                 candidates.append(role)
 
+    if getattr(state, "project_worktree", None) is not None:
+        try:
+            from .subprocess_policy import overlaps_project_worktree
+        except ImportError:
+            from tools.subprocess_policy import overlaps_project_worktree
+
+        candidates = [
+            role for role in candidates
+            if role.role != "approved_write_root" or not overlaps_project_worktree(state, role.path)
+        ]
+
     if include_runtime:
         workspace = _normalize_path(getattr(state, "workspace_root", None))
         if workspace:

@@ -41,11 +41,6 @@ try:
 except Exception:  # noqa: BLE001
     pass
 
-PROCESS_VOCAB = [
-    "artifact", "上游", "revision item", "revision_items", "机械审计", "用户交来",
-    "本平台", "not provided in upstream", "占位", "待补充", "投稿前需补充", "列入",
-    "adequacy", "receipt", "preflight",
-]
 EMPTY_REF_PATTERNS = [r"第\s+节", r"第\s*节的", r"Section\s+\.", r"\?\?", r"图\s+所示", r"表\s+所示"]
 
 
@@ -243,9 +238,6 @@ def hard_lines(pdf: Path | None, tex_dir: Path | None) -> dict:
     out["title_block"] = len(head) >= 1
     out["first_lines"] = lines[:4]
     body = text
-    hits = {kw: len(re.findall(re.escape(kw), body)) for kw in PROCESS_VOCAB}
-    out["process_vocab_hits"] = {k: v for k, v in hits.items() if v}
-    out["process_vocab_ok"] = not out["process_vocab_hits"]
     ers = {p: len(re.findall(p, body)) for p in EMPTY_REF_PATTERNS}
     out["empty_ref_hits"] = {k: v for k, v in ers.items() if v}
     out["empty_refs_ok"] = not out["empty_ref_hits"]

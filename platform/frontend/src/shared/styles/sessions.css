@@ -712,12 +712,46 @@
 /* 拖动时全局禁选：不禁的话拖过对话区会把正文一路选蓝。 */
 body:has(.session-inspector-resizer.is-dragging) { cursor: col-resize; user-select: none; }
 
+/* 会话信息独立于会话网格，长指令只在抽屉正文里滚动。 */
+.session-about-drawer {
+  position: fixed;
+  inset: 0;
+  width: min(440px, 100vw);
+  max-width: none;
+  height: 100dvh;
+  max-height: none;
+  margin: 0 0 0 auto;
+  padding: 20px;
+  border: 0;
+  border-left: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-fg);
+  box-shadow: -18px 0 50px rgba(0, 0, 0, .12);
+}
+.session-about-drawer[open] { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 4px; }
+.session-about-drawer::backdrop { background: rgba(0, 0, 0, .18); }
+.session-about-drawer > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--color-border); }
+.session-about-drawer h2 { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 16px; font-weight: 580; }
+.session-about-drawer > header button { display: grid; flex: none; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--color-fg-muted); cursor: pointer; }
+.session-about-drawer > header button:hover { background: var(--color-bg-elevated); color: var(--color-fg); }
+.session-about-content { min-width: 0; overflow-y: auto; overscroll-behavior: contain; }
+.session-about-content p { margin: 14px 0; color: var(--color-fg-subtle); font-size: var(--font-size-meta); }
 /* 会话信息抽屉里的事实行（版本 / 基线 / 驾驶者）—— 从顶栏搬进来的那三行。 */
 .session-about-facts { display: grid; gap: 7px; margin: 16px 0 0; }
 .session-about-facts > div { display: grid; grid-template-columns: 66px minmax(0, 1fr); align-items: baseline; gap: 10px; }
 .session-about-facts dt { color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
-.session-about-facts dd { margin: 0; color: var(--color-fg); font-size: var(--font-size-meta); }
+.session-about-facts dd { margin: 0; color: var(--color-fg); font-size: var(--font-size-meta); overflow-wrap: anywhere; }
 .session-about-instruction-label { display: flex; align-items: center; gap: 5px; margin: 16px 0 0; padding-top: 14px; border-top: 1px solid var(--color-border); color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.session-about-sources { margin-top: 8px; }
+.session-about-sources > details { border-bottom: 1px solid var(--color-border); }
+.session-about-sources summary { display: flex; align-items: center; gap: 7px; padding: 12px 0; font-size: var(--font-size-meta); list-style: none; cursor: pointer; }
+.session-about-sources summary::-webkit-details-marker { display: none; }
+.session-about-sources summary > svg { flex: none; color: var(--color-fg-subtle); }
+.session-about-sources details[open] > summary > svg { transform: rotate(90deg); }
+.session-about-sources summary > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.session-about-sources summary > code,
+.session-about-sources summary > em { flex: none; color: var(--color-fg-subtle); font-size: var(--font-size-caption); }
+.session-about-sources pre { overflow-x: auto; margin: 0 0 12px; padding: 12px; border-radius: 6px; background: var(--color-bg-elevated); color: var(--color-fg-muted); font: 12px/1.65 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 /* 菜单分组：不可逆的操作和随便点的操作之间要有一条线。 */
 .session-header-actions details .session-menu-sectioned { margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--color-border); border-radius: 0; }
 

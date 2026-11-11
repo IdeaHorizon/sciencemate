@@ -160,6 +160,9 @@ class Win32Backend:
 
         msys_bin = msys_runtime_bin(spec.argv[0]) if spec.argv else None
         payload_spec = {
+            # All explicit read-only roots participate, including a directory
+            # made writable by an earlier call. Deepest rule wins.
+            "layers": [[str(path), mode] for path, mode in layers.ordered],
             "writable": [str(p) for p in layers.writable],
             "readonly": [str(p) for p in carve_outs],
             "git": [str(p) for p in layers.git],

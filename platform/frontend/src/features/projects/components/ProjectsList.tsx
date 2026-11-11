@@ -11,7 +11,7 @@
  */
 
 import { otherHomes } from "../homes";
-import { Building2, FolderKanban, Laptop, Plus } from "lucide-react";
+import { Building2, FolderKanban, Laptop, Plus, Server } from "lucide-react";
 import Link from "next/link";
 import { Button, Empty, Skeleton } from "@/shared/ui";
 import type { Project, ProjectHome } from "@/lib/api";
@@ -26,15 +26,15 @@ function byHome(projects: Project[]): Group[] {
   const groups = new Map<string, Group>();
   for (const project of projects) {
     const home = project.home ?? null;
-    const key = home?.kind === "organisation" ? home.connection_id : "local";
+    const key = home && home.kind !== "local" ? home.connection_id : "local";
     if (!groups.has(key)) groups.set(key, { key, home, projects: [] });
     groups.get(key)!.projects.push(project);
   }
   return [...groups.values()].sort((a, b) => {
     if (a.key === "local") return -1;
     if (b.key === "local") return 1;
-    const left = a.home?.kind === "organisation" ? a.home.name : "";
-    const right = b.home?.kind === "organisation" ? b.home.name : "";
+    const left = a.home && a.home.kind !== "local" ? a.home.name : "";
+    const right = b.home && b.home.kind !== "local" ? b.home.name : "";
     return left.localeCompare(right);
   });
 }
@@ -106,7 +106,7 @@ export function ProjectsList({ onCreate }: { onCreate?: () => void }) {
   return (
     <div className="project-groups">
       {groups.map((group) => {
-        const org = group.home?.kind === "organisation" ? group.home : null;
+        const org = group.home && group.home.kind !== "local" ? group.home : null;
         const dark = org !== null && !org.reachable;
         const why: Phrase | null = !org ? null
           : org.needs_sign_in ? { zh: "需要重新登录", en: "Needs signing in again" }
@@ -115,7 +115,7 @@ export function ProjectsList({ onCreate }: { onCreate?: () => void }) {
         return (
           <section key={group.key} className={`project-group${dark ? " is-out-of-reach" : ""}`}>
             <h2 className="project-group-name">
-              {org ? <Building2 size={13} /> : <Laptop size={13} />}
+              {org?.kind === "remote" ? <Server size={13} /> : org ? <Building2 size={13} /> : <Laptop size={13} />}
               {org ? org.name : t({ zh: "本机", en: "This computer" })}
               {why && (
                 <span className="project-group-why">

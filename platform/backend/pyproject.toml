@@ -88,7 +88,7 @@ packages = ["app"]
 # `scripts/package/build_mac_app.py` 在打包前放进来，不进版本库（构建产物），
 # 而 hatchling 默认**跳过被 VCS 忽略的文件** —— 不在这里点名，打出来的 wheel
 # 就是空的一半：能起服务、没有界面、发消息永远不回复。
-artifacts = ["app/static_ui/**", "app/harness/**"]
+artifacts = ["app/static_ui/**", "app/harness/**", "app/runtime_bundle/**", "app/_vendor/**"]
 
 [tool.ruff]
 target-version = "py312"

@@ -1,7 +1,8 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { FileCheck2, X } from "lucide-react";
+import { ChevronRight, FileCheck2, X } from "lucide-react";
+import { useEffect, useId, useRef } from "react";
 
 import { instructionsClient } from "../api/instructions-client";
 import { useT } from "@/shared/i18n";
@@ -31,6 +32,8 @@ export function SessionAboutDrawer({
   facts: { term: string; value: string }[];
 }) {
   const t = useT();
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
   const effective = useQuery({
     queryKey: ["instructions", "session", projectId, sessionId],
     queryFn: () => instructionsClient.readSessionInstructions(projectId, sessionId),
@@ -38,38 +41,66 @@ export function SessionAboutDrawer({
     retry: false,
   });
 
+  // 放进浏览器的模态层，避免抽屉占用会话网格的一行；焦点和 Escape 也由 dialog 管理。
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!open || !dialog) return;
+    dialog.showModal();
+    return () => dialog.close();
+  }, [open]);
+
+  const closeDrawer = () => {
+    dialogRef.current?.close();
+    onClose();
+  };
+
   if (!open) return null;
 
   return (
-    <aside className="session-about-drawer" aria-label={t({ zh: "会话信息", en: "Session details" })}>
+    <dialog
+      ref={dialogRef}
+      className="session-about-drawer"
+      aria-labelledby={titleId}
+      onCancel={(event) => { event.preventDefault(); closeDrawer(); }}
+      onClick={(event) => {
+        if (event.target !== event.currentTarget) return;
+        const bounds = event.currentTarget.getBoundingClientRect();
+        if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) closeDrawer();
+      }}
+    >
       <header>
-        <h2><FileCheck2 size={15} />{t({ zh: "会话信息", en: "Session details" })}</h2>
-        <button type="button" onClick={onClose} aria-label={t({ zh: "关闭", en: "Close" })}><X size={14} /></button>
+        <h2 id={titleId}><FileCheck2 size={15} />{t({ zh: "会话信息", en: "Session details" })}</h2>
+        <button type="button" onClick={closeDrawer} aria-label={t({ zh: "关闭", en: "Close" })}><X size={14} /></button>
       </header>
-      <dl>
-        {facts.map((fact) => (
-          <div key={fact.term}><dt>{fact.term}</dt><dd>{fact.value}</dd></div>
-        ))}
-      </dl>
-      <section>
-        <h3>{t({ zh: "当前生效的指令", en: "Instructions in effect" })}</h3>
-        {effective.isLoading && <p>{t({ zh: "正在加载…", en: "Loading…" })}</p>}
-        {effective.isError && <p>{t({ zh: "无法加载这个会话的指令。", en: "The instructions for this session could not be read." })}</p>}
-        {effective.data && LAYERS.map((kind) => {
-          const layer = effective.data.layers[kind];
-          if (!layer) return null;
-          return (
-            <details key={kind}>
-              <summary>
-                {layer.filename}{" "}
-                {/* 没内容就没有指纹 —— 那时印一串 undefined 才是骗人。 */}
-                {layer.sha256 ? <code>{layer.sha256.slice(0, 12)}</code> : <em>{t({ zh: "（空）", en: "(empty)" })}</em>}
-              </summary>
-              <pre>{layer.content}</pre>
-            </details>
-          );
-        })}
-      </section>
-    </aside>
+      <div className="session-about-content">
+        <dl className="session-about-facts">
+          {facts.map((fact) => (
+            <div key={fact.term}><dt>{fact.term}</dt><dd>{fact.value}</dd></div>
+          ))}
+        </dl>
+        <section>
+          <h3 className="session-about-instruction-label">{t({ zh: "当前生效的指令", en: "Instructions in effect" })}</h3>
+          {effective.isLoading && <p>{t({ zh: "正在加载…", en: "Loading…" })}</p>}
+          {effective.isError && <p>{t({ zh: "无法加载这个会话的指令。", en: "The instructions for this session could not be read." })}</p>}
+          <div className="session-about-sources">
+            {effective.data && LAYERS.map((kind) => {
+              const layer = effective.data.layers[kind];
+              if (!layer) return null;
+              return (
+                <details key={kind}>
+                  <summary>
+                    <ChevronRight size={13} aria-hidden="true" />
+                    <span>{layer.filename}</span>
+                    {/* 没内容就没有指纹 —— 那时印一串 undefined 才是骗人。 */}
+                    {layer.sha256 ? <code>{layer.sha256.slice(0, 12)}</code> : <em>{t({ zh: "（空）", en: "(empty)" })}</em>}
+                  </summary>
+                  <pre>{layer.content}</pre>
+                </details>
+              );
+            })}
+          </div>
+        </section>
+      </div>
+    </dialog>
   );
 }

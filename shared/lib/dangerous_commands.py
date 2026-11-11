@@ -164,7 +164,8 @@ def match_high_risk(text: str, *, mode: str = "shell") -> str | None:
 # 框架管理状态的路径特征（出现在写入类命令里即越界）
 _PROTECTED_SIG = (
     r"(?:artifacts/|deliverables/|kb_\w+\.jsonl|memory\.jsonl|memory/"
-    r"|transcript\.jsonl|summary\.json|records\.jsonl|\.research/ledger/"
+    r"|transcript\.jsonl|records\.jsonl|\.research/"
+    r"|runs/[^/\s\"']+/summary\.json"
     # project.yaml 是平台管理的项目配置（PATCH /config 是唯一合法改法）——
     # 2026-08-31 给协调者放开无主之地写权时发现它既无属主又不在签名里，
     # 一并收进来（shell/python/file 三条到达路径同时生效）。

@@ -28,6 +28,18 @@
 #       probe_toolchain / resource_fetch / run_contract / hooks   共 +7
 #
 entries:
+  - file: nodes/experiment/tools/resource_manager.py
+    class: C
+    why: stage_in.mode 只接受 0644/0755，与提交确认内固定的文件模式一致；不接受任意权限或 setuid。
+  - file: nodes/experiment/tools/safe_bash.py
+    class: C
+    why: 显式 WSL cwd 没有当前执行目标到宿主项目的映射，启动前报告目录不可用，禁止按 MSYS 坐标重解释。
+  - file: nodes/experiment/tools/safe_bash.py
+    class: C
+    why: cwd/workdir 两个入口共用同一坐标映射，guest-only 路径不能被当成 Windows 写根或获得额外权限。
+  - file: core/project_workspace.py
+    class: C
+    why: WSL 绝对工具路径必须可由所选目标同源映射到宿主 Project 坐标；发行版私有目录没有该坐标时明确报告映射缺失，不能误投 MSYS 或扩大写根。
   # ── 文献自然语言检索与候选分页（2026-11-09）────────────────────────────
   - file: nodes/literature/tools/academic_tool.py
     class: C
@@ -2257,3 +2269,12 @@ entries:
   - file: nodes/data/tools/web_search.py
     class: A
     why: 流式接收超出已声明字节范围或 max_bytes 预算时停止下载，不发布不完整内容；明确返回预算和可选择的有界子集。
+
+  # Lifecycle audit 2026-11-10: destructive resolution reads producer-owned receipts.
+  - file: nodes/experiment/tools/resource_manager.py
+    class: B
+    why: >-
+      cancel_job consumes the existing artifact-ledger producer identity. If its
+      durable submission receipts cannot be read or validated, report that
+      integrity failure before any scheduler query, approval or cancellation.
+      Project tasks and payload owner declarations cannot grant this authority.

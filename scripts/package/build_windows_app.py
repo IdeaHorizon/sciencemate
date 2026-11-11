@@ -242,6 +242,7 @@ def stage_into_the_package(interface: Path | None) -> None:
             raise SystemExit(f"harness 少了 {package}/ —— 装出来的包跑不了 worker")
     if HARNESS_ENTRY not in shipped:
         raise SystemExit(f"harness 少了 {HARNESS_ENTRY}（git 没跟踪它）—— 装出来的包跑不了 worker")
+    git_tracked.carry_the_runtime_files(REPO, staged_harness)
     modules = git_tracked.carry_the_top_level_modules(REPO, staged_harness)
     if modules:
         print(f"  顺带需要的顶层模块：{', '.join(sorted(modules))}")
@@ -262,12 +263,20 @@ def stage_into_the_package(interface: Path | None) -> None:
              if interface is not None else "（无界面，API-only）"))
 
 
+def build_the_ssh_password_helper() -> None:
+    staged_core = BACKEND / "app" / "harness" / "core"
+    run([CSC, *CSC_FLAGS, "/target:exe", "/optimize+",
+         f"/out:{staged_core / '_ssh_askpass.exe'}",
+         str(REPO / "core" / "_ssh_askpass.cs")])
+
+
 def unstage_from_the_package() -> None:
     """撤走装配进去的东西 —— 留在工作树里会**改变源码树的答案**
     （`find_static_ui()`/`find_the_harness()` 的第二个来源就是包里那份）。"""
     for target in (BACKEND / "app" / "static_ui", BACKEND / "app" / "harness",
                    BACKEND / "app" / payload_release.VENDOR_DIR,
-                   BACKEND / "app" / payload_release.SERVER_BUNDLE_DIR):
+                   BACKEND / "app" / payload_release.SERVER_BUNDLE_DIR,
+                   BACKEND / "app" / payload_release.RUNTIME_BUNDLE_DIR):
         shutil.rmtree(target, ignore_errors=True)
 
 
@@ -281,7 +290,7 @@ def build_the_wheel(with_ui: bool) -> Path:
         raise SystemExit("没打出 wheel")
     wheel = wheels[-1]
     names = zipfile.ZipFile(wheel).namelist()
-    needed = ["app/harness/core/agent_loop.py"]
+    needed = ["app/harness/core/agent_loop.py", "app/harness/docs/xiaohongshu_journal_map.tsv"]
     if with_ui:
         needed.append("app/static_ui/index.html")
     for want in needed:
@@ -1822,6 +1831,7 @@ def main(argv: list[str] | None = None) -> int:
         import build_server_bundle
         server_bundle = build_server_bundle.build(interface=interface, update_source=args.update_source)
     stage_into_the_package(interface)
+    build_the_ssh_password_helper()
     payload_release.stage_the_pro_only_things(BACKEND, args.edition, server_bundle)
     try:
         wheel = build_the_wheel(with_ui=args.with_ui)

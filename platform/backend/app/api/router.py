@@ -26,6 +26,7 @@ from app.api.v1 import (
     update,
 )
 from app.auth import get_current_user
+from app.api.v1 import remote_servers
 from app.policies import require_project_access
 
 api_router = APIRouter()
@@ -39,6 +40,12 @@ api_router.include_router(
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(cnki.router, prefix="/cnki", tags=["cnki"])
 authenticated = [Depends(get_current_user)]
+api_router.include_router(
+    remote_servers.router, tags=["remote-servers"], dependencies=authenticated
+)
+api_router.include_router(
+    remote_servers.runtime_router, tags=["remote-runtime"], dependencies=authenticated
+)
 
 api_router.include_router(execution.router, tags=["execution"], dependencies=authenticated)
 api_router.include_router(skills.router, tags=["skills"], dependencies=authenticated)

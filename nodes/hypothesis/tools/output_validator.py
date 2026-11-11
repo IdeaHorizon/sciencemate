@@ -290,7 +290,9 @@ def _applicability(state: State) -> dict[str, str]:
     mode = current_mode(state)
     skipped: dict[str, str] = {}
     for name in _CHECK_NAMES:
-        if name in _HYPOTHESIS_ONLY_CHECKS and not expects_hypotheses:
+        if name == "definition_fidelity" and not resolve_locked_definitions(state):
+            skipped[name] = "本次请求没有显式分类约束；自由文本候选或派生缓存不是定义权威"
+        elif name in _HYPOTHESIS_ONLY_CHECKS and not expects_hypotheses:
             skipped[name] = (
                 "本项目的 Inquiry Contract 未声明命题裁决型问题"
                 "（decides_a_proposition 全为 no）→ 没有假说，也就没有 "

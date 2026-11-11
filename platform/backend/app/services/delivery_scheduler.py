@@ -102,7 +102,7 @@ class DeliveryReconciler:
             try:
                 resumed = await resume_interrupted_continuous_runs(get_session_factory())
                 if resumed:
-                    logger.info("auto-resumed %d interrupted continuous run(s): %s",
+                    logger.info("scheduled recovery reconciliation for %d continuous run(s): %s",
                                 len(resumed), ", ".join(resumed))
             except asyncio.CancelledError:
                 return

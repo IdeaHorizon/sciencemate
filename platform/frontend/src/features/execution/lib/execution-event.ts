@@ -75,6 +75,9 @@ export const EXECUTION_EVENT_KINDS = [
   "autonomy.weak_walls",
   "material.added",
   "run.rejoined",
+  "run.continued",
+  "run.transport_disconnected",
+  "run.recovery_attention",
   // 运行时丢了之后开出的接续会话：从哪儿接的、原会话冻结的东西落到了哪里（#1186）。
   "session.recovered",
   "redaction.warning",

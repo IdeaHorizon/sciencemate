@@ -15,8 +15,7 @@ tools_used:
   - curator_scan
   - list_proposals
   - propose
-  - save_artifact
-expected_outcome: 一份 research_direction_proposals artifact，含 5-20 条带 reasoning 的候选方向，每条 propose 给 user inbox
+expected_outcome: 带 reasoning 的方向 proposals；handoff 汇总 proposal id 与扫描范围
 status: validated
 relevant_concepts: []
 ---
@@ -120,13 +119,8 @@ relevant_concepts: []
 
 ### 阶段 3：汇总
 
-```
-save_artifact('research_direction_proposals', date,
-  content='# Dreaming run <ts>
-  ## Tier 1 (high value): N proposals
-  ## Tier 2 (worth checking): N
-  ## Tier 3 (low priority but novel): N')
-```
+在 handoff 汇总候选方向、已持久化的 proposal id、依据、未提议的理由与扫描范围，
+随 run transcript 保存。_curator 不产 artifact；无需也不申请通用保存工具。
 
 ## Pitfalls
 

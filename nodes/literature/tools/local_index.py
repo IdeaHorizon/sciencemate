@@ -15,6 +15,7 @@ import re
 import os
 import time
 import unicodedata
+import tempfile
 from datetime import UTC, datetime, timedelta
 from typing import Optional
 from pathlib import Path
@@ -42,9 +43,38 @@ class LocalPaperIndex:
     """本地论文索引管理器"""
     
     def __init__(self, db_path: str = str(INDEX_DB)):
-        self.db_path = db_path
+        self.db_path = os.fspath(db_path)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+        if Path(self.db_path).resolve() == Path(INDEX_DB).resolve():
+            from shared.lib.filelock import exclusive
+
+            with exclusive(self.db_path + ".migration.lock"):
+                self._migrate_legacy_index()
+                self._init_db()
+        else:
+            self._init_db()
+
+    def _migrate_legacy_index(self) -> None:
+        """Copy the old complete SQLite catalog once; retain its original bytes."""
+        destination = Path(self.db_path)
+        legacy = _paths.literature_index_dir() / "papers.db"
+        if destination.exists() or not legacy.is_file() or legacy.resolve() == destination.resolve():
+            return
+        fd, name = tempfile.mkstemp(prefix=".legacy-catalog-", suffix=".sqlite3", dir=destination.parent)
+        os.close(fd)
+        temporary = Path(name)
+        try:
+            with sqlite3.connect(legacy.resolve().as_uri() + "?mode=ro", uri=True) as source:
+                if not source.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_index'"
+                ).fetchone():
+                    raise sqlite3.DatabaseError("Legacy literature catalog has no paper_index table")
+                with sqlite3.connect(temporary) as target:
+                    source.backup(target)
+                    target.execute("PRAGMA journal_mode=DELETE")
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
     
     def _init_db(self):
         """初始化数据库表结构"""

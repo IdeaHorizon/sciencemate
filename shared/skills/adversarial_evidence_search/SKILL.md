@@ -6,18 +6,32 @@ description: |
   不要用在：刚写下 claim 还没数据支撑时 —— 那时该用 falsifiability_pretest 先设计反驳判据，
   不是搜反例。
 applies_when:
-  - analysis 节点 finalize 一条 claim 的 status=validated 前
+  - Analysis（hypothesis）给研究问题下科学结论前
   - review 节点检查 manuscript 是否做过对抗扫描
   - hypothesis 节点 finalize prereg 前，确认 claim 真的可证伪 + 有反例搜过
-tools_used:
-  - search_papers
-  - arxiv_search
 expected_outcome: 至少跑过 3-5 个 adversarial query；读过 abstract 判断是否真矛盾；记 observation memory
 status: validated
 relevant_concepts: []
 ---
 
 ## 工作流（5 步）
+
+### 检索入口与裁决边界
+
+Literature 使用自己的 `search_papers` / `arxiv_search`。Observation 等无直接检索工具的消费方，
+若有 `run_node` 且获准调用 Literature，使用：
+
+```python
+run_node(node_type="literature", user_note="正在委派反向检索，随后检查反证与边界条件。",
+         node_inputs={"research_question": "<待检验主张、反向 queries、范围与已知边界>",
+                      "mode": "contradiction_check"})
+```
+
+用 `read_artifact` 消费返回的 `literature_evidence_package`；把支持、反对、无法取得的材料
+分开记录。两种入口都没有时向调用方报告缺口，不尝试未授予工具。
+本 skill 不授予 `update_claim_status`。科学终态的 owner 是 Analysis（hypothesis），
+见 `nodes/hypothesis/harness.yaml` 的“轮次与裁决权”；Observation / Experiment 只交证据与执行层评估，
+_curator 按采纳的科学判断整合 KB，reviewer 给独立审查意见。
 
 1. **明确要审的 claim**：一句话写出准备 validate 的 claim 全文。例：
    > "Foundation MLIP MACE-MP-0 在 OC20 OOD subset 上 force MAE > 100 meV/Å"
@@ -29,7 +43,7 @@ relevant_concepts: []
    - `{claim} disagreement`
    - `contradicting {claim}`
 
-3. **依次跑 query**：对每个 query 各调一次：
+3. **执行检索**：消费方走上述 Literature 委派；只有 Literature 直接对每个 query 调用：
    ```
    search_papers(query="<adversarial_query>", max_results=5)
    arxiv_search(query="<adversarial_query>", max_results=5)
@@ -42,9 +56,9 @@ relevant_concepts: []
    - 跟 claim 部分一致部分矛盾？→ 边界条件，记下来
 
 5. **落地决策**：
-   - 找到真反证 → 不要 update_claim_status to validated；写 candidate：
+   - 找到真反证 → 将反证交给 Analysis 判断，不自行翻科学终态；记录：
      `memory_note(text='<反证 paper + 简述>', category='pitfall')`
-   - 找不到反证 → 可以走 validate，但 memory_note 记一句"已做对抗扫描跑了 N 个 query"作 audit trail
+   - 找不到反证 → 如实报告检索范围与未知项，不能因此认定 validated；memory_note 记录扫描范围。
 
 ## Pitfalls
 
@@ -57,7 +71,7 @@ relevant_concepts: []
 ## 完整例子
 
 ```
-# analysis 节点准备 finalize 一条 claim
+# Literature 检索执行示例；消费方使用上面的委派入口
 claim = "MACE-MP-0 在 OC20 OOD subset 上 force MAE > 100 meV/Å"
 
 # Step 2-3: 跑 5 个 adversarial query
@@ -78,8 +92,7 @@ await memory_note(
     category="observation",
     tags=["adversarial-scan", "claim:abc123", "boundary-condition"],
 )
-await update_claim_status(claim_id="abc123", new_status="validated",
-                           reasoning="adversarial scan 5 query 后只找到 fine-tuning 边界条件，base 模型 claim 成立")
+# 把证据和边界交给 Analysis；检索无反证不是科学终态。
 ```
 
 ## 为什么是 skill 不是 tool

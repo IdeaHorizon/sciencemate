@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -141,6 +142,9 @@ def figure_binding_hash(metadata: dict[str, Any]) -> str:
     contract_hash = metadata.get("contract_hash")
     if contract_hash:
         payload["contract_hash"] = str(contract_hash)
+    if metadata.get("annotated_values_hash_version") == 1:
+        payload["annotated_values_hash_version"] = 1
+        payload["annotated_values"] = metadata.get("annotated_values")
     return _hash_json(payload)
 
 
@@ -242,6 +246,9 @@ def annotated_value_conflicts(
         except (TypeError, ValueError):
             conflicts.append(
                 f"{label}：出处 {artifact_id}/{field_path} 不是数字（{found!r}）")
+            continue
+        if not all(math.isfinite(number) for number in (printed, actual, tolerance)):
+            conflicts.append(f"{label}：图面、出处和容差必须是有限数值")
             continue
         if abs(printed - actual) > tolerance:
             conflicts.append(

@@ -1796,7 +1796,7 @@ async def _write_file(state: State, path: str, content: str,
     if create_dirs:
         abs_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        abs_path.write_text(content, encoding="utf-8")
+        bytes_written = abs_path.write_bytes(content.encode("utf-8"))
     except Exception as e:
         return {"status": "error", "error": f"写文件失败：{type(e).__name__}: {e}"}
 
@@ -1806,7 +1806,7 @@ async def _write_file(state: State, path: str, content: str,
     return {
         "status": "success",
         "path": str(abs_path),
-        "bytes_written": len(content.encode("utf-8")),
+        "bytes_written": bytes_written,
     }
 
 

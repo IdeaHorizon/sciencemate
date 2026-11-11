@@ -103,6 +103,38 @@ def _render(state, **overrides):
     return result
 
 
+@pytest.mark.parametrize("printed, accepted", [(2.2692871655836173, True), (2.268776, False)])
+def test_rendered_scientific_annotation_matches_frozen_source(tmp_path, printed, accepted):
+    state = _state(tmp_path)
+    source = state.save_artifact(
+        "clean_results", "frozen", json.dumps({"fss": {"tc": 2.2692871655836173}}),
+        metadata={},
+    )["id"]
+    code = _CLEAN_CODE.replace(
+        "fig.tight_layout()",
+        f"ax.text(0.1, 0.9, 'Tc={printed}', transform=ax.transAxes)\nfig.tight_layout()",
+    )
+    result = _render(state, code=code, annotated_values=[{
+        "label": "Tc", "value": printed, "source_artifact_id": source,
+        "source_field": "fss/tc", "tolerance": 1e-6,
+    }])
+    if not accepted:
+        assert result["status"] == "error"
+        assert "2.268776" in result["error"] and "2.269287" in result["error"]
+        assert not state.list_artifacts("figure", own_only=True)
+        return
+    assert result["status"] == "success", result
+    metadata = state.read_artifact(result["figure_id"])["metadata"]
+    assert metadata["annotated_values_check"]["ran"] is True
+    assert source in metadata["source_artifact_ids"]
+    assert len(metadata["source_hashes"]) == 1
+    assert metadata["source_hashes"][0].startswith("sha256:")
+    from shared.lib.publication_figures import figure_binding_hash
+    assert figure_binding_hash(metadata) == metadata["figure_hash"]
+    tampered = {**metadata, "annotated_values": [{**metadata["annotated_values"][0], "value": 9}]}
+    assert figure_binding_hash(tampered) != metadata["figure_hash"]
+
+
 def _print_render_error(kwargs: dict, result: dict) -> None:
     """render_figure 说了 error，就把它的原话带到现场。
 

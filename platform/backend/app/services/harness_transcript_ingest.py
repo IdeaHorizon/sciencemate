@@ -28,7 +28,7 @@ from app.config import DataRootError, data_root
 from app.models.execution import ExecutionEvent
 from app.services.execution_ingest import (
     LOCAL_RECORD_IDENTITY_PREFIX,
-    NARRATION_IDENTITY_SUFFIX,
+    transcript_file_identities,
     RECOVERED_CHILD_RUN_KEY,
     ExecutionIngestService,
     IngestContext,
@@ -167,7 +167,7 @@ async def _child_run_of(db: AsyncSession, context: IngestContext,
             ExecutionEvent.tenant_id == context.tenant_id,
             ExecutionEvent.session_id == context.session_id,
             ExecutionEvent.file_identity.in_(
-                [file_identity, f"{file_identity}{NARRATION_IDENTITY_SUFFIX}"]
+                transcript_file_identities(file_identity)
             ),
             ExecutionEvent.run_id.startswith(prefix),
         )
@@ -234,7 +234,7 @@ async def _owning_transcript(db: AsyncSession, context: IngestContext,
             # 同一份文件的叙述条目带派生后缀（execution_ingest 里加的），
             # 它也是"这个 file 供过稿"的证据。
             ExecutionEvent.file_identity.in_(
-                [file_identity, f"{file_identity}{NARRATION_IDENTITY_SUFFIX}"]
+                transcript_file_identities(file_identity)
             ),
         )
     )
@@ -271,7 +271,10 @@ def resolve_wrapper(
         or byte_end <= byte_start
         or byte_end - byte_start > MAX_TRANSCRIPT_RECORD_BYTES
     ):
-        raise RuntimeError("Harness transcript wrapper has an invalid byte range")
+        raise RuntimeError(
+            "Harness transcript wrapper has an invalid byte range "
+            f"(start={byte_start}, end={byte_end}, maximum={MAX_TRANSCRIPT_RECORD_BYTES})"
+        )
     return transcript_path, byte_start, byte_end
 
 

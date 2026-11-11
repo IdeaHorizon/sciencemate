@@ -94,7 +94,7 @@ def _build_evolution_plan(
         "rewrite_checklist": [
             "新 claim 必须与原文有 ≥1 个非显然差异（新 regime / metric / mechanism）",
             "**禁止**改写用户 locked_definitions 的类别名/定义/互斥关系；只能改预测与 falsifier",
-            "不得合并/拆分/重命名操作类别；要改 ontology → request_human_input",
+            "仅对本次请求显式 locked_taxonomy / operation_categories 保留用户定义；文本候选不自动锁定 ontology",
             "文献 taxonomy 仅可作对照，不得替换用户分类表",
             "改数值 threshold 必须同步写 threshold_rationale（source_type + citation_or_derivation + scientific_meaning）；"
             "定性/存在性用 comparison=qualitative|exists|not_exists + 清晰判据",

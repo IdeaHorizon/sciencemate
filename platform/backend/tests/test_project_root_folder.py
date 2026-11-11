@@ -17,6 +17,79 @@ from app.services.project_repository import (
 from tests.test_local_runtime_api import _headers, _token, runtime_client  # noqa: F401
 
 
+@pytest.mark.asyncio
+async def test_startup_accepts_the_registered_root_and_refuses_a_lost_location_index(
+    runtime_client,  # noqa: F811
+    tmp_path,
+    monkeypatch,
+):
+    from app.main import _refuse_to_serve_where_the_data_is_not
+
+    monkeypatch.setattr(settings, "profile", "personal")
+    client, _ = runtime_client
+    headers = _headers(await _token(client, "researcher@atrium.local"))
+    created = await client.post(
+        "/api/v1/projects/",
+        headers=headers,
+        json={"name": "Restartable", "root_folder": str(tmp_path / "chosen")},
+    )
+    assert created.status_code == 201, created.text
+    project = created.json()
+    session = await client.post(
+        f"/api/v1/projects/{project['id']}/sessions",
+        headers=headers,
+        json={"title": "Session at a chosen root"},
+    )
+    assert session.status_code == 201, session.text
+    await _refuse_to_serve_where_the_data_is_not()
+    repository = get_project_repository()
+    repository.locations.unregister(project["id"])
+    with pytest.raises(RuntimeError, match="worktree"):
+        await _refuse_to_serve_where_the_data_is_not()
+
+
+@pytest.mark.asyncio
+async def test_startup_does_not_accept_another_projects_registered_root(
+    runtime_client,  # noqa: F811
+    tmp_path,
+    monkeypatch,
+):
+    from sqlalchemy import update
+
+    from app.main import _refuse_to_serve_where_the_data_is_not
+    from app.models.execution import SessionProjection
+
+    monkeypatch.setattr(settings, "profile", "personal")
+    client, factory = runtime_client
+    headers = _headers(await _token(client, "researcher@atrium.local"))
+    projects = []
+    for name in ("first", "second"):
+        response = await client.post(
+            "/api/v1/projects/",
+            headers=headers,
+            json={"name": name, "root_folder": str(tmp_path / name)},
+        )
+        assert response.status_code == 201, response.text
+        projects.append(response.json())
+    response = await client.post(
+        f"/api/v1/projects/{projects[0]['id']}/sessions",
+        headers=headers,
+        json={"title": "Original session"},
+    )
+    assert response.status_code == 201, response.text
+    session_id = response.json()["id"]
+    wrong = get_project_repository().session_path(projects[1]["id"], session_id)
+    async with factory() as db:
+        await db.execute(
+            update(SessionProjection)
+            .where(SessionProjection.session_id == session_id)
+            .values(git_worktree_path=str(wrong))
+        )
+        await db.commit()
+    with pytest.raises(RuntimeError, match="worktree"):
+        await _refuse_to_serve_where_the_data_is_not()
+
+
 def _repository(tmp_path):
     return GitProjectRepository(tmp_path / "repositories", tmp_path / "worktrees")
 

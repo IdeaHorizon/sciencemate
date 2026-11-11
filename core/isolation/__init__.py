@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 import sys
 import weakref
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -517,6 +517,44 @@ def enforcement_snapshot() -> dict:
     return enforcement_record(backend).as_event()
 
 
+@dataclass(frozen=True)
+class TargetPaths:
+    """Read-only coordinate mapping bound to Core's selected execution target.
+
+    No prepare/launch/terminate surface is handed to node code. Bound methods
+    reuse the same cached backend and its observed mount prefix.
+    """
+
+    target_spec: str
+    _host: Callable[[str], str | None] = field(repr=False)
+    _target: Callable[[str], str] = field(repr=False)
+
+    def _check_current(self) -> None:
+        from core.execution_target import current
+
+        if current().spec != self.target_spec:
+            raise IsolationContractError("Execution target changed; obtain target_paths() again")
+
+    def to_windows(self, path: str) -> str | None:
+        self._check_current()
+        return self._host(path)
+
+    def to_linux(self, path: Path | str) -> str:
+        self._check_current()
+        return self._target(os.fspath(path))
+
+
+def target_paths() -> TargetPaths:
+    """Return only path conversions for the same target used by the launch throat."""
+    from core.execution_target import current
+
+    selected = current()
+    backend = _target_backend()
+    if backend is None:
+        return TargetPaths(selected.spec, str, str)
+    return TargetPaths(selected.spec, backend.to_windows, backend.to_linux)
+
+
 def target_facts() -> dict[str, Any] | None:
     """执行目标不是本机时，那一边是什么样（给开局说明）；本机 → None。只读，不起载荷。
 
@@ -612,6 +650,7 @@ __all__ = [
     "POLICY_ENV",
     "SANDBOX_LIMIT_EXIT_CODES",
     "SANDBOX_LIMIT_MARKER",
+    "TargetPaths",
     "UNATTENDED_MINIMUM",
     "UNRECOVERABLE",
     "enforcement_policy",
@@ -622,4 +661,5 @@ __all__ = [
     "record_enforcement_once",
     "select_backend",
     "target_facts",
+    "target_paths",
 ]

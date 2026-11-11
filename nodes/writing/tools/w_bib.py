@@ -1,16 +1,18 @@
-"""参考文献：模型写 BibTeX，框架核每条能不能解析（DOI / arXiv）。"""
+"""参考文献：保存 BibTeX，消费 Literature 的引用事实接口。"""
 from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Iterable
 from typing import Any
 
 from core.tool_registry import ToolDefinition, register_tool
+from nodes.literature.tools.reference_metadata import resolve_reference
 
 from .w_common import bib_keys, craft, manuscript_dir, read_json, write_json
 
 _HEAD_RE = re.compile(r"@(\w+)\s*\{\s*([^,\s]+)\s*,")
-_FIELD_RE = re.compile(r"(\w+)\s*=\s*[{\"]([^}\"]*)[}\"]")
+_FIELD_RE = re.compile(r"(\w+)\s*=\s*")
 
 
 class _Entry:
@@ -40,19 +42,54 @@ def _split_entries(text: str) -> list[_Entry]:
 
 
 def _fields(body: str) -> dict[str, str]:
-    return {k.lower(): v.strip() for k, v in _FIELD_RE.findall(body)}
+    fields, pos = {}, 0
+    while m := _FIELD_RE.search(body, pos):
+        start = pos = m.end()
+        if pos < len(body) and body[pos] in '{"':
+            delim, depth = body[pos], 1
+            start = pos = pos + 1
+            while pos < len(body) and depth:
+                c = body[pos]
+                if c == "\\":
+                    pos += 2
+                    continue
+                if delim == "{" and c == "{":
+                    depth += 1
+                elif c == ("}" if delim == "{" else '"'):
+                    depth -= 1
+                pos += 1
+            value = body[start:pos - 1]
+        else:
+            while pos < len(body) and body[pos] != ",":
+                pos += 1
+            value = body[start:pos]
+        fields[m.group(1).lower()] = value.strip()
+    return fields
 
 
-async def _resolve(url: str) -> str:
-    try:
-        import httpx
-        async with httpx.AsyncClient(follow_redirects=True, timeout=12.0) as c:
-            r = await c.head(url, headers={"User-Agent": "harness-writing/1.0"})
-            if r.status_code in (403, 405):
-                r = await c.get(url, headers={"User-Agent": "harness-writing/1.0"})
-            return "resolved" if 200 <= r.status_code < 400 else f"http {r.status_code}"
-    except Exception as exc:  # noqa: BLE001
-        return f"unchecked ({type(exc).__name__})"
+def bibliography_facts(check: dict, keys: Iterable[str] = ()) -> list[dict]:
+    """Project old observations for consumers; never rewrite or certify old evidence."""
+    entries = []
+    for entry in check.get("entries", []):
+        raw = entry.get("check")
+        if isinstance(raw, dict):
+            entries.append(entry)
+            continue
+        status = ("resolved" if raw == "resolved" else "invalid" if raw == "missing identifier"
+                  or str(raw).lower() in ("http 404", "http 410") else "unavailable")
+        entries.append({**entry, "check": {"status": status, "scope": "identifier",
+                                          "legacy_observation": raw}})
+    known = {entry["key"] for entry in entries}
+    entries.extend({"key": key, "check": {"status": "unavailable", "reason": "no recorded check"}}
+                   for key in sorted(set(keys) - known))
+    return entries
+
+
+def bibliography_issues(check: dict, keys: Iterable[str] = ()) -> tuple[list[str], list[str]]:
+    """Compatibility summaries are derived from entry facts, never another verdict."""
+    entries = bibliography_facts(check, keys)
+    return ([r["key"] for r in entries if r["check"]["status"] in ("invalid", "mismatch")],
+            [r["key"] for r in entries if r["check"]["status"] == "unavailable"])
 
 
 async def _write_bibliography(state: Any, bibtex: str, mode: str = "replace", **_: Any) -> dict:
@@ -74,30 +111,26 @@ async def _write_bibliography(state: Any, bibtex: str, mode: str = "replace", **
         eprint = f.get("eprint") if "arxiv" in (f.get("eprinttype", "") + f.get("archiveprefix", "")).lower() else None
         url = f.get("url")
         if doi:
-            tasks.append((key, "doi", f"https://doi.org/{doi}"))
+            tasks.append(resolve_reference("doi", doi, f))
         elif eprint:
-            tasks.append((key, "arxiv", f"https://arxiv.org/abs/{eprint}"))
+            tasks.append(resolve_reference("arxiv", eprint, f))
         elif url:
-            tasks.append((key, "url", url))
+            tasks.append(resolve_reference("url", url, f))
         else:
-            tasks.append((key, "none", ""))
+            tasks.append(resolve_reference("none", "", f))
         report.append({"key": key, "type": etype, "title": f.get("title", "")[:80],
                        "year": f.get("year"), "id_kind": "doi" if doi else ("arxiv" if eprint else ("url" if url else "none"))})
-    results = await asyncio.gather(*[
-        _resolve(u) if u else asyncio.sleep(0, result="missing identifier") for (_k, _kind, u) in tasks
-    ])
-    bad = []
+    results = await asyncio.gather(*tasks)
     for r, res in zip(report, results):
         r["check"] = res
-        if res == "missing identifier" or res.startswith("http 404"):
-            bad.append(r["key"])
     dup = [k for k in set(r["key"] for r in report) if sum(1 for r in report if r["key"] == k) > 1]
     path.write_text(text, encoding="utf-8")
-    check = {"entries": report, "bad": bad, "duplicates": dup}
+    check = {"schema_version": 2, "entries": report, "duplicates": dup}
+    bad, unchecked = bibliography_issues(check)
     write_json(mdir / "bib_check.json", check)
     state.append_transcript("writing_bibliography_written", entries=len(report), bad=bad, duplicates=dup)
-    return {"status": "success" if not (bad or dup) else "success_with_issues", "count": len(report),
-            "bad": bad, "duplicates": dup, "unchecked": [r["key"] for r in report if str(r["check"]).startswith("unchecked")],
+    return {"status": "success" if not (bad or dup or unchecked) else "success_with_issues", "count": len(report),
+            "bad": bad, "duplicates": dup, "unchecked": unchecked,
             "entries": [{k: r[k] for k in ("key", "type", "year", "id_kind", "check")} for r in report]}
 
 
@@ -108,7 +141,9 @@ async def _read_bibliography(state: Any, **_: Any) -> dict:
         return {"status": "success", "count": 0, "keys": {}, "guide": craft("bibliography")}
     keys = bib_keys(path.read_text(encoding="utf-8"))
     check = read_json(mdir / "bib_check.json") or {}
-    return {"status": "success", "count": len(keys), "keys": keys, "bad": check.get("bad", []),
+    bad, unchecked = bibliography_issues(check, keys)
+    return {"status": "success", "count": len(keys), "keys": keys, "bad": bad, "unchecked": unchecked,
+            "entries": bibliography_facts(check, keys), "duplicates": check.get("duplicates", []),
             "guide": craft("bibliography")}
 
 
@@ -117,7 +152,8 @@ register_tool(
         name="write_bibliography",
         description=(
             "写参考文献（BibTeX 全文；mode=replace 覆盖，append 追加）。每条必须带 doi 或 arXiv eprint 或 url，"
-            "框架会逐条联网核解析结果；解析失败或缺标识的 key 会被列在 bad 里，不许留在稿子里。"
+            "框架返回 resolved/unavailable/invalid/mismatch 事实；bad 是无效或身份不符，unchecked 是暂不可核验。"
+            "网络不可用不表示文献不存在；草稿仍保存。URL 可达不证明题名、作者或引用支持。"
             "只写你确定存在的文献。写之前先 read_bibliography 看写法。"
         ),
         parameters_schema={

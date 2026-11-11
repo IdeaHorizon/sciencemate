@@ -386,6 +386,7 @@ def _scan_child_runs(state: State) -> dict[str, dict]:
             "task_contract_revision": None,
             "task_contract_digest": None,
             "parent_run_id": None,
+            "parent_dispatch_id": None,
             "has_end": False,
             "n_tool_calls": 0,
             "paths": [],
@@ -407,6 +408,7 @@ def _scan_child_runs(state: State) -> dict[str, dict]:
                     if event == "run_start" and info["node_type"] is None:
                         info["node_type"] = record.get("node_type")
                         info["parent_run_id"] = record.get("parent_run_id")
+                        info["parent_dispatch_id"] = record.get("parent_dispatch_id")
                         info["session_id"] = record.get("session_id")
                         # 任务身份（#1080 第 5 条）：续跑要拿它逐字比对，
                         # 不能再按 node_type + session 去猜。
@@ -2210,6 +2212,7 @@ async def _run_node_tool(
         # 这次派发的身份（#1080 第 4 条）。子 run 的 `parent_dispatch_id` 就是它
         # —— 审计据此把「父这边的哪一次调用」和「子那边的哪一个 run」接上。
         dispatch_id=_dispatch_id,
+        parent_tool_call_id=state.hook_state.get("_current_tool_call_id_being_executed"),
         task_instance_uuid=(_identity or {}).get("task_instance_uuid"),
         task_contract_revision=(_identity or {}).get("task_contract_revision"),
         task_contract_digest=(_identity or {}).get("task_contract_digest"),
@@ -2552,8 +2555,8 @@ def _report_background_done(parent_state: State, node_type: str, summary: dict, 
         parent_state,
         f"[后台子节点回报] {node_type}[{run_id}] 已结束，status={status}，"
         f"turns={summary.get('turns')}，回填 artifact={imported_ids or '无'}。"
-        f"若它是 producing 节点且 completed：post-producing 3-step flow 已登记，"
-        f"按流程推进（_reviewer → _curator → present_decision_package）。"
+        f"若它是 producing 节点：检查 pending_post_node_flow 中尚未完成的审查和决策；"
+        f"_curator 仅按需调用，不要重复已有审查。"
         f"向用户汇报结果时引用真实产出，不要凭记忆编。"
         # 只读派发的三类改动（#973）—— 后台跑完也要交到调度器手上，与前台同一句。
         + (f"\n{out['side_effect_note']}" if out.get("side_effect_note") else ""),
@@ -2892,6 +2895,7 @@ def _finish_child(
             "producing_node_inputs": (
                 dict(node_inputs) if isinstance(node_inputs, dict) else {}
             ),
+            "producing_dispatch_contract": dict(summary.get("dispatch_contract") or {}),
             # #183：绑定发起本 run 的 task，让 task(complete) 一致性 gate 能精确
             # 匹配（没传 task_id 时为 None → gate 保守拦截，见
             # decision_package.blocking_decision_for_task）。
@@ -3449,9 +3453,82 @@ def _compact_run_node_result(content: str) -> str:
     )
 
 
+def _recover_run_node_receipt(arguments, *, state, tool_call_id):
+    """Report the original child, not permission to create a replacement.
+
+    The parent dispatch event and child run_start already share dispatch_id.
+    New dispatch events also record the original tool call identity explicitly.
+    Without that exact chain no recovery is asserted for legacy ambiguity.
+    """
+    starts = []
+    try:
+        checkpoint = json.loads((state.root / "messages_checkpoint.json").read_text())
+        if checkpoint.get("tool_dispatch") != tool_call_id:
+            return None
+        dispatch_after = datetime.fromisoformat(checkpoint["written_at"].replace("Z", "+00:00"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    try:
+        with state.transcript_path.open() as stream:
+            for line in stream:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if (record.get("event") == "subagent_call_start"
+                        and record.get("parent_tool_call_id") == tool_call_id
+                        and record.get("child_node_type") == arguments.get("node_type")):
+                    if dispatch_after is not None:
+                        try:
+                            at = datetime.fromisoformat(record["at"].replace("Z", "+00:00"))
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        if at < dispatch_after:
+                            continue
+                    starts.append(record)
+    except OSError:
+        return None
+    if not starts:
+        return None
+    dispatch = starts[-1]
+    children = [info for info in _scan_child_runs(state).values()
+                if info.get("parent_dispatch_id") == dispatch.get("dispatch_id")
+                and info.get("parent_run_id") == state.run_id
+                and info.get("node_type") == arguments.get("node_type")
+                and info.get("session_id") == state.session_id]
+    if len(children) != 1:
+        return None
+    child = children[0]
+    if run_has_live_executor(child["run_id"]):
+        return None  # the existing live child still owns this dispatch
+    root = state.root.parent / child["run_id"]
+    if child["has_end"]:
+        try:
+            summary = json.loads((root / "summary.json").read_text())
+        except (OSError, ValueError):
+            return None
+        if summary.get("status") == "paused":
+            return None  # a human pause is not permission for an autonomous model wake
+        return {"result": {"status": "recovered", "child_run_id": child["run_id"],
+                "child_node_type": child["node_type"], "child_status": summary.get("status"),
+                "child_state_dir": str(root), "summary": summary,
+                "do_not_start_fresh": True,
+                "note": "Original child is terminal. Use its saved outputs and existing flow; "
+                        "this receipt does not assert unfinished parent bookkeeping completed."}}
+    if not child["has_checkpoint"]:
+        return None
+    return {"result": {"status": "interrupted", "child_run_id": child["run_id"],
+            "child_node_type": child["node_type"], "child_state_dir": str(root),
+            "resume_run_id": child["run_id"], "do_not_start_fresh": True,
+            "note": "Original child was interrupted and has its checkpoint. Continue it with "
+                    "run_node using this exact resume_run_id and the original task arguments; "
+                    "do not start a replacement child."}}
+
+
 register_tool(
     ToolDefinition(
         name="run_node",
+        interrupted_recovery=_recover_run_node_receipt,
         result_compactor=_compact_run_node_result,
         description=(
             "把任意子节点当作 subagent 调起来。"
@@ -3459,7 +3536,7 @@ register_tool(
             "共享同一个 project_id（memory + KB 跨节点持久化）。\n\n"
             "**节点分类不要背名单** —— producing 还是 service 以各节点 harness 的 "
             "`post_run_flow` 声明为准，会随「🔌 可调子节点契约」注入给你："
-            "producing（hypothesis / experiment / writing）跑完自动登记收尾三步；"
+            "producing 交付后由运行时执行独立审查并登记待处理决策；"
             "service（literature / data / postprocess 等 `post_run_flow: none`）"
             "跑完直接看结果，不走审查流。\n\n"
             "**Artifact 转发**：绑定 Project worktree 的 run（平台常态）**不搬运 "
@@ -3472,15 +3549,11 @@ register_tool(
             "子节点 required_output 类型的 artifact 会自动回填到本节点 artifacts/，"
             "其它产物保留在子 run 目录（用 read_external_artifact 拉）。\n"
             "⚠️ 父 harness.callable_nodes 决定能调哪些子节点；递归深度 ≤ 4。\n\n"
-            "**v0.5.1 hard gate**：上一个 producing 节点的收尾三步（reviewer → "
-            "curator → decision）没走完就再起 producing 节点，会被直接拒绝 —— "
-            "防跳过 user 决策门陷入无限 revise 循环。_reviewer / _curator 不受此"
-            "约束（它们正是用来推进 pending entry 的）。\n\n"
-            "**background=true（长任务后台跑）**：预计跑得久（实验/大调研，几十分钟"
-            "以上）且用户还想继续对话时用。立即返回 started_background；child 完成/"
-            "暂停/失败会自动作为系统消息回报给你和用户。起了后台节点就**正常继续"
-            "对话**，不要轮询、不要重复起同一节点。需要严格顺序衔接下一步的流程"
-            "（如 post-producing 3-step）用默认前台模式。"
+            "producing 节点返回时运行时已执行独立审查，调度器解释结果后提交决策；"
+            "待处理项见 pending_post_node_flow，不要重复派审查。_curator 仅按需调用。\n\n"
+            "Project v2 共用一个 Git 工作区，只支持默认前台模式；background=true 会拒绝。"
+            "节点内的远程长计算用 remote_job submit / wait，由 Harness 等待并接续。"
+            "独立工作区的旧运行模式才支持 background=true；已启动则不要重复派发。"
         ),
         parameters_schema={
             "type": "object",
@@ -3625,8 +3698,8 @@ register_tool(
                     "type": "boolean",
                     "default": False,
                     "description": (
-                        "可选。true = 子节点后台跑，本调用立即返回，完成/暂停/失败"
-                        "自动回报。用于长任务（实验/大调研）+ 用户还想继续对话的场景。"
+                        "可选，默认前台。Project v2 共用 Git 工作区，不支持 true。"
+                        "只有独立工作区的旧运行模式支持后台执行并自动回报。"
                     ),
                 },
                 "task_id": {

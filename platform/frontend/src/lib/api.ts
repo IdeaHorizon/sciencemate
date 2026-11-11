@@ -6,6 +6,7 @@
  */
 
 import type { ChatRequest } from "./generated/chat-request";
+import type { RemoteServer, RemoteServerInput, RuntimeOperation, RemoteAvailability } from "./remote-runtime";
 import { say, type Phrase } from "../shared/i18n/language.ts";
 import type { PublicationCategory } from "@/lib/publication-categories";
 
@@ -304,9 +305,71 @@ export class ApiClient {
     });
   }
 
-  async listProjectFolders(path?: string) {
+  async listProjectFolders(path?: string, serverId?: string) {
     const query = path ? `?${new URLSearchParams({ path })}` : "";
+    if (serverId) return this.remoteRequest<ProjectFolderListing>(serverId, `/projects/folders${query}`);
     return this.onThisMachine<ProjectFolderListing>(`/projects/folders${query}`);
+  }
+
+  remoteRequest<T>(serverId: string, path: string, options: RequestInit = {}): Promise<T> {
+    return this.request<T>(path, options, { "X-Remote-Server": serverId });
+  }
+
+  remoteModels(serverId: string) {
+    return {
+      list: async () => {
+        const response = await this.remoteRequest<ModelBackend[] | { backends?: ModelBackend[]; items?: ModelBackend[] }>(serverId, "/settings/model-backends");
+        return Array.isArray(response) ? response : response.backends ?? response.items ?? [];
+      },
+      save: (data: SaveModelBackendRequest, id?: string) => this.remoteRequest(serverId, id ? `/settings/model-backends/${encodeURIComponent(id)}` : "/settings/model-backends", { method: id ? "PUT" : "POST", body: JSON.stringify(data) }),
+      remove: (id: string) => this.remoteRequest(serverId, `/settings/model-backends/${encodeURIComponent(id)}`, { method: "DELETE" }),
+      probe: (id: string) => this.remoteRequest(serverId, `/settings/model-backends/${encodeURIComponent(id)}/probe`, { method: "POST" }),
+      setEnabled: (id: string, is_enabled: boolean) => this.remoteRequest(serverId, `/settings/model-backends/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ is_enabled }) }),
+      roles: async () => (await this.remoteRequest<{ roles: ModelRole[] }>(serverId, "/settings/model-roles")).roles,
+      setRoleDefault: (id: string, role: string) => this.remoteRequest(serverId, `/settings/model-backends/${encodeURIComponent(id)}/roles/${encodeURIComponent(role)}/default`, { method: "POST" }),
+    };
+  }
+
+  listRemoteServers() {
+    return this.onThisMachine<{ items: RemoteServer[] }>("/remote-servers");
+  }
+
+  remoteSSHOptions() {
+    return this.onThisMachine<{ aliases: string[]; keys: string[] }>("/remote-servers/ssh-options");
+  }
+
+  connectRemoteServer(data: RemoteServerInput) {
+    return this.onThisMachine<{ operation_id: string }>("/remote-servers/connect", {
+      method: "POST", body: JSON.stringify(data),
+    });
+  }
+
+  remoteConnectionOperation(id: string) {
+    return this.onThisMachine<RuntimeOperation>(`/remote-servers/operations/${encodeURIComponent(id)}`);
+  }
+
+  checkRemoteServer(id: string) {
+    return this.onThisMachine<{ version: string | null; protocol: number }>(
+      `/remote-servers/${encodeURIComponent(id)}/check`, { method: "POST" });
+  }
+
+  async remoteServerAvailability(id: string) {
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort(), 8_000);
+    try {
+      return await this.onThisMachine<RemoteAvailability>(
+        `/remote-servers/${encodeURIComponent(id)}/availability`, { signal: controller.signal });
+    } finally {
+      clearTimeout(deadline);
+    }
+  }
+
+  disconnectRemoteServer(id: string) {
+    return this.onThisMachine<void>(`/remote-servers/${encodeURIComponent(id)}/disconnect`, { method: "POST" });
+  }
+
+  removeRemoteServer(id: string) {
+    return this.onThisMachine<void>(`/remote-servers/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
   /** 改会话属性。目前用于换模型：PATCH …/sessions/{id} { model_backend_id }。 */
@@ -1201,7 +1264,7 @@ export interface OrganisationConnection {
 export type ProjectHome =
   | { kind: "local"; reachable: true }
   | {
-      kind: "organisation";
+      kind: "organisation" | "remote";
       connection_id: string;
       name: string;
       url: string;

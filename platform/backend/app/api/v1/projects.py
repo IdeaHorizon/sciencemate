@@ -10,12 +10,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.services import refusals
-from app.services.user_interface import Language, language_for, language_on_screen, said_of, say
 from app.auth import get_current_user
 from app.config import settings
 from app.database import get_db
-from app.models.execution import SessionProjection, BLOCKER_RESOLVED_RUN_STATUSES
+from app.models.execution import BLOCKER_RESOLVED_RUN_STATUSES, SessionProjection
 from app.models.project import (
     EntryType,
     Project,
@@ -32,6 +30,8 @@ from app.schemas.project import (
     ProjectResponse,
     ProjectUpdate,
 )
+from app.services import refusals
+from app.services.user_interface import Language, language_for, language_on_screen, said_of, say
 
 router = APIRouter()
 
@@ -121,8 +121,11 @@ async def create_project(
     A2）。不是"本机建完同步过去"—— 两处各一份就是两个真相源。
     """
     from app.assembly import can_choose_project_folders
+    from app.services.remote_servers import PREFIX as REMOTE_PREFIX
 
-    if data.root_folder is not None and (data.home or not can_choose_project_folders()):
+    if data.root_folder is not None and (
+        (data.home and not data.home.startswith(REMOTE_PREFIX)) or not can_choose_project_folders()
+    ):
         raise HTTPException(status_code=422, detail=say({
             "zh": "组织项目的存储位置由服务器管理。请为本机项目选择根文件夹。",
             "en": "Organisation project storage is managed by the server. Choose a root folder for a local project.",
@@ -137,9 +140,9 @@ async def create_project(
         except other_homes.ThereIsNoSuchHomeError as refused:
             raise HTTPException(status_code=refused.status, detail=refused.said_in(lang)) from refused
 
-    from app.services.project_service import create_project
     from app.services.project_locations import ProjectLocationError
     from app.services.project_repository import ProjectRepositoryError
+    from app.services.project_service import create_project
 
     try:
         result = await create_project(

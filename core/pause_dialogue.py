@@ -27,8 +27,13 @@ def exact_pause_answer(pause, text: str):
         pass
     if (pause.metadata or {}).get("type") in {"highrisk_confirm", "permission", "capability_grant"}:
         from core.capability_grants import _NO, _YES
-        from shared.lib.dangerous_commands import _APPROVE_WORDS
+        from shared.lib.dangerous_commands import _APPROVE_WORDS, _option_choice
 
+        # Legacy cards have no Offer. Resolve only this card's exact labels or
+        # in-range indices, then pass the label to the existing authorization hook.
+        choice = _option_choice(text.strip(), pause.options) if pause.options else None
+        if choice is not None:
+            return choice
         if text.strip().casefold() in _YES | _NO or _APPROVE_WORDS.fullmatch(text.strip()):
             return text.strip()
     return None

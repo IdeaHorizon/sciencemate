@@ -44,7 +44,7 @@ relevant_concepts: []
 1. 在 scratchpad 写清：
    - `user_prompt` 一句话复述
    - **`must_cover_themes` 完整列表**（防退化锚点）
-   - **`locked_definitions` 类别表**（防改写锚点：label + 定义原文）
+   - 有显式约束时记录 **`locked_definitions` 类别表**（label + 定义原文 + 输入来源 + request 作用域）；definition_candidates 只是线索
    - 对话里的禁做/只用约束（`inferred_constraints`）
 2. `read_artifact` 读 `survey_report` 全文（若有）。
 3. 从 survey 提取 **per-paper 结构**（写在 scratchpad）：
@@ -59,7 +59,7 @@ relevant_concepts: []
 5. **防退化 + 防改写对齐检查**：
    - 后续每条候选必须标注 `serves_pillars: [与 must_cover 的交集]`
    - **禁止**只跟 survey 最锋利的单一 open_question 走，而丢掉其他 must_cover
-   - **禁止**用文献 taxonomy 替换 `locked_labels`；claim 中的操作类别只能用用户原文名
+   - 对本次请求显式锁定的类别沿用用户定义；不从自由文本或历史缓存生成新的 locked_labels
    - 与对话约束冲突的路径直接丢掉
 
 ### Phase 1 — 发散（目标 3–6 条候选，允许暂时不可证伪）
@@ -160,7 +160,7 @@ non-fundamental 错误 → `evolve_hypothesis(mode=assumption_repair)`，不必�
 收敛后写 `hypothesis_research_overview`：
 - Top 1–3 假设一句话摘要 + 为何选它们
 - **must_cover 覆盖说明**（每支柱 → 哪条 H / 哪段 plan）
-- **definition_lock 确认**：locked_labels 均未改名；文献 taxonomy 仅作对照
+- **显式定义确认（适用时）**：保留请求 locked_taxonomy / operation_categories 的定义与来源；文本解析候选不构成冻结义务
 - 被淘汰候选及原因（audit/HIF/cluster）——注明「未因冲 HIF 丢掉支柱 / 未改用户分类」
 - 未探索方向（下一轮建议）
 - freeze 卡住时仍须优先交 overview（required_output），勿把轮次耗尽在 freeze 上
@@ -170,7 +170,7 @@ non-fundamental 错误 → `evolve_hypothesis(mode=assumption_repair)`，不必�
 - [ ] **完成闸优先**：required（research_state / prereg / research_plan / HIF / overview）齐 + `validate_hypothesis_outputs` passed=true；额外 audit 不得挤占轮次
 - [ ] `get_research_goal` 已调，`must_cover_themes` + `locked_definitions` 已写入 scratchpad
 - [ ] pillar×candidate 覆盖表在发散与收敛后均全绿
-- [ ] prereg 含 `## definition_lock`，类别名与定义与用户原文一致
+- [ ] 有显式分类约束时保留用户定义与来源；无显式约束不补 definition_lock 段，不将修订工作项写成科学定义
 - [ ] ≥2 个独立来源（paper/claim/KB/用户子目标）被显式引用
 - [ ] ≥1 条候选来自反直觉/跨域路径（C 或 D），且仍服务 user_prompt
 - [ ] ≥3 候选时 `cluster_hypothesis_candidates` 已调

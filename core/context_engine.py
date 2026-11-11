@@ -114,18 +114,38 @@ def _write_first_turn_node_inputs_receipt(state, node_inputs: dict | None) -> No
             "digest": _sha(values),
         }
         if path.exists():
-            # 已经有了 —— 这不是首轮。把这次派发带来的输入另记一条，
-            # 收据本身一个字节不动。
+            if not values:
+                return  # continuing without a new task does not replace its inputs
+            # The first-turn receipt stays immutable. Current dispatch values
+            # live in the existing append-only resume event, with an explicit
+            # replacement link; a digest alone cannot recover or consume them.
             try:
+                first_digest = _json.loads(path.read_text(encoding="utf-8")).get("digest")
+                previous_digest = first_digest
+                if state.transcript_path.exists():
+                    with state.transcript_path.open(encoding="utf-8") as transcript:
+                        for line in transcript:
+                            try:
+                                event = _json.loads(line)
+                            except _json.JSONDecodeError:
+                                continue
+                            if (isinstance(event, dict) and event.get("event") == "resumed_node_inputs"
+                                    and event.get("keys")):
+                                previous_digest = event.get("digest") or previous_digest
                 state.append_transcript(
                     "resumed_node_inputs",
                     keys=sorted(values),
+                    values=values,
+                    value_sha256=receipt["value_sha256"],
                     digest=receipt["digest"],
-                    first_turn_digest=_json.loads(
-                        path.read_text(encoding="utf-8")).get("digest"),
+                    first_turn_digest=first_digest,
+                    supersedes_digest=previous_digest,
+                    parent_dispatch_id=getattr(state, "parent_dispatch_id", None),
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                state.append_transcript("resumed_node_inputs_receipt_failed",
+                    keys=sorted(values), digest=receipt["digest"],
+                    error=f"{type(exc).__name__}: {exc}"[:300])
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -678,6 +698,11 @@ def _producer_side_effect_section(
     return "\n".join(lines)
 
 
+def render_node_inputs(node_inputs: dict) -> str:
+    """Render the caller's explicit current task identically on fresh and resume."""
+    return "\n".join(["## 节点输入", *[f"- **{k}**：{v}" for k, v in node_inputs.items()]])
+
+
 def _build_user_prompt(harness: NodeHarness, state: State, node_inputs: dict) -> str:
     sections: list[str] = []
     _manifest: list[str] = []
@@ -696,9 +721,7 @@ def _build_user_prompt(harness: NodeHarness, state: State, node_inputs: dict) ->
         _mark("producer_side_effects")
 
     if node_inputs:
-        sections.append("## 节点输入")
-        for k, v in node_inputs.items():
-            sections.append(f"- **{k}**：{v}")
+        sections.append(render_node_inputs(node_inputs))
         _mark("node_inputs")
 
     artifacts = state.list_artifacts()

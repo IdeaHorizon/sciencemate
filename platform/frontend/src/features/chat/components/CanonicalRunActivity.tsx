@@ -643,14 +643,14 @@ export function CanonicalRunActivity({
     return anchoredBlock ? <div className="chat-transcript-run">{anchoredBlock}</div> : null;
   }
 
-  if (loading) {
+  if (loading && !detail) {
     return (
       <div className="chat-run-canonical-state" aria-live="polite">
         <Loader2 className="spin" size={13} /> {t({ zh: "正在加载执行记录…", en: "Loading execution record…" })}
       </div>
     );
   }
-  if (error || !detail) {
+  if (!detail) {
     return (
       <div className="chat-run-canonical-state failed" role="alert">
         <AlertCircle size={13} />{t({ zh: "无法加载执行记录", en: "Could not load the execution record" })}</div>
@@ -717,6 +717,9 @@ export function CanonicalRunActivity({
   return (
     <div className="chat-transcript-run">
       {anchoredBlock}
+      {Boolean(error) && <div className="chat-run-detail-state" role="status">
+        {t({ zh: "暂时无法刷新，显示最后一次已知进度。", en: "Cannot refresh right now; showing the last known progress." })}
+      </div>}
       {isTailWindow && eventsQuery.isLoading && (
         <div className="chat-run-detail-state"><Loader2 className="spin" size={11} /> {t({ zh: "正在加载执行活动…", en: "Loading activity…" })}</div>
       )}

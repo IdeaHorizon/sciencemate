@@ -1676,3 +1676,179 @@ async def test_re_dispatching_the_same_node_gets_its_own_card(
     legacy = _root_step_id(run_id, 1, {"childRunId": "1787296172-abc"})
     assert legacy == _root_step_id(run_id, 1, {"childRunId": "1787296172-abc"})
     assert legacy not in {first, second}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status,kind",
+    [("success", "tool.completed"), ("error", "tool.failed"), ("deferred", "tool.completed")],
+)
+async def test_standby_tool_uses_normal_lifecycle_without_closing_foreground_tool(
+    execution_db,
+    status,
+    kind,
+):
+    service = ExecutionIngestService()
+    context = _context()
+    records = [
+        {"event": "run_start", "at": AT, "node_type": "project_chat"},
+        {"event": "tool_call", "at": AT, "name": "run_node", "args": {"node_type": "experiment"}},
+        {
+            "event": "interrupt_tool",
+            "at": AT,
+            "tool_name": "remote_job",
+            "arguments": {
+                "action": "status",
+                "path": "/Users/researcher/private/job.json",
+                "apiKey": "standby-secret",
+            },
+            "result": {"status": status, "state": "running", "accessToken": "result-secret"},
+            "replies_to_message_id": "message-standby",
+        },
+        {"event": "tool_result", "at": AT, "result_preview": {"status": "success"}},
+    ]
+    path = _runtime_transcript("runs/standby/transcript.jsonl", records)
+    await ingest_transcript_like_production(
+        execution_db, service=service, context=context, path=path, harness_states={}
+    )
+    events = list(
+        await execution_db.scalars(select(ExecutionEvent).order_by(ExecutionEvent.sequence))
+    )
+    standby = [e for e in events if e.payload.get("toolName") == "remote_job"]
+    assert [e.kind for e in standby] == ["tool.started", kind]
+    assert standby[0].payload["toolCallId"] == standby[1].payload["toolCallId"]
+    assert standby[0].payload["stepId"] == standby[1].payload["stepId"]
+    assert standby[1].payload["resultStatus"] == status
+    assert all(e.source["rawEvent"] == "interrupt_tool" for e in standby)
+    assert standby[0].source == standby[1].source
+    assert standby[0].payload["arguments"]["apiKey"] == "[REDACTED]"
+    persisted = json.dumps([e.payload for e in events])
+    for secret in ("standby-secret", "result-secret", "/Users/researcher/private/job.json"):
+        assert secret not in persisted
+    foreground = [e for e in events if e.payload.get("toolName") == "run_node"]
+    assert [e.kind for e in foreground] == ["tool.started", "tool.completed"]
+    assert foreground[0].payload["toolCallId"] == foreground[1].payload["toolCallId"]
+    await ingest_transcript_like_production(
+        execution_db, service=service, context=context, path=path, harness_states={}
+    )
+    replay = list(
+        await execution_db.scalars(select(ExecutionEvent).order_by(ExecutionEvent.sequence))
+    )
+    assert [e.id for e in replay] == [e.id for e in events]
+
+
+@pytest.mark.asyncio
+async def test_reprojecting_legacy_standby_warning_preserves_evidence(execution_db):
+    service = ExecutionIngestService()
+    context = _context()
+    raw = {
+        "event": "interrupt_tool",
+        "at": AT,
+        "tool_name": "remote_job",
+        "arguments": {"action": "status", "path": "/Users/private/job.json"},
+        "result": {"status": "success", "state": "running"},
+    }
+    path = _runtime_transcript("runs/legacy-standby/transcript.jsonl", [raw])
+    # Exact warning-only row shape produced by adapter 1.0.0 before this fix.
+    import hashlib
+
+    from app.models.execution import EventOrigin, EventVisibility
+    from app.services.execution_ingest import ADAPTER_VERSION, EventDraft, _hash_parts
+    from app.services.harness_transcript_ingest import file_identity_of
+
+    file_identity = file_identity_of(path)
+    line_hash = hashlib.sha256(_raw_line(raw)).hexdigest()
+    identity = _hash_parts(context.run_id, file_identity, 0, line_hash)
+    session, _ = await service._lock_scope(execution_db, context)
+    await service._insert_event(
+        execution_db,
+        session=session,
+        context=context,
+        event_id=_hash_parts(context.session_id, identity, ADAPTER_VERSION),
+        draft=EventDraft(
+            "redaction.warning",
+            EventVisibility.SUMMARY,
+            {"codes": ["path_minimized"]},
+            datetime.fromisoformat(AT.replace("Z", "+00:00")),
+        ),
+        origin=EventOrigin.RAW_TRANSCRIPT,
+        source={
+            "rawEvent": "interrupt_tool",
+            "byteOffset": 0,
+            "fileRef": f"file_{_hash_parts(context.tenant_id, context.run_id, file_identity)[:24]}",
+        },
+        source_identity=identity,
+        file_identity=file_identity,
+        byte_offset=0,
+        raw_line_hash=line_hash,
+    )
+    original = list(await execution_db.scalars(select(ExecutionEvent)))
+    assert any(e.kind == "redaction.warning" for e in original)
+    before = {e.id: (e.kind, dict(e.source), dict(e.payload)) for e in original}
+    await ingest_transcript_like_production(
+        execution_db, service=service, context=context, path=path, harness_states={}
+    )
+    events = list(await execution_db.scalars(select(ExecutionEvent)))
+    assert {e.kind for e in events} >= {"tool.started", "tool.completed", "redaction.warning"}
+    assert {e.id: (e.kind, e.source, e.payload) for e in events if e.id in before} == before
+    ids = {e.id for e in events}
+    await ingest_transcript_like_production(
+        execution_db, service=service, context=context, path=path, harness_states={}
+    )
+    assert set(await execution_db.scalars(select(ExecutionEvent.id))) == ids
+
+
+@pytest.mark.asyncio
+async def test_real_worker_build_facts_survive_transcript_ingest_and_read_api(execution_db):
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[3]
+    path = _runtime_transcript("runs/build-facts/transcript.jsonl", [])
+    program = """
+import json, sys
+from pathlib import Path
+from core.state import State
+from core.runtime_build import facts
+from core import remote_resources
+async def adapter(*args): pass
+remote_resources.install(adapter)
+s = State.new('_orchestrator', Path(sys.argv[1]))
+s.append_transcript('tool_call', name='remote_job', args={'action': 'wait'})
+Path(sys.argv[2]).write_bytes(s.transcript_path.read_bytes())
+print(json.dumps(facts()))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", program, str(path.parent / "worker"), str(path)],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    build = json.loads(completed.stdout)
+    service = ExecutionIngestService()
+    context = _context(actor="reader")
+    await ingest_transcript_like_production(
+        execution_db, service=service, context=context, path=path, harness_states={}
+    )
+    api = FastAPI()
+    api.include_router(router, prefix="/api/v1")
+
+    async def database():
+        yield execution_db
+
+    api.dependency_overrides[get_db] = database
+    api.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id="reader")
+    api.dependency_overrides[get_runtime_tenant_id] = lambda: "tenant-a"
+    async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as client:
+        response = await client.get("/api/v1/sessions/session-a/events")
+    assert response.status_code == 200, response.text
+    tool = next(e for e in response.json()["items"] if e["kind"] == "tool.started")
+    from app.services.execution_ingest import ADAPTER_SOURCE_SHA256
+
+    assert tool["payload"]["runtimeBuild"] == {
+        **build,
+        "adapterVersion": "1.0.0",
+        "adapterSourceSha256": ADAPTER_SOURCE_SHA256,
+    }
+    assert tool["payload"]["runtimeBuild"]["resourceAdapter"] == "__main__.adapter"

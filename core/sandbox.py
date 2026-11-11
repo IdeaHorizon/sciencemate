@@ -464,9 +464,13 @@ def write_roots_for(state: Any) -> list[Path]:
             scoped = _canonical_existing(getattr(state, "workspace_root", None))
         if scoped is not None:
             roots.append(scoped)
-    run_root = _canonical_existing(getattr(state, "root", None))
-    if run_root is not None:
-        roots.append(run_root)
+    from core.project_workspace import private_run_roots
+
+    if getattr(state, "root", None) is not None:
+        for private in private_run_roots(state):
+            run_root = _canonical_existing(private)
+            if run_root is not None:
+                roots.append(run_root)
     if not roots:
         raise SandboxContractError("run has no writable sandbox root")
     worktree_root = _canonical_existing(worktree) if worktree is not None else None

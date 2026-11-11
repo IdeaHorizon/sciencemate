@@ -31,6 +31,9 @@ from pathlib import Path, PurePosixPath
 #: 打包器中途失败留下的 `app/static_ui`、`edition.json`…… —— 它们有一个共同点：都不在 git 里。
 NOT_SHIPPED = frozenset({"tests"})
 
+# These are runtime inputs even though their canonical copy lives under docs/.
+HARNESS_RUNTIME_FILES = ("docs/xiaohongshu_journal_map.tsv",)
+
 
 def _git(repo: Path, *args: str) -> str:
     """跑一条 git，按 **UTF-8** 解码它的输出。
@@ -82,6 +85,15 @@ def copy_the_tracked_files(repo: Path, paths: Iterable[str], into: Path,
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(repo / name, target)
     return names
+
+
+def carry_the_runtime_files(repo: Path, staged: Path) -> list[str]:
+    """Ship required data with the harness, including desktop update payloads."""
+    copied = copy_the_tracked_files(repo, HARNESS_RUNTIME_FILES, staged)
+    missing = set(HARNESS_RUNTIME_FILES) - set(copied)
+    if missing:
+        raise SystemExit(f"harness 缺少运行数据 {sorted(missing)} —— 不能发布不完整的安装包")
+    return copied
 
 
 def top_level_modules_reachable_from(staged: Path, repo: Path) -> set[str]:

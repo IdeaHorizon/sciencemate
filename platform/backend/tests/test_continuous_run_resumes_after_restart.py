@@ -1,13 +1,6 @@
-"""被重启打断的 **continuous** 研究会被自动续跑；别的一律不碰（Layer B 选择器）。
+"""Durable continuous work survives process loss until a later human boundary.
 
-误驱动的代价是烧钱（[[project_hypothesis_node_token_runaway]]），所以选择器的每一
-条判据都在这里钉死。变异任一条都该有一个负例转红：
-  · 不是 continuous 档（assisted）          → test_assisted_run_is_not_resumed
-  · 不是重启打断的（别的 staleReason）      → test_non_restart_stale_is_not_resumed
-  · 运行时没真丢（attempt 还开着）          → test_run_with_open_attempt_is_not_resumed
-  · 太久以前打断的（窗口外）                → test_old_interruption_is_not_resumed
-  · 正在续的（进程内幂等）                  → test_a_run_already_resuming_is_skipped
-  · 顶层才驱动（子节点跟父走）              → 顺带：子 run 不单独出现
+Model heartbeat age is liveness evidence, not expiration of task authorization.
 """
 from __future__ import annotations
 
@@ -17,7 +10,7 @@ from uuid import uuid4
 import pytest
 
 from app.config import settings
-from app.models.execution import Run, RunAttempt, RunStatus, SessionProjection
+from app.models.execution import Command, Run, RunAttempt, RunStatus, SessionProjection
 from app.models.project import OperationMode, Project, ProjectConfig
 from app.models.user import User
 from app.services import restart_resume
@@ -64,6 +57,11 @@ async def _seed(
         project_id=pid, session_id=sid, parent_run_id=None,
         status=status, summary={"staleReason": stale_reason} if stale_reason else {},
     ))
+    db.add(Command(
+        tenant_id=settings.runtime_tenant_id, workspace_id="w", project_id=pid, session_id=sid,
+        run_id=rid, actor_user_id=uid, kind="run.start", idempotency_key=f"start:{rid}",
+        payload={"message": "authorized continuous work"},
+    ))
     db.add(RunAttempt(
         id=f"a_{uuid4().hex}", tenant_id=settings.runtime_tenant_id, workspace_id="w",
         project_id=pid, session_id=sid, run_id=rid, attempt_no=1,
@@ -94,10 +92,10 @@ async def test_assisted_run_is_not_resumed(db_session):
     assert await find_resumable_continuous_runs(db_session) == []
 
 
-async def test_non_restart_stale_is_not_resumed(db_session):
-    # 别的原因（真崩、上游拒绝）各有出口，不在这一层兜。
+async def test_unfinished_command_does_not_require_a_restart_reason(db_session):
+    # An unfinished command still owns work; the witness reason is not authority.
     await _seed(db_session, stale_reason="provider_unavailable")
-    assert await find_resumable_continuous_runs(db_session) == []
+    assert len(await find_resumable_continuous_runs(db_session)) == 1
 
 
 async def test_a_worker_killed_without_closing_its_attempt_is_resumed(db_session):
@@ -125,29 +123,22 @@ async def test_a_fresh_lease_is_never_resumed_out_from_under_a_live_worker(db_se
     assert await find_resumable_continuous_runs(db_session) == []
 
 
-async def test_old_interruption_is_not_resumed(db_session):
-    # 上一次真实进展是很久以前 = 老僵尸，不主动复活。
+async def test_old_heartbeat_does_not_expire_unfinished_authorized_work(db_session):
+    # A long scientific wait can be silent for hours without revoking the task.
     await _seed(db_session, heartbeat_at=OLD)
-    assert await find_resumable_continuous_runs(db_session) == []
+    assert len(await find_resumable_continuous_runs(db_session)) == 1
 
 
-async def test_witness_bump_to_updated_at_does_not_defeat_recency(db_session):
-    """回归钉子：2026-08-24 本地实测的那条缝。
-
-    `mark_orphaned_harness_runs` 写见证时把 `updated_at` 顶到 now —— 一个几小时前
-    就停了的老 run，重启后 updated_at 看起来"刚刚更新"。当时的 recency 判据看
-    updated_at，于是误续了 3 条旧测试 run。正解看 `heartbeat_at`（真实进展、见证
-    不碰）。这里就造那个形状：updated_at=now，但 heartbeat=6h 前 → 必须不续。
-    单测里 updated_at 是手设的，所以最初那版单测照不出这条缝——这条专门补上。
-    """
+async def test_witness_timestamp_does_not_decide_authorization(db_session):
+    """Neither the witness timestamp nor heartbeat age revokes durable work."""
     await _seed(db_session, updated_at=RECENT, heartbeat_at=OLD)
-    assert await find_resumable_continuous_runs(db_session) == []
+    assert len(await find_resumable_continuous_runs(db_session)) == 1
 
 
-async def test_run_without_heartbeat_is_not_resumed(db_session):
-    # 从没产出过真实进展 = 没有可续的断点。
+async def test_durable_command_without_heartbeat_keeps_its_recovery_owner(db_session):
+    # Backend death can precede the first worker heartbeat.
     await _seed(db_session, heartbeat_at=None)
-    assert await find_resumable_continuous_runs(db_session) == []
+    assert len(await find_resumable_continuous_runs(db_session)) == 1
 
 
 async def test_a_run_already_resuming_is_skipped(db_session):

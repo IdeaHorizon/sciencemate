@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-from difflib import SequenceMatcher
-import html
 import json
 import re
 from typing import Any
@@ -13,6 +11,7 @@ import httpx
 
 from core.state import State
 from core.tool_registry import ToolDefinition, register_tool
+from .reference_metadata import compare_reference_metadata
 
 
 def _json_list(raw: str, field: str) -> tuple[list[Any] | None, str | None]:
@@ -44,11 +43,6 @@ def _has_stable_identifier(paper: Any) -> bool:
 _DOI_AUDIT_MAX_SECONDS = 18
 _DOI_AUDIT_PER_REQUEST_SECONDS = 6
 _DOI_AUDIT_CONCURRENCY = 3
-
-
-def _normalise_title(title: str) -> str:
-    plain = html.unescape(re.sub(r"<[^>]*>", " ", title or ""))
-    return " ".join(re.findall(r"[\w]+", plain.casefold()))
 
 
 def _official_year(record: dict) -> int | None:
@@ -121,13 +115,13 @@ async def _audit_doi_metadata(papers: list[Any]) -> dict[str, int]:
                     pass
             titles = (record or {}).get("title") or [""]
             raw_title = titles[0] if isinstance(titles, list) else titles
-            official_title = _normalise_title(str(raw_title))
             official_year = _official_year(record or {})
             for paper in group:
-                supplied_title = _normalise_title(str(paper.get("title") or ""))
-                if not record or not official_title or not supplied_title:
+                fact = compare_reference_metadata(
+                    {"title": str(paper.get("title") or "")}, {"title": str(raw_title)})
+                if not record or fact["status"] == "unavailable":
                     status = {"status": "unverified", "source": "crossref"}
-                elif SequenceMatcher(None, supplied_title, official_title).ratio() < 0.78:
+                elif fact["status"] == "mismatch":
                     status = {"status": "title_mismatch", "source": "crossref",
                               "official_title": raw_title}
                 else:
@@ -140,6 +134,7 @@ async def _audit_doi_metadata(papers: list[Any]) -> dict[str, int]:
                                            "original_year": previous_year,
                                            "official_year": official_year})
                 paper["metadata_verification"] = status
+                paper["metadata_verification"]["identity_fact"] = fact
                 counts[status["status"]] += 1
     return counts
 

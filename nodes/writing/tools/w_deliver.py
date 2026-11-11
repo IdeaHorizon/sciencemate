@@ -62,6 +62,8 @@ async def _submit_manuscript(state: Any, force: bool = False, reason: str = "", 
     for p in sorted((mdir / "sections").glob("*.tex")):
         parts.append(f"% === included file: sections/{p.name} ===\n{p.read_text(encoding='utf-8')}")
     bib = (mdir / "refs.bib").read_text(encoding="utf-8") if (mdir / "refs.bib").is_file() else ""
+    from .w_bib import _read_bibliography
+    bibliography = await _read_bibliography(state)
     content = main + "\n\n" + "\n\n".join(parts) + "\n\n% === refs.bib ===\n" + bib
     pdf_path = render.get("pdf_path")
     metadata = {
@@ -72,6 +74,7 @@ async def _submit_manuscript(state: Any, force: bool = False, reason: str = "", 
         "referee_scores": referee.get("scores"), "author_notes_path": str(notes) if notes.is_file() else None,
         "sections": [p.stem for p in sorted((mdir / "sections").glob("*.tex"))],
         "bibliography_entries": (hl.get("H5_bibliography") or {}).get("n_entries"),
+        "bibliography_verification": bibliography.get("entries", []),
         "forced": bool(force), "force_reason": reason or None,
         "deliverable": True,
     }

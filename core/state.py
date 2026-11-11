@@ -787,6 +787,10 @@ class State:
             "at": datetime.now(timezone.utc).isoformat(),
             **payload,
         }
+        if event_type in {"run_start", "loop_start", "loop_resume", "tool_call", "interrupt_tool"}:
+            from core.runtime_build import facts
+
+            record["runtime_build"] = facts()
         if self.tenant_id:
             record["tenant_id"] = self.tenant_id
         if self.session_id:

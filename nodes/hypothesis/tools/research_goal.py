@@ -7,6 +7,7 @@ from core.state import State
 from core.tool_registry import ToolDefinition, register_tool
 
 from .dialogue_context import build_dialogue_context, format_dialogue_brief
+from .definition_lock import build_definition_lock, resolve_definition_lock
 
 _GOAL_FIELDS = ("title", "goals", "preferences", "constraints", "desirable_attributes")
 
@@ -47,6 +48,7 @@ def _opt_int(value: object) -> int | None:
 def parse_research_goal(
     node_inputs: dict[str, Any],
     dialogue: dict[str, Any] | None = None,
+    *, definition_lock: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Normalize node_inputs (+ optional dialogue) into structured research goal."""
     explicit = node_inputs.get("research_goal")
@@ -111,14 +113,10 @@ def parse_research_goal(
         # Promote pillars into goals so downstream scoring / prompts see them
         goal["goals"] = _merge_unique(must_cover, _as_list(goal.get("goals")))
 
-    locked_definitions = list(dialogue.get("locked_definitions") or [])
-    locked_labels = list(dialogue.get("locked_labels") or [])
-    if not locked_labels and locked_definitions:
-        locked_labels = [
-            str(e.get("label"))
-            for e in locked_definitions
-            if isinstance(e, dict) and e.get("label")
-        ]
+    lock = definition_lock if definition_lock is not None else build_definition_lock(
+        node_inputs, user_prompt=user_prompt)
+    locked_definitions = lock["locked_definitions"]
+    locked_labels = lock["locked_labels"]
 
     iteration = node_inputs.get("hypothesis_iteration") or {}
     if not isinstance(iteration, dict):
@@ -167,6 +165,7 @@ def parse_research_goal(
         "must_cover_themes": must_cover,
         "locked_definitions": locked_definitions,
         "locked_labels": locked_labels,
+        "definition_candidates": lock["definition_candidates"],
         "dialogue_context": {
             "user_prompt_source": dialogue.get("user_prompt_source"),
             "must_cover_themes": must_cover,
@@ -196,7 +195,8 @@ async def _get_research_goal(state: State, **_: Any) -> dict[str, Any]:
         inputs = {}
 
     dialogue = build_dialogue_context(state, inputs)
-    parsed = parse_research_goal(inputs, dialogue=dialogue)
+    parsed = parse_research_goal(inputs, dialogue=dialogue, definition_lock=resolve_definition_lock(
+        state, inputs, user_prompt=dialogue.get("user_prompt") or ""))
     state.hook_state["research_goal_parsed"] = parsed
     state.hook_state["dialogue_context"] = dialogue
 
@@ -255,6 +255,8 @@ register_tool(
             "  - 确认 goals / preferences / constraints / desirable_attributes\n"
             "  - 拿到最新 user_prompt、近期对话、从对话推断的禁做/只用约束\n"
             "  - 获取 hypothesis_iteration 预算\n\n"
+            "分类约束只来自显式 locked_taxonomy / operation_categories，带输入来源与 request 作用域；"
+            "definition_candidates 是文本线索，不能自升为只读 ontology。\n"
             "假设与 research_plan **必须**对齐返回的 user_prompt / must_cover_themes / "
             "locked_definitions；\n"
             "多支柱诉求禁止退化；用户分类定义禁止改写；上游 artifact 只是证据。\n"

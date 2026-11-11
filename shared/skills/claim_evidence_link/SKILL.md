@@ -1,24 +1,28 @@
 ---
 name: claim_evidence_link
 description: |
-  防止幻觉式叙述的硬规则。当你即将 create_claim 或在 analysis_report / manuscript 里
+  防止幻觉式叙述的硬规则。当你在研究状态、证据记录或 manuscript 里
   下定量结论时按本指引做：每个定量陈述必须能指到一个具体 chunk_id（artifact 走
   freeze_artifact，冻结返回里带 chunk_id）或外部 URI（doi:/arxiv:/https:）作为 source。
   不要用在：写 hypothesis / 设计文档 / 主观心得 —— 那些非定量陈述用
-  create_claim(claim_type='hypothesis') / memory_note 即可，evidence chain 由其它工具保证。
+  按本节点的设计产物或 memory_note 记录，不由本 skill 授予 KB 写权。
 applies_when:
-  - 写 analysis_report / writing 节点的论文 / 任何含定量结论的产出
+  - 写研究状态、观察记录、writing 节点的论文或任何含定量结论的产出
   - 上游有 artifact 可读，需要把结论锚定到证据
 tools_used:
   - list_artifacts
   - read_artifact
-  - read_external_artifact
 expected_outcome: 产出中**每一条**定量 claim 都标注了来源 artifact + 定位
 status: validated
 relevant_concepts: []
 ---
 
 ## 工作流
+
+只读当前节点可见产物，用 `list_artifacts` / `read_artifact` 获取；已绑定工作区文件可用
+`read_file`。`read_external_artifact` 仅在本节点实际授予该能力时使用。不可见的来源让调用方
+转交，或在获准调用 Literature 时委派查证；不要绕项目边界，也不要求开放额外读写权限。
+Observation 只写自己的证据记录；KB 的 create_claim 由 _curator 采纳时执行。
 
 1. **拿 artifact 全景**：用 `list_artifacts` 列出本节点可见的上游 artifact id
 2. **起草 claim**：写下你的断言（"X 比 Y 高 23%"，"p < 0.05"，"effect size = 0.42 ± 0.05"）

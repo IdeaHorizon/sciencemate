@@ -42,6 +42,7 @@ from nodes.data.planning.schemas import (
 from nodes.data.planning.store import PlanningStore, canonical_hash
 from nodes.data.planning.request_contract import (
     build_preprocessing_work_order,
+    canonical_asset_id,
     caller_request_text,
     normalize_preprocessing_request,
     requirement_authority_context,
@@ -1929,7 +1930,13 @@ def _deterministic_designer_fallback_plan(
     }
 
     for item in required_files:
-        item_id = _unique_slug(item.get("id") or item.get("name_or_role"), used_ids, "deliverable")
+        item_id = canonical_asset_id(item.get("id") or item.get("name_or_role"), "deliverable")
+        base_id = item_id
+        suffix = 2
+        while item_id in used_ids:
+            item_id = f"{base_id}_{suffix}"
+            suffix += 1
+        used_ids.add(item_id)
         outputs.append(item_id)
         role = _asset_contract_role(item)
         contract = normalize_asset_contract(item)
@@ -2656,10 +2663,10 @@ def _normalize_requirement_analysis(raw: dict[str, Any]) -> dict[str, Any]:
             item["parameter_binding_source"] = "caller_contract" if caller_asset else "analyst_inference"
         # Logical deliverable IDs cross Analyst, Designer, executor, Publisher,
         # and Reviewer boundaries.  Canonicalize them at the first boundary;
-        # normalizing only Designer outputs left stage contracts with ``F001``
-        # while the executable plan delivered ``f001``.
+        # use the request's alphabet here too: dots, case and hyphens are part
+        # of an asset identity, not instructions to rename its output file.
         if str(item.get("id") or "").strip():
-            item["id"] = _slug(str(item["id"]))
+            item["id"] = canonical_asset_id(item["id"])
         # An authorized embedded discretization needs a producer even when
         # its optional sizing defaults were omitted. Persist that fact once,
         # rather than letting later gates infer it from parameter-group shape.

@@ -160,23 +160,44 @@ async def resume(state, messages, *, turn: int) -> None:
         for key in ("project_id", "run_id", "tool", "arguments", "identity", "tool_call_id")
     }
     marker = "job-wait:" + hashlib.sha256(json.dumps(delivery, sort_keys=True).encode()).hexdigest()
+    from core.conversation_store import unresolved_tool_calls
+
+    unresolved = unresolved_tool_calls(messages)
     delivered = any(
-        (call_id and m.role == "tool" and m.tool_call_id == call_id) or marker in (m.content or "")
-        for m in messages
+        (call_id and m.role == "tool" and m.tool_call_id == call_id and call_id not in unresolved)
+        or marker in (m.content or "") for m in messages
     )
     if not delivered:
         from core import tool_registry
         from core.agent_loop import _inject_notice, _persist_messages_checkpoint
 
         result = await tool_registry.execute(value["tool"], state, **value["arguments"])
-        _inject_notice(
-            state,
-            messages,
-            turn=turn,
-            source="job_wait_resumed",
-            text=marker
-            + "\nHarness resumed the selected job wait:\n"
-            + json.dumps(result, ensure_ascii=False),
-        )
+        if call_id and call_id in unresolved:
+            from core.llm import LLMMessage
+
+            actual = LLMMessage(role="tool", tool_call_id=call_id, name=value["tool"],
+                                content=json.dumps(result, ensure_ascii=False))
+            # Replace the protocol repair placeholder, or close the actual saved
+            # assistant call. This is the original result identity, not a new call.
+            index = next((i for i, m in enumerate(messages)
+                          if m.role == "tool" and m.tool_call_id == call_id), None)
+            updated = list(messages)
+            if index is None:
+                index = next(i + 1 for i, m in enumerate(messages)
+                             if any(c.get("id") == call_id for c in (m.tool_calls or [])))
+                while index < len(messages) and messages[index].role == "tool":
+                    index += 1
+                updated.insert(index, actual)
+            else:
+                updated[index] = actual
+            from core.conversation_store import render_context_change
+
+            render_context_change(state, messages, updated, turn=turn, source="job_wait_resumed")
+        else:
+            _inject_notice(
+                state, messages, turn=turn, source="job_wait_resumed",
+                text=marker + "\nHarness resumed the selected job wait:\n"
+                + json.dumps(result, ensure_ascii=False),
+            )
         _persist_messages_checkpoint(state, messages, turn=turn)
     acknowledge(state)

@@ -7,6 +7,13 @@
 export const qk = {
   // Projects
   projects: () => ["projects"] as const,
+  remoteServers: () => ["remote-servers"] as const,
+  remoteAvailability: (id: string) => ["remote-availability", id] as const,
+  remoteSSHOptions: () => ["remote-servers", "ssh-options"] as const,
+  remoteOperation: (id: string | null) => ["remote-operation", id] as const,
+  projectFolders: (home: string | undefined, path: string | undefined) => ["project-folders", home ?? "local", path] as const,
+  runtimeModels: (id: string) => ["remote-servers", id, "models"] as const,
+  runtimeModelRoles: (id: string) => ["remote-servers", id, "model-roles"] as const,
   project: (id: string) => ["project", id] as const,
   projectMembers: (id: string) => ["project", id, "members"] as const,
 

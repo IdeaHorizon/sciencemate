@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import glob as _glob
 import json
+import shlex
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -50,7 +51,25 @@ CheckRunner = Callable[[Any, dict[str, Any]], Awaitable[dict[str, Any]]]
 
 # ── 证据 ─────────────────────────────────────────────────────────────────────
 
-def _producer_rows(records: list[dict[str, Any]], path: Path) -> list[dict[str, Any]]:
+class _OutputView:
+    """A derived index for one ledger snapshot, never a cross-check cache.
+
+    Expanding digest-checked observation sidecars belongs to the snapshot, not
+    to each delivered file. Keep observation order, including unknown writes
+    which invalidate an earlier producer.
+    """
+
+    def __init__(self, records: list[dict[str, Any]]) -> None:
+        self.by_path: dict[str, list[dict[str, Any]]] = {}
+        for row in _ledger.project_output_observations(records):
+            paths = {path for field in ("created", "modified", "unknown")
+                     for path in (row.get(field) or []) if isinstance(path, str)}
+            for path in paths:
+                self.by_path.setdefault(path, []).append(row)
+
+
+def _producer_rows(records: list[dict[str, Any]], path: Path, *,
+                   view: _OutputView | None = None) -> list[dict[str, Any]]:
     """Content provenance projected from before/after observations.
 
     A same-inode, same-content timestamp change cannot establish a new content
@@ -60,7 +79,7 @@ def _producer_rows(records: list[dict[str, Any]], path: Path) -> list[dict[str, 
     """
     key = str(path)
     out: list[dict[str, Any]] = []
-    for row in _ledger.project_output_observations(records):
+    for row in (view or _OutputView(records)).by_path.get(key, []):
         if key in (row.get("unknown") or []):
             out = []
             continue
@@ -125,14 +144,15 @@ def _identity_matches(frozen: dict[str, Any] | None, now: dict[str, Any]) -> tup
 
 def _file_evidence(state: Any, records: list[dict[str, Any]], ob: dict[str, Any], *,
                    allow_input_reference: bool = False,
-                   before_check: dict[str, Any] | None = None) -> dict[str, Any]:
+                   before_check: dict[str, Any] | None = None,
+                   view: _OutputView | None = None) -> dict[str, Any]:
     try:
         path = _obligations.resolve_path(state, ob["path"])
     except (ValueError, OSError, RuntimeError) as exc:
         return {"passed": False, "gap": "path_unavailable", "evidence": {"path": ob["path"], "error": str(exc)}}
     exists = path.is_file()
     size = path.stat().st_size if exists else 0
-    rows = _producer_rows(records, path) if exists else []
+    rows = _producer_rows(records, path, view=view) if exists else []
     evidence = {"path": str(path), "exists": exists, "bytes": size,
                 "producers": [r["action_id"] for r in rows]}
     if not exists:
@@ -177,7 +197,8 @@ def _file_evidence(state: Any, records: list[dict[str, Any]], ob: dict[str, Any]
 
 def _empty_directory_evidence(state: Any, records: list[dict[str, Any]], path: Path,
                               current: dict[str, Any], *,
-                              before_check: dict[str, Any] | None = None) -> dict[str, Any]:
+                              before_check: dict[str, Any] | None = None,
+                              view: _OutputView | None = None) -> dict[str, Any]:
     evidence: dict[str, Any] = {"path": str(path), "identity_now": current,
                                 "producers": [], "identity_adjustments": []}
     reference = _obligations.input_reference(state, path)
@@ -185,7 +206,7 @@ def _empty_directory_evidence(state: Any, records: list[dict[str, Any]], path: P
         evidence["input_reference"] = reference
         stable = before_check is None or _identity_matches(before_check, current)[0]
         return {"passed": stable, "gap": None if stable else "input_changed_during_check", "evidence": evidence}
-    rows = [row for row in _producer_rows(records, path)
+    rows = [row for row in _producer_rows(records, path, view=view)
             if _identity_matches(row.get("after"), current)[0]]
     evidence["producers"] = [row["action_id"] for row in rows]
     evidence["identity_adjustments"] = [aid for row in rows for aid in row.get("identity_adjustments", [])]
@@ -194,7 +215,8 @@ def _empty_directory_evidence(state: Any, records: list[dict[str, Any]], path: P
 
 def _directory_evidence(state: Any, records: list[dict[str, Any]], path: Path, *,
                         before_check: dict[str, Any] | None = None,
-                        before_members: dict[str, Any] | None = None) -> dict[str, Any]:
+                        before_members: dict[str, Any] | None = None,
+                        view: _OutputView | None = None) -> dict[str, Any]:
     """A directory is a bounded collection, not a file nor a provenance waiver.
 
     This is a C view of existing B observations, never another manifest owner.
@@ -236,6 +258,7 @@ def _directory_evidence(state: Any, records: list[dict[str, Any]], path: Path, *
             row.get("status") != "complete" for row in before_members.get("root_coverage", [])))
     if not before_complete:
         gaps.append({"path": str(path), "gap": "directory_before_observation_incomplete"})
+    view = view or _OutputView(records)
     for value, observed in entries.items():
         member = Path(value)
         kind = observed.get("kind")
@@ -243,14 +266,14 @@ def _directory_evidence(state: Any, records: list[dict[str, Any]], path: Path, *
             continue
         if kind == "dir":
             row = _empty_directory_evidence(state, records, member, observed,
-                    before_check=previous_entries.get(value))
+                    before_check=previous_entries.get(value), view=view)
         elif kind != "file":
             row = {"passed": False, "gap": "member_kind_unverified",
                    "evidence": {"path": value, "identity_now": observed}}
         else:
             row = _file_evidence(state, records, {"path": value, "non_empty": False},
                                  allow_input_reference=True,
-                                 before_check=previous_entries.get(value))
+                                 before_check=previous_entries.get(value), view=view)
         facts = row["evidence"]
         producers.update(facts.get("producers") or [])
         adjustments.update(facts.get("identity_adjustments") or [])
@@ -285,7 +308,8 @@ def _directory_evidence(state: Any, records: list[dict[str, Any]], path: Path, *
             "evidence": evidence}
 
 
-def _glob_evidence(state: Any, records: list[dict[str, Any]], ob: dict[str, Any]) -> dict[str, Any]:
+def _glob_evidence(state: Any, records: list[dict[str, Any]], ob: dict[str, Any], *,
+                   view: _OutputView | None = None) -> dict[str, Any]:
     try:
         pattern = str(_obligations.resolve_path(state, ob["pattern"]))
     except (ValueError, OSError, RuntimeError) as exc:
@@ -294,10 +318,11 @@ def _glob_evidence(state: Any, records: list[dict[str, Any]], ob: dict[str, Any]
     candidates: dict[str, dict[str, Any]] = {}
     fatal_actions = {str(row.get("action_id")) for row in records
                      if row.get("kind") == "action_settled" and row.get("fatal_signals")}
+    view = view or _OutputView(records)
     for path in matches:
         candidates[str(path)] = _file_evidence(
             state, records, {"path": str(path), "non_empty": False},
-            allow_input_reference=ob.get("source") == "model_interpretation")
+            allow_input_reference=ob.get("source") == "model_interpretation", view=view)
     attributed = [p for p, row in candidates.items() if row["passed"] and row["evidence"].get("producers")]
     reference_paths = {p for p, row in candidates.items() if row["passed"] and row["evidence"].get("input_reference")}
     unattributed = [str(p) for p in matches if str(p) not in attributed and str(p) not in reference_paths]
@@ -379,7 +404,9 @@ async def _default_check_runner(state: Any, ob: dict[str, Any]) -> dict[str, Any
                 "admission": admission, "risk_category": risk}
     cwd = str(_obligations.resolve_path(state, ob.get("cwd") or "."))
     roots = read_only_roots(state, cwd)
-    result = await _exec_and_log(state, ob["command"], timeout=int(ob.get("timeout_s") or 120),
+    scratch = shlex.quote(str(roots[0][0]))
+    command = f"export TMPDIR={scratch} TMP={scratch} TEMP={scratch}\n{ob['command']}"
+    result = await _exec_and_log(state, command, timeout=int(ob.get("timeout_s") or 120),
                                  cwd=cwd, sandbox_profile="bash", sandbox_roots=roots, _read_only_check=True)
     return {"exit_code": result.get("returncode"),
             "executed": type(result.get("returncode")) is int,
@@ -534,9 +561,10 @@ async def evaluate(state: Any, led: _ledger.Ledger, verification: Any = None,
     # Select necessary witnesses before ANY check executes. A check appearing
     # before a glob must not turn its post-check identity into a fake baseline.
     initial_globs = {}
+    view = _OutputView(records)
     for ob in applicable:
         if ob["kind"] == "glob":
-            row = _glob_evidence(state, records, ob)
+            row = _glob_evidence(state, records, ob, view=view)
             initial_globs[ob["id"]] = row
             if ob["required"]:
                 for selected in row["evidence"].get("selected_objects", []):
@@ -557,7 +585,7 @@ async def evaluate(state: Any, led: _ledger.Ledger, verification: Any = None,
                            "evidence": {"artifact_type": ob["artifact_type"], "frozen_by": "finish"}})
             continue
         if kind == "file":
-            row = _file_evidence(state, records, ob, allow_input_reference=ob.get("source") == "model_interpretation")
+            row = _file_evidence(state, records, ob, allow_input_reference=ob.get("source") == "model_interpretation", view=view)
         elif kind == "glob":
             row = initial_globs[ob["id"]]
         else:
@@ -569,6 +597,7 @@ async def evaluate(state: Any, led: _ledger.Ledger, verification: Any = None,
     # A check is itself a ledgered support action. Re-read after all checks so
     # contradictions and the delivery snapshot describe one final B view.
     records = led.records()
+    view = _OutputView(records)
     for index, obj in enumerate(objects.values()):
         name = f"delivery_object_{index}"
         path = Path(obj["path"])
@@ -576,10 +605,10 @@ async def evaluate(state: Any, led: _ledger.Ledger, verification: Any = None,
             row = {"passed": False, "gap": "path_unavailable", "evidence": obj}
         elif obj.get("before_check", {}).get("kind") == "dir":
             row = _directory_evidence(state, records, path, before_check=obj.get("before_check"),
-                                      before_members=obj.get("before_members"))
+                                      before_members=obj.get("before_members"), view=view)
         else:
             row = _file_evidence(state, records, {"path": str(path), "non_empty": False},
-                                 allow_input_reference=True, before_check=obj.get("before_check"))
+                                 allow_input_reference=True, before_check=obj.get("before_check"), view=view)
         checks.append({"name": name, "required": True, "assessment_kind": "delivery_object",
                        "passed": row["passed"], "evidence": row["evidence"]})
         if not row["passed"]:
@@ -1623,6 +1652,8 @@ register_tool(
             "检查命令是否通过、作业是否都已终态；success 站不住时一次告诉你缺口和可达的诚实 outcome。"
             "自然任务用 verification 说明原文要求与实际核验方法；不必先声明或重做已完成工作。"
             "模型负责解释覆盖，框架验证具体检查，不能把文件存在当作全部语义已满足。"
+            "核验命令只能读取任务文件；临时报告可写入 $TMPDIR（唯一可写 scratch），"
+            "不要在核验时覆写输入、源码或交付物。"
             "失败命令与任务失败分别判断：保留原退出码，核对适用的计算状态与结果；报告格式通过不能替代计算验收。"
             "诚实的非 success 收尾永远可达。"
             "已有交付后纠正文件或交付说明，仍用 finish；保留旧版本并重新核验，不重跑实验载荷。"

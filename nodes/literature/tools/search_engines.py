@@ -9,7 +9,7 @@ import json
 import os
 import time
 import hashlib
-import pickle
+import tempfile
 import sqlite3
 from datetime import datetime, UTC
 from pathlib import Path
@@ -1441,8 +1441,8 @@ class SearchManager:
             if per_source_limits is not None
             else None
         )
-        from core.paths import home as _hf_home
-        self._cache_dir = _hf_home() / "literature" / "search_cache"
+        from core.paths import literature_cache_dir
+        self._cache_dir = literature_cache_dir()
         self._cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _emit_progress(self, event: dict) -> None:
@@ -1455,27 +1455,38 @@ class SearchManager:
             pass
 
     def _cache_path(self, key: str) -> Path:
-        return self._cache_dir / f"{key}.pkl"
+        return self._cache_dir / f"{key}.json"
 
     def _load_cached_results(self, key: str):
         path = self._cache_path(key)
         if path.exists():
             try:
-                with open(path, 'rb') as f:
-                    return pickle.load(f)
-            except Exception:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if data.get("schema_version") != 1 or not isinstance(data.get("papers"), list):
+                    return None
+                if not all(isinstance(row, dict) for row in data["papers"]):
+                    return None
+                return [Paper(**row) for row in data["papers"]]
+            except (OSError, ValueError, TypeError, AttributeError):
                 return None
         return None
 
     def _save_cached_results(self, key: str, papers: list):
         path = self._cache_path(key)
+        temporary = None
         try:
-            with open(path, 'wb') as f:
-                # 只落**普通 list**：缓存格式与历史文件保持一致（存量 pkl 就是 list），
-                # 审计信息按调用现算，不进缓存（缓存跨调用复用，审计是本次调用的事实）。
-                pickle.dump(list(papers), f)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self._cache_dir,
+                                             suffix=".tmp", delete=False) as stream:
+                temporary = Path(stream.name)
+                json.dump({"schema_version": 1, "papers": [paper.to_dict() for paper in papers]},
+                          stream, ensure_ascii=False, allow_nan=False)
+            os.replace(temporary, path)
+            path.with_suffix(".pkl").unlink(missing_ok=True)
         except Exception:
             pass
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def _drop_cached_results(self, key: str) -> None:
         """作废某个 cache_key 的缓存文件。
@@ -1487,6 +1498,7 @@ class SearchManager:
         """
         try:
             self._cache_path(key).unlink(missing_ok=True)
+            self._cache_path(key).with_suffix(".pkl").unlink(missing_ok=True)
         except Exception:
             pass
 

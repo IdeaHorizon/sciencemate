@@ -18,6 +18,7 @@ from core.bootstrap import bootstrap
 from core.harness import NodeHarness
 from core.llm import LLMMessage, LLMResponse, framework_notice
 from core.state import State
+from core.conversation_store import apply_context_patch, jsonable_to_msg
 
 
 @pytest.fixture(autouse=True)
@@ -33,10 +34,7 @@ def _events(state):
 
 
 def _msg_from_dict(d):
-    return LLMMessage(
-        role=d.get("role"), content=d.get("content"),
-        tool_calls=d.get("tool_calls"), tool_call_id=d.get("tool_call_id"),
-        name=d.get("name"), reasoning_content=d.get("reasoning_content"))
+    return jsonable_to_msg(d)
 
 
 def _rebuild_and_check(state):
@@ -58,11 +56,20 @@ def _rebuild_and_check(state):
     for e in _events(state):
         ev = e.get("event")
         if ev == "loop_seed":
+            # A new seed replaces the whole request view. A response pending
+            # when the previous worker died is already represented by this seed.
+            pending_assistant.clear()
             rebuilt = [_msg_from_dict(d) for d in e["messages"]]
+        elif ev == "context_rendered":
+            _flush()
+            rebuilt = apply_context_patch(rebuilt, e["splices"])
         elif ev == "hook_injection" or ev == "finish_gate_blocked":
             _flush()
-            for role, content in zip(e["roles"], e["contents"]):
-                rebuilt.append(LLMMessage(role=role, content=content))
+            if "messages" in e:
+                rebuilt.extend(jsonable_to_msg(d) for d in e["messages"])
+            else:
+                for role, content in zip(e["roles"], e["contents"]):
+                    rebuilt.append(LLMMessage(role=role, content=content))
         elif ev == "framework_notice_injected":
             if e.get("source") == "truncation_recovery":
                 pending_assistant.clear()     # 那轮的 assistant 从未落进历史
@@ -84,7 +91,7 @@ def _rebuild_and_check(state):
             checked += 1
         elif ev == "llm_response":
             pending_assistant.append(LLMMessage(
-                role="assistant", content=e["content"] or None,
+                role="assistant", content=e["content"],
                 tool_calls=e["tool_calls_full"] or None,
                 reasoning_content=e.get("reasoning_content")))
         elif ev == "tool_result":
@@ -204,3 +211,74 @@ async def test_recovery_notice_participates_in_rebuild(tmp_path):
     assert notices and notices[0]["source"] == "truncation_recovery"
     assert len(notices[0]["text"]) > 100      # 全文，不是截样
     assert _rebuild_and_check(state) == 2     # 第二轮请求含 notice，digest 对上
+
+
+def test_request_digest_tracks_provider_fields_not_local_rendering_identity():
+    from dataclasses import replace
+    from core.llm import _msg_to_dict
+
+    plain = framework_notice("current snapshot")
+    local = replace(plain, context_slot="snapshot")
+    assert _msg_to_dict(plain) == _msg_to_dict(local)
+    assert digest_messages([plain]) == digest_messages([local])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restored", [False, True])
+@pytest.mark.parametrize("assistant_content", [None, ""])
+async def test_snapshot_replacement_and_empty_view_rebuild_every_request(
+        tmp_path, monkeypatch, restored, assistant_content):
+    from dataclasses import replace
+    from core import agent_loop
+    from core.loop_hooks import LoopHook, register_loop_hook
+
+    name = "replay_snapshot"
+    register_loop_hook(LoopHook(name=name, context_slot=name,
+        on_turn_start=lambda ctx: [framework_notice(f"snapshot {ctx.turn}")] if ctx.turn < 3 else None))
+    monkeypatch.setattr(agent_loop, "resolve_enabled_hook_names", lambda harness: [name])
+    state = State.new("_test", tmp_path / "snapshots")
+    messages = [LLMMessage(role="system", content="system")]
+    if restored:
+        messages.append(replace(framework_notice("previous process"), context_slot=name))
+        agent_loop._persist_messages_checkpoint(state, messages, turn=9)
+        messages, _ = agent_loop.load_messages_checkpoint(state)
+    class SilentToolTurn(_Scripted):
+        async def chat(self, messages, **kwargs):
+            response = await super().chat(messages, **kwargs)
+            if self.turn == 1:
+                response.content = assistant_content
+            return response
+
+    result = await run_loop(NodeHarness(node_type="_test", tools=["list_artifacts"], max_turns=4),
+                            state, messages, SilentToolTurn())
+    assert result.status == "completed"
+    assert _rebuild_and_check(state) == 3
+    assert not any(m.context_slot == name for m in result.messages)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_rollback_rebuilds_the_next_request(tmp_path, monkeypatch):
+    from core import agent_loop
+    from core.loop_hooks import LoopHook, register_loop_hook
+
+    name = "replay_snapshot_rollback"
+    register_loop_hook(LoopHook(name=name, context_slot=name,
+        on_turn_start=lambda ctx: [framework_notice(f"snapshot {ctx.turn}")]))
+    monkeypatch.setattr(agent_loop, "resolve_enabled_hook_names", lambda harness: [name])
+    monkeypatch.setattr(agent_loop, "_VOID_RETRY_DELAYS", (0,))
+
+    class VoidThenDone:
+        calls = 0
+
+        async def chat(self, messages, **kwargs):
+            self.calls += 1
+            return LLMResponse(content="" if self.calls == 1 else "done", tool_calls=[],
+                usage={"completion_tokens": 1 if self.calls == 1 else 10},
+                finish_reason="stop", protocol_leak=self.calls == 1,
+                leak_kind="empty" if self.calls == 1 else None)
+
+    state = State.new("_test", tmp_path / "rollback")
+    result = await run_loop(NodeHarness(node_type="_test", max_turns=3), state,
+                            [LLMMessage(role="system", content="system")], VoidThenDone())
+    assert result.status == "completed"
+    assert _rebuild_and_check(state) == 2

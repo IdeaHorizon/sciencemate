@@ -145,9 +145,9 @@ blocking_check_aggregates:
 #   python tests/test_model_commands_reach_the_os_through_one_throat.py
 subprocess_call_sites:
   - file: core/ssh_transport.py
-    sites: [call]
+    sites: [call, _windows_askpass]
     argv_source: framework
-    reason: "已认证 Project Resource 的 SSH 控制面：本机只执行固定 OpenSSH + 框架提供的远端 Python 模板，账号/目标来自经服务层校验且与凭据绑定的登记；模型命令只通过 JSON stdin 送到已授权远程账户，不插入本机 shell。进程组由 process_control 接管；远端运行器作为模板数据上传，不在本机导入。"
+    reason: "已认证 Project Resource 的 SSH 控制面：固定 OpenSSH + 框架远端 Python 模板，模型命令仅经 JSON stdin。Windows 密码辅助程序只编译固定随包 C#，密码仅在 SSH/askpass 子进程环境，绝不进入编译源文件或命令行；进程由 process_control 接管。"
   - file: shared/lib/cancellable_subprocess.py
     sites: [spawn_and_wait, spawn_and_wait]
     argv_source: throat

@@ -4,11 +4,11 @@ English | [简体中文](README.zh-CN.md)
 
 Install it, open it, and say what you want to research — it writes the code, runs the computation, reads the results, and writes the paper.
 
-Data and computation stay **on your own machine**: every project is a local git repository, and model keys are stored encrypted on that machine only. Python, git, LaTeX (tectonic), and a bash shell for running experiments ship with the app — **nothing to set up first**.
+Data and computation stay **on your own machine or a personal Linux server you choose**: every project is a git repository on its selected machine, and model keys are stored encrypted there. Python, git, LaTeX (tectonic), and a bash shell for running experiments ship with the app — **nothing to set up first**.
 
-- Current version: [v0.5.13](../../releases/tag/v0.5.13) · [Download for macOS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.13/ScienceMate-0.5.13-arm64.dmg) · [Download for Windows](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.13/ScienceMate-Setup.exe) · changelog in [Releases](../../releases)
+- Current version: [v0.5.14](../../releases/tag/v0.5.14) · [Download for macOS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.14/ScienceMate-0.5.14-arm64.dmg) · [Download for Windows](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.14/ScienceMate-Setup.exe) · changelog in [Releases](../../releases)
 - This repository holds the **source code** of the Personal edition and its **releases** (installers and updates). The installers are built from this tree; see [DEVELOPMENT.md](DEVELOPMENT.md) to run it from source.
-- This is the **Personal edition**: everything runs on your own machine. The Professional edition adds a shared organization server for teams and is not distributed here.
+- This is the **Personal edition**: projects run on this computer by default, with optional personal Linux servers over SSH. The Professional edition adds a shared organization server for teams and is not distributed here.
 
 ## A look at the interface
 
@@ -20,8 +20,10 @@ Open a research session inside a project and say what you need in the input box 
 
 ## What it does
 
-- **One sentence in, a study out** — code, computation, results, and a written paper, all on your own machine
-- **Projects are git repositories** — one local repo per project; git is the record of what changed and when
+- **Personal remote runtimes** — select a Linux server and its root folder when creating a project; remote workers continue after Desktop closes. Configure SSH and server-side models in Settings → Runtime environments.
+
+- **One sentence in, a study out** — code, computation, results, and a written paper, on your computer or chosen personal server
+- **Projects are git repositories** — one repository per project on its selected machine; git is the record of what changed and when
 - **Research intelligence built in** — follow fields, journals, and scholars; the feed uses them to pick what is worth your time; literature search in English and Chinese
 - **Figures** — charts are laid out to a print type area, and the type area decides the canvas; data plots follow a design contract
 - **Experiment nodes** — experiment orchestration with run contracts and output postconditions
@@ -32,10 +34,10 @@ Open a research session inside a project and say what you need in the input box 
 
 | Platform | Download | Size |
 |---|---|---|
-| macOS (Apple Silicon) | [ScienceMate-0.5.13-arm64.dmg](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.13/ScienceMate-0.5.13-arm64.dmg) | 468 MiB |
-| Windows 10 / 11 (64-bit) | [ScienceMate-Setup.exe](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.13/ScienceMate-Setup.exe) | 497 MiB |
+| macOS (Apple Silicon) | [ScienceMate-0.5.14-arm64.dmg](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.14/ScienceMate-0.5.14-arm64.dmg) | See release assets |
+| Windows 10 / 11 (64-bit) | [ScienceMate-Setup.exe](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.14/ScienceMate-Setup.exe) | See release assets |
 
-Checksums: [SHA256SUMS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.13/SHA256SUMS) · all files: [Releases](../../releases/latest)
+Checksums: [SHA256SUMS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.14/SHA256SUMS) · all files: [Releases](../../releases/latest)
 
 - **macOS**: open the dmg and drag ScienceMate into Applications. The first launch is blocked once because the app is not yet signed: **System Settings → Privacy & Security → scroll down → "Open Anyway"**, then confirm. One time per machine.
 - **Windows**: run `ScienceMate-Setup.exe`. If SmartScreen shows "Windows protected your PC", click **More info → Run anyway**. One time per machine.
@@ -122,7 +124,7 @@ On first launch it asks three things. Every step can be skipped, and anything yo
 
 Then walk through a real task. Say you have experiment data you want to understand:
 
-**① Create a project**, give it a name, and drop your data file (say `runs.csv`) into it — a local git repository is created for the project.
+**① Create a project**, give it a name, and drop your data file (say `runs.csv`) into it — a git repository is created on the selected machine.
 
 ![New project: just give it a name](docs/new-project.png)
 

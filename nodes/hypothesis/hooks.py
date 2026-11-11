@@ -198,13 +198,6 @@ async def _auto_validation_on_end(ctx: HookContext, _loop_result: Any) -> None:
     )
 
 
-_DEFAULT_REQUIRED_OUTPUTS = (
-    "research_state",
-    "pre_registration",
-    "research_plan",
-    "hypothesis_innovation_report",
-    "hypothesis_research_overview",
-)
 _PROGRESS_ARTIFACT_TYPES = frozenset({
     "pre_registration",
     "research_plan",
@@ -216,9 +209,15 @@ _PROGRESS_ARTIFACT_TYPES = frozenset({
 })
 
 
+def _required_outputs(ctx: HookContext) -> list[str]:
+    from nodes.hypothesis.tools.analysis_mode import current_mode
+
+    return ctx.harness.required_outputs_for({"mode": current_mode(ctx.state)})
+
+
 def _completion_gate_snapshot(ctx: HookContext) -> dict[str, Any]:
     """机械快照：缺哪些 required、validate 是否已过。"""
-    required = list(ctx.harness.required_outputs or _DEFAULT_REQUIRED_OUTPUTS)
+    required = _required_outputs(ctx)
     produced = {a["type"] for a in ctx.state.list_artifacts()}
     missing = [t for t in required if t not in produced]
 
@@ -318,7 +317,8 @@ def _missing_outputs_nudge_on_turn_start(ctx: HookContext) -> list[LLMMessage] |
             "不要空转多次 save+freeze。"
         )
 
-    if ctx.state.hook_state.pop(_OVERVIEW_AFTER_FREEZE_NUDGE_KEY, None):
+    if (ctx.state.hook_state.pop(_OVERVIEW_AFTER_FREEZE_NUDGE_KEY, None)
+            and "hypothesis_research_overview" in _required_outputs(ctx)):
         notes.append(
             "[hypothesis] freeze 已多次卡在 capital_basis，且 hypothesis_research_overview "
             "仍缺失。请先 "
@@ -329,7 +329,7 @@ def _missing_outputs_nudge_on_turn_start(ctx: HookContext) -> list[LLMMessage] |
         )
 
     if ctx.state.hook_state.get(_TRUNCATED_TURN_KEY) == ctx.turn - 1:
-        required = set(ctx.harness.required_outputs or [])
+        required = set(_required_outputs(ctx))
         produced = {a["type"] for a in ctx.state.list_artifacts()}
         missing = required - produced
         if missing:
@@ -495,7 +495,8 @@ async def _fix_capital_basis_metadata_on_turn_end(ctx: HookContext) -> None:
 
     # 3) After repeated freeze stalls, nudge overview before burning more turns.
     produced = {a["type"] for a in ctx.state.list_artifacts()}
-    if fails >= 2 and "hypothesis_research_overview" not in produced:
+    if (fails >= 2 and "hypothesis_research_overview" not in produced
+            and "hypothesis_research_overview" in _required_outputs(ctx)):
         ctx.state.hook_state[_OVERVIEW_AFTER_FREEZE_NUDGE_KEY] = True
 
 

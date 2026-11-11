@@ -51,6 +51,7 @@ export interface EnvironmentRepair {
 }
 
 export interface EnvironmentRepairResult {
+  status?: "executed" | "cancelled" | "not_started" | "unknown";
   code: string;
   path: string | null;
   command: string | null;
@@ -168,7 +169,14 @@ function factLines(w: EnvironmentWarning, lang: Language): string[] {
   if (w.repair_attempt) out.push(say({ zh: "自动修复失败：{why}", en: "Automatic repair failed: {why}" }, lang, { why: w.repair_attempt }));
   if (w.backup) out.push(say({ zh: "原文件已备份到：{backup}", en: "The original was backed up to: {backup}" }, lang, { backup: w.backup }));
   if (w.repair_result) {
-    out.push(say({ zh: "已执行 `{command}`，返回码 {rc}", en: "Ran `{command}`, exit code {rc}" }, lang, {
+    const status = w.repair_result.status;
+    if (status === "cancelled") {
+      out.push(say({ zh: "管理员授权已取消，修复未执行。", en: "Administrator approval was cancelled; the repair did not run." }, lang));
+    } else if (status === "not_started") {
+      out.push(say({ zh: "修复未能启动。", en: "The repair could not start." }, lang));
+    } else if (w.repair_result.returncode === null) {
+      out.push(say({ zh: "修复执行结果尚未确认。", en: "The repair's execution result is not confirmed." }, lang));
+    } else out.push(say({ zh: "已执行 `{command}`，返回码 {rc}", en: "Ran `{command}`, exit code {rc}" }, lang, {
       command: w.repair_result.command ?? "",
       rc: w.repair_result.returncode === null ? "?" : String(w.repair_result.returncode),
     }));

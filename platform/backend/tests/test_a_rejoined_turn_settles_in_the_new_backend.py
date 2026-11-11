@@ -414,3 +414,31 @@ async def test_the_real_lifespan_wires_the_adoption_handler(monkeypatch, db_engi
     finally:
         lifecycle.reset_for_tests()
         harness_session_manager.set_adoption_handler(None)
+
+
+@pytest.mark.asyncio
+async def test_a_broken_control_connection_rejoins_the_same_worker_and_request(adoption_wired, seeded):
+    item, factory = seeded
+    request_id = "turn-disconnect"
+    declare_activity(item.state_root, pid=item.proc.pid, spawn_token=TOKEN, state="working",
+                     turn_id=request_id, app_binding=item.binding())
+    await _adopt_through_the_real_entry(factory)
+    await _rejoin_is_waiting(item, request_id)
+    session = harness_session_manager._sessions[
+        harness_session_manager._key(item.project_id, item.session_id)]
+    original_channel = session.channel
+    original_channel.close()
+    await _wait_until(lambda: session.channel is not original_channel, timeout=15,
+                      what="restore control connection without replacing the worker")
+    assert item.proc.poll() is None and session.worker.pid == item.proc.pid
+    declare_activity(item.state_root, pid=item.proc.pid, spawn_token=TOKEN, state="idle")
+    cue(item.cue_dir, type="result", request_id=request_id,
+        data=_completed_result(item, request_id, "same worker finished"))
+    await _wait_until(lambda: detached_execution_count(REJOIN_KIND) == 0, timeout=30,
+                      what="settle the reconnected request")
+    async with factory() as db:
+        assert (await db.get(Run, item.run_id)).status == "completed"
+        assert (await db.get(Command, item.command_id)).result["status"] == "completed"
+        replies = (await db.scalars(select(SessionMessage).where(
+            SessionMessage.run_id == item.run_id, SessionMessage.role == "assistant"))).all()
+        assert [message.content for message in replies] == ["same worker finished"]

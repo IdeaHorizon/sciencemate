@@ -29,6 +29,7 @@ import hashlib
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -271,6 +272,30 @@ def bind_project_workspace(state: Any, project_worktree: Path | str | None) -> N
     state.hook_state["_project_workspace_expected_head"] = _git(root, "rev-parse", "HEAD").strip()
 
 
+def run_scratch_directory(state: Any) -> Path:
+    r"""Stable private scratch, compact enough for Windows process cwd.
+
+    CreateProcess does not accept a long current directory, even with a \\?\
+    prefix. Keep the run ID/state directory unchanged and place only its private
+    scratch under the Project's already ignored runtime tree when needed.
+    """
+    path = Path(state.root) / "scratch"
+    project = getattr(state, "project_worktree", None)
+    if sys.platform == "win32" and len(str(path)) >= 248 and project is not None:
+        key = hashlib.sha256(str(Path(state.root).resolve()).encode("utf-8")).hexdigest()[:24]
+        path = Path(project) / ".research" / "runtime" / "cwd" / key
+    return path
+
+
+def private_run_roots(state: Any) -> tuple[Path, ...]:
+    root = Path(state.root).resolve(strict=False)
+    if str(getattr(state, "node_type", "")) in _SCRATCH_ANCHORED:
+        scratch = run_scratch_directory(state).resolve(strict=False)
+        if not scratch.is_relative_to(root):
+            return root, scratch
+    return (root,)
+
+
 def working_directory(state: Any) -> Path:
     """Return the default cwd for model-controlled file and process tools.
 
@@ -286,7 +311,7 @@ def working_directory(state: Any) -> Path:
             # 调度器没有私人抽屉：相对路径落 run 目录的 scratch/，不落记录。
             # 产物锚点（core/paths._node_anchor）仍在它的作用域 notes/ ——
             # 这是刻意的分叉：草稿归 run，产物归记录。
-            path = Path(state.root) / "scratch"
+            path = run_scratch_directory(state)
     else:
         from core.paths import node_outputs_root
 
@@ -417,6 +442,10 @@ def _relative_candidates(
         return _Candidates(out, out[0])
 
     # ── 以下只在读侧 ──────────────────────────────────────────────────
+    if str(getattr(state, "node_type", "")) in _SCRATCH_ANCHORED:
+        # Existing absolute receipts keep their old paths. A relative read can
+        # still find a pre-upgrade draft without moving any historical bytes.
+        out.append((Path(state.root) / "scratch" / path).resolve(strict=False))
     own = _own_node_package(state)
     if (own is not None and len(parts) > 1 and parts[0] == "nodes"
             and parts[1] == str(getattr(state, "node_type", "") or "")):
@@ -438,6 +467,17 @@ def resolve_tool_path(state: Any, value: str, *, write: bool = False) -> Path:
     logical prefix for Platform-bound runs while preserving explicit run-state
     paths such as ``artifacts/...`` for read-only inspection.
     """
+    if sys.platform == "win32" and str(value).startswith("/"):
+        from core.execution_target import current
+        from core.isolation import target_paths
+
+        if current().kind == "wsl":
+            mapped = target_paths().to_windows(str(value))
+            if mapped is None:
+                raise ProjectWorkspaceError(
+                    f"WSL path has no host tool mapping: {value!r}; use a mapped Project path"
+                )
+            value = mapped
     path = Path(value).expanduser()
     if getattr(state, "project_worktree", None) is None:
         resolved = (
@@ -470,9 +510,9 @@ def resolve_tool_path(state: Any, value: str, *, write: bool = False) -> Path:
     else:
         resolved = _first_existing(
             _relative_candidates(state, project_root, path, write=write))
-    run_root = Path(state.root).resolve()
-    if resolved == run_root or resolved.is_relative_to(run_root):
-        return resolved
+    for private_root in private_run_roots(state):
+        if resolved == private_root or resolved.is_relative_to(private_root):
+            return resolved
     if not (resolved == project_root or resolved.is_relative_to(project_root)):
         # 节点自己的 package（nodes/<own type>/）是**只读**例外。harness.yaml 里
         # 白纸黑字写着 `read_file('nodes/_reviewer/specs/project_synthesis.md')`

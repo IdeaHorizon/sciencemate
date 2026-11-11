@@ -11,9 +11,13 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 try:
-    from .bash_paths import normalize_bash_path, shell_path_resolution
+    from .bash_paths import (
+        is_bash_absolute, resolve_bash_cwd, shell_path_resolution,
+    )
 except ImportError:  # pragma: no cover - node runtime import style
-    from tools.bash_paths import normalize_bash_path, shell_path_resolution
+    from tools.bash_paths import (
+        is_bash_absolute, resolve_bash_cwd, shell_path_resolution,
+    )
 
 try:
     import tree_sitter_bash
@@ -1404,16 +1408,17 @@ def _cwd_success_after_cd(incoming: CwdDomain,
         return CwdDomain(unknown=True)
     if operand.startswith("<"):
         return _cwd_domain((operand,))
-    if os.path.isabs(operand):
-        resolved = normalize_bash_path(operand)
-        return (_cwd_domain((resolved,)) if resolved is not None
-                else CwdDomain(unknown=True))
-    values = [
-        base if base.startswith("<")
-        else os.path.abspath(os.path.join(base, operand))
+    if is_bash_absolute(operand):
+        absolute = resolve_bash_cwd(operand, None)
+        return _cwd_domain((absolute,)) if absolute is not None else CwdDomain(unknown=True)
+    resolved = [
+        base if base.startswith("<") else resolve_bash_cwd(operand, base)
         for base in incoming.values
     ]
-    return _cwd_domain(values, unknown=incoming.unknown)
+    return _cwd_domain(
+        [path for path in resolved if path is not None],
+        unknown=incoming.unknown or any(path is None for path in resolved),
+    )
 
 
 def _append_path_event(result: BashAnalysis, event: StaticPathEvent) -> None:

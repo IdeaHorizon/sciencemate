@@ -88,6 +88,10 @@ _ALWAYS_ON_TOOLS: tuple[str, ...] = (
 
 def _with_always_on_tools(declared: list, node_type: str, skills: list | None = None) -> list[str]:
     tools = [str(t) for t in declared]
+    # Context eviction advertises this read path for every node, including
+    # system nodes. It reads the current run log, never re-enters an effect.
+    if "read_tool_result" not in tools:
+        tools.append("read_tool_result")
     # ── 声明了 skill 就必须够得着 skill 正文（v3.9.1）────────────────────────
     #
     # 两级加载之后 system_prompt 里只剩 L1 索引，正文要另取。取正文的通道是

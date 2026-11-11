@@ -32,6 +32,9 @@ _SERVER_DATABASE_URL_DEFAULT = "postgresql+asyncpg://postgres:postgres@localhost
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
+    # Set only by the headless personal-runtime installer; desktop installs stay implicit-local.
+    remote_runtime_token: str = Field(default="", repr=False)
+
     #: 这台 App Server 的起法。**只有 config.py 与 assembly.py 读它**
     #: （RFC_RESEARCH_BUDDY R2：档位只在装配处生效）。
     #:

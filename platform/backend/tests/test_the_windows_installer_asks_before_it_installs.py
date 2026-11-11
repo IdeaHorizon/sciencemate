@@ -62,6 +62,15 @@ def _the_compile_units() -> dict[str, list[Path]]:
     `System.Drawing`，逼它 STA 是无缘无故。
     """
     tree = ast.parse(BUILD.read_text(encoding="utf-8"))
+
+    def source_path(node: ast.AST) -> Path:
+        if isinstance(node, ast.Name) and node.id in {"REPO", "SHELL_DIR"}:
+            return REPO if node.id == "REPO" else WINDOWS_SHELL
+        if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+                and isinstance(node.right, ast.Constant) and isinstance(node.right.value, str)):
+            return source_path(node.left) / node.right.value
+        raise AssertionError(f"Cannot resolve C# compile source: {ast.dump(node)}")
+
     units: dict[str, list[Path]] = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
@@ -74,10 +83,11 @@ def _the_compile_units() -> dict[str, list[Path]]:
             if not (isinstance(first, ast.List) and first.elts
                     and isinstance(first.elts[0], ast.Name) and first.elts[0].id == "CSC"):
                 continue
-            sources = [WINDOWS_SHELL / n.value
+            sources = [source_path(n)
                        for n in ast.walk(call)
-                       if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                       and n.value.endswith(".cs")]
+                       if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div)
+                       and isinstance(n.right, ast.Constant) and isinstance(n.right.value, str)
+                       and n.right.value.endswith(".cs")]
             if sources:
                 units[node.name] = sources
     return units

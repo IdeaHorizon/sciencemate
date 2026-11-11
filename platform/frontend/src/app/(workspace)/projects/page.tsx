@@ -9,6 +9,7 @@ import { ProjectRootFolder } from "@/features/projects/ProjectRootFolder";
 import { otherHomes } from "@/features/projects/homes";
 import { useCreateProject } from "@/features/projects/hooks/useProjects";
 import { api } from "@/lib/api";
+import { changeProjectRuntime } from "@/lib/remote-runtime";
 import { Button } from "@/shared/ui";
 import { useT } from "@/shared/i18n";
 
@@ -44,7 +45,7 @@ export default function ProjectsPage() {
     const isContinuous = form.operation_mode === "continuous";
     const created = await createProject.mutateAsync({
       ...form,
-      root_folder: form.home ? undefined : form.root_folder?.trim() || undefined,
+      root_folder: form.home && !form.home.startsWith("remote:") ? undefined : form.root_folder?.trim() || undefined,
       operation_mode: isContinuous ? "autonomous" : form.operation_mode,
       description: form.description.trim() || undefined,
       research_domain: form.research_domain.trim() || undefined,
@@ -99,9 +100,10 @@ export default function ProjectsPage() {
               <label><span>{t({ zh: "研究方向", en: "Research domain" })}</span><input value={form.research_domain} onChange={(e) => setForm({ ...form, research_domain: e.target.value })} placeholder={t({ zh: "流体力学", en: "Materials science" })} /></label>
               <label><span>{t({ zh: "研究说明", en: "Research brief" })}</span><textarea rows={4} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder={t({ zh: "想解决什么问题、有什么限制、希望得到什么结果。", en: "Describe the question, constraints and desired result." })} /></label>
               <WhereItLives value={form.home}
-                            onChange={(home) => setForm({ ...form, home, root_folder: null })}
+                            onChange={(home) => setForm({ ...form, ...changeProjectRuntime(home) })}
                             onAddOne={() => setAddingHome(true)} />
-              {!form.home && <ProjectRootFolder value={form.root_folder}
+              {(!form.home || form.home.startsWith("remote:")) && <ProjectRootFolder key={form.home} value={form.root_folder}
+                serverId={form.home || undefined}
                 onChange={(root_folder) => setForm((current) => ({ ...current, root_folder }))}
                 disabled={createProject.isPending} />}
               <details className="project-create-advanced">

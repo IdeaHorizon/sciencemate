@@ -39,7 +39,7 @@
  "nodes/experiment/tools/external_submission_recovery.py": 10,
  "nodes/experiment/tools/operation_completion.py": 26,
  "nodes/experiment/tools/probe_toolchain.py": 2,
- "nodes/experiment/tools/resource_fetch.py": 30,
+ "nodes/experiment/tools/resource_fetch.py": 28,
  "nodes/experiment/tools/resource_manager.py": 96,
  "nodes/experiment/tools/run_contract.py": 2,
  "nodes/experiment/tools/safe_bash.py": 27,

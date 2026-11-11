@@ -79,7 +79,7 @@ v0.5 起一等公民是**研究问题**；**写了 `proposition` 的问题就是
 - `claim_text` 是否**没有**重复 scope 信息（scope 只该放结构化字段，避免同假设字面不同被当不同 claim）
 - **是否对齐用户 prompt / 对话约束**（读 producer 的 `get_research_goal` 产物或 pre_registration 前言）：假设方向是否回答了用户最新诉求，而不是只复述 survey？
 - **是否发生任务退化**：用户 `must_cover_themes`（或多支柱诉求）是否被收窄成单一小点？哪怕该小点可证伪性很好，若丢掉其它支柱 → 低分
-- **是否改写用户分类定义**：`locked_definitions` 的类别名/定义是否被重命名、合并或换成文献 taxonomy？若实验对象已变 → 低分/critical
+- **显式分类约束（适用时）**：核对请求 locked_taxonomy / operation_categories 的 source 与 request 作用域，再检查是否被擅自重命名、合并或替换。不从任意列表、状态刷新文案、派生缓存或历史审计中建立新约束。实验对象确有改变时按具体证据评价。
 - 5 分：每个 hypothesis scope 明确且**正交**，合集覆盖全部 must_cover，**且**分类定义与用户 proposal 一致，并显式服务 user_prompt
 - 1 分：scope 全空、scope 信息硬塞 claim_text，或把复杂诉求退化成 survey 窄 gap / 单一小点，或改写了用户操作类别
 ### 3. Baseline 选择合理性 (baseline_reasonableness)

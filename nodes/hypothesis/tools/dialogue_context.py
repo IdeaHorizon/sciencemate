@@ -16,7 +16,7 @@ from typing import Any
 
 from core.state import State
 
-from .definition_lock import build_definition_lock
+from .definition_lock import resolve_definition_lock
 
 _USER_PROMPT_KEYS = (
     "user_prompt",
@@ -295,19 +295,22 @@ def build_dialogue_context(
     parsed_themes = extract_must_cover_themes(user_prompt or "")
     must_cover = _dedupe_themes([*from_inputs_themes, *parsed_themes])
 
-    def_lock = build_definition_lock(inputs, user_prompt=user_prompt)
+    def_lock = resolve_definition_lock(state, inputs, user_prompt=user_prompt or "")
     locked_definitions = def_lock["locked_definitions"]
     locked_labels = def_lock["locked_labels"]
 
     recent_users = [t["content"] for t in dialogue_turns if t["role"] == "user"]
 
+    from core.loader import load_harness
+    from .analysis_mode import resolve_mode
+
+    mode = resolve_mode(state, inputs)["mode"]
+    required = load_harness("hypothesis").required_outputs_for({"mode": mode})
     grounding = [
         # Completion gate first — extra audits must not burn the turn budget.
-        "【完成闸优先】先闭合 required outputs（research_state / pre_registration / "
-        "research_plan / hypothesis_innovation_report / hypothesis_research_overview）"
+        f"【完成闸优先】本轮 mode={mode}，先闭合 required outputs（{' / '.join(required)}）"
         "与 validate_hypothesis_outputs(passed=true)；额外 audit/cluster/evolve 不得挤占轮次",
-        "【完成闸优先】有 prereg 或 HIF 后尽早 save research_plan + overview + "
-        "research_state，并立刻跑 validate；失败项当场修，勿先堆更多 audit artifact",
+        "【完成闸优先】按本轮交付契约保存产物后尽早 validate；沿用已有科学承诺时不为补格式重新生成或冻结协议",
         "禁止把多支柱用户诉求退化成其中单一小点；must_cover_themes 须全部覆盖",
         "最终 hypothesis 集合 + research_plan 合集必须覆盖全部 must_cover_themes",
         "research_plan / computational_workflow 必须遵守 inferred_constraints 与对话中的禁做/只用约束",
@@ -325,6 +328,7 @@ def build_dialogue_context(
         "must_cover_themes": must_cover,
         "locked_definitions": locked_definitions,
         "locked_labels": locked_labels,
+        "definition_candidates": def_lock["definition_candidates"],
         "recent_user_turns": recent_users[-5:],
         "recent_dialogue": dialogue_turns,
         "inferred_constraints": inferred_constraints,

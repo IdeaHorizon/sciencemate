@@ -7,6 +7,7 @@ from typing import Any
 from core.tool_registry import ToolDefinition, register_tool
 
 from .w_brief import load_brief, load_outline
+from .w_bib import _read_bibliography
 from .w_common import (
     bounded_llm, clip, extract_json, figure_text_sample, graphics_files, load_genre, manuscript_dir, paper_dir,
     read_json, worktree_root, write_json,
@@ -70,6 +71,10 @@ async def _referee_review(state: Any, focus: str = "", **_: Any) -> dict:
     pages = pages_path.read_text(encoding="utf-8").split("\f")
     text = "\n".join(f"===== 第 {i} 页 =====\n{p}" for i, p in enumerate(pages, start=1))
     hl = render.get("hard_lines") or {}
+    bibliography = await _read_bibliography(state)
+    reference_facts = [{"key": r["key"], **{k: v for k, v in r["check"].items()
+                       if k in ("status", "scope", "comparisons", "reason", "legacy_observation")}}
+                      for r in bibliography.get("entries", [])]
     system = "\n\n".join([
         "你是独立审稿人。你读到的是排好版的 PDF 逐页文字。按规则先判硬线，再打软维，再给带页码、可执行的意见。只输出 JSON。",
         genre["rubric"],
@@ -78,6 +83,8 @@ async def _referee_review(state: Any, focus: str = "", **_: Any) -> dict:
     user = "\n\n".join([
         f"# 简报\n{json.dumps(brief, ensure_ascii=False, indent=1)}",
         f"# 框架机械硬线结果（供参考，你仍要自己核）\n{json.dumps({k: {'passed': v.get('passed')} for k, v in hl.items() if k.startswith('H')}, ensure_ascii=False)}",
+        ("# 参考文献事实（unavailable 是未知；标识可达与书目身份均不证明引用支持）\n"
+         + json.dumps(reference_facts, ensure_ascii=False)),
         (f"# 本轮重点\n{focus}" if focus else ""),
         ("# 图文件对照（你看不见图。图表服务记录说明每个文件画的是什么；稿件图题与正文对这张图的描述必须与记录说的是同一张图，"
          f"文件放错、图题张冠李戴一律 critical）\n{_figure_crosswalk(state)}"),

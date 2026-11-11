@@ -144,7 +144,8 @@ async def run_repair(db: AsyncSession, *, project_id: str, session_id: str, code
         raise RepairRefused("这个问题已不存在，请刷新页面。",
                             en="This problem no longer applies to this Session. Refresh the page.")
     warning = matching[0]
-    proposal = facts.repair_proposal(code, error=warning.get("error"), data_root=the_data_root())
+    proposal = facts.repair_proposal(code, error=warning.get("error"), data_root=the_data_root(),
+                                    path=warning.get("path"))
     if proposal is None or not proposal.get("argv"):
         # 唯一不带 argv 的提案是 needs_administrator（`environment_facts.repair_proposal`）。
         raise RepairRefused("这个问题无法自动修复，需要管理员处理。",
@@ -157,6 +158,8 @@ async def run_repair(db: AsyncSession, *, project_id: str, session_id: str, code
     outcome = {
         "code": code, "path": warning.get("path"), "command": proposal["command"],
         "returncode": result["returncode"], "stdout": result["stdout"], "stderr": result["stderr"],
+        "status": result.get("status") or (
+            "executed" if result["returncode"] is not None else "unknown"),
         "facts_after": after,
     }
     # 活 worker 的报告上记一笔：下一次 ready 之前，条幅能说「已执行，结果如下」。
@@ -213,12 +216,14 @@ def _run_argv_elevated(argv: list[str], *, verb: str = "runas", timeout_s: int =
         if not shell32.ShellExecuteExW(ctypes.byref(info)):
             code = ctypes.get_last_error()
             if code == 1223:                        # ERROR_CANCELLED：人在 UAC 上点了「否」
-                return {"returncode": None, "stdout": "",
+                return {"status": "cancelled", "returncode": None, "stdout": "",
                         "stderr": "administrator approval was declined; nothing was changed"}
-            return {"returncode": None, "stdout": "", "stderr": f"ShellExecuteEx failed: WinError {code}"}
+            return {"status": "not_started", "returncode": None, "stdout": "",
+                    "stderr": f"ShellExecuteEx failed: WinError {code}"}
         try:
             if kernel32.WaitForSingleObject(info.hProcess, timeout_s * 1000) != 0:
-                return {"returncode": None, "stdout": "", "stderr": f"timeout after {timeout_s}s"}
+                return {"status": "unknown", "returncode": None, "stdout": "",
+                        "stderr": f"timeout after {timeout_s}s"}
             exit_code = w.DWORD()
             kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(exit_code))
         finally:

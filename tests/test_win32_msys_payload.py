@@ -136,12 +136,16 @@ class _Kernel32:
     """``_spawn_low_and_wait`` 用到的 kernel32 —— 全部成功、退出码 0。"""
 
     def __getattr__(self, name):
-        return lambda *args, **kwargs: 1
+        return lambda *args, **kwargs: 0 if name == "WaitForSingleObject" else 1
 
 
 class _Advapi32:
     def __init__(self) -> None:
         self.command_lines: list[str] = []
+        def username(buffer, size):
+            buffer.value = "test-user"
+            return 1
+        self.GetUserNameW = username
 
     def CreateProcessAsUserW(self, token, app, cmdline, *rest) -> int:  # noqa: N802
         assert app is None, "程序由命令行第一个 token 决定"
@@ -153,7 +157,7 @@ def _launcher_command_line(launch, monkeypatch) -> str:
     """把 prepare 交出的启动器 argv 原样喂给启动器的 main()，截下它起载荷用的命令行。"""
     advapi = _Advapi32()
     monkeypatch.setattr(_win32_exec, "_win32", lambda: (_Kernel32(), advapi))
-    monkeypatch.setattr(_win32_exec, "_icacls", lambda path, level: None)
+    monkeypatch.setattr(_win32_exec, "_icacls", lambda path, level, **kwargs: None)
     monkeypatch.setattr(_win32_exec, "_make_job", lambda k, **limits: None)
     monkeypatch.setattr(_win32_exec, "_low_il_primary_token", lambda a: None)
     script = next(i for i, part in enumerate(launch.argv) if part.endswith("_win32_exec.py"))

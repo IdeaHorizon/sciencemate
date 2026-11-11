@@ -113,9 +113,13 @@ def caller_request_text(
     return ""
 
 
-def _slug(value: Any, fallback: str) -> str:
+def canonical_asset_id(value: Any, fallback: str = "asset") -> str:
+    """One identity alphabet for request, work order and plan asset references."""
     result = re.sub(r"[^A-Za-z0-9._-]+", "_", _text(value)).strip("._-")
     return result or fallback
+
+
+_slug = canonical_asset_id
 
 
 def requirement_authority_context(

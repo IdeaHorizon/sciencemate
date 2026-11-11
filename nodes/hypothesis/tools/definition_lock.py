@@ -1,7 +1,7 @@
-"""definition_lock — 冻结用户给定分类/操作类别定义，防止 prereg 改写 ontology。
+"""Request-scoped taxonomy constraints come from explicit typed inputs.
 
-用户 proposal 中的类别名与定义默认只读；假说只能在其上做预测，
-不得重命名、合并、拆分或用文献 taxonomy 替换。
+Free-text extraction is a candidate view, never an authority or a freeze request.
+Derived goal/dialogue/audit caches cannot establish user intent.
 """
 from __future__ import annotations
 
@@ -16,13 +16,7 @@ from .artifact_save import save_hypothesis_singleton
 
 _DEF_INPUT_KEYS = (
     "locked_taxonomy",
-    "user_definitions",
-    "definition_lock",
-    "classification",
-    "categories",
     "operation_categories",
-    "taxonomy",
-    "category_definitions",
 )
 
 _HEADING = re.compile(
@@ -88,24 +82,32 @@ def _dedupe_entries(entries: list[dict[str, str]]) -> list[dict[str, str]]:
             continue
         seen.add(key)
         out.append(e)
-    return out[:24]
+    return out
 
 
-def _coerce_entry(item: Any, *, source: str = "explicit") -> dict[str, str] | None:
+def _coerce_entry(item: Any, *, source: str = "explicit", literal: bool = False) -> dict[str, str] | None:
+    def label_text(value: str) -> str | None:
+        return (value.strip() or None) if literal else _clean_label(value)
+
+    def entry(label: str, definition: str) -> dict[str, str]:
+        if literal:
+            return {"label": label, "definition": definition.strip(), "source": source, "scope": "request"}
+        return _entry(label, definition, source=source)
+
     if isinstance(item, str):
         if ":" in item or "：" in item:
             parts = re.split(r"[:：]", item, maxsplit=1)
-            label = _clean_label(parts[0])
+            label = label_text(parts[0])
             if label:
-                return _entry(label, parts[1] if len(parts) > 1 else "", source=source)
-        label = _clean_label(item)
-        return _entry(label, "", source=source) if label else None
+                return entry(label, parts[1] if len(parts) > 1 else "")
+        label = label_text(item)
+        return entry(label, "") if label else None
     if isinstance(item, dict):
         label = None
         for key in ("label", "name", "category", "class", "id", "title", "操作", "类别"):
             val = item.get(key)
-            if isinstance(val, str) and _clean_label(val):
-                label = _clean_label(val)
+            if isinstance(val, str) and label_text(val):
+                label = label_text(val)
                 break
         if not label:
             return None
@@ -115,11 +117,13 @@ def _coerce_entry(item: Any, *, source: str = "explicit") -> dict[str, str] | No
             if isinstance(val, str) and val.strip():
                 defn = val
                 break
-        return _entry(label, defn, source=source)
+        return entry(label, defn)
     return None
 
 
-def extract_locked_definitions_from_inputs(node_inputs: dict[str, Any]) -> list[dict[str, str]]:
+def extract_locked_definitions_from_inputs(
+    node_inputs: dict[str, Any], *, source_prefix: str = "node_inputs",
+) -> list[dict[str, str]]:
     """Pull explicit taxonomy / classification locks from node_inputs."""
     if not isinstance(node_inputs, dict):
         return []
@@ -128,7 +132,7 @@ def extract_locked_definitions_from_inputs(node_inputs: dict[str, Any]) -> list[
     def _ingest(val: Any, source: str) -> None:
         if isinstance(val, list):
             for item in val:
-                e = _coerce_entry(item, source=source)
+                e = _coerce_entry(item, source=source, literal=True)
                 if e:
                     entries.append(e)
         elif isinstance(val, dict):
@@ -141,34 +145,32 @@ def extract_locked_definitions_from_inputs(node_inputs: dict[str, Any]) -> list[
                 for k, v in val.items():
                     e = _coerce_entry(
                         {"label": k, "definition": str(v) if v is not None else ""},
-                        source=source,
+                        source=source, literal=True,
                     )
                     if e:
                         entries.append(e)
             else:
-                e = _coerce_entry(val, source=source)
+                e = _coerce_entry(val, source=source, literal=True)
                 if e:
                     entries.append(e)
-        elif isinstance(val, str) and val.strip():
-            entries.extend(extract_locked_definitions_from_text(val, source=source))
 
     for key in _DEF_INPUT_KEYS:
         if key in node_inputs:
-            _ingest(node_inputs.get(key), f"node_inputs.{key}")
+            _ingest(node_inputs.get(key), f"{source_prefix}.{key}")
     rg = node_inputs.get("research_goal")
     if isinstance(rg, dict):
         for key in _DEF_INPUT_KEYS:
             if key in rg:
-                _ingest(rg.get(key), f"research_goal.{key}")
+                _ingest(rg.get(key), f"{source_prefix}.research_goal.{key}")
     return _dedupe_entries(entries)
 
 
-def extract_locked_definitions_from_text(
+def extract_definition_candidates_from_text(
     text: str,
     *,
     source: str = "user_prompt",
 ) -> list[dict[str, str]]:
-    """Heuristic parse of category/definition locks from proposal text."""
+    """Heuristic candidates only, including uncertain key/value or list matches."""
     if not text or not str(text).strip():
         return []
     body = str(text)
@@ -195,27 +197,27 @@ def extract_locked_definitions_from_text(
             if label and defn:
                 entries.append(_entry(label, defn, source=source))
 
-    return _dedupe_entries(entries)
+    return _dedupe_entries(entries)[:24]
 
 
 def build_definition_lock(
     node_inputs: dict[str, Any] | None,
     user_prompt: str | None = None,
+    *, source_prefix: str = "node_inputs",
 ) -> dict[str, Any]:
     """Assemble locked taxonomy for grounding + fidelity audit."""
     inputs = node_inputs if isinstance(node_inputs, dict) else {}
-    explicit = extract_locked_definitions_from_inputs(inputs)
-    parsed = extract_locked_definitions_from_text(user_prompt or "")
-    locked = _dedupe_entries([*explicit, *parsed])
+    locked = extract_locked_definitions_from_inputs(inputs, source_prefix=source_prefix)
     labels = [e["label"] for e in locked]
     return {
         "locked_definitions": locked,
         "locked_labels": labels,
         "n_locked": len(locked),
         "has_definitions": any(e.get("definition") for e in locked),
+        "definition_candidates": extract_definition_candidates_from_text(user_prompt or ""),
         "checklist": [
             "用户给定类别名与定义只读：禁止重命名 / 合并 / 拆分 / 用文献 taxonomy 替换",
-            "prereg 必须含 definition_lock 段，逐条引用 locked_labels 原文",
+            "仅在本次显式分类约束的作用域内核对定义；文本候选不是锁定定义",
             "claim / 实验对象只能使用 locked 类别；要改 ontology → request_human_input",
             "文献分类仅可作对照 baseline，不得替换用户定义",
         ] if locked else [],
@@ -359,27 +361,34 @@ def assess_definition_fidelity(
     }
 
 
+def resolve_definition_lock(
+    state: State, node_inputs: dict | None = None, *, user_prompt: str = "",
+) -> dict:
+    """Rebuild from request inputs/receipt; never trust a derived lock cache."""
+    from core.context_engine import read_first_turn_node_inputs_receipt
+
+    inputs = node_inputs if node_inputs is not None else state.hook_state.get("node_inputs")
+    inputs = inputs if isinstance(inputs, dict) else {}
+    nested = inputs.get("research_goal")
+    explicit = any(k in inputs or isinstance(nested, dict) and k in nested for k in _DEF_INPUT_KEYS)
+    source = "node_inputs"
+    note = None
+    if not explicit:
+        try:
+            inputs = read_first_turn_node_inputs_receipt(state)["values"]
+            source = "first_turn_node_inputs"
+        except FileNotFoundError:
+            pass  # Legacy runs may lack a receipt; caches are not a substitute.
+        except (OSError, ValueError, KeyError) as exc:
+            note = f"definition input receipt unavailable: {type(exc).__name__}"
+    lock = build_definition_lock(inputs, user_prompt=user_prompt, source_prefix=source)
+    if note:
+        lock["source_note"] = note
+    return lock
+
+
 def resolve_locked_definitions(state: State) -> list[dict[str, str]]:
-    cached = state.hook_state.get("research_goal_parsed")
-    if isinstance(cached, dict):
-        locked = cached.get("locked_definitions")
-        if isinstance(locked, list) and locked:
-            return [e for e in locked if isinstance(e, dict) and e.get("label")]
-
-    dialogue = state.hook_state.get("dialogue_context")
-    if isinstance(dialogue, dict):
-        locked = dialogue.get("locked_definitions")
-        if isinstance(locked, list) and locked:
-            return [e for e in locked if isinstance(e, dict) and e.get("label")]
-
-    inputs = state.hook_state.get("node_inputs") or {}
-    if not isinstance(inputs, dict):
-        inputs = {}
-    up = None
-    if isinstance(dialogue, dict):
-        up = dialogue.get("user_prompt")
-    lock = build_definition_lock(inputs, user_prompt=str(up or ""))
-    return lock["locked_definitions"]
+    return resolve_definition_lock(state)["locked_definitions"]
 
 
 def _read_latest_content(state: State, artifact_type: str) -> str:
@@ -396,20 +405,13 @@ async def _audit_definition_fidelity(
     save_report: bool = True,
     **_: Any,
 ) -> dict[str, Any]:
-    if locked_definitions:
-        locked = []
-        for item in locked_definitions:
-            e = _coerce_entry(item, source="arg")
-            if e:
-                locked.append(e)
-    else:
-        locked = resolve_locked_definitions(state)
+    locked = resolve_locked_definitions(state)
 
     prereg = _read_latest_content(state, "pre_registration")
     plan = _read_latest_content(state, "research_plan")
     overview = _read_latest_content(state, "hypothesis_research_overview")
 
-    if not prereg and not plan:
+    if locked and not prereg and not plan:
         return {
             "status": "error",
             "passed": False,
@@ -477,6 +479,7 @@ async def _audit_definition_fidelity(
         "passed": report["passed"],
         "locked_definitions": locked,
         "artifact_id": artifact_id,
+        "candidate_definitions": locked_definitions or [],
         "message": report["reason"],
         **report,
     }
@@ -486,7 +489,8 @@ register_tool(
     ToolDefinition(
         name="audit_definition_fidelity",
         description=(
-            "审计最终产物是否**保真用户给定分类/操作类别定义**，"
+            "按请求的结构化 locked_taxonomy / operation_categories（source + request scope）审计分类定义保真；"
+            "不从自由文本、派生缓存或本工具参数建立强制约束；无显式分类约束时不适用。"
             "防止 prereg 重命名、合并或用文献 taxonomy 替换用户 ontology。\n\n"
             "**Use when**：\n"
             "  - save pre_registration（草稿）/ research_plan 之后\n"
@@ -501,7 +505,7 @@ register_tool(
                 "locked_definitions": {
                     "type": "array",
                     "items": {"type": "object"},
-                    "description": "[{label, definition}]；留空则用 get_research_goal 锁定结果",
+                    "description": "可选候选 [{label, definition}]；仅作线索回显，不改变显式请求约束或 passed 判据",
                 },
                 "save_report": {"type": "boolean", "default": True},
             },

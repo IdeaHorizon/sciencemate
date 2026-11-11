@@ -11,7 +11,7 @@ from core.tool_registry import ToolDefinition, register_tool
 
 from .w_brief import load_brief, load_outline
 from .w_common import (
-    PROCESS_VOCAB, RENDERERS_DIR, bib_keys, cite_keys, clip, load_genre, manuscript_dir,
+    RENDERERS_DIR, bib_keys, cite_keys, clip, load_genre, manuscript_dir,
     paper_dir, read_json, write_json, worktree_root,
 )
 from .w_dossier import build_dossier
@@ -213,16 +213,7 @@ def hard_lines(state: Any, pages: list[str], log_text: str, main_pdf: Path | Non
     title_norm = re.sub(r"\s+", "", brief.get("title") or "")
     out["H1_title_block"] = {"passed": bool(before_abs) and (not title_norm or title_norm[:12] in norm[:600]),
                             "first_lines": lines[:3]}
-    # H2 过程词汇
-    hits = []
-    for i, p in enumerate(pages, start=1):
-        for kw in PROCESS_VOCAB:
-            for m in re.finditer(re.escape(kw), p, re.I):
-                s = p[max(0, m.start() - 30): m.end() + 30].replace("\n", " ")
-                hits.append({"page": i, "word": kw, "context": s})
-                if len(hits) > 40:
-                    break
-    out["H2_process_vocab"] = {"passed": not hits, "hits": hits[:20], "n": len(hits)}
+    # H2 is semantic review of unfinished work, not a vocabulary verdict.
     # H3 空引用 + 编译警告
     empty = []
     for i, p in enumerate(pages, start=1):
@@ -283,10 +274,13 @@ def hard_lines(state: Any, pages: list[str], log_text: str, main_pdf: Path | Non
     for p in (mdir / "sections").glob("*.tex"):
         used |= set(cite_keys(p.read_text(encoding="utf-8")))
     check = read_json(mdir / "bib_check.json") or {}
-    bad = set(check.get("bad") or [])
+    from .w_bib import bibliography_issues
+    bad_keys, unchecked_keys = bibliography_issues(check, keys)
+    bad, unchecked = set(bad_keys), set(unchecked_keys)
     out["H5_bibliography"] = {"passed": bool(keys) and not (used - keys) and not (keys - used) and not (bad & used),
                               "n_entries": len(keys), "n_cited": len(used & keys), "unknown_cites": sorted(used - keys)[:20],
-                              "uncited": sorted(keys - used)[:20], "unresolvable_cited": sorted(bad & used)[:20]}
+                              "uncited": sorted(keys - used)[:20], "unresolvable_cited": sorted(bad & used)[:20],
+                              "unchecked_cited": sorted(unchecked & used)[:20]}
     # H6 简报硬性要求（机械项）。验收按交付的 PDF 算：forbid 在正文、图题、矢量图内文字里命中都是命中
     # （iter5 实测：用户原图 svg 带 case6 标签被原样搬进稿子，正文干净、成品违约）。detail 指出命中在哪，
     # 在图里就得带 rename 约束重派图表服务。
@@ -585,7 +579,7 @@ register_tool(
         description=(
             "装配并编译成品：框架用体裁的渲染器生成 main.tex（标题块、摘要环境、部件顺序、参考文献），"
             "把提纲与正文引用的图放进 figures/，用 xelatex+biber 编译，抽出每页文字，算六条硬线"
-            "（标题块、过程词汇、空引用、图表编号与引用、参考文献闭合、简报机械项）。返回首页文字与硬线结果。"
+            "（标题块、空引用、图表编号与引用、参考文献闭合、简报机械项）。返回首页文字与硬线结果。"
         ),
         parameters_schema={"type": "object", "properties": {}},
         allowed_node_types=["writing"],

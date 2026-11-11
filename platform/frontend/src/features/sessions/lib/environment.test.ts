@@ -55,6 +55,18 @@ test("dismissing hides the same group and only the same group", () => {
   assert.equal(bannerModel(repaired, "zh", null)?.tone, "info");
 });
 
+test("cancelled or unconfirmed repair is never displayed as executed", () => {
+  for (const status of ["cancelled", "not_started", "unknown"] as const) {
+    const model = bannerModel(env([{ repair_result: {
+      status, code: "home_marker_unreadable", path: "/data/afs/marker.json",
+      command: "icacls marker.json /reset /C", returncode: null, stdout: "", stderr: "detail",
+    } }]), "zh", null);
+    assert.ok(model);
+    assert.ok(model.details.every((line) => !line.startsWith("已执行")));
+    if (status === "cancelled") assert.ok(model.details.some((line) => line.includes("已取消")));
+  }
+});
+
 test("an escalated report cannot be dismissed and says which repetition this is", () => {
   const escalated = env([], {
     escalated: true, repeated: 2,

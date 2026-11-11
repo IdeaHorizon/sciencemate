@@ -569,6 +569,13 @@ async def execute_authorized_action(state, entry: dict | None) -> dict | None:
         "human_directive": human_note[:2000],
     }
     decision_actor = "调度器决定" if entry.get("decided_by") == "orchestrator" else "人工决定"
+    inherited = {}
+    if target == entry.get("producing_node"):
+        contract = entry.get("producing_dispatch_contract") or {}
+        if contract.get("node_type") == target:
+            inherited = {key: contract[key] for key in
+                         ("task_instance_uuid", "task_contract_digest", "deliverable")
+                         if contract.get(key) is not None}
     try:
         result = await _run_node_tool(
             state,
@@ -576,6 +583,7 @@ async def execute_authorized_action(state, entry: dict | None) -> dict | None:
             node_inputs=dispatch_inputs,
             user_note=(f"{decision_actor} {entry.get('authorized_action')!r} → 由运行时执行："
                        f"重跑 {target}"),
+            **inherited,
         )
     except Exception as exc:                      # noqa: BLE001
         return _note_dispatch_failure(f"{type(exc).__name__}: {exc}")

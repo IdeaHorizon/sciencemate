@@ -282,6 +282,7 @@ def the_package_carries_no_pro_edition(package_root: Path, edition: str) -> None
 #: 一起到。2026-09-20 发现：0.5.1 新加的 asyncssh 与服务器包都在 `Resources/`，
 #: 于是从 0.5.0 自更新上来的那份点「建立组织」必然失败。
 SERVER_BUNDLE_DIR = "server_bundle"
+RUNTIME_BUNDLE_DIR = "runtime_bundle"
 VENDOR_DIR = "_vendor"
 #: 随 `app/` 一起分发的第三方包。载荷不带 site-packages，所以**新加的依赖只能
 #: 这样送到自更新上来的安装里**。只收纯 Python 的：带原生扩展的要按平台分发，
@@ -291,16 +292,25 @@ VENDORED = ("asyncssh",)
 
 def stage_the_pro_only_things(backend: Path, edition: str,
                               server_bundle: Path | None) -> None:
-    """专业版多的两样：远程安装用的 ssh 库，和它要送上去的服务器包。"""
-    if edition != "pro":
-        return
-    print("── 把 ssh 库与服务器包装进 app/（自更新才带得走）")
+    """Stage shared SSH/personal runtime assets, plus the pro organisation bundle."""
+    print("── 把 SSH 库与个人远程运行时装进 app/")
     vendor = backend / "app" / VENDOR_DIR
     shutil.rmtree(vendor, ignore_errors=True)
     vendor.mkdir(parents=True)
     for name in VENDORED:
         _vendor_one(backend, vendor, name)
-    if server_bundle is not None:
+    import importlib.util
+
+    builder = Path(__file__).with_name("build_remote_runtime_bundle.py")
+    spec = importlib.util.spec_from_file_location("package_remote_runtime", builder)
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    package = runtime.build()
+    target = backend / "app" / RUNTIME_BUNDLE_DIR
+    shutil.rmtree(target, ignore_errors=True)
+    target.mkdir(parents=True)
+    shutil.copy2(package, target / package.name)
+    if edition == "pro" and server_bundle is not None:
         target = backend / "app" / SERVER_BUNDLE_DIR
         shutil.rmtree(target, ignore_errors=True)
         target.mkdir(parents=True)

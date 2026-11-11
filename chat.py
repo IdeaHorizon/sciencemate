@@ -1030,8 +1030,10 @@ def _repair_message_tool_protocol(messages: list[LLMMessage]) -> int:
                 name=name,
                 content=json.dumps({
                     "status": "deferred",
-                    "note": "会话中断导致原 tool result 缺失；continuous protocol repair "
-                            "已补占位。若仍需要该动作，请重新调用工具。",
+                    "outcome": "unknown",
+                    "do_not_resubmit": True,
+                    "note": "会话中断导致原 tool result 缺失；调用可能已经产生副作用，"
+                            "必须核对原动作，不能根据占位结果重新调用。",
                 }, ensure_ascii=False),
             ))
             changes += 1
@@ -2164,7 +2166,7 @@ async def _run_one_turn(state: State, harness, messages: list[LLMMessage],
 
 async def _run_one_turn_raw(state: State, harness,
                             messages: list[LLMMessage], llm: LLMClient,
-                            user_text: str):
+                            user_text: str, *, framework_continuation: bool = False):
     """Run one orchestrator turn without consuming a human-input pause.
 
     The terminal REPL and App Server share this boundary.  The REPL hands the
@@ -2175,7 +2177,8 @@ async def _run_one_turn_raw(state: State, harness,
     # 这个 orchestrator state 就永久废了。平台入口也直接调用本函数，因此取消
     # 清理必须位于 REPL 与平台共用的原始轮次边界，而不能只放在 REPL 包装层。
     from core import cancellation as _cancel
-    _cancel.clear(state)
+    if not framework_continuation:
+        _cancel.clear(state)
 
     # 如果 /btw 注入了 pending system message，先插进去
     pending_btw = state.hook_state.pop("pending_btw_injection", None)
@@ -2199,6 +2202,11 @@ async def _run_one_turn_raw(state: State, harness,
     else:
         messages.insert(0, opening)
     await _inject_status_snapshot(state, messages)
+    if framework_continuation:
+        from core.agent_loop import _inject_notice
+
+        _inject_notice(state, messages, turn=0, source="runtime_continuation", text=user_text)
+        return await run_loop(harness, state, messages, llm)
     user_text = _preprocess_user_input(state, messages, user_text)
     # v3.7 L2 不可变锚：项目第一条真实用户输入逐字存盘（已存在则进 amendments，
     # 永不覆盖）。框架自动续轮消息不算 —— 那是 orchestrator 自己的话，不是用户的。

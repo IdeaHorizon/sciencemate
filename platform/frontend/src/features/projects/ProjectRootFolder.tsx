@@ -4,22 +4,24 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowUp, Folder } from "lucide-react";
 import { api } from "@/lib/api";
+import { qk } from "@/lib/query/keys";
 import { Button } from "@/shared/ui";
 import { useT } from "@/shared/i18n";
 
 /** null uses the installation default; a string is an explicitly chosen address. */
-export function ProjectRootFolder({ value, onChange, disabled }: {
+export function ProjectRootFolder({ value, onChange, disabled, serverId }: {
   value: string | null;
   onChange: (path: string | null) => void;
   disabled?: boolean;
+  serverId?: string;
 }) {
   const t = useT();
   const [browsing, setBrowsing] = useState(false);
   const [path, setPath] = useState<string>();
   const [newFolder, setNewFolder] = useState("");
   const listing = useQuery({
-    queryKey: ["project-folders", path],
-    queryFn: () => api.listProjectFolders(path),
+    queryKey: qk.projectFolders(serverId, path),
+    queryFn: () => api.listProjectFolders(path, serverId),
     retry: false,
   });
   const folders = listing.data?.available ? listing.data : undefined;
@@ -62,7 +64,8 @@ export function ProjectRootFolder({ value, onChange, disabled }: {
         </div>
         <p className="project-root-note">{t({ zh: "选择空文件夹或输入新路径。项目文件和会话工作区将保存在这里。", en: "Choose an empty folder or enter a new path. Project files and session workspaces will be stored here." })}</p>
       </>}
-      {browsing && <div className="project-folder-browser" aria-label={t({ zh: "浏览本机文件夹", en: "Browse local folders" })}>
+      {serverId && <p className="project-root-note">{t({ zh: "这里选择的是服务器上的目录，项目文件和运行记录保存在服务器上。", en: "Choose a directory on the server. Project files and run records stay there." })}</p>}
+      {browsing && <div className="project-folder-browser" aria-label={serverId ? t({ zh: "浏览服务器文件夹", en: "Browse server folders" }) : t({ zh: "浏览本机文件夹", en: "Browse local folders" })}>
         <div className="project-folder-toolbar">
           <Button type="button" size="sm" variant="ghost" disabled={!folders?.parent || listing.isFetching}
             aria-label={t({ zh: "上一级文件夹", en: "Parent folder" })}

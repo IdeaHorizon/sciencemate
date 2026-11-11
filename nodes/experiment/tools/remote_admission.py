@@ -5,8 +5,8 @@
 * **授权包络**：用户 / 平台预授权了多少 CPU、GPU、节点、时长、费用。包络之内
   不重复问；**首次真实外部提交**或越出包络时问一次。包络本身是 A 的一部分，
   run 内冻结；模型改不了它。
-* **作业归属**：普通 Experiment 只能取消**本 run 拥有**的作业。归属来自账本
-  （哪个 nonce 是本 run 写进去的），不是调用方说了算。取消别人的作业需要任务
+* **作业归属**：普通 Experiment 只能取消**本 run 拥有**的作业。归属来自既有
+  提交收据的 artifact producer，不是调用方或项目待办说了算。取消别人的作业需要任务
   明确目标加平台独立的 ownership 授权，不能靠一次高危确认升权。
 * **边界披露**：adapter 说 ``remote_write_isolation`` 是 missing，那就必须一路
   披露到收尾，不能在任何一层变成 enforced。
@@ -131,46 +131,6 @@ def record_authorization(state: Any, *, scope: str, granted_by: str, note: str =
     """记下一次已获授权的维度；同一维度之后不再问。"""
     row = _ledger.try_record(state, "authorization_granted", scope=scope, granted_by=granted_by, note=note)
     return {"status": "recorded" if row else "ledger_unavailable", "scope": scope}
-
-
-def owned_jobs(state: Any) -> dict[str, dict[str, Any]]:
-    """本 run 拥有的作业：账本里有 intent 的那些（按 nonce）。"""
-    try:
-        records = _ledger.open_ledger(state).records()
-    except Exception:
-        return {}
-    return _ledger.project_jobs(records)
-
-
-def cancel_admission(state: Any, *, scheduler: str, job_id: str) -> dict[str, Any]:
-    """取消的归属判定：这个作业是不是本 run 从账本里认得的那些之一。
-
-    **当前只作披露，还没有接成 cancel 的门。** 原因是实测的：2026-09-23 把它接
-    在 ``resource_manager._cancel_job`` 入口上，7 个既有用例转红——它们的受管作业
-    是直接构造提交记录建起来的，账本里没有对应绑定，于是本 run 自己的作业被判成
-    "别人的"。在账本成为唯一归属权威之前（S1d 原子切换），拿它当门只会多拒一种
-    情况，而不会多挡住一个谎。
-
-    真实的缺口仍然存在并已登记：``_external_job_record`` 按项目级 artifact 查，
-    不限本 run，所以"普通 Experiment 只能取消本 run 的作业"这条保证今天并不完整。
-    S1d 撤掉旧提交记录这条权威时一并关闭。
-    """
-    jobs = owned_jobs(state)
-    for nonce, job in jobs.items():
-        if str(job.get("external_id") or "") == str(job_id) and \
-                str(job.get("scheduler") or "").lower() == str(scheduler or "").lower():
-            return {"decision": "allowed", "nonce": nonce, "job": job}
-    return {
-        "decision": "refused",
-        "reason": "not_owned_by_this_run",
-        "error": (f"{scheduler}/{job_id} 不在本 run 的账本里：本 run 没有提交过它，"
-                  "普通 Experiment 不能取消别人的作业。"),
-        "exit": ("这不是一次高危确认能解除的：取消别的 run 或别人的作业，需要任务里明确"
-                 "点名这个目标，加上平台独立的 ownership / admin 授权。"
-                 "若只是想停下本 run 自己的作业，用账本里列出的那些。"),
-        "owned": [{"nonce": n, "external_id": j.get("external_id"), "state": j.get("state")}
-                  for n, j in jobs.items()],
-    }
 
 
 def isolation_disclosure(scheduler: str) -> dict[str, Any]:

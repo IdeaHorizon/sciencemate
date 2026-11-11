@@ -21,6 +21,35 @@ class SSHError(RuntimeError):
     pass
 
 
+def _windows_askpass(directory: Path) -> Path:
+    """OpenSSH on Windows requires a native executable, not a shebang script."""
+    bundled = Path(__file__).with_name("_ssh_askpass.exe")
+    if bundled.is_file():
+        return bundled
+    windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    compiler = next((path for architecture in ("Framework64", "Framework")
+                     if (path := windows / "Microsoft.NET" / architecture
+                         / "v4.0.30319" / "csc.exe").is_file()), None)
+    if compiler is None:
+        raise SSHError("Windows SSH password helper is unavailable: .NET compiler not found")
+    helper = directory / "_ssh_askpass.exe"
+    source = Path(__file__).with_name("_ssh_askpass.cs")
+    # Only fixed, shipped source is compiled. Credentials are added to the SSH
+    # child's environment later; they never enter compiler arguments or files.
+    try:
+        compiled = subprocess.run(
+            [str(compiler), "/nologo", "/target:exe", "/optimize+", "/codepage:65001",
+             "/utf8output", f"/out:{helper}", str(source)],
+            capture_output=True, timeout=30, check=False,
+            **process_control.group_spawn_kwargs(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SSHError("Could not build Windows SSH password helper") from exc
+    if compiled.returncode or not helper.is_file():
+        raise SSHError("Could not build Windows SSH password helper")
+    return helper
+
+
 class SSHInputManifestConflict(SSHError):
     def __init__(self, existing_input_manifest_sha256: str | None):
         super().__init__("Submission key already belongs to a different input manifest")
@@ -90,9 +119,12 @@ class SSHTransport:
                 argv[1:1] = ["-o", "PreferredAuthentications=password,keyboard-interactive"]
                 # A separate environment is passed only to OpenSSH/askpass. The
                 # password is never a command-line argument or a project file.
-                helper = Path(temporary) / "askpass"
-                helper.write_text('#!/bin/sh\nprintf "%s" "$HF_SSH_PASSWORD"\n')
-                helper.chmod(0o700)
+                if os.name == "nt":
+                    helper = _windows_askpass(Path(temporary))
+                else:
+                    helper = Path(temporary) / "askpass"
+                    helper.write_text('#!/bin/sh\nprintf "%s" "$HF_SSH_PASSWORD"\n')
+                    helper.chmod(0o700)
                 env.update(
                     SSH_ASKPASS=str(helper),
                     SSH_ASKPASS_REQUIRE="force",

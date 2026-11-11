@@ -37,6 +37,7 @@ context 里放的只是它的一个渲染。框架对 context 的唯一合法动
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -72,7 +73,7 @@ def _compactor_for(key: str):
 
 
 def _render_tombstone(key: str, size: int, turn: int, *, replayable: bool,
-                      ok: bool = True, logged: bool = False) -> str:
+                      ok: bool = True, logged: bool = False, result_ref: str | None = None) -> str:
     """墓碑正文。**按能不能安全重调分岔** —— 这是正确性，不是文案偏好。
 
     "用同样参数再调一次就能取回"对纯读工具是真话；对 `run_bash` / `save_artifact`
@@ -85,10 +86,12 @@ def _render_tombstone(key: str, size: int, turn: int, *, replayable: bool,
     """
     tool, _, raw = key.partition("|")
     kept = ("原文**完整保存在本 run 的 tool_results.jsonl 里没有丢**"
-            if logged else "原文**完整保存在磁盘上没有丢**")
+            if logged else "本 run 未找到这条结果的原文备份")
     head = (f"{TOMBSTONE_PREFIX}\n"
             f"这一条是 {tool}({raw[:200]}) 在 turn {turn} 的结果，原文 {size:,} 字符，"
             f"已从上下文移出以腾出空间。{kept}。\n")
+    if result_ref:
+        head += _recovery_pointer(result_ref)
     if not ok:
         # 失败结果的墓碑**不能**说"重新取回不算重复"：那句话对成功副本是真的
         # （恢复路径 lookup 会放行且不计数），对失败是假的 —— 失败没有可复用的
@@ -98,11 +101,22 @@ def _render_tombstone(key: str, size: int, turn: int, *, replayable: bool,
                        "大概率再次失败，**而且会被计入重复**（够多次就停机）。"
                        "先换地址、换做法，或者说清楚你要的东西不存在。")
     if replayable:
+        if not logged:
+            return head + ("可以用同样的参数再调用一次，取得新的观察；"
+                           "这会重新执行读取，不是历史原文的恢复。")
         return head + ("需要它就用同样的参数再调用一次 —— 会原样完整取回，"
                        "**重新取回不算重复调用，不会被判为循环**。")
     return head + ("⚠️ 这个工具**有副作用，不要为了看结果而重跑它**。"
-                   "如果后面的判断依赖这条结果，把你还记得的结论先写进白板/产物；"
-                   "确实必须重新拿到原文时，说明你需要它，别自己重放。")
+                   "后续判断依赖它时先读取原始回执，不要把记忆当作证据。")
+
+
+def _recovery_pointer(result_ref: str) -> str:
+    return (f'历史回执只读取回：read_tool_result(result_ref="{result_ref}")。'
+            '这不会重跑原工具；历史状态不代表作业当前状态。\n')
+
+
+def _record_identity(key: str, tool_call_id: str, content: str) -> tuple[str, str, str]:
+    return key, tool_call_id, hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 class ContextView:
@@ -119,8 +133,8 @@ class ContextView:
         #: tool_call_id -> {key, size, turn, evicted}
         self.entries: dict[str, dict] = {}
         self._log_path: Path | None = None
-        #: run log 里已有原文的 key 集合；惰性建（adopt 首用），note_result 增量维护。
-        self._logged_key_cache: set[str] | None = None
+        #: Exact record identities, lazily rebuilt from the existing append-only log.
+        self._logged_reference_cache: dict[tuple[str, str, str], str] | None = None
 
     # ── 磁盘：全保真 run log ────────────────────────────────────────────
 
@@ -144,52 +158,102 @@ class ContextView:
         except OSError:
             return None
 
-    def _append_log(self, *, key: str, tool_call_id: str, turn: int, content: str) -> bool:
+    def _reference(self, offset: int, raw: bytes) -> str:
+        scope = hashlib.sha256(str(self._log().resolve()).encode()).hexdigest()[:24]
+        return f"v1:{scope}:{offset}:{len(raw)}:{hashlib.sha256(raw).hexdigest()}"
+
+    def _append_log(self, *, key: str, tool_call_id: str, turn: int, content: str) -> str | None:
         """原文落盘。**永不编辑**，只 append —— 它是取回的唯一权威。
 
-        返回是否真的写进去了：这个布尔值就是该条目的**驱逐资格**（见
+        返回当前 run 内绑定字节位置及摘要的引用；写失败返回 None（见
         `enforce_budget`）—— 落了盘的驱逐是无损的，没落盘的才谈得上"真丢"。
         """
         p = self._log()
         if p is None:
-            return False
+            return None
         try:
-            with p.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(
+            raw = (json.dumps(
                     {"key": key, "tool_call_id": tool_call_id,
                      "turn": turn, "content": content},
-                    ensure_ascii=False) + "\n")
-            return True
+                    ensure_ascii=False) + "\n").encode("utf-8")
+            with p.open("ab") as fh:
+                offset = fh.tell()
+                fh.write(raw)
+            return self._reference(offset, raw)
         except OSError:
-            return False
+            return None
 
-    def _logged_keys(self) -> set[str]:
-        """run log 里已有原文的 key 集合（惰性建一次，之后由 note_result 增量维护）。
+    def _logged_references(self) -> dict[tuple[str, str, str], str]:
+        """原文身份 → 字节引用（惰性建一次，之后由 note_result 增量维护）。
 
         为的是 `adopt`：续跑/respawn 恢复的历史消息不是本进程写的，但同一个
         run 目录的 log 里往往**躺着它们的原文**（session 级 run 目录活过 worker
         重启）。不查一下就当"没备份"，等于把可无损驱逐的东西错判成不可驱逐 ——
         issue #710 的豁免扩大化正是这么来的。
         """
-        if getattr(self, "_logged_key_cache", None) is not None:
-            return self._logged_key_cache
-        keys: set[str] = set()
+        if self._logged_reference_cache is not None:
+            return self._logged_reference_cache
+        refs: dict[tuple[str, str, str], str] = {}
         p = self._log()
         if p is not None and p.exists():
             try:
-                with p.open(encoding="utf-8") as fh:
+                with p.open("rb") as fh:
+                    offset = 0
                     for line in fh:
                         try:
                             rec = json.loads(line)
-                        except json.JSONDecodeError:
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            offset += len(line)
                             continue
-                        k = rec.get("key")
-                        if k:
-                            keys.add(k)
+                        if isinstance(rec, dict) and isinstance(rec.get("content"), str):
+                            identity = _record_identity(rec.get("key"), rec.get("tool_call_id"), rec["content"])
+                            refs[identity] = self._reference(offset, line)
+                        offset += len(line)
             except OSError:
                 pass
-        self._logged_key_cache = keys
-        return keys
+        self._logged_reference_cache = refs
+        return refs
+
+    def read_result(self, result_ref: str, *, offset: int = 0, limit: int = 16000) -> dict:
+        """Read one exact historical record, never dispatch its originating tool.
+
+        No caller-controlled path: the reference must name this run's log, and
+        the byte range and digest must match even after worker restart.
+        """
+        p = self._log()
+        if p is None:
+            raise ValueError("No tool result log in this run")
+        try:
+            version, scope, start, length, digest = result_ref.split(":")
+            start, length = int(start), int(length)
+            expected_scope = hashlib.sha256(str(p.resolve()).encode()).hexdigest()[:24]
+            if (version != "v1" or scope != expected_scope or start < 0 or length <= 0
+                    or length > 64 * 1024 * 1024 or len(digest) != 64
+                    or offset < 0 or not 1 <= limit <= 16000):
+                raise ValueError("Invalid tool result reference or page")
+            with p.open("rb") as fh:
+                if start + length > p.stat().st_size:
+                    raise ValueError("Tool result reference is outside the log")
+                if start:
+                    fh.seek(start - 1)
+                    if fh.read(1) != b"\n":
+                        raise ValueError("Tool result reference is not a record boundary")
+                fh.seek(start)
+                raw = fh.read(length)
+            if not raw.endswith(b"\n") or hashlib.sha256(raw).hexdigest() != digest:
+                raise ValueError("Tool result record integrity mismatch")
+            record = json.loads(raw)
+            content = record["content"]
+            if not isinstance(content, str):
+                raise ValueError("Tool result content is not text")
+        except (OSError, KeyError, TypeError, UnicodeDecodeError) as exc:
+            raise ValueError("Cannot read the referenced tool result") from exc
+        end = min(offset + limit, len(content))
+        return dict(status="success", historical=True, result_ref=result_ref,
+                    tool_name=record["key"].partition("|")[0],
+                    tool_call_id=record.get("tool_call_id"), turn=record.get("turn"),
+                    content=content[offset:end], offset=offset, total_chars=len(content),
+                    truncated=end < len(content), next_offset=end if end < len(content) else None)
 
     def recover(self, tool_name: str, args: dict | None) -> str | None:
         """从 run log 取回某个 key 的最新原文。取不到返回 None。"""
@@ -229,17 +293,19 @@ class ContextView:
         任何"惩罚重复"的机制。
         """
         key = canonical_key(tool_name, args)
-        logged = self._append_log(key=key, tool_call_id=tool_call_id,
+        result_ref = self._append_log(key=key, tool_call_id=tool_call_id,
                                   turn=turn, content=content)
-        if logged and getattr(self, "_logged_key_cache", None) is not None:
-            self._logged_key_cache.add(key)
+        if result_ref and self._logged_reference_cache is not None:
+            self._logged_reference_cache[_record_identity(key, tool_call_id, content)] = result_ref
         prior = self.live.get(key)
         if prior is not None and prior != tool_call_id:
             self._evict(prior)
         self.live[key] = tool_call_id
         self.entries[tool_call_id] = {
             "key": key, "size": len(content), "turn": turn, "evicted": False,
-            "replayable": bool(replayable), "ok": bool(ok), "logged": logged,
+            "replayable": bool(replayable), "ok": bool(ok), "logged": bool(result_ref),
+            "result_ref": result_ref,
+            "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
             # 只在工具声明了 compactor 时才留原文在内存里 —— 否则墓碑够用，
             # 没必要把已经落盘的东西再拷一份。
             "original": content if _compactor_for(key) is not None else None,
@@ -282,6 +348,10 @@ class ContextView:
                 out.append(m); continue
             if (m.content or "").startswith(TOMBSTONE_PREFIX):
                 out.append(m); continue
+            if e.get("content_sha256") != hashlib.sha256((m.content or "").encode("utf-8")).hexdigest():
+                # A resumed provider may reuse a call ID. Never attach the
+                # newest call's receipt or lifecycle facts to an older body.
+                out.append(m); continue
             # 工具自己声明了 `result_compactor` 就用它：**作者比框架更知道
             # 这份结果里什么可以丢**。这是唯一被授权的有损转述形式，且它是
             # 工具契约的一部分，不是框架自作主张。
@@ -294,10 +364,11 @@ class ContextView:
                     rendered = None
             out.append(LLMMessage(
                 role="tool", tool_call_id=m.tool_call_id, name=m.name,
-                content=rendered or _render_tombstone(
+                content=(rendered + ("\n" + _recovery_pointer(e["result_ref"])
+                                    if e.get("result_ref") else "")) if rendered else _render_tombstone(
                     e["key"], e["size"], e["turn"],
                     replayable=e.get("replayable", False), ok=e.get("ok", True),
-                    logged=e.get("logged", False)),
+                    logged=e.get("logged", False), result_ref=e.get("result_ref")),
             ))
         return out
 
@@ -348,13 +419,15 @@ class ContextView:
                 args = {}
             key = canonical_key(name, args) if name else f"?|{tcid}"
             replayable = bool(replayable_of(name)) if (replayable_of and name) else False
+            result_ref = self._logged_references().get(_record_identity(key, tcid, content))
             self.entries[tcid] = {
                 "key": key, "size": len(content), "turn": 0, "evicted": False,
                 "replayable": replayable, "ok": ok, "adopted": True,
                 # 续跑恢复的历史不是本进程写的，但 session 级 run 目录活过
                 # worker 重启 —— log 里常躺着它的原文。查一下再定资格，
                 # 别把可无损驱逐的错判成不可驱逐（issue #710）。
-                "logged": key in self._logged_keys(),
+                "logged": bool(result_ref), "result_ref": result_ref,
+                "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
                 "original": content if _compactor_for(key) is not None else None,
             }
             # 认领的不进 `live`：它没有 run log 备份，"答案就在眼前"这个判断

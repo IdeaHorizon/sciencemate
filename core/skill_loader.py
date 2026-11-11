@@ -116,7 +116,7 @@ def load_skill_from_folder(skill_dir: Path, *, origin: str = "framework") -> Ski
         if sub_dir.is_dir():
             for f in sorted(sub_dir.rglob("*")):
                 if f.is_file() and not f.name.startswith("."):
-                    assets.append(str(f.relative_to(skill_dir)))
+                    assets.append(f.relative_to(skill_dir).as_posix())
 
     return Skill(
         name=str(name),

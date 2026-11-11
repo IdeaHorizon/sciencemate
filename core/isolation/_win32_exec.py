@@ -28,11 +28,13 @@ r"""Windows 写边界启动器：用**完整性级别（Low IL）**把命令关�
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from ctypes import wintypes
 
 V = ctypes.c_void_p
@@ -211,7 +213,7 @@ def _journal(record: dict) -> None:
         pass   # 账记不上不该让命令跑不成；账本自己的缺席在快照比对里看得见
 
 
-def _icacls(path: str, level: str) -> None:
+def _icacls(path: str, level: str, *, strict: bool = False) -> None:
     """给 path 打强制完整性标签。level 'L'=Low(放行 Low-IL 写)、'M'=Medium(拒 Low-IL 写)。
     只降/平级：给对象打不高于自己令牌的标签不需要管理员（打 High 才要 SeRelabelPrivilege）。
     对自己拥有的对象失败不抛（探针会把真结果反映出来）—— 但**每一次都记账**：路径、改前、改后、
@@ -231,6 +233,8 @@ def _icacls(path: str, level: str) -> None:
             "run_id": os.environ.get("HARNESS_RUN_ID") or None,
             "pid": os.getpid(),
         })
+    if strict and rc != 0:
+        raise OSError(f"Cannot establish {level} integrity for {path!r}: rc={rc}, {err[:500]}")
 
 
 def _msys_quote(arg: str) -> str:
@@ -311,29 +315,65 @@ def _spawn_low_and_wait(k, a, argv: list[str], job: V, *, timeout_ms: int = INFI
     return int(code.value)
 
 
+@contextmanager
+def _permission_labels(k, a):
+    """MIC labels belong to files, not a token. Serialize their effective lifetime.
+
+    The kernel mutex is released on normal exit or process death, including an
+    abandoned owner's cancellation. No persistent lease or job identity is added.
+    """
+    a.GetUserNameW.argtypes = [wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    a.GetUserNameW.restype = wintypes.BOOL
+    user = ctypes.create_unicode_buffer(257)
+    size = wintypes.DWORD(len(user))
+    if not a.GetUserNameW(user, ctypes.byref(size)):
+        raise OSError(ctypes.get_last_error(), "GetUserNameW")
+    identity = hashlib.sha256(user.value.casefold().encode()).hexdigest()[:24]
+    name = "Global\\ScienceMate-MIC-" + identity
+    k.CreateMutexW.argtypes = [V, wintypes.BOOL, wintypes.LPCWSTR]
+    k.CreateMutexW.restype = V
+    k.ReleaseMutex.argtypes = [V]
+    k.ReleaseMutex.restype = wintypes.BOOL
+    mutex = k.CreateMutexW(None, False, name)
+    if not mutex:
+        raise OSError(ctypes.get_last_error(), "CreateMutexW")
+    acquired = False
+    try:
+        result = k.WaitForSingleObject(mutex, INFINITE)
+        if result not in (0, 0x80):  # WAIT_OBJECT_0 / WAIT_ABANDONED
+            raise OSError(ctypes.get_last_error(), "WaitForSingleObject(permission labels)")
+        acquired = True
+        yield
+    finally:
+        if acquired:
+            k.ReleaseMutex(mutex)
+        k.CloseHandle(mutex)
+
+
 def run(spec: dict, argv: list[str]) -> int:
     global _JOURNAL
     _JOURNAL = str(spec.get("journal") or "") or None
     k, a = _win32()
-    for root in spec.get("writable", []):
-        _icacls(str(root), "L")            # 可写根：Low-IL 可写
-    # 可写根**内部**声明的只读洞：Windows 上 deny 原语已经存在 —— 就是 git 那条用的
-    # "重打 Medium 标签"。`(OI)(CI)` 会往下传播，所以在可写根之后打、按深度升序打，
-    # 于是最具体的那条赢（#900-B2：不必等 write_layers 改成补集覆盖）。
-    for root in spec.get("readonly", []):
-        _icacls(str(root), "M")
-    for marker in spec.get("git", []):
-        _icacls(str(marker), "M")          # 其下 .git：打 Medium，Low-IL 写不进（Medium 无需特权）
-    job = _make_job(k, memory_bytes=int(spec.get("memory_bytes") or 0),
-                    pids=int(spec.get("pids") or 0))
-    # 载荷继承本启动器的当前目录。cwd 由 spec 带进来、这里自己进（#943）：调用方不必再拿
-    # MSYS bash 包一层 `cd` —— 那一跳会把本启动器的 argv（含这份 spec）按 Cygwin 规则重新
-    # 解析坏掉。进不去就抛 OSError，main() 报 win32_setup_failed，不在别处静默跑。
-    if spec.get("cwd"):
-        os.chdir(spec["cwd"])
-    # "msys"：载荷是 MSYS 程序（判据在 shared.lib.shell.msys_runtime_bin，由 win32 后端填）。
-    return _spawn_low_and_wait(k, a, argv, job, use_std_handles=True,
-                               msys=bool(spec.get("msys")))
+    with _permission_labels(k, a):
+        ordered = spec.get("layers")
+        if ordered is None:  # already-created legacy launch specifications
+            ordered = ([(root, "rw") for root in spec.get("writable", [])]
+                       + [(root, "ro") for root in spec.get("readonly", [])])
+        for root, mode in ordered:
+            _icacls(str(root), "L" if mode == "rw" else "M", strict=True)
+        for marker in spec.get("git", []):
+            _icacls(str(marker), "M", strict=True)
+        job = _make_job(k, memory_bytes=int(spec.get("memory_bytes") or 0),
+                        pids=int(spec.get("pids") or 0))
+        try:
+            if spec.get("cwd"):
+                os.chdir(spec["cwd"])
+            return _spawn_low_and_wait(k, a, argv, job, use_std_handles=True,
+                                       msys=bool(spec.get("msys")))
+        finally:
+            # KILL_ON_JOB_CLOSE drains descendants before another launch can
+            # change labels. Releasing the mutex first would reopen the race.
+            k.CloseHandle(job)
 
 
 def probe() -> dict:

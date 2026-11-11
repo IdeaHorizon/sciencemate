@@ -48,3 +48,4 @@ from .library import blockers                  # noqa: F401  generic node -> orc
 from .library import concede                   # noqa: F401  对 blocking 义务的公开让步（判决拆除批 0）
 from .library import memory_tools             # noqa: F401  memory_write / memory_note / memory_maintain / memory_recall
 from .library import remote_resources         # noqa: F401  Project Resources / SSH / durable remote jobs
+from .library import tool_results             # noqa: F401  read-only historical tool receipts

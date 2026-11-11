@@ -155,11 +155,11 @@ def test_math_letters_normalized_and_flagged():
     assert t == "即 T = T wall time/T6，全角，保留" and n == 3
 
 
-def test_fragment_problems_catch_process_vocab_and_preamble():
-    """iter0（生产稿）：正文出现「上游 artifact」「用户交来」；片段里塞 \\documentclass。"""
+def test_fragment_problems_catch_preamble():
+    """片段里的导言区是结构错误；稿件内容由审读按具体上下文评价。"""
     from nodes.writing.tools.w_common import fragment_problems
     p = fragment_problems("\\documentclass{article} 本文基于一份用户交来的数据（列入 revision items）。")
-    assert any("documentclass" in x for x in p) and any("用户交来" in x for x in p) and any("revision item" in x for x in p)
+    assert len(p) == 1 and "documentclass" in p[0]
 
 
 def test_figure_env_mismatch_against_outline(tmp_path):
@@ -181,7 +181,7 @@ def test_hard_lines_text_layer_on_real_pages(tmp_path):
     st = _state(tmp_path)
     pages = _pages(st)
     hl = hard_lines(st, pages, "", None)
-    for k in ("H1_title_block", "H2_process_vocab", "H3_references_resolved", "H4_figures_tables",
+    for k in ("H1_title_block", "H3_references_resolved", "H4_figures_tables",
               "H6_must_haves", "H7_layout", "H10_no_mojibake", "H11_figure_files_match_outline"):
         assert hl[k]["passed"], (k, hl[k])
 
@@ -353,6 +353,10 @@ def test_submit_requires_verdict_on_the_delivered_pdf(tmp_path):
     rp.write_text(json.dumps(rep, ensure_ascii=False), encoding="utf-8")
     r = asyncio.run(_submit_manuscript(st))
     assert r["status"] == "success" and r["artifact"]
+    delivered = st.read_artifact(r["artifact"]["id"])
+    facts = delivered["metadata"]["bibliography_verification"]
+    assert any(entry["check"]["status"] == "unavailable" for entry in facts)
+    assert all(entry["check"]["scope"] == "identifier" for entry in facts)
 
 
 # ── 派图 ────────────────────────────────────────────────────────────────────

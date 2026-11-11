@@ -14,7 +14,8 @@
 ## 判据：扫盘对比，不是断言字符串在不在
 
 「断言文案还在 ≈ 什么都没断言」。这里测的是**两个集合相等**：
-框架实际存在的 producing 节点，和调度器引导里点名的 producing 节点。
+框架实际存在的 producing 节点，和调度器实际收到的运行时契约分类。
+调度用途仍在引导中说明；分类只从各节点声明投影，不再维护第二张手写名单。
 
 新增一个 producing 节点却忘了让调度器知道，这条测试会红 —— 而这正是
 2026-08-23 那个缺陷的形态（机制到位、认知缺席）。
@@ -73,22 +74,22 @@ def test_every_producing_node_is_named_in_the_dispatch_guidance():
         f"命题裁决题上被跳过，调度器自己答了（答案对，但没有可核验记录）。")
 
 
-def test_the_classification_table_lists_them_as_producing():
-    """★ 光被提到不够 —— 要出现在那张「先读这张表再调度」的分类表里。
+def test_runtime_contracts_classify_all_producing_nodes_for_the_orchestrator(tmp_path):
+    """The classification seen by the model must cover the actual node set."""
+    import re
+    from core.loop_hooks import HookContext
+    from core.loop_hooks_builtin import _callee_contracts_on_turn_start
+    from core.state import State
 
-    调度器读的是那张表来决定走不走 post-producing 3-step flow。
-    漏在表外的节点会被当成 service 处理：不调 reviewer、不调 curator、
-    不出 decision package —— 一份没人审的证据记录直接进了项目。
-    """
-    prompt = _orchestrator_prompt()
-    marker = "| **producing** |"
-    assert marker in prompt, "分类表的 producing 行不见了 —— 引导结构变了？"
-    row = next(line for line in prompt.splitlines() if marker in line)
-    missing = sorted(n for n in _producing_nodes() if f"`{n}`" not in row)
-    assert not missing, (
-        f"这些 producing 节点不在分类表的 producing 行里：{missing}。\n"
-        f"当前那一行：{row.strip()[:200]}\n"
-        f"漏在表外 = 调度器会当它是 service，跑完不走审查流。")
+    harness = load_harness("_orchestrator")
+    state = State.new("_orchestrator", tmp_path)
+    state.hook_state["_callable_nodes"] = list(harness.callable_nodes)
+    messages = _callee_contracts_on_turn_start(HookContext(
+        harness=harness, state=state, messages=[], turn=1))
+    assert messages, "The caller did not receive its callee contracts"
+    body = "\n".join(message.content for message in messages)
+    seen = set(re.findall(r"^### `([^`]+)`（producing）$", body, re.MULTILINE))
+    assert seen == _producing_nodes(), f"Model-visible producing classification differs: {seen}"
 
 
 def test_the_dispatch_criterion_is_about_being_cited_not_difficulty():
