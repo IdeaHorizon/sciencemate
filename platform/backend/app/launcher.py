@@ -543,6 +543,21 @@ def prepare_the_environment() -> tuple[Path | None, Path | None]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The installed launcher owns this escape hatch. A declared checkout may be
+    # older than developer mode and have neither its API nor its settings panel.
+    arguments = sys.argv[1:] if argv is None else argv
+    if arguments and arguments[0] == "reset-developer-mode":
+        argparse.ArgumentParser(prog="research-platform reset-developer-mode").parse_args(arguments[1:])
+        from app.data_root_default import data_root_before_config
+        from app.services.developer_source import write_declared
+
+        write_declared(data_root_before_config(), None)
+        print(in_both_languages({
+            "zh": "已退出开发者模式。重新打开应用后将使用安装版，项目和设置会保留。",
+            "en": "Developer mode is off. Reopen the app to use the installed version; projects and settings are kept.",
+        }))
+        return 0
+
     # 最前面（先于任何输出/文件 IO）：Windows 上没在 UTF-8 模式就带 PYTHONUTF8=1 re-exec
     # 一次，否则后端一路写读中文的 transcript/memory 会 cp1252 崩或乱码。POSIX/已是 utf-8=无操作。
     #
@@ -577,7 +592,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="research-platform",
         description="Start the research platform on this machine.",
     )
-    parser.add_argument("command", nargs="?", default="start", choices=["start", "doctor"])
+    parser.add_argument("command", nargs="?", default="start", choices=["start", "doctor", "reset-developer-mode"])
     parser.add_argument("--port", type=int, default=None, help="默认让系统挑一个空端口")
     parser.add_argument(
         "--host", default="127.0.0.1",

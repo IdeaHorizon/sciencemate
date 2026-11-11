@@ -140,6 +140,28 @@ final class Backend {
     /// RESTART_EXIT_CODE 是同一个数 —— 壳只认这一个，别的码一律当事故。
     static let restartExitCode: Int32 = 3
 
+    /// Run the installed launcher's recovery command, even if the selected source
+    /// backend has no developer-mode API. The Python layer owns the declaration.
+    static func resetDeveloperMode(python: URL) throws {
+        let recovery = Process()
+        recovery.executableURL = python
+        recovery.currentDirectoryURL = python.deletingLastPathComponent().deletingLastPathComponent()
+        recovery.arguments = ["-B", "-m", "app.launcher", "reset-developer-mode"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        recovery.environment = environment
+        let errors = Pipe()
+        recovery.standardOutput = FileHandle.nullDevice
+        recovery.standardError = errors
+        try recovery.run()
+        let details = errors.fileHandleForReading.readDataToEndOfFile()
+        recovery.waitUntilExit()
+        guard recovery.terminationStatus == 0 else {
+            throw NSError(domain: "ScienceMate.DeveloperMode", code: Int(recovery.terminationStatus),
+                          userInfo: [NSLocalizedDescriptionKey: String(decoding: details, as: UTF8.self)])
+        }
+    }
+
     /// 等到 `/health/ready` 答 200 为止。
     ///
     /// 判据不是"进程还活着"：后端可以起来、健康检查却一直不过（库开不了、
@@ -247,6 +269,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var window: NSWindow!
     private var webView: WKWebView!
     private var backend: Backend?
+    private var backendGeneration = UUID()
+    private var resettingDeveloperMode = false
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 起任何东西之前先看数据根里有没有比我新的壳（上次更新留下的）。有就换成它并重新
         // 拉起自己 —— 此刻还没起后端、没开窗口，是壳能被自更新换掉的唯一时机（#953 ④）。
@@ -498,6 +522,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     ///
     /// 现在：组织是本机后端握着的几条连接，项目出生时挑一个家。壳只管起后端。
     private func startBackend() {
+        let generation = UUID()
+        backendGeneration = generation
         let resources = Bundle.main.resourceURL!
         let python = resources.appendingPathComponent("python/bin/python3")
         // 日志落在数据根里，跟别的东西一起。数据根的规则只有一条（config.py：
@@ -514,6 +540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 switch backend.waitUntilReady(timeout: 120) {
                 case .success:
                     DispatchQueue.main.async {
+                        guard self?.backendGeneration == generation else { backend.stop(); return }
                         self?.backend = backend
                         // 后端刚起来就把暂存的更新搬成了当前载荷 —— 那一版带了新壳的话，
                         // 此刻数据根里已经有它。换成它并重新拉起自己（applicationWillTerminate
@@ -525,6 +552,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                         // 日志尾巴给人看，而不是留一个失联的白窗口。
                         backend.onExit = { [weak self] code in
                             DispatchQueue.main.async {
+                                guard self?.backendGeneration == generation else { return }
                                 self?.backend = nil
                                 if code == Backend.restartExitCode {
                                     self?.startBackend()
@@ -538,13 +566,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                         self?.webView.load(URLRequest(url: backend.url))
                     }
                 case .failure(let error):
-                    DispatchQueue.main.async { self?.show(error) }
+                    backend.stop()
+                    DispatchQueue.main.async {
+                        guard self?.backendGeneration == generation else { return }
+                        self?.show(error)
+                    }
                 }
             } catch let error as ShellError {
-                DispatchQueue.main.async { self?.show(error) }
+                DispatchQueue.main.async {
+                    guard self?.backendGeneration == generation else { return }
+                    self?.show(error)
+                }
             } catch {
                 DispatchQueue.main.async {
+                    guard self?.backendGeneration == generation else { return }
                     self?.showMessage(Speech.pair("起不来。", "Could not start."),
+                                      evidence: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    @objc func returnToInstalledVersion(_ sender: Any?) {
+        guard !resettingDeveloperMode else { return }
+        resettingDeveloperMode = true
+        let python = Bundle.main.resourceURL!.appendingPathComponent("python/bin/python3")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                try Backend.resetDeveloperMode(python: python)
+                DispatchQueue.main.async {
+                    self?.backendGeneration = UUID()
+                    self?.backend?.stop()
+                    self?.backend = nil
+                    self?.resettingDeveloperMode = false
+                    self?.startBackend()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self?.resettingDeveloperMode = false
+                    self?.showMessage(Speech.pair("未能退出开发者模式。", "Could not leave developer mode."),
                                       evidence: error.localizedDescription)
                 }
             }
@@ -614,6 +674,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                                   action: #selector(openLogsFolder(_:)), keyEquivalent: "")
         openLogs.target = self
         help.addItem(openLogs)
+        let resetDeveloper = NSMenuItem(title: Speech.t("返回安装版并重启", "Return to Installed Version and Restart"),
+                                       action: #selector(returnToInstalledVersion(_:)), keyEquivalent: "")
+        resetDeveloper.target = self
+        help.addItem(resetDeveloper)
         helpItem.submenu = help
         main.addItem(helpItem)
         NSApp.mainMenu = main
