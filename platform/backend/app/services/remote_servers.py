@@ -13,7 +13,6 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
-from shared.lib.private_files import mkdir_private
 
 from app.config import settings
 from app.services.other_homes import ThereIsNoSuchHomeError
@@ -36,6 +35,8 @@ def _path(server_id: str, suffix: str = ".json") -> Path:
 
 
 def _write(path: Path, content: bytes) -> None:
+    from shared.lib.private_files import mkdir_private
+
     mkdir_private(path.parent)
     temporary = path.with_name(path.name + "." + uuid4().hex)
     try:
