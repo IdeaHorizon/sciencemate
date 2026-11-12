@@ -35,8 +35,13 @@ def bind_worker(*, user_id, project_id):
     # The worker uses this name for its socket *path*. App Settings uses the
     # same legacy name for a boolean. It is transport state, not App config.
     previous["HARNESS_CONTROL_SOCKET"] = os.environ.get("HARNESS_CONTROL_SOCKET")
+    previous["PLATFORM_ENV_FILE"] = os.environ.get("PLATFORM_ENV_FILE")
     try:
         os.environ.pop("HARNESS_CONTROL_SOCKET", None)
+        # This process runs in the Harness checkout, whose .env belongs to the
+        # CLI. App settings must use the delivered configuration, never that
+        # file (including otherwise-valid App fields such as DEBUG).
+        os.environ["PLATFORM_ENV_FILE"] = ""
         os.environ.update({name: str(_context[key]) for key, name in names.items()})
         from app.services.ssh_resources import install_worker_bridge
     finally:

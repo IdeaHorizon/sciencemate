@@ -237,7 +237,14 @@ class Settings(BaseSettings):
     # `populate_by_name`：上面 `profile` 有了 validation_alias 之后，
     # `Settings(profile="org")` 这种按字段名构造的写法就不再默认成立（测试里有
     # 六处这么写）。别名是给环境变量的，不是给调用方的。
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "populate_by_name": True}
+    model_config = {
+        # The App Server can pin its dotenv explicitly. Workers disable it
+        # during bootstrap: their cwd contains Harness/CLI configuration and
+        # their App settings are supplied by the owning server.
+        "env_file": os.environ.get("PLATFORM_ENV_FILE", ".env") or None,
+        "env_file_encoding": "utf-8",
+        "populate_by_name": True,
+    }
 
     def get_model_for_harness(self, node_type: str) -> str:
         """Resolve the LLM model for a given node/harness type."""
