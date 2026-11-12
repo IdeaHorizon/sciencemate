@@ -7,7 +7,7 @@
 数据和计算位于**本机或你选择的个人 Linux 服务器**：项目在所选机器上保存为 git 仓库，模型 key 加密后保存在对应机器。
 Python、git、LaTeX（tectonic）、跑实验用的 bash 都随包带，**不用先装任何东西**。
 
-- 当前版本：[v0.5.15](../../releases/tag/v0.5.15) · [下载 macOS 版](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.15/ScienceMate-0.5.15-arm64.dmg) · [下载 Windows 版](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.15/ScienceMate-Setup.exe) · 更新日志见 [Releases](../../releases)
+- 当前版本：[v0.5.15](../../releases/tag/v0.5.15) · [下载 macOS 版](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.15/ScienceMate-0.5.15-arm64.dmg) · [下载 Windows 版](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.14/ScienceMate-Setup.exe) · 更新日志见 [Releases](../../releases)
 - 本仓库放的是个人版的**源码**和它的**发布件**（安装包与更新）。安装包就是从这棵树打出来的；从源码运行见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 - 这是**个人版**：全部在你自己的机器上运行。团队共用的组织服务器属于专业版，不在这里发布。
 
@@ -34,7 +34,9 @@ Python、git、LaTeX（tectonic）、跑实验用的 bash 都随包带，**不�
 | 平台 | 下载 | 大小 |
 |---|---|---|
 | macOS（Apple Silicon） | [ScienceMate-0.5.15-arm64.dmg](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.15/ScienceMate-0.5.15-arm64.dmg) | 见发布资产 |
-| Windows 10 / 11（64 位） | [ScienceMate-Setup.exe](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.15/ScienceMate-Setup.exe) | 见发布资产 |
+| Windows 10 / 11（64 位） | [ScienceMate-Setup.exe](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.14/ScienceMate-Setup.exe) | 见发布资产 |
+
+Windows 下载暂沿用 0.5.14 安装包；安装后通过应用内更新获取 0.5.15 修复。
 
 校验和：[SHA256SUMS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.15/SHA256SUMS) · 全部文件：[Releases](../../releases/latest)
 
@@ -212,6 +214,6 @@ $env:AFS_INSTALL_DIR="D:\Tools\ScienceMate"   # 装到哪
 
 *本仓库以 [Apache License 2.0](LICENSE) 开源。随包第三方组件（Python、git、tectonic、biber、Node 依赖）的声明正在整理。*
 
-## 个人远程运行环境（0.5.15）
+## 个人远程运行环境（0.5.14）
 
 新建项目默认在本机运行，也可选择通过 SSH 配置的个人 Linux 服务器及服务器上的根目录。关闭 Desktop 后远程任务继续运行，重新连接后可查看已记录的进度和结果。请在「设置 → 运行环境」配置服务器及服务器侧模型。服务器重启后的恢复遵循运行时检查点机制。
