@@ -53,7 +53,7 @@ def test_caller_sees_service_node_output(tmp_path):
 def test_type_filter_still_applies_across_nodes(tmp_path):
     root = _worktree(tmp_path)
     _bound(tmp_path, "literature", root).save_artifact("survey_report", "s", "body", {})
-    _bound(tmp_path, "hypothesis", root).save_artifact("research_plan", "p", "plan", {})
+    _bound(tmp_path, "analysis", root).save_artifact("research_plan", "p", "plan", {})
 
     caller = _bound(tmp_path, "_orchestrator", root)
     assert [a["type"] for a in caller.list_artifacts("survey_report")] == ["survey_report"]
@@ -69,7 +69,7 @@ def test_another_nodes_record_cannot_be_shadowed_by_the_same_id(tmp_path):
     """
     root = _worktree(tmp_path)
     _bound(tmp_path, "literature", root).save_artifact("survey_report", "x", "theirs", {})
-    mine = _bound(tmp_path, "hypothesis", root)
+    mine = _bound(tmp_path, "analysis", root)
     with pytest.raises(StateContractError) as exc:
         mine.save_artifact("survey_report", "x", "mine", {})
     assert "literature" in str(exc.value) and "amendment_reason" in str(exc.value)
@@ -80,7 +80,7 @@ def test_another_nodes_record_cannot_be_shadowed_by_the_same_id(tmp_path):
     # 换个 name 另起一份：落本节点自己的目录、盖本节点的章
     own = mine.save_artifact("survey_report", "x_mine", "mine", {})
     assert own["path"] == "plan/survey_report__x_mine.md"
-    assert mine.read_artifact(own["id"])["produced_by_node_type"] == "hypothesis"
+    assert mine.read_artifact(own["id"])["produced_by_node_type"] == "analysis"
 
 
 def test_missing_artifact_is_still_none(tmp_path):
@@ -103,18 +103,18 @@ def test_corrupt_file_does_not_break_listing(tmp_path):
 
 def test_non_v2_run_is_unchanged(tmp_path):
     """没绑 worktree（CLI / 老路径）→ 只看自己的 run 目录，行为一字不变。"""
-    state = State(run_id="r", node_type="hypothesis", root=tmp_path / "run")
+    state = State(run_id="r", node_type="analysis", root=tmp_path / "run")
     state.save_artifact("research_plan", "p", "plan", {})
     [entry] = state.list_artifacts()
     assert entry["id"] == "research_plan__p"
-    assert entry["owner_node"] == "hypothesis"
+    assert entry["owner_node"] == "analysis"
     assert state.find_artifact_path("research_plan__p").is_relative_to(state.root / "artifacts")
 
 
 def test_artifact_missing_type_or_name_does_not_crash_listing(tmp_path):
     """issue #299：缺 type/name 的记录曾抛 KeyError 且未被捕获 —— 一条半截
     账本行能让整个列举崩掉。列举是观察，观察不该被坏数据打断。"""
-    state = State(run_id="r", node_type="hypothesis", root=tmp_path / "run")
+    state = State(run_id="r", node_type="analysis", root=tmp_path / "run")
     state.save_artifact("pre_registration", "good", "body", {})
     (state.root / "artifacts" / "half_written__x.md").write_text(
         "只有正文，没有 type/name", encoding="utf-8")

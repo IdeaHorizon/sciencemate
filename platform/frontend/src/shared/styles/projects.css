@@ -253,3 +253,38 @@
 .project-archived-group > summary { margin-bottom: 8px; color: var(--color-fg-muted); font-size: var(--font-size-caption); font-weight: 600; cursor: pointer; }
 .project-archived-group .project-list { opacity: .75; }
 .project-list-note { margin: 12px 0 0; color: var(--color-fg-muted); font-size: 13px; }
+
+.project-workspace-toolbar { display: flex; align-items: center; justify-content: space-between; flex: none; gap: 20px; min-height: 62px; padding: 10px 24px; border-bottom: 1px solid var(--color-border); background: var(--color-bg); }
+.project-workspace-identity { display: grid; gap: 3px; min-width: 0; }
+.project-workspace-identity strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-fg); font-size: 13px; font-weight: 600; }
+.project-workspace-identity small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-fg-subtle); font-size: 11px; }
+.project-workspace-toolbar nav { display: flex; flex: none; gap: 3px; }
+.project-workspace-tool { display: flex; align-items: center; gap: 6px; padding: 7px 10px; border-radius: 6px; color: var(--color-fg-muted); text-decoration: none; font-size: 12px; white-space: nowrap; }
+.project-workspace-tool:hover { background: var(--color-bg-subtle); color: var(--color-fg); }
+.project-workspace-tool.is-active { color: var(--color-fg); background: var(--color-bg-subtle); }
+.project-start { display: grid; place-content: center; min-height: 100%; padding: 40px 28px; }
+.project-start-content { width: min(600px, 100%); margin: 0 auto; }
+.project-start-content > svg { color: var(--color-fg-subtle); margin-bottom: 18px; }
+.project-start h1 { margin: 0 0 12px; color: var(--color-fg); font-size: 25px; font-weight: 550; letter-spacing: -.5px; }
+.project-start p { margin: 0 0 28px; color: var(--color-fg-muted); font-size: 13px; line-height: 1.8; }
+.project-start form { border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-bg); overflow: hidden; }
+.project-start textarea { display: block; width: 100%; resize: vertical; min-height: 120px; padding: 17px 18px 8px; border: 0; background: transparent; color: var(--color-fg); font: inherit; font-size: 14px; line-height: 1.7; }
+.project-start textarea:focus { outline-offset: -3px; }
+.project-start footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 14px 14px; }
+.project-start footer > span { color: var(--color-fg-subtle); font-size: 11px; }
+.project-start footer > button { display: flex; align-items: center; flex: none; gap: 7px; padding: 8px 12px; border: 0; border-radius: 7px; background: var(--color-accent-fill); color: var(--color-accent-fill-fg); font-size: 12px; cursor: pointer; }
+.project-start footer > button:disabled { opacity: .6; cursor: wait; }
+.project-start-readonly { padding-top: 16px; border-top: 1px solid var(--color-border); }
+@media (max-width: 800px) {
+  .project-workspace-toolbar { padding-left: 54px; gap: 10px; flex-wrap: wrap; }
+  .project-workspace-toolbar nav { flex-wrap: wrap; }
+  .project-workspace-tool { padding: 6px 7px; }
+}
+@media (max-width: 480px) {
+  .project-workspace-toolbar nav { width: 100%; }
+  .project-workspace-tool { flex: 1; justify-content: center; padding-inline: 4px; }
+  .project-workspace-tool svg { display: none; }
+  .project-start { padding: 30px 20px; }
+  .project-start h1 { font-size: 22px; }
+  .project-start footer { align-items: flex-end; }
+}

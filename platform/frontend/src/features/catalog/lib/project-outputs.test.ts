@@ -7,7 +7,7 @@ function source(path: string) {
 }
 
 const view = source("../components/ProjectOutputsView.tsx");
-const shell = source("../../../shared/layout/AppShell.tsx");
+const shell = source("../../projects/components/ProjectToolbar.tsx");
 const api = source("../../../lib/api.ts");
 
 test("只有过程文件默认收起 —— 用户来这一页是找那篇论文的", () => {
@@ -55,7 +55,7 @@ test("类型名取自共用的那张表 —— 表本身的判据在 kind-label.
 });
 
 test("导航里「研究成果」是这个问题的唯一入口", () => {
-  assert.match(shell, /\$\{root\}\/outputs`, label: \{ zh: "研究成果"/);
+  assert.match(shell, /id: "outputs", label: \{ zh: "成果"/);
 });
 
 test("目录是一次请求，不是前端把几个来源拼起来", () => {

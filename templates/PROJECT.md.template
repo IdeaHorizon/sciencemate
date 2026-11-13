@@ -35,7 +35,7 @@ system_prompt。其它节点看不到。
 - {例：优先 2023 后的工作；忽略 pre-print 没 peer-review 的}
 - {例：每篇 paper 必须 add_memory(kind='observation', tags=['paper:<key>'])}
 
-### hypothesis
+### analysis
 
 - {例：每个 hypothesis 必须带结构化 falsification_criteria}
 - {例：prereg 必须 freeze_artifact 后才能进 experiment}

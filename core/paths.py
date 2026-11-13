@@ -242,7 +242,7 @@ def find_run_dir(run_id: str) -> Path | None:
 NODE_OUTPUTS_DIRNAME = "outputs"
 
 #: 规范 kind 名。节点侧引用常量而不是字面量，改名只改这里。
-HYPOTHESIS_DRAFTS = ("hypothesis", "drafts")
+ANALYSIS_DRAFTS = ("analysis", "drafts")
 POSTPROCESS_FIGURES = ("postprocess", "figures")
 POSTPROCESS_SCRATCH = ("postprocess", "scratch")
 POSTPROCESS_DATA_CACHE = ("postprocess", "data_cache")
@@ -251,6 +251,7 @@ WRITING_BUNDLES = ("writing", "bundles")
 
 #: 新 canonical 相对路径 → v0.9 之前的旧相对路径。只用于**读回退**，不再写。
 LEGACY_RUN_SUBDIRS: dict[str, str] = {
+    "outputs/analysis/drafts": "outputs/hypothesis/drafts",
     "outputs/hypothesis/drafts": "drafts",
     "outputs/postprocess/figures": "figures",
     "outputs/postprocess/scratch": ".postprocess",
@@ -429,6 +430,9 @@ def _node_anchor(state: Any, node_type: str) -> Path:
     ——草稿归 run、产物归记录——而且只对它成立：它没有 prepare/stage 那种
     "先建再找"的多步流程，compile_latex 从它指名的源目录读、往 notes/ 下写。
     """
+    from core.naming import canonical_node_type
+
+    node_type = canonical_node_type(node_type)
     worktree = getattr(state, "project_worktree", None)
     if worktree is not None:
         owned = _worktree_node_dir(worktree, node_type or getattr(state, "node_type", ""))
@@ -462,9 +466,10 @@ def _worktree_node_dir(worktree: Path | str, node_type: str) -> Path | None:
     作用域表在 `core.project_workspace` —— 那里是分配作用域的地方，这里只读它。
     再抄一份名单，改一处忘一处就会让产物落到别人的目录里。
     """
+    from core.naming import canonical_node_type
     from core.project_workspace import _NODE_WORKSPACES
 
-    owned = _NODE_WORKSPACES.get(str(node_type or ""))
+    owned = _NODE_WORKSPACES.get(canonical_node_type(str(node_type or "")))
     if not owned:
         return None
     relative = Path(owned)
@@ -506,14 +511,15 @@ def prefer_existing(state_root: Path | str, canonical: Path) -> Path:
             legacy = root / old_rel / rel[len(new_rel) + 1:]
         else:
             continue
+        legacy = prefer_existing(root, legacy)
         if legacy.exists():
             return legacy
     return canonical
 
 
 # ── 具名 helper（节点侧只调这些）──────────────────────────────────────────
-def hypothesis_drafts_dir(state: Any, *, create: bool = False) -> Path:
-    return node_output_dir(state, *HYPOTHESIS_DRAFTS, create=create)
+def analysis_drafts_dir(state: Any, *, create: bool = False) -> Path:
+    return node_output_dir(state, *ANALYSIS_DRAFTS, create=create)
 
 
 def postprocess_figures_dir(state: Any, *, create: bool = False) -> Path:

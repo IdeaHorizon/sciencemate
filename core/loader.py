@@ -19,6 +19,8 @@ from typing import Any
 
 import yaml
 
+from core.naming import canonical_node_type
+
 from .harness import (
     DEFAULT_MAX_CONTEXT_TOKENS,
     HandoffPolicy,
@@ -52,7 +54,7 @@ def _default_context_window() -> int:
 
 def node_dir(node_type: str, nodes_dir: Path | None = None) -> Path:
     """返回 nodes/{node_type}/ 的路径。"""
-    return (nodes_dir or NODES_DIR) / node_type
+    return (nodes_dir or NODES_DIR) / canonical_node_type(node_type)
 
 
 # ── v3.6 框架强制工具（对应既有的 _ALWAYS_ON_HOOKS）──────────────────────────
@@ -201,7 +203,9 @@ def _refuse_if_declared_tools_are_not_granted(harness: NodeHarness) -> None:
         if tool is None or tool.internal_only:
             continue  # 幽灵名/内部工具各有自己的闸，不在本条判据里
         allowed = tool.allowed_node_types
-        if allowed is not None and harness.node_type not in allowed:
+        if allowed is not None and harness.node_type not in {
+            canonical_node_type(node) for node in allowed
+        }:
             blocked.append(f"  - {name}：allowed_node_types={sorted(allowed)}")
     if not blocked:
         return
@@ -221,6 +225,7 @@ def load_harness(node_type: str, nodes_dir: Path | None = None) -> NodeHarness:
     如果文件不存在，会抛出 FileNotFoundError —— 团队 owner 必须先创建它。
     （对全新节点：复制 templates/harness.yaml.template 到 nodes/{your_node}/harness.yaml。）
     """
+    node_type = canonical_node_type(node_type)
     base = nodes_dir or NODES_DIR
     path = base / node_type / "harness.yaml"
     if not path.exists():
@@ -285,6 +290,7 @@ def load_harness(node_type: str, nodes_dir: Path | None = None) -> NodeHarness:
         ),
         # quality_checks 层已删除（2026-08-22）：yaml 里残留的块静默忽略。
         expected_inputs=dict(raw.get("expected_inputs") or {}),
+        task_input_fields=list(raw.get("task_input_fields") or []),
         expected_outputs=dict(raw.get("expected_outputs") or {}),
         handoff_policy=handoff,
         max_turns=raw.get("max_turns", 12),

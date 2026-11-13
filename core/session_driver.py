@@ -353,6 +353,8 @@ async def next_action(
 
     if not _chat._continuous_running(state):
         return SessionAction(kind="stop", reason="continuous_not_running")
+    if state.hook_state.get("_unconfirmed_tool_calls"):
+        return SessionAction(kind="stop", reason="unconfirmed_tool_outcome")
 
     # 0) 有没有东西可续。连续档续的是**已经开始的研究**；项目里还什么都没有时，
     #    研究什么要等用户说 —— 这时续一轮就是替用户开题（2026-10-30 node20：

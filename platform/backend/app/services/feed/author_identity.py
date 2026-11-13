@@ -127,15 +127,24 @@ async def papers(entry, *, since):
         return []
     output, cursor = [], '*'
     zenodo_cache = {}
+    use_cursor = bool(os.environ.get('OPENALEX_API_KEY'))
     async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
-        # A bounded round; subsequent daily windows continue acquisition.
-        for _ in range(5):
-            response = await client.get('https://api.openalex.org/works', params=params({
+        # Keep the existing 1000-record round budget, using supported page sizes.
+        # Public page-based retrieval does not need a key; subsequent cursor
+        # requests do. Only request fields consumed below (large collaborations
+        # can otherwise produce very large responses).
+        for page in range(1, 11):
+            query = {
                 'filter': f'authorships.author.id:{aid},from_publication_date:{since}',
-                'per-page': 200, 'sort': 'publication_date:desc', 'cursor': cursor}))
+                'per-page': 100, 'sort': 'publication_date:desc',
+                'select': 'id,title,doi,publication_year,publication_date,authorships,abstract_inverted_index,primary_location,cited_by_count',
+            }
+            query['cursor' if use_cursor else 'page'] = cursor if use_cursor else page
+            response = await client.get('https://api.openalex.org/works', params=params(query))
             response.raise_for_status()
             payload = response.json()
-            for work in payload.get('results') or []:
+            rows = payload.get('results') or []
+            for work in rows:
                 identities = authorships(work)
                 if not any(row['author_id'] == aid for row in identities):
                     continue
@@ -161,8 +170,12 @@ async def papers(entry, *, since):
                     doi=str(work.get('doi') or '').removeprefix('https://doi.org/'),
                     source='openalex', url=str(work.get('doi') or work.get('id') or ''),
                     citations=int(work.get('cited_by_count') or 0), pub_date=str(work.get('publication_date') or '')))
-            following = (payload.get('meta') or {}).get('next_cursor')
-            if not payload.get('results') or not following or following == cursor:
+            meta = payload.get('meta') or {}
+            if not rows or len(rows) < 100 or (isinstance(meta.get('count'), int) and page * 100 >= meta['count']):
                 break
-            cursor = following
+            if use_cursor:
+                following = meta.get('next_cursor')
+                if not following or following == cursor:
+                    break
+                cursor = following
     return output

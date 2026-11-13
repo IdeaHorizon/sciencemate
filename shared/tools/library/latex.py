@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import shutil
 from pathlib import Path
@@ -433,6 +434,12 @@ async def _run_process(
     from core.sandbox import SandboxLimits
     from shared.lib.cancellable_subprocess import spawn_and_wait
 
+    # TeX and its bibliography helpers belong to the selected distribution.
+    # Resolving biber again from the app's PATH mixed a bundled old biber with
+    # the system's newer biblatex, even though latexmk itself was correct.
+    executable = Path(command[0])
+    environment = ({"PATH": str(executable.parent) + os.pathsep + os.environ.get("PATH", "")}
+                   if executable.is_absolute() else None)
     status, returncode, stdout, stderr = await spawn_and_wait(
         *command,
         state=state,
@@ -441,6 +448,7 @@ async def _run_process(
         writable_roots=[cwd],
         sandbox_home=home,
         network_access=network,
+        sandbox_environment=environment,
         sandbox_limits=SandboxLimits(
             memory_bytes=4 * 1024**3,
             cpus=2,

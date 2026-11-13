@@ -190,7 +190,7 @@ export const FEED_COPY = {
   "subscriptions.domains": { zh: "学科", en: "Fields" },
   "subscriptions.journals": { zh: "期刊", en: "Journals" },
   "subscriptions.scholars": { zh: "学者", en: "Scholars" },
-  "subscriptions.search_journals": { zh: "搜索 SCI 期刊名称或 ISSN", en: "Search SCI journals by name or ISSN" },
+  "subscriptions.search_journals": { zh: "搜索期刊名称或 ISSN", en: "Search journals by name or ISSN" },
   "subscriptions.search_scholars": { zh: "按姓名搜索学者", en: "Search scholars by name" },
   "subscriptions.follow": { zh: "关注", en: "Follow" },
   "subscriptions.following": { zh: "已关注", en: "Following" },

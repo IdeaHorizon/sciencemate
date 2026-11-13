@@ -1,4 +1,5 @@
 import type { ExecutionEvent } from "./execution-event";
+import { canonicalNodeType } from "../../../shared/node-type.ts";
 
 /**
  * 把子节点的动作按它自己的 run 分组。
@@ -35,7 +36,7 @@ function nodeTypeOf(events: ExecutionEvent[], fallback: string): string {
   for (const event of events) {
     const payload = event.payload as Record<string, unknown> | undefined;
     const value = payload?.nodeType ?? payload?.node_type;
-    if (typeof value === "string" && value) return value;
+    if (typeof value === "string" && value) return canonicalNodeType(value);
   }
   // 取不到节点名时退回 run id —— 显示空白比显示一个丑名字更糟。
   return fallback;

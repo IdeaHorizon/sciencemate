@@ -397,7 +397,7 @@ def test_a_non_redirect_recommendation_is_never_touched(tmp_path):
 # 的名单，而 writing 的 review_spec 今天还在教模型 redirect 到 `analysis`。
 
 #: 历史上真的存在过、后来被删掉的节点名（memory / harness 注释里都还留着它们）。
-_GHOSTS = ("analysis", "review", "survey", "planning", "exploration")
+_GHOSTS = ("retired_analysis", "review", "survey", "planning", "exploration")
 
 
 def test_the_ghosts_really_are_gone():
@@ -446,16 +446,16 @@ def test_the_gates_reject_a_deleted_node_end_to_end(tmp_path):
     "target_node 指向实际负责出图的 `analysis` 或 `postprocess`"（issue #1061）。
     模型照做是大概率事件。
     """
-    out = _recommend(tmp_path, "analysis")
+    out = _recommend(tmp_path, "retired_analysis")
     assert out["status"] == "error", "reviewer 工具放行了一个已删节点"
     assert "analysis" in out["error"]
 
-    state = _flow_with_a_redirect_recommendation(tmp_path, "analysis")
+    state = _flow_with_a_redirect_recommendation(tmp_path, "retired_analysis")
     entry = record_decision_answer(
         state, {"type": "decision_package", "producing_run_id": "run-w-1"},
         str(_NORMAL_ACTIONS.index("redirect_upstream") + 1))
     assert entry["decision_state"] == "awaiting_human"
     assert entry.get("authorized_target_node") is None
 
-    _s, pause = _present(tmp_path, target="analysis")
+    _s, pause = _present(tmp_path, target="retired_analysis")
     assert pause["metadata"]["recommended_action"] != "redirect_upstream"

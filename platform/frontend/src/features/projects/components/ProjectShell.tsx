@@ -1,6 +1,7 @@
 "use client";
 
 import { useProjects } from "../hooks/useProjects";
+import { ProjectToolbar } from "./ProjectToolbar";
 import { RemoteConnectionStatus } from "./RemoteConnectionStatus";
 
 export function ProjectShell({ projectId, children }: { projectId: string; children: React.ReactNode }) {
@@ -10,6 +11,7 @@ export function ProjectShell({ projectId, children }: { projectId: string; child
     <div className="project-shell" data-project-id={projectId}>
       {home?.kind === "remote" && <RemoteConnectionStatus key={home.connection_id}
         projectId={projectId} serverId={home.connection_id} name={home.name} />}
+      <ProjectToolbar projectId={projectId} />
       <div className="project-shell-body">{children}</div>
     </div>
   );

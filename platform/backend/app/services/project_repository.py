@@ -224,7 +224,8 @@ _ARTIFACT_DIRECTORIES = {
     "literature_index": "literature",
     "research_plan": "plans",
     "hypothesis_innovation_report": "plans",
-    "hypothesis_research_overview": "plans",
+    "analysis_research_overview": "plans",
+    "hypothesis_research_overview": "plans",  # historical artifacts keep their paths
     "pre_registration": "preregistrations",
     "experiment_log": "experiments",
     "clean_results": "experiments",
@@ -253,9 +254,13 @@ _ARTIFACT_DIRECTORIES = {
 # import harness core，所以建仓与 checkpoint 闸需要自己的一份。两份分叉的后果
 # 是静默的（节点写盘被判越界，而报错指向"越界"不指向"两张表对不上"），
 # `tests/test_node_workspaces_match_the_harness.py` 把两边钉在同一张表上。
+# Lightweight backend mirror of core.naming.NODE_ALIASES, checked with the
+# ownership table contract. Reading a Git trailer never rewrites that evidence.
+NODE_TYPE_ALIASES = {"hypothesis": "analysis"}
+
 NODE_WORKSPACES: dict[str, str] = {
     "literature": "literature",
-    "hypothesis": "plan",
+    "analysis": "plan",
     "data": "data",
     "experiment": "experiments",
     "observation": "observation",
@@ -696,7 +701,7 @@ def _artifact_type_policy_yaml() -> str:
         "clean_results",
         "figure",
         "hypothesis_innovation_report",
-        "hypothesis_research_overview",
+        "analysis_research_overview",
         "literature_index",
         "writing_preflight_plan",
     )
@@ -899,7 +904,8 @@ class GitProjectRepository:
         raw = self._git(path, "log", "-1", "--format=%B", branch, check=False)
         for line in raw.splitlines():
             if line.startswith("Lane-Node-Type:"):
-                return line.split(":", 1)[1].strip()
+                node = line.split(":", 1)[1].strip()
+                return NODE_TYPE_ALIASES.get(node, node)
         return ""
 
     def open_child_lane(
@@ -922,6 +928,7 @@ class GitProjectRepository:
         session_id = self._safe_id(session_id, "session id")
         lane_id = self._safe_id(lane_id, "lane id")
         node = re.sub(r"[^A-Za-z0-9._-]+", "-", str(node_type)).strip("-.")[:64]
+        node = NODE_TYPE_ALIASES.get(node, node)
         if not node:
             raise ProjectRepositoryError("Child lane needs a node type")
         repo = self.project_path(project_id)
@@ -2561,6 +2568,7 @@ class GitProjectRepository:
         workspace_prefix: str,
         paths: list[str],
     ) -> CheckpointSelection:
+        node_type = NODE_TYPE_ALIASES.get(node_type, node_type)
         canonical = self.project_path(project_id)
         policy_text = self._git(canonical, "show", f"{DEFAULT_BRANCH}:access/nodes.yaml")
         policy = yaml.safe_load(policy_text) or {}
@@ -2569,7 +2577,12 @@ class GitProjectRepository:
             "_reviewer": "reviewer",
             "_orchestrator": "orchestrator",
         }.get(node_type, node_type)
-        node_policy = (policy.get("nodes") or {}).get(policy_node) or {}
+        policies = policy.get("nodes") or {}
+        node_policy = policies.get(policy_node)
+        if node_policy is None:
+            node_policy = next((policies[old] for old, new in NODE_TYPE_ALIASES.items()
+                                if new == policy_node and old in policies), {})
+        node_policy = node_policy or {}
         allowed = tuple(
             self._safe_relative_path(str(value)) for value in (node_policy.get("write") or [])
         )

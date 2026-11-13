@@ -8,6 +8,64 @@ def concept(zh, en):
     return {'zh': [zh], 'en': [en]}
 
 
+def umbrella_plan():
+    return {'retrieval_mode': 'focused', 'core_concepts': [
+        {**concept('先进材料', 'advanced materials'), 'role': 'subject',
+         'background_optional': False, 'scope': 'umbrella',
+         'member_classes': [concept('复合材料', 'composite materials'),
+                            concept('超材料', 'metamaterials')]},
+        {**concept('力学性能', 'mechanical properties'), 'role': 'outcome',
+         'background_optional': False}],
+        'exclude_concepts': [concept('撤稿', 'retraction')],
+        'search_groups': [{'label': '材料力学', 'additional_concepts': []}]}
+
+
+def test_subject_members_expand_recall_without_relaxing_other_conditions():
+    from nodes.literature.tools.academic_admission import assess_concepts
+
+    plan = bs.compile_plan(json.dumps(umbrella_plan()),
+                           '先进材料力学性能，排除撤稿', require_roles=True)
+    assert plan['english_query'] == ('("advanced materials" OR "composite materials" OR "metamaterials")'
+                                     ' AND "mechanical properties" NOT ("retraction")')
+    assert plan['concept_roles'] == ['subject', 'outcome']
+    assert plan['background_optional_concepts'] == []
+    assert plan['research_aspects'] == []
+    assert plan['bilingual_queries'][0]['zh'].count(' * ') == 1
+    assert plan['scope_adjustments'][0]['action'] == 'subject_members_as_alternatives'
+    for title in ['Mechanical properties of composite materials', '超材料的力学性能']:
+        assert assess_concepts({'title': title}, plan)['tier'] == 'direct'
+    for title in ['Composite materials for hydrogen storage', 'Mechanical properties of bone',
+                  'Retraction: mechanical properties of metamaterials']:
+        assert assess_concepts({'title': title}, plan)['tier'] == 'excluded'
+
+
+@pytest.mark.parametrize('role,scope', [('subject', 'specific'), ('method', 'umbrella'),
+                                     ('population', 'umbrella'), ('outcome', 'umbrella')])
+def test_members_cannot_broaden_specific_subjects_methods_or_populations(role, scope):
+    data = umbrella_plan()
+    data['core_concepts'][0].update(role=role, scope=scope)
+    with pytest.raises(ValueError, match='only_umbrella_subjects'):
+        bs.compile_plan(json.dumps(data), '先进材料力学性能，排除撤稿', require_roles=True)
+
+
+def test_bundled_subject_members_are_not_silently_reduced_to_the_first_term():
+    data = umbrella_plan()
+    data['core_concepts'][0]['member_classes'] = [{
+        'zh': ['复合材料', '超材料', '智能材料'],
+        'en': ['composite materials', 'metamaterials', 'smart materials']}]
+    plan = bs.compile_plan(json.dumps(data), '先进材料力学性能，排除撤稿', require_roles=True)
+    assert plan['concept_groups'][0] == ['advanced materials', 'composite materials', 'metamaterials', 'smart materials']
+    assert plan['core_concepts_zh'][0] == ['先进材料', '复合材料', '超材料', '智能材料']
+
+
+@pytest.mark.parametrize('members', ['materials', [concept('类别', 'class')] * 4])
+def test_subject_member_expansion_is_bounded(members):
+    data = umbrella_plan()
+    data['core_concepts'][0]['member_classes'] = members
+    with pytest.raises(ValueError, match='at_most_three'):
+        bs.compile_plan(json.dumps(data), '先进材料力学性能，排除撤稿', require_roles=True)
+
+
 @pytest.mark.parametrize('question,zh,en', [
     ('水稻 耐盐性 根系离子稳态', ['水稻', '耐盐性', '根系离子稳态'], ['rice', 'salt tolerance', 'root ion homeostasis']),
     ('个人信息保护法中自动化决策的透明度', ['个人信息保护法', '自动化决策', '透明度'], ['privacy law', 'automated decisions', 'transparency']),

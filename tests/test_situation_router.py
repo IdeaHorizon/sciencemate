@@ -80,7 +80,7 @@ def test_a_fresh_project_routes_to_hypothesis_not_literature() -> None:
         body = result[0].content
         assert body.startswith(_SITUATION_MARKER)
         assert "fresh" in body
-        assert "hypothesis" in body
+        assert "analysis" in body
         assert "landscape" in body          # 明说别先铺综述
         assert "import_artifact" in body    # 外部材料的合法出口也在场
 
@@ -115,7 +115,7 @@ def test_a_project_with_research_state_routes_by_verdict() -> None:
         record = write_record(worktree, artifact_type="research_state",
                               name="research_state", content="# research state",
                               directory="plan", metadata={"verdict": "continue"},
-                              produced_by_node_type="hypothesis",
+                              produced_by_node_type="analysis",
                               produced_by_run_id="r-hyp")
         state.project_worktree = worktree
 
@@ -141,7 +141,7 @@ def test_reinjection_replaces_instead_of_appending() -> None:
 
         # 局面变化：欠下收尾三步
         state.hook_state["pending_post_node_flow"] = [{
-            "producing_node": "hypothesis", "producing_run_id": "r9",
+            "producing_node": "analysis", "producing_run_id": "r9",
             "review_state": "pending", "curator_state": "pending",
             "decision_state": "pending", "artifact_ids": [],
         }]

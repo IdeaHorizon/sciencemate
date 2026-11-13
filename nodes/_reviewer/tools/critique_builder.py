@@ -100,8 +100,11 @@ def _review_subject_snapshot(state: State, artifact_id: str) -> dict[str, Any]:
     pdf_hashes: dict[str, str] = {}
     metadata = record.get("metadata") or {}
     variants = metadata.get("pdf_variants") or {}
+    # Current submit_manuscript records one pdf_path rather than legacy variants.
+    if not variants and metadata.get("pdf_path"):
+        variants = {"primary": {"pdf_path": metadata["pdf_path"]}}
     if isinstance(variants, dict):
-        for name in ("review", "clean"):
+        for name in ("review", "clean", "primary"):
             variant = variants.get(name)
             raw = variant.get("pdf_path") if isinstance(variant, dict) else None
             if not isinstance(raw, str) or not raw.strip():
@@ -171,11 +174,17 @@ async def _compose_review_critique(
     verdict: str | None = None,
     confidence: float | None = None,
     summary: str = "",
+    review_scope: str = "",
+    unverified_checks: list[str] | None = None,
     # add_concern
     severity: str | None = None,
     title: str = "",
     description: str = "",
     suggestion: str = "",
+    basis: str = "",
+    evidence: str = "",
+    impact: str = "",
+    affected_use: str = "",
     # add_strength
     text: str = "",
     # set_scores
@@ -241,6 +250,10 @@ async def _compose_review_critique(
             d["confidence"] = float(confidence)
         if summary.strip():
             d["summary"] = summary.strip()
+        if review_scope.strip():
+            d["review_scope"] = review_scope.strip()
+        if unverified_checks is not None:
+            d["unverified_checks"] = list(unverified_checks)
         return {"status": "success", "draft": _summarize(d)}
 
     if action == "add_concern":
@@ -259,6 +272,10 @@ async def _compose_review_critique(
         }
         if suggestion.strip():
             concern["suggestion"] = suggestion.strip()
+        for key, value in (("basis", basis), ("evidence", evidence),
+                           ("impact", impact), ("affected_use", affected_use)):
+            if value.strip():
+                concern[key] = value.strip()
         d["concerns"].append(concern)
         return {"status": "success", "draft": _summarize(d)}
 
@@ -425,8 +442,13 @@ async def _compose_review_critique(
     rubric_source = {
         "owner_spec_loaded": bool(_delivery.get("owner_spec_loaded")),
         "owner_spec_path": _delivery.get("owner_spec_path"),
+        "owner_spec_sha256": _delivery.get("owner_spec_sha256"),
+        "owner_spec_truncated": bool(_delivery.get("owner_spec_truncated")),
         "stamped_by": "framework",
     }
+    from core.review_policy import REVIEW_POLICY_SHA256
+
+    rubric_source["review_policy_sha256"] = REVIEW_POLICY_SHA256
     recommended = d.get("recommended_action") or {}
     review_incomplete = not d.get("verdict") or not recommended.get("action")
     # 副作用检查盖章（#973）：用户的副作用约束 + 被审 run 实际改了什么，框架算、
@@ -443,6 +465,8 @@ async def _compose_review_critique(
         "recommended_action": recommended,
         "rubric_source": rubric_source,
         "review_subject": review_subject,
+        "review_scope": d.get("review_scope", ""),
+        "unverified_checks": d.get("unverified_checks", []),
         # R-OB1：缺项与意见矛盾如实随 payload 走（判决拆除批 3w）。
         "advisories": advisories,
         "_composed_by": "compose_review_critique",   # 审计：框架拼装，非模型单发
@@ -476,6 +500,9 @@ async def _compose_review_critique(
         "recommended_action": recommended.get("action"),
         "recommended_target_node": recommended.get("target_node"),
         "owner_spec_loaded": rubric_source["owner_spec_loaded"],  # 机械读取者用
+        "rubric_source": rubric_source,
+        "review_scope": d.get("review_scope", ""),
+        "unverified_checks": d.get("unverified_checks", []),
         "review_subject": review_subject,
         "advisories": advisories,
     }
@@ -530,9 +557,9 @@ register_tool(
         description=(
             "**增量拼装并落盘 review_critique**（推荐路径）。`action` 决定操作：\n"
             "  - `set_verdict`：verdict（approve/approve_with_revisions/major_concerns/block）"
-            "+ confidence + summary\n"
+            "+ confidence + summary；可选 review_scope / unverified_checks\n"
             "  - `add_concern`：一条 concern 一次调用（severity=critical/major/minor + "
-            "title + description + 可选 suggestion）\n"
+            "title + description；可选 suggestion / basis / evidence / impact / affected_use）\n"
             "  - `add_strength`：一条 strength\n"
             "  - `set_scores`：per_dimension_scores（维度 → 1-5）\n"
             "  - `set_project_synthesis`：project_synthesis 专用，写入 project_verdict、"
@@ -558,10 +585,44 @@ register_tool(
                 "verdict": {"type": "string", "enum": list(_VERDICTS)},
                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 "summary": {"type": "string"},
+                "review_scope": {
+                    "type": "string",
+                    "description": (
+                        "Claims, intended use and delivery stage actually assessed; "
+                        "not permission to execute."
+                    ),
+                },
+                "unverified_checks": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Relevant checks not completed; absence is not a passing check.",
+                },
                 "severity": {"type": "string", "enum": list(_SEVERITIES)},
                 "title": {"type": "string"},
                 "description": {"type": "string"},
                 "suggestion": {"type": "string"},
+                "basis": {
+                    "type": "string",
+                    "description": (
+                        "Requirement, domain validity, scientific risk or optional "
+                        "improvement; explain applicability."
+                    ),
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": (
+                        "Concrete observation and source/file location, "
+                        "not just a severity label."
+                    ),
+                },
+                "impact": {
+                    "type": "string",
+                    "description": "Why the finding matters to the current claim/use.",
+                },
+                "affected_use": {
+                    "type": "string",
+                    "description": "Specific claim or use affected; avoid a blanket project veto.",
+                },
                 "text": {"type": "string"},
                 "scores": {"type": "object"},
                 "project_verdict": {"type": "string", "enum": list(_PROJECT_VERDICTS)},

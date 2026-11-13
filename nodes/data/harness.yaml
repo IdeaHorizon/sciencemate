@@ -129,6 +129,7 @@ expected_inputs:
   artifact_id: "operation 指定的唯一已有 dataset artifact id。"
   spec: "明确的前处理资产请求，或包含请求/上游契约的本地路径；应声明目标资产、下游用途及已知参数和验收要求。"
   upstream_plan: "可选：调用方附带的 pre_registration/research_plan/stage contract；直接资产请求无需提供。"
+  review_feedback: "可选：针对已有交付的具体疑点列表，每项说明 file、message、evidence 或 observation，以及影响的用途。Data 先对照当前实物审核；确认缺陷后进入既有修复流程。优化偏好和扩写 spec 不自动成为新要求。"
 
 expected_outputs:
   preprocessing_document: "schema、获取计划或部分交付；不标为可消费的完整 dataset。"

@@ -16,7 +16,7 @@ from core.project_workspace import bind_project_workspace
 from core.state import State
 from shared.tools.builtin import _list_files, _search_files
 
-NODES = ("literature", "hypothesis", "experiment", "writing")
+NODES = ("literature", "analysis", "experiment", "writing")
 
 from core.project_workspace import _NODE_WORKSPACES as _DIRS  # 节点 → 目录
 
@@ -63,7 +63,7 @@ async def test_writing_can_list_another_nodes_directory(tmp_path: Path) -> None:
     assert result["status"] == "success", result
     found = {e["path"] for e in result["entries"]}
     assert "experiments/artifacts/experiment_note.md" in found
-    assert "plan/artifacts/hypothesis_note.md" in found
+    assert "plan/artifacts/analysis_note.md" in found
 
 
 @pytest.mark.asyncio

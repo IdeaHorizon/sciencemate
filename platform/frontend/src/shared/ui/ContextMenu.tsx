@@ -31,6 +31,7 @@ export function useContextMenu() {
   const [at, setAt] = useState<{ x: number; y: number } | null>(null);
   return {
     at,
+    openAt: (x: number, y: number) => setAt({ x, y }),
     close: () => setAt(null),
     onContextMenu: (event: React.MouseEvent) => {
       event.preventDefault();

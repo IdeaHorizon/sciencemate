@@ -49,14 +49,13 @@ def _review_provenance(state: State) -> dict:
 
 # test_reviewer_harness_loads 已随 QC 层删除（2026-08-22）：改为下方新断言
 
-def test_reviewer_hard_blocks_figureless_publication_manuscripts():
+def test_reviewer_checks_delivery_format_against_the_current_use():
     h = load_harness("_reviewer")
-    assert "投稿型研究论文没有科研图片" in h.system_prompt
+    assert "当前简报" in h.system_prompt
+    assert "研究论文必须有图" in h.system_prompt  # explicitly rejected as a generic rule
+    assert "缺图 → critical" not in " ".join(h.rules)
     spec = Path("nodes/writing/review_spec.md").read_text(encoding="utf-8")
-    assert "hard_lines_passed" in spec and "critical concern" in spec
-    rules_text = " ".join(h.rules)
-    assert "缺图 → critical" in rules_text
-    assert "绝不 proceed" in rules_text
+    assert "简报" in spec and "venue" in spec and "hard_lines_passed" in spec
 
 
 def test_reviewer_in_kb_heuristic_injection():

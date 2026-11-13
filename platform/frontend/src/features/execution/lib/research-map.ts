@@ -1,4 +1,5 @@
 import type { ExecutionEvent } from "./execution-event";
+import { canonicalNodeType } from "../../../shared/node-type.ts";
 
 /**
  * 研究地图：把一个会话的执行事件投影成「走过的流程图」。
@@ -72,7 +73,7 @@ export type ResearchMapModel = {
 //: 所以配了扫盘闸：`tests/test_research_map_stations_match_node_roles.py` 直接
 //: 读 `nodes/*/harness.yaml`，对不上就 CI 红。**名单可以存在，分叉不可以静默。**
 const STATION_ORDER = [
-  "hypothesis", "observation", "experiment", "derivation", "writing",
+  "analysis", "observation", "experiment", "derivation", "writing",
 ] as const;
 const STATION_TYPES = new Set<string>(STATION_ORDER);
 
@@ -95,7 +96,7 @@ type ChildRun = {
 export function parseRunLineage(runId: string): { dispatcher: string; nodeType: string } | null {
   const match = /::([^:>]+)->([^@:>]+)@d\d+$/.exec(runId);
   if (!match) return null;
-  return { dispatcher: match[1], nodeType: match[2] };
+  return { dispatcher: canonicalNodeType(match[1]), nodeType: canonicalNodeType(match[2]) };
 }
 
 /**
@@ -123,9 +124,9 @@ function collectChildRuns(events: readonly ExecutionEvent[]): ChildRun[] {
     if (event.kind === "run.started") {
       const payload = event.payload as Record<string, unknown> | undefined;
       const lineage = parseRunLineage(event.runId);
-      const nodeType = typeof payload?.nodeType === "string" && payload.nodeType
+      const nodeType = canonicalNodeType(typeof payload?.nodeType === "string" && payload.nodeType
         ? payload.nodeType
-        : lineage?.nodeType ?? "research";
+        : lineage?.nodeType ?? "research");
       const visit: ChildRun = {
         runId: event.runId,
         nodeType,

@@ -167,7 +167,7 @@ def test_successful_results_keep_their_old_truncated_shape():
 
       - `nodes/experiment/tools/contract_audit.py` 拿"只剩截断字符串"当"这次
         调用不算成功"的保守判据 —— 换成 envelope dict 会**放宽一道审计**。
-      - `nodes/hypothesis/artifact_recovery.py` 直接在字符串里找 `"passed"`
+      - `nodes/analysis/artifact_recovery.py` 直接在字符串里找 `"passed"`
         —— envelope 只留 status/error，`passed` 会消失，恢复逻辑静默失效。
     """
     from core.agent_loop import _brief

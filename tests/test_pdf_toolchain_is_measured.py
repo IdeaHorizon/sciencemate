@@ -176,16 +176,33 @@ def _needs(tex: str) -> dict:
 
 
 def test_the_sample_needs_everything_the_platforms_templates_need():
+    from nodes.writing.renderers import render_template
+
     templates = sorted(RENDERERS.glob("*/main.tex.tmpl"))
     assert templates, f"没找到平台模板：{RENDERERS}"
-    sample = _needs(pdf_toolchain.PROBE_TEX)
     for template in templates:
-        need = _needs(template.read_text(encoding="utf-8"))
-        assert need["class"] == sample["class"], f"{template}: 文档类对不上"
-        missing = need["packages"] - sample["packages"]
-        assert not missing, f"{template} 用到而实测样本没有的宏包：{sorted(missing)}"
-        assert need["biblatex"] == sample["biblatex"], (
-            f"{template} 的 biblatex 选项（后端 / 样式）和样本不同 —— 实测证明不了它能编")
+        samples = [("zh", pdf_toolchain.PROBE_TEX), ("en", pdf_toolchain.PROBE_EN_TEX)]
+        for language, source in samples:
+            need = _needs(render_template(template.parent.name, language))
+            sample = _needs(source)
+            assert need == sample, (template, language, need, sample)
+    assert _needs(pdf_toolchain.PROBE_EN_TEX)["class"] == "article"
+
+
+def test_an_english_template_failure_cannot_be_hidden_by_the_chinese_probe(monkeypatch):
+    _with_latexmk(monkeypatch)
+
+    async def fake(state, command, cwd, timeout, **kw):
+        name = command[-1]
+        if name == "probe-en.tex":
+            return "done", 1, b"! LaTeX Error: This NFSS system isn't set up properly.", b""
+        (Path(cwd) / Path(name).with_suffix(".pdf")).write_bytes(pdf_toolchain._tiny_pdf())
+        return "done", 0, b"", b""
+
+    monkeypatch.setattr(latex, "_run_process", fake)
+    record = asyncio.run(pdf_toolchain.measure())
+    assert record["works"] is False
+    assert "NFSS" in record["reason"]
 
 
 def test_the_sample_figure_is_a_real_pdf():
@@ -283,6 +300,7 @@ def test_an_empty_cache_is_filled_by_the_frameworks_samples_then_recompiled_offl
     assert fake.calls == [
         ("paper.tex", False),        # 模型的稿子：断网，撞墙
         ("probe.tex", True),         # 框架的样本：联网取包
+        ("probe-en.tex", True),
         ("probe-tikz.tex", True),
         ("paper.tex", False),        # 同一份稿子：仍然断网，用刚取进来的包
     ]
@@ -344,15 +362,15 @@ def test_the_measurement_fetches_through_the_same_path(monkeypatch, tmp_path):
     async def compiles_and_writes_the_pdf(state, command, cwd, timeout, **kw):
         result = await fake(state, command, cwd, timeout, **kw)
         if result[1] == 0 and not kw.get("network"):
-            (Path(cwd) / "probe.pdf").write_bytes(pdf_toolchain._tiny_pdf())
+            (Path(cwd) / Path(command[-1]).with_suffix(".pdf")).write_bytes(pdf_toolchain._tiny_pdf())
         return result
 
     monkeypatch.setattr(latex, "_run_process", compiles_and_writes_the_pdf)
     record = asyncio.run(pdf_toolchain.measure())
 
     assert record["works"] is True, record
-    assert fake.calls[0] == ("probe.tex", False) and fake.calls[-1] == ("probe.tex", False)
-    assert [network for _, network in fake.calls].count(True) == 2
+    assert fake.calls[0] == ("probe.tex", False) and fake.calls[-1] == ("probe-en.tex", False)
+    assert [network for _, network in fake.calls].count(True) == 3
 
 
 def _network_keyword(call: ast.Call) -> ast.expr | None:

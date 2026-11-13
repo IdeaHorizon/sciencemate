@@ -161,9 +161,9 @@ POLICY: dict[str, ArtifactPolicy] = {
     "literature_evidence_package":
                          {"retention": "permanent"},
     "research_plan":     {"retention": "permanent", "singleton": True, "exemplar_candidate": True},
-    "hypothesis_research_overview":  {"retention": "transient", "singleton": True},
+    "analysis_research_overview":  {"retention": "transient", "singleton": True},
     "hypothesis_innovation_report":  {"retention": "transient", "singleton": True},
-    "hypothesis_output_validation":  {"retention": "transient", "singleton": True},
+    "analysis_output_validation":  {"retention": "transient", "singleton": True},
     "pre_registration":  {"retention": "permanent", "exemplar_candidate": True},
     # 检索协议对取样，等同预注册对假设：冻结后必须能核验没被改过，否则"协议
     # 先于取证"这条纪律就只是约定。
@@ -232,7 +232,9 @@ POLICY: dict[str, ArtifactPolicy] = {
 
 def get_policy(artifact_type: str) -> ArtifactPolicy:
     """查 policy。未声明的类型 → 默认 transient。"""
-    return POLICY.get(artifact_type, _DEFAULT)
+    from core.naming import canonical_artifact_type
+
+    return POLICY.get(canonical_artifact_type(artifact_type), _DEFAULT)
 
 
 def is_permanent(artifact_type: str) -> bool:

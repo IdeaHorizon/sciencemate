@@ -39,6 +39,10 @@ DISCOVERY_ROUND_TIMEOUT_SECONDS = 600.0
 #: 每5分钟检查到期项，实际采集统一按24小时。
 TICK_SECONDS = 300
 
+# Let short DB rounds finish before cancelling a slow external request. Killing
+# an aiosqlite query mid-flight can leave its native cursor alive after rollback.
+SHUTDOWN_GRACE_SECONDS = 2.0
+
 #: 同时最多拉几个源。压到很低是刻意的：这些是别人的免费接口，
 #: 我们没有理由并发地打它们。
 MAX_CONCURRENT_FETCHES = 3
@@ -52,12 +56,15 @@ class FeedCollector:
     def __init__(self) -> None:
         self._task: asyncio.Task[None] | None = None
         self._subscription_task: asyncio.Task[None] | None = None
+        self._subscription_asset_task: asyncio.Task[None] | None = None
         self._school_task: asyncio.Task[None] | None = None
         self._project_asset_task: asyncio.Task[None] | None = None
         self._translation_task: asyncio.Task[None] | None = None
         self._journal_cover_task: asyncio.Task[None] | None = None
         self._journal_browser_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
+        self._subscription_wakeup = asyncio.Event()
+        self._subscription_assets_wakeup = asyncio.Event()
         #: 当前这一轮的 HTTP client（补图那一步要用，见 run_once）。
         self._client: httpx.AsyncClient | None = None
         self._school_last_refresh: datetime | None = None
@@ -70,17 +77,16 @@ class FeedCollector:
             return
         self._stop.clear()
         self._task = asyncio.create_task(self._run(), name="feed-collector")
-        self._subscription_task = asyncio.create_task(
-            self._run_subscriptions(), name="feed-subscription-collector"
-        )
+        self.start_subscriptions()
+        if self._translation_task is None or self._translation_task.done():
+            self._translation_task = asyncio.create_task(
+                self._run_translations(), name="feed-translation-worker"
+            )
         self._school_task = asyncio.create_task(
             self._run_school(), name="feed-school-library-collector"
         )
         self._project_asset_task = asyncio.create_task(
             self._run_project_assets(), name="feed-project-asset-collector"
-        )
-        self._translation_task = asyncio.create_task(
-            self._run_translations(), name="feed-translation-worker"
         )
         from app.services.feed.journal_cover_inventory import run_forever
         self._journal_cover_task = asyncio.create_task(
@@ -92,6 +98,43 @@ class FeedCollector:
         )
         logger.info("Feed collector started (tick=%ss)", TICK_SECONDS)
 
+    def start_subscriptions(self) -> bool:
+        """Run requested subscriptions without starting unsolicited public crawls."""
+        if not settings.feed_collector_enabled or not settings.feed_external_fetch_enabled:
+            return False
+        self._stop.clear()
+        for attribute, run, name in (
+            ("_subscription_task", self._run_subscriptions, "feed-subscription-collector"),
+            ("_subscription_asset_task", self._run_subscription_assets, "feed-subscription-assets"),
+            ("_translation_task", self._run_translations, "feed-translation-worker"),
+        ):
+            task = getattr(self, attribute)
+            if task is None or task.done():
+                setattr(self, attribute, asyncio.create_task(run(), name=name))
+        return True
+
+    def request_subscription_refresh(self) -> bool:
+        """Wake the worker after preferences commit; saved follows are its queue."""
+        if not self.start_subscriptions():
+            return False
+        self._subscription_wakeup.set()
+        return True
+
+    async def resume_saved_subscriptions(self) -> bool:
+        """On desktop restart, resume only work the user has explicitly requested."""
+        async with get_session_factory()() as db:
+            preferences = (await db.execute(
+                select(User.preferences).where(User.is_active.is_(True))
+            )).scalars().all()
+        for prefs in preferences:
+            feed = (prefs or {}).get("feed") or {}
+            subscriptions = feed.get("subscriptions") or {}
+            # Field-only users also have archived papers waiting for assets and
+            # translation. A journal/author follow must not be required to show them.
+            if feed.get("domains") or subscriptions.get("journals") or subscriptions.get("scholars"):
+                return self.request_subscription_refresh()
+        return False
+
     async def stop(self) -> None:
         """停掉循环并等它真的退出。
 
@@ -100,24 +143,26 @@ class FeedCollector:
         最难查，因为它们只在关机时出现。
         """
         self._stop.set()
+        self._subscription_wakeup.set()
+        self._subscription_assets_wakeup.set()
         subscriptions, self._subscription_task = self._subscription_task, None
+        subscription_assets, self._subscription_asset_task = self._subscription_asset_task, None
         school, self._school_task = self._school_task, None
         project_assets, self._project_asset_task = self._project_asset_task, None
         translations, self._translation_task = self._translation_task, None
         journal_covers, self._journal_cover_task = self._journal_cover_task, None
         journal_browser, self._journal_browser_task = self._journal_browser_task, None
-        for worker in (subscriptions, school, project_assets, translations, journal_covers, journal_browser):
-            if worker is not None:
-                worker.cancel()
-                await asyncio.gather(worker, return_exceptions=True)
         task, self._task = self._task, None
-        if task is None:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        workers = [worker for worker in (
+            subscriptions, subscription_assets, school, project_assets,
+            translations, journal_covers, journal_browser, task,
+        ) if worker is not None]
+        if workers:
+            _, pending = await asyncio.wait(workers, timeout=SHUTDOWN_GRACE_SECONDS)
+            for worker in pending:
+                if not worker.cancelling():
+                    worker.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
 
     async def _run(self) -> None:
         while not self._stop.is_set():
@@ -162,19 +207,39 @@ class FeedCollector:
                 continue
 
     async def _run_subscriptions(self) -> None:
-        # 订阅检索独立循环，学者慢请求不能阻塞公共源和课题发现。
+        # Clear before taking the DB snapshot. A follow saved during collection
+        # keeps the event set and is picked up immediately by the next round.
         while not self._stop.is_set():
-            completed = 0
+            self._subscription_wakeup.clear()
             try:
                 await discovery.run_subscription_round()
-                completion = await discovery.run_subscription_asset_round()
-                completed = completion.get("completed", 0)
+                self._subscription_assets_wakeup.set()
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("Feed subscription discovery round failed")
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=1 if completed else TICK_SECONDS)
+                await asyncio.wait_for(self._subscription_wakeup.wait(), timeout=TICK_SECONDS)
+            except TimeoutError:
+                continue
+
+    async def _run_subscription_assets(self) -> None:
+        # Publisher/image requests must not hold up another newly followed author.
+        while not self._stop.is_set():
+            self._subscription_assets_wakeup.clear()
+            completed = 0
+            try:
+                result = await discovery.run_subscription_asset_round()
+                completed = result.get("completed", 0)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Feed subscription asset round failed")
+            try:
+                await asyncio.wait_for(
+                    self._subscription_assets_wakeup.wait(),
+                    timeout=1 if completed else TICK_SECONDS,
+                )
             except TimeoutError:
                 continue
 

@@ -160,7 +160,7 @@ def is_cacheable(tool_name: str) -> bool:
     from core.tool_registry import get_tool
 
     definition = get_tool(tool_name)
-    return bool(definition is not None and getattr(definition, "replayable_read", False))
+    return definition is not None and definition.replayable_read is True
 
 
 

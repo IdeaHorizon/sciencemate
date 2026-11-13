@@ -23,12 +23,23 @@ import re
 from pathlib import Path
 
 from app.services.project_repository import (
+    NODE_TYPE_ALIASES,
     NODE_WORKSPACES,
     SYSTEM_WORKSPACES,
     _node_write_rules,
 )
 
 HARNESS_ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_node_aliases_match_the_runtime():
+    import ast
+
+    tree = ast.parse((HARNESS_ROOT / "core/naming.py").read_text())
+    aliases = next(node.value for node in tree.body if isinstance(node, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id == "NODE_ALIASES"
+                           for target in node.targets))
+    assert NODE_TYPE_ALIASES == ast.literal_eval(aliases)
 
 
 def _harness_workspace_table() -> dict[str, str]:

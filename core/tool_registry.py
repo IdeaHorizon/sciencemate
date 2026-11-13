@@ -57,6 +57,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, runtime_checkable
 
 from core import tool_errors as _errs
+from core.naming import canonical_node_type, canonical_tool_name
 
 log = logging.getLogger("tool_registry")
 
@@ -80,7 +81,7 @@ class ToolDefinition:
     # ── 上下文压缩契约（谁定义工具，谁声明旧结果怎么恢复）─────────────────
     # replayable_read=True：结果可以用同样参数重调取回（纯读工具）。压缩器可以
     # 把旧结果内容清成占位符 —— 参数还在前一条 assistant 消息里，信息零丢失。
-    replayable_read: bool = False
+    replayable_read: bool | Callable = False
     # The owner receives arguments plus state/tool_call_id. True permits the
     # original call's safe re-entry; {"result": receipt} returns verified existing
     # facts without dispatch. None/False leaves an unknown effect unconfirmed.
@@ -376,7 +377,7 @@ def _validate_tool(d: ToolDefinition, ex: ToolExecutorCallable) -> None:
 
 
 def get_tool(name: str) -> ToolDefinition | None:
-    return _REGISTRY.tools.get(name)
+    return _REGISTRY.tools.get(canonical_tool_name(name))
 
 
 def list_tools_for_node(
@@ -387,13 +388,16 @@ def list_tools_for_node(
 ) -> list[ToolDefinition]:
     """该节点既被允许使用、又在自己 yaml 白名单里的工具。"""
     out: list[ToolDefinition] = []
-    for name in whitelist:
+    node_type = canonical_node_type(node_type)
+    for name in dict.fromkeys(canonical_tool_name(name) for name in whitelist):
         t = _REGISTRY.tools.get(name)
         if t is None:
             continue
         if t.internal_only:
             continue
-        if t.allowed_node_types is not None and node_type not in t.allowed_node_types:
+        if t.allowed_node_types is not None and node_type not in {
+            canonical_node_type(node) for node in t.allowed_node_types
+        }:
             continue
         if t.required_runtime_capability:
             from core.runtime_capabilities import has_runtime_capability
@@ -536,6 +540,14 @@ def _record_witness_failure(state, tool_name: str, *, phase: str, error: str) ->
         log.debug("could not record witness failure for %s: %s", tool_name, error)
 
 
+def is_read_only(tool_name: str, arguments: dict | None = None) -> bool:
+    definition = get_tool(tool_name)
+    declaration = definition.replayable_read if definition else False
+    if callable(declaration):
+        return arguments is not None and declaration(arguments) is True
+    return declaration is True
+
+
 async def execute(tool_name: str, state, /, **kwargs: Any) -> dict[str, Any]:
     """按名字调度工具。返回工具的 dict 结果（带 envelope 保证）。
 
@@ -559,7 +571,13 @@ async def execute(tool_name: str, state, /, **kwargs: Any) -> dict[str, Any]:
     from core import cancellation as _cancel
     from core import secrets as _secrets
 
+    tool_name = canonical_tool_name(tool_name)
     _cancel.check(f"tool:{tool_name}")
+    pending = getattr(state, "hook_state", {}).get("_unconfirmed_tool_calls")
+    if pending and not is_read_only(tool_name, kwargs):
+        return {"status": "error", "error_code": "unconfirmed_tool_outcome",
+                "error": "An earlier action has an unconfirmed outcome. Only observation is allowed until it is reconciled.",
+                "unconfirmed_calls": pending, "executed": False}
     # 写边界的墙在 spawn 那一刻（core/sandbox.py）；这里只是事后见证的「调用前
     # 拍照」。拍照崩了（gitdir 指针坏、git 超时……）不构成拒绝派发的理由 ——
     # 从前这里 fail-closed，见证器一故障整条 run 的每次工具调用都 GUARD_FAILED。
@@ -892,6 +910,14 @@ def _argument_shape_mismatches(schema: Any, kwargs: dict[str, Any]) -> list[str]
 async def _execute_dispatch(tool_name: str, state, /, **kwargs: Any) -> dict[str, Any]:
     """execute 的原始派发实现（取消/脱敏由 execute 包在外面）。"""
     # Consume the retired parameter from old calls/checkpoints.
+    from core.naming import canonical_artifact_type, canonical_node_fields
+
+    tool_name = canonical_tool_name(tool_name)
+    kwargs = canonical_node_fields(kwargs, recursive=False)
+    if isinstance(kwargs.get("node_inputs"), dict):
+        kwargs["node_inputs"] = canonical_node_fields(kwargs["node_inputs"], recursive=False)
+    if isinstance(kwargs.get("artifact_type"), str):
+        kwargs["artifact_type"] = canonical_artifact_type(kwargs["artifact_type"])
     kwargs.pop(RESERVED_CHECK_AFTER, None)
 
     executor = _REGISTRY.executors.get(tool_name)
@@ -964,6 +990,9 @@ async def _execute_dispatch(tool_name: str, state, /, **kwargs: Any) -> dict[str
         # 故意用 raise 实现的驳回 —— 不是 bug，也别带 `TypeError:` 那种前缀。
         return {"status": "error", "error_code": _errs.REJECTED, "error": str(e)}
     except Exception as e:
+        from core.conversation_store import UnconfirmedToolOutcome
+        if isinstance(e, UnconfirmedToolOutcome):
+            raise
         import traceback as _tb
 
         tb_str = _tb.format_exc()

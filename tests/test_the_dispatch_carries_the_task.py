@@ -20,7 +20,6 @@ from core.tasks import TaskList
 from shared.tools.run_node import (
     TASK_IDENTITY_REQUIRED_NODES,
     _resolve_task_identity,
-    _resumable_run_for,
     task_identity_mismatch,
 )
 
@@ -159,31 +158,8 @@ def _interrupted(uuid: str | None, digest: str | None, revision: int | None = 1)
             "task_contract_revision": revision}
 
 
-def test_a_run_serving_another_task_is_not_resumed(tmp_path: Path, monkeypatch) -> None:
-    st = _state(tmp_path)
-    st.session_id = "s1"
-    monkeypatch.setattr(
-        "shared.tools.run_node.scan_interrupted_child_runs",
-        lambda state, scope="all": [_interrupted("other-uuid", "other-digest")])
-
-    identity = {"task_instance_uuid": "mine", "task_contract_digest": "mine-digest",
-                "task_contract_revision": 1}
-    assert _resumable_run_for(st, "experiment", task_identity=identity) is None, (
-        "把另一件事的尸体当成这件事的半成品续上了 —— #1052 那条翼型会话的形状")
-
-    same = {"task_instance_uuid": "other-uuid", "task_contract_digest": "other-digest",
-            "task_contract_revision": 1}
-    assert _resumable_run_for(st, "experiment", task_identity=same) is not None
 
 
-def test_a_dispatch_without_identity_still_resumes(tmp_path: Path, monkeypatch) -> None:
-    """对照：没带身份的派发（CLI、老 run）维持原样 —— 否则历史 run 永远续不上。"""
-    st = _state(tmp_path)
-    st.session_id = "s1"
-    monkeypatch.setattr(
-        "shared.tools.run_node.scan_interrupted_child_runs",
-        lambda state, scope="all": [_interrupted(None, None, None)])
-    assert _resumable_run_for(st, "experiment", task_identity=None) is not None
 
 
 def test_the_mismatch_is_explained_field_by_field() -> None:

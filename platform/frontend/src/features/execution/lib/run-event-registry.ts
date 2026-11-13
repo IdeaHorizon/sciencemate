@@ -139,8 +139,11 @@ export class CanonicalRunEventRegistry {
   }
 
   private publish(entry: RegistryEntry, snapshot: RunEventRegistrySnapshot) {
+    const eventsChanged = entry.snapshot.events !== snapshot.events;
     entry.snapshot = snapshot;
-    entry.options.onEvents(snapshot.events);
+    // Streaming text and transport state do not change durable history. Feeding
+    // it back through Query for every token used to deep-merge the entire Run.
+    if (eventsChanged) entry.options.onEvents(snapshot.events);
     for (const listener of entry.listeners) listener(snapshot);
   }
 

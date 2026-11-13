@@ -255,6 +255,7 @@ class LiteratureIndexHarvester:
         self._asset_task: asyncio.Task[None] | None = None
         self._openalex_blocked_until: datetime | None = None
         self._online_tasks: dict[str, asyncio.Task] = {}
+        self._retiring_online_tasks: set[asyncio.Task] = set()
         self._online_domains: dict[str, tuple[str, ...]] = {}
         self._last_online_refresh: dict[str, tuple[tuple[str, ...], datetime]] = {}
 
@@ -273,19 +274,21 @@ class LiteratureIndexHarvester:
 
     async def stop(self) -> None:
         self._stop.set()
-        online, self._online_tasks = list(self._online_tasks.values()), {}
+        online = list(set(self._online_tasks.values()) | self._retiring_online_tasks)
+        self._online_tasks = {}
         for running in online:
-            running.cancel()
+            if not running.cancelling():
+                running.cancel()
         if online:
             await asyncio.gather(*online, return_exceptions=True)
+        self._retiring_online_tasks.clear()
         task, self._task = self._task, None
-        if task is None:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         if self._asset_task is not None:
             self._asset_task.cancel()
             try:
@@ -402,7 +405,7 @@ class LiteratureIndexHarvester:
         key = "subscription:" + str(user_id)
         running = self._online_tasks.get(key)
         if running is not None and not running.done():
-            running.cancel()
+            self._retire_online(running)
         task = asyncio.create_task(
             self.run_once(domain_codes=set(), online=True, explicit_journals=journals),
             name=f"literature-subscription-refresh-{user_id}",
@@ -416,6 +419,14 @@ class LiteratureIndexHarvester:
     def _subscription_finished(self, key: str, task: asyncio.Task) -> None:
         if self._online_tasks.get(key) is task:
             self._online_tasks.pop(key, None)
+
+    def _retire_online(self, task: asyncio.Task) -> None:
+        # A replacement must not discard ownership while the old DB session
+        # is still closing. A second cancellation can interrupt that cleanup.
+        self._retiring_online_tasks.add(task)
+        task.add_done_callback(self._retiring_online_tasks.discard)
+        if not task.cancelling():
+            task.cancel()
 
     def request_online_refresh(
         self,
@@ -436,7 +447,7 @@ class LiteratureIndexHarvester:
         if running is not None and not running.done():
             if self._online_domains.get(key) == signature:
                 return False
-            running.cancel()
+            self._retire_online(running)
         previous = self._last_online_refresh.get(key)
         if (
             not force
@@ -469,6 +480,13 @@ class LiteratureIndexHarvester:
         self._online_domains.pop(key, None)
         if not task.cancelled() and task.exception() is None and task.result():
             self._last_online_refresh[key] = (signature, datetime.now(UTC))
+        if not task.cancelled():
+            # The first preparation round may have run before new field indexes
+            # arrived. Wake it after collection, including partial failures; a
+            # cancelled task must never restart workers during shutdown.
+            from app.services.feed.scheduler import feed_collector
+
+            feed_collector.request_subscription_refresh()
 
     def is_online_refreshing(self, user_id: object) -> bool:
         task = self._online_tasks.get(str(user_id))

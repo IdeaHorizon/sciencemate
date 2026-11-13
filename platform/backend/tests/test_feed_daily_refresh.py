@@ -58,6 +58,20 @@ def test_subscription_progress_is_persisted_per_target_and_does_not_starve_later
     assert len(tomorrow) == 8
 
 
+def test_failed_subscription_retries_in_five_minutes_but_success_waits_a_day():
+    now = datetime.now(UTC)
+    good = {"key": "openalex:A123", "name": "Succeeded"}
+    failed = {"key": "openalex:A456", "name": "Failed"}
+    history = {
+        "scholars:openalex:a123": {"attempted_at": now.isoformat(), "error": None},
+        "scholars:openalex:a456": {"attempted_at": now.isoformat(), "error": "ReadTimeout"},
+    }
+    user = make_user(subscriptions={"scholars": [good, failed]}, subscription_discovery=history)
+    assert discovery.due_subscription_targets(user, now=now + timedelta(seconds=299)) == ([], [])
+    assert discovery.due_subscription_targets(user, now=now + timedelta(seconds=301)) == ([], [failed])
+    assert discovery.due_subscription_targets(user, now=now + timedelta(days=1)) == ([], [good, failed])
+
+
 @pytest.mark.asyncio
 async def test_subscription_batch_commits_success_and_continues_after_failed_target(db_session, monkeypatch):
     user = make_user(subscriptions={"journals": [{"name": "Journal"}],

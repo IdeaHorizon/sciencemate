@@ -66,9 +66,9 @@ import { runFreshSessionPublish } from "../lib/publish-error-policy";
 import { canKeepCachedSession } from "@/lib/remote-runtime";
 import { WorkspacePanelHost } from "@/features/file-preview/components/WorkspacePanelHost";
 import { WorkspaceFileOpenerProvider } from "@/features/file-preview/components/WorkspaceFileOpener";
+import { stageSessionDraft, readSessionDraft, clearSessionDraft } from "../lib/session-draft";
 import { useWorkspacePanel } from "@/stores/workspace-panel";
 import { SessionChangesPanel } from "./SessionChangesPanel";
-import { SessionDeliverables } from "./SessionDeliverables";
 import { SessionInspectorPanel } from "./SessionInspectorPanel";
 import { composeText, type Answer } from "@/features/chat/lib/answer";
 import {
@@ -225,15 +225,17 @@ const MAX_SEEDED_DRAFT = 2000;
  * 保证只写一次，以及只在输入框**还是空的**时候写。两者都成立时，不存在可
  * 被覆盖的用户输入。
  */
-function useSeededDraft(setDraft: Dispatch<SetStateAction<string>>) {
+function useSeededDraft(setDraft: Dispatch<SetStateAction<string>>, projectId: string, sessionId: string) {
   const searchParams = useSearchParams();
   const seeded = useRef(false);
   const raw = searchParams.get("draft");
   useEffect(() => {
-    if (seeded.current || !raw) return;
+    const staged = readSessionDraft(projectId, sessionId);
+    if (seeded.current || (!raw && !staged)) return;
     seeded.current = true;
-    setDraft((current: string) => (current ? current : raw.slice(0, MAX_SEEDED_DRAFT)));
-  }, [raw, setDraft]);
+    setDraft((current: string) => current || staged || raw?.slice(0, MAX_SEEDED_DRAFT) || "");
+    clearSessionDraft(projectId, sessionId);
+  }, [raw, setDraft, projectId, sessionId]);
 }
 
 export function SessionWorkspace({
@@ -473,7 +475,11 @@ export function SessionWorkspace({
   const refreshAfterTerminal = useSessionTerminalRefresh(projectId, sessionId);
   const session = sessionQuery.data;
   const [draft, setDraft] = useState("");
-  useSeededDraft(setDraft);
+  useSeededDraft(setDraft, projectId, sessionId);
+  useEffect(() => {
+    if (draft) stageSessionDraft(projectId, sessionId, draft);
+    else clearSessionDraft(projectId, sessionId);
+  }, [draft, projectId, sessionId]);
   // 长粘贴 → 工作区文件（见 chat/lib/long-paste）。和「添加文件」走同一条
   // 上传通道；输入框里先占一行「上传中…」（占着时发不出去），回来后换成
   // 文件路径。失败就把原文放回原处 —— 卡一点也比让人贴的东西凭空消失强。
@@ -702,7 +708,7 @@ export function SessionWorkspace({
         <h1>{t({ zh: "无法加载会话", en: "Could not load this session" })}</h1>
         {/* 对面违约（ContractViolation）的 message 是写给排查的人的诊断，不照念。 */}
         <p>{problem instanceof Error && !(problem instanceof ContractViolation) ? problem.message : t({ zh: "请稍后重试。", en: "Please try again later." })}</p>
-        <Link href={`/projects/${encodeURIComponent(projectId)}/research`}><ChevronLeft size={13} />{t({ zh: "回到研究列表", en: "Back to research" })}</Link>
+        <Link href={`/projects/${encodeURIComponent(projectId)}/chat`}><ChevronLeft size={13} />{t({ zh: "打开项目", en: "Open project" })}</Link>
       </div>
     );
   }
@@ -870,7 +876,6 @@ export function SessionWorkspace({
             指令快照三行字都搬进了 ⋯ 里的「会话信息」—— 那些是要查的时候才
             查的东西，不是每一眼都要读的东西（wangd 2026-08-18）。 */}
         <div className="session-header-primary">
-          <Link href={`/projects/${encodeURIComponent(projectId)}/research${mode === "fixture" ? "?mode=demo" : ""}`} aria-label={t({ zh: "回到研究列表", en: "Back to research" })}><ChevronLeft size={14} /></Link>
           <SessionTitle
             session={session}
             editable={canOperate}
@@ -1058,19 +1063,6 @@ export function SessionWorkspace({
               />
             )), pausePrompt];
           }}
-          composerAbove={(
-            /* 交付物挨着输入框 —— 用户读完汇报、正要说下一句时，"论文在这儿"
-               就在手边。放进对话流里的话它会被几百条活动记录冲走；放进 ⋯ 菜单
-               里等于还是要翻。 */
-            <>
-              <SessionDeliverables
-                projectId={projectId}
-                sessionId={sessionId}
-                enabled={mode === "api"}
-                onOpenFile={openWorkspaceFile}
-              />
-            </>
-          )}
           composerContext={(
             <SessionComposerBar
               mode={operationMode}

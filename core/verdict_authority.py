@@ -36,7 +36,7 @@ _REQUIRED_ANALYSIS_STATUS = {
 }
 
 #: Analysis 的产物落在项目工作区里这个节点目录下。
-_ANALYSIS_WORKSPACES = ("hypothesis",)
+_ANALYSIS_WORKSPACES = ("analysis",)
 
 
 def _load_latest_research_state(state: Any) -> dict[str, Any] | None:
@@ -119,7 +119,9 @@ def scientific_verdict_block(
     required = _REQUIRED_ANALYSIS_STATUS.get(str(new_status or ""))
     if required is None:
         return None
-    node_type = str(getattr(state, "node_type", "") or "")
+    from core.naming import canonical_node_type
+
+    node_type = canonical_node_type(str(getattr(state, "node_type", "") or ""))
     if node_type.startswith("_") or node_type in _ANALYSIS_WORKSPACES:
         return None
 

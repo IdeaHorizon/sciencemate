@@ -5,6 +5,7 @@ running platform database. Run with --noconftest to avoid integration fixtures.
 """
 import asyncio
 import io
+import sys
 import zipfile
 from datetime import timedelta
 from uuid import uuid4
@@ -1224,6 +1225,48 @@ async def test_category_quota_counts_unique_matching_indexes_and_keeps_metadata_
     assert next(p for p in response['result']['papers'] if p['title']=='学位研究 0')['abstract']=='补齐摘要'
 
 
+@pytest.mark.parametrize('kind,limit,expected', [('other',200,10),('journal',23,23)])
+async def test_single_search_stops_at_its_recall_budget_without_filling_survivors(rig,kind,limit,expected):
+    from app.services.cnki_worker import Collector
+    client,sessions,users=rig
+    class MixedBrowser(ManagedBrowser):
+        async def search(self,query,field,**kwargs):
+            self.searches += 1
+            self.page = 1
+            return self.snapshot()
+
+        def snapshot(self):
+            start=(self.page-1)*20
+            rows=[paper(title=f'候选 {i}',document_type=(
+                '其他' if kind=='other' and i%20==0 else '期刊')) for i in range(start,start+20)]
+            return {'rows':rows,'page':self.page,'hasNext':True,'total':10000,'dateSorted':False}
+
+    browser=MixedBrowser();worker=Collector(sessions,browser)
+    created=(await client.post('/cnki/jobs',headers=owner(users[0]),json={
+        'query':'宽泛主题','limit':limit,'document_kind':kind})).json()
+    await worker.process(*(await worker.claim()))
+    result=(await client.get('/cnki/jobs/'+created['id'],headers=owner(users[0]))).json()
+    assert result['count']==expected
+    assert result['phase']=='metadata'
+    assert browser.page==(limit+19)//20
+    assert browser.exports==0
+
+
+async def test_exhausted_index_checkpoint_does_not_reopen_or_replay_browser_pages(rig):
+    from app.services.cnki_worker import Collector
+    client,sessions,users=rig
+    created=(await client.post('/cnki/jobs',headers=owner(users[0]),json={
+        'query':'宽泛主题','limit':200,'document_kind':'other'})).json()
+    async with sessions.begin() as db:
+        row=await db.get(CnkiJob,created['id'])
+        row.checkpoint={**row.checkpoint,'page':11,'check_session':False}
+    browser=ManagedBrowser();worker=Collector(sessions,browser)
+    await worker.process(*(await worker.claim()))
+    result=(await client.get('/cnki/jobs/'+created['id'],headers=owner(users[0]))).json()
+    assert result['phase']=='metadata'
+    assert browser.searches==browser.exports==0
+
+
 async def test_collector_runs_two_lanes_together_and_cleans_up_on_stop(rig,monkeypatch,tmp_path):
     from types import SimpleNamespace
     from app.services.cnki_worker import Collector
@@ -1248,3 +1291,250 @@ async def test_collector_runs_two_lanes_together_and_cleans_up_on_stop(rig,monke
     finally:
         await worker.stop()
     assert closed==[True]
+
+
+async def test_manual_session_reset_is_owned_coalesced_and_preserves_indexes(rig, tmp_path):
+    from app.services.cnki_browser import Browser
+    from app.services.cnki_worker import Collector
+    client, sessions, users = rig
+    created = []
+    for kind in ('journal', 'thesis'):
+        response = await client.post('/cnki/jobs', headers=owner(users[0]), json={
+            'query': '研究主题', 'document_kind': kind, 'limit': 200})
+        created.append(response.json()['id'])
+    browser = Browser(tmp_path)
+    profile = tmp_path/users[0].id
+    profile.mkdir()
+    (profile/'old-session').write_text('old')
+    other = tmp_path/users[1].id
+    other.mkdir()
+    (other/'keep').write_text('other user')
+    worker = Collector(sessions, browser)
+    device, task = await worker.claim()
+    await worker.batch(device, task, papers=[paper()], total=23, page_complete=True)
+    await worker.report(device, task, 'paused', 'HTTP 403', code='access_denied',
+                        metrics={'resume_verification': True})
+    assert not await worker.reset_requested_session({})
+    payload = {'job_ids': created}
+    assert (await client.post('/cnki/session/reset', json=payload)).status_code == 401
+    assert (await client.post('/cnki/session/reset', headers=owner(users[1]), json=payload)).status_code == 404
+    first = await client.post('/cnki/session/reset', headers=owner(users[0]), json=payload)
+    second = await client.post('/cnki/session/reset', headers=owner(users[0]), json=payload)
+    assert first.status_code == second.status_code == 200
+    assert first.json()['request_id'] == second.json()['request_id']
+    assert await worker.claim() is None
+    assert await worker.reset_requested_session({})
+    backup = tmp_path/'backups'/users[0].id/first.json()['request_id']
+    assert (backup/'old-session').read_text() == 'old'
+    assert not (profile/'old-session').exists()
+    assert (other/'keep').read_text() == 'other user'
+    assert not await worker.reset_requested_session({})
+    for identifier in created:
+        view = (await client.get('/cnki/jobs/'+identifier, headers=owner(users[0]))).json()
+        assert view['state'] == 'queued'
+        if identifier == task['id']:
+            assert view['page'] == 2 and view['count'] == 1
+            assert view['result']['papers'][0]['title'] == paper()['title']
+        async with sessions.begin() as db:
+            row = await db.get(CnkiJob, identifier)
+            assert not row.checkpoint['resume_verification']
+            assert 'reset_session' not in row.checkpoint
+    assert (await client.post('/cnki/session/reset', headers=owner(users[0]), json=payload)).status_code == 429
+    assert await worker.claim() is not None
+
+
+async def test_session_reset_does_not_accept_extension_browser_jobs(rig):
+    client, _, users = rig
+    created = await job(client, users[0])
+    response = await client.post('/cnki/session/reset', headers=owner(users[0]), json={'job_ids': [created['id']]})
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize('detail,code', [('知网拒绝当前访问（HTTP 403）', 'access_denied'), ('文献类型不一致', None)])
+async def test_legacy_paused_receipt_exposes_reset_only_for_403(rig, detail, code):
+    client, sessions, users = rig
+    response = await client.post('/cnki/jobs', headers=owner(users[0]), json={'query': '研究主题'})
+    identifier = response.json()['id']
+    async with sessions.begin() as db:
+        row = await db.get(CnkiJob, identifier)
+        row.last_report = {'state': 'paused', 'detail': detail}
+    view = (await client.get('/cnki/jobs/'+identifier, headers=owner(users[0]))).json()
+    assert view['error_code'] == code
+
+
+@pytest.mark.parametrize('failure', [False, True])
+async def test_session_reset_quiesces_both_lanes_and_never_auto_repeats(rig, failure):
+    from app.services.cnki_browser import CollectionError
+    from app.services.cnki_worker import Collector
+    client, sessions, users = rig
+    ids = []
+    for kind in ('journal', 'thesis'):
+        result = await client.post('/cnki/jobs', headers=owner(users[0]), json={
+            'query': '研究主题', 'document_kind': kind})
+        ids.append(result.json()['id'])
+    started, stopped, resets = [], [], []
+    class Lane(ManagedBrowser):
+        async def search(self, query, field, **kwargs):
+            started.append(True)
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.append(True)
+    class Root:
+        async def reset_session(self, user_id, request_id):
+            assert len(stopped) == 2
+            resets.append((user_id, request_id))
+            if failure:
+                raise CollectionError('browser_profile_in_use')
+    worker = Collector(sessions, Root())
+    active = {}
+    for slot in range(2):
+        device, task = await worker.claim(server_slots=2)
+        async with sessions.begin() as db:
+            row = await db.get(CnkiJob, task['id'])
+            row.checkpoint = {**row.checkpoint, 'page': 3, 'accepted': ['persisted']}
+        active[slot] = (device.user_id, asyncio.create_task(Collector(sessions, Lane()).process(device, task)))
+    try:
+        async with asyncio.timeout(3):
+            while len(started) != 2:
+                await asyncio.sleep(.01)
+        assert (await client.post('/cnki/session/reset', headers=owner(users[0]), json={'job_ids': ids})).status_code == 200
+        assert await worker.reset_requested_session(active)
+        assert not active and len(resets) == 1
+        assert not await worker.reset_requested_session(active)
+        for identifier in ids:
+            async with sessions.begin() as db:
+                row = await db.get(CnkiJob, identifier)
+                assert row.checkpoint['page'] == 3
+                assert row.checkpoint['accepted'] == ['persisted']
+                assert row.lease_hash is None
+                assert service.job_state(row) == ('paused' if failure else 'queued')
+                if failure:
+                    assert row.last_report['code'] == 'browser_profile_in_use'
+        if failure:
+            assert await worker.claim() is None
+        else:
+            class Denied(ManagedBrowser):
+                async def search(self, query, field, **kwargs):
+                    raise CollectionError('access_denied')
+            child = Collector(sessions, Denied())
+            await child.process(*(await worker.claim()))
+            assert not await worker.reset_requested_session({})
+            assert len(resets) == 1
+    finally:
+        for _, work in active.values():
+            work.cancel()
+        await asyncio.gather(*(work for _, work in active.values()), return_exceptions=True)
+
+
+async def test_profile_backup_is_idempotent_after_interrupted_reset(tmp_path):
+    from app.services.cnki_browser import Browser
+    user, request = str(uuid4()), str(uuid4())
+    profile = tmp_path/user
+    profile.mkdir()
+    (profile/'old').write_text('retained')
+    browser = Browser(tmp_path)
+    browser.denied, browser.denied_at, browser.complete_result = True, 100, ('stale',)
+    browser.lanes[1] = {'id': 'stale-tab'}
+    await browser.reset_session(user, request)
+    assert not browser.denied and browser.denied_at is None and browser.complete_result is None
+    assert not browser.lanes
+    (profile/'new').write_text('fresh')
+    await browser.reset_session(user, request)
+    assert (profile/'new').read_text() == 'fresh'
+    assert (tmp_path/'backups'/user/request/'old').read_text() == 'retained'
+
+
+async def test_locked_profile_is_retained_when_backup_fails(tmp_path, monkeypatch):
+    from pathlib import Path
+    from app.services.cnki_browser import Browser, CollectionError
+    user = str(uuid4())
+    profile = tmp_path/user
+    profile.mkdir()
+    (profile/'old').write_text('retained')
+    original = Path.rename
+    def locked(path, target):
+        if path == profile:
+            raise PermissionError('profile open')
+        return original(path, target)
+    monkeypatch.setattr(Path, 'rename', locked)
+    with pytest.raises(CollectionError, match='browser_profile_in_use'):
+        await Browser(tmp_path).reset_session(user, str(uuid4()))
+    assert (profile/'old').read_text() == 'retained'
+
+
+@pytest.mark.skipif(sys.platform != 'linux', reason='Chrome SingletonLock uses a PID symlink on Linux')
+@pytest.mark.parametrize('running', [True, False])
+async def test_profile_reset_distinguishes_live_owner_from_stale_lock(tmp_path, monkeypatch, running):
+    from app.services import cnki_browser
+    user, request = str(uuid4()), str(uuid4())
+    profile = tmp_path/user
+    profile.mkdir()
+    (profile/'old').write_text('retained')
+    (profile/'SingletonLock').symlink_to('test-host-51234')
+    inspected = []
+    def alive(pid):
+        inspected.append(pid)
+        return running
+    monkeypatch.setattr(cnki_browser.process_control, 'alive', alive)
+    browser = cnki_browser.Browser(tmp_path)
+    if running:
+        with pytest.raises(cnki_browser.CollectionError, match='browser_profile_in_use'):
+            await browser.reset_session(user, request)
+        assert (profile/'old').read_text() == 'retained'
+        assert not (tmp_path/'backups').exists()
+    else:
+        await browser.reset_session(user, request)
+        assert (tmp_path/'backups'/user/request/'old').read_text() == 'retained'
+        assert not (profile/'old').exists()
+    assert inspected == [51234]
+
+
+async def test_reset_waits_for_other_owner_and_cancelled_requests_do_not_move_profiles(rig):
+    from app.services.cnki_worker import Collector
+    client, sessions, users = rig
+    response = await client.post('/cnki/jobs', headers=owner(users[1]), json={'query': '研究主题'})
+    identifier = response.json()['id']
+    await client.post('/cnki/session/reset', headers=owner(users[1]), json={'job_ids': [identifier]})
+    worker = Collector(sessions, object())  # No browser reset is expected.
+    other_work = asyncio.create_task(asyncio.Event().wait())
+    try:
+        assert not await worker.reset_requested_session({0: (users[0].id, other_work)})
+        assert not other_work.done()
+        assert (await client.delete('/cnki/jobs/'+identifier, headers=owner(users[1]))).status_code == 200
+        assert not await worker.reset_requested_session({})
+    finally:
+        other_work.cancel()
+        await asyncio.gather(other_work, return_exceptions=True)
+
+
+async def test_new_category_joins_in_progress_reset_without_blocking_database(rig):
+    from app.services.cnki_worker import Collector
+    client, sessions, users = rig
+    ids = []
+    for kind in ('journal', 'thesis'):
+        response = await client.post('/cnki/jobs', headers=owner(users[0]), json={'query': '研究主题', 'document_kind': kind})
+        ids.append(response.json()['id'])
+    initial = await client.post('/cnki/session/reset', headers=owner(users[0]), json={'job_ids': ids[:1]})
+    started, resume = asyncio.Event(), asyncio.Event()
+    class Root:
+        async def reset_session(self, user_id, request_id):
+            started.set()
+            await resume.wait()
+    worker = Collector(sessions, Root())
+    work = asyncio.create_task(worker.reset_requested_session({}))
+    try:
+        await asyncio.wait_for(started.wait(), 3)
+        joined = await asyncio.wait_for(client.post('/cnki/session/reset', headers=owner(users[0]), json={'job_ids': ids[1:]}), 2)
+        assert joined.status_code == 200
+        assert joined.json()['request_id'] == initial.json()['request_id']
+        resume.set()
+        assert await work
+        for identifier in ids:
+            async with sessions.begin() as db:
+                row = await db.get(CnkiJob, identifier)
+                assert 'reset_session' not in row.checkpoint
+                assert row.checkpoint.get('session_reset_at')
+    finally:
+        resume.set()
+        await asyncio.gather(work, return_exceptions=True)

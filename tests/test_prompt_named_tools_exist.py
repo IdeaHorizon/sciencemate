@@ -2,7 +2,7 @@
 
 ## 为什么（2026-08-18 起，多次实测）
 
-`nodes/hypothesis/harness.yaml` 写着「save pre_registration 后、freeze 前必须
+`nodes/analysis/harness.yaml` 写着「save pre_registration 后、freeze 前必须
 跑齐 `audit_inquiry_contract` / …」—— 那个工具**不存在**。模型照着文案去找，
 找不到，于是跳过了这道检查，直接 freeze；冻结闸这才告诉它闭合条件解析不出来。
 一个格式要求花了三轮才学会，其中一轮跑在模型自己编的假线索上。
@@ -416,7 +416,7 @@ def test_the_legal_shape_is_described_in_exactly_one_place() -> None:
 
     sources = [
         REPO_ROOT / "shared" / "tools" / "library" / "artifacts_extra.py",
-        REPO_ROOT / "nodes" / "hypothesis" / "tools" / "research_questions.py",
+        REPO_ROOT / "nodes" / "analysis" / "tools" / "research_questions.py",
     ]
     for path in sources:
         text = path.read_text(encoding="utf-8")

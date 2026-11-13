@@ -61,7 +61,11 @@ def _child(parent: State, run_id: str, *, node_type: str = "experiment",
 
 
 def _mark_live(run_id: str, base: Path, node_type: str = "experiment") -> None:
-    live = State.reopen(node_type=node_type, base_dir=base, run_id=run_id)
+    identity = json.loads((base / run_id / "transcript.jsonl").read_text().splitlines()[0])
+    live = State.reopen(node_type=node_type, base_dir=base, run_id=run_id,
+                        task_instance_uuid=identity.get("task_instance_uuid"),
+                        task_contract_revision=identity.get("task_contract_revision"),
+                        task_contract_digest=identity.get("task_contract_digest"))
     register_active(ActiveRunInfo(run_id=run_id, node_type=node_type, state=live))
 
 
@@ -86,6 +90,8 @@ def test_a_finished_child_and_a_different_task_are_not_live_children(tmp_path):
     for run_id in ("run_done", "run_other", "run_other_node"):
         _mark_live(run_id, parent.root.parent,
                    node_type="observation" if run_id == "run_other_node" else "experiment")
+    assert [row["run_id"] for row in rn.live_same_task_children(parent, "experiment", _IDENTITY)] == ["run_done"]
+    unregister_active("run_done")
     assert rn.live_same_task_children(parent, "experiment", _IDENTITY) == []
 
 

@@ -188,7 +188,7 @@ def _sig_claim(r: dict) -> str:
     #
     # 实测（jicq E2E 流体力学 Study3）：冻了 prereg v5 带新 falsification 判据重建
     # claim → 算出同一个 id → 走 upsert 合进旧记录（新判据丢失）→
-    # validate_hypothesis_outputs 照样失败，改措辞也没用。语义去重那层的守卫
+    # validate_analysis_outputs 照样失败，改措辞也没用。语义去重那层的守卫
     # 若不配上这一层，会在 id 层被原样抵消。
     #
     # 只对**带 prereg 绑定**的 claim 生效：其余 claim（含历史记录）签名一字不变，

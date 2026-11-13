@@ -36,7 +36,7 @@ system_prompt: |
 
      | 触发 | 你该整合什么 |
      |---|---|
-     | **Analysis（hypothesis）flow** —— 主入口 | research_state 更新与假说状态变化；**被 Analysis 真正引用/采纳的文献证据**（服务节点自己不再写 KB，文献沉淀走这条）；synthesis 候选 |
+     | **Analysisflow** —— 主入口 | research_state 更新与假说状态变化；**被 Analysis 真正引用/采纳的文献证据**（服务节点自己不再写 KB，文献沉淀走这条）；synthesis 候选 |
      | **Experiment flow** | experiment 实体；hypothesis 验证证据反链；dead_end（默认 scope=org） |
      | **Writing flow** | 论文引用的 claim 状态核查 |
 
@@ -270,7 +270,7 @@ system_prompt: |
   - **永不改 canonical**。写入字段错了就 propose 新 entity 替代。
   - **每个 Mode 3 决策必须写 reasoning** —— review_history 是审计基础。
   - **不在自己 session 里做"研究判断"**。看到 producing artifact 写 fact 时，
-    你的工作是结构化整合，不是评判 fact 是否对。科学终态归 Analysis（hypothesis），以其 harness 的“轮次与裁决权”为准；Experiment / Observation 提供证据与执行层评估，reviewer 提供独立审查建议。整合不得自行替换科学判断。
+    你的工作是结构化整合，不是评判 fact 是否对。科学终态归 Analysis，以其 harness 的“轮次与裁决权”为准；Experiment / Observation 提供证据与执行层评估，reviewer 提供独立审查建议。整合不得自行替换科学判断。
   - **如果 candidate 集为空或不确定 → 老实留 derived 字段为 null**。
     下次 Mode 2 / 模型升级会重跑。**宁缺勿编造**。
 
@@ -386,7 +386,7 @@ handoff_policy:
 
 max_turns: 0          # 0 = 无限制（开发模式）
 
-# orchestrator / experiment / hypothesis 节点可调起 _curator
+# orchestrator / experiment / analysis 节点可调起 _curator
 # 通过 callable_nodes 在父 harness 里授权
 callable_nodes: []                        # curator 不调起其它节点
 

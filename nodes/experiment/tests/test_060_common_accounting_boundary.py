@@ -154,6 +154,32 @@ def test_an_action_that_never_spawns_is_still_settled_not_left_open(tmp_path, mo
         assert settled[0]["state"] in {"spawn_failed", "settled", "timed_out", "cancelled"}
 
 
+def test_cancelled_tool_settles_its_exact_action_before_propagating(tmp_path, monkeypatch):
+    from nodes.experiment.tools import safe_bash
+
+    state = _state(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setattr(safe_bash, "resolve_required_workdir", lambda *a: (str(work), None))
+    monkeypatch.setattr(safe_bash, "_frozen_attempt_capability_gap", lambda *a: None)
+    monkeypatch.setattr(safe_bash, "_ensure_hardened_attempt_manifest", lambda *a: None)
+
+    async def cancelled(*a, **kw):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(safe_bash, "spawn_and_wait", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(safe_bash._exec_and_log(
+            state, "printf test", cwd=str(work), sandbox_roots=([work], []),
+            sandbox_write_targets=[str(work)]))
+    rows = ledger.open_ledger(state).records()
+    starts = [r for r in rows if r["kind"] == "action_started"]
+    ends = [r for r in rows if r["kind"] == "action_settled"]
+    assert len(starts) == len(ends) == 1
+    assert starts[0]["action_id"] == ends[0]["action_id"]
+    assert ends[0]["state"] == "cancelled" and ends[0]["exit_code"] is None
+
+
 # ── 统一 action 边界（Codex 21 号 P0-A / P0-B / P0-C）─────────────────────────
 
 def test_a_ledger_that_cannot_record_the_start_stops_the_side_effect(tmp_path, monkeypatch):

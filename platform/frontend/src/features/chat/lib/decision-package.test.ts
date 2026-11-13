@@ -12,8 +12,8 @@ const FACTS = { sourceNodeType: "hypothesis", redirectTargetNode: "literature" }
 
 test("问句按做完的那一步用人话问，两种语言", () => {
   const pause = { kind: "decision", question: HARNESS.question, facts: FACTS };
-  assert.equal(decisionQuestion(pause, "zh"), "「假设与分析」这一步已完成，接下来怎么做？");
-  assert.equal(decisionQuestion(pause, "en"), "“Hypothesis & analysis” is done. What should happen next?");
+  assert.equal(decisionQuestion(pause, "zh"), "「分析」这一步已完成，接下来怎么做？");
+  assert.equal(decisionQuestion(pause, "en"), "“Analysis” is done. What should happen next?");
 });
 
 test("不是决策包（没有 sourceNodeType）就照上游原文问", () => {

@@ -36,7 +36,7 @@ log = logging.getLogger("upstream_routing")
 
 # 研究流水线的常规顺序（依赖图推不出时的兜底候选，按"越靠上游越靠前"排）
 PIPELINE_ORDER: tuple[str, ...] = (
-    "literature", "hypothesis", "data", "experiment", "observation", "derivation",
+    "literature", "analysis", "data", "experiment", "observation", "derivation",
     "postprocess", "writing",
 )
 
@@ -70,7 +70,9 @@ def upstream_candidates(node_type: str) -> list[str]:
     上游"的情况（如 writing 的引用问题其实要回 literature）。
     """
     from core.loader import node_owes_post_node_flow
+    from core.naming import canonical_node_type
 
+    node_type = canonical_node_type(node_type)
     h = _load(node_type)
     prod = producer_map()
     ordered: list[str] = []

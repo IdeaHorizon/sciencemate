@@ -27,7 +27,7 @@ from core.project_workspace import _NODE_WORKSPACES, bind_project_workspace
 from core.state import State
 from shared.tools.library.artifacts_extra import _freeze_artifact
 
-NODES = ("literature", "hypothesis", "data", "experiment", "postprocess", "writing")
+NODES = ("literature", "analysis", "data", "experiment", "postprocess", "writing")
 
 
 def _worktree(tmp_path: Path) -> Path:
@@ -47,7 +47,7 @@ def _worktree(tmp_path: Path) -> Path:
 
 
 def _hypothesis_state(tmp_path: Path, root: Path) -> State:
-    state = State.new(node_type="hypothesis", base_dir=tmp_path / "runs",
+    state = State.new(node_type="analysis", base_dir=tmp_path / "runs",
                       project_id="p6")
     bind_project_workspace(state, root)
     return state
@@ -76,7 +76,7 @@ async def test_freeze_appends_register_line_with_content_hash(tmp_path: Path) ->
     # 冻结不碰文件：账本钉的哈希 = 冻结后文件的哈希 = 正文哈希。
     assert row["sha256"] == hashlib.sha256(frozen_file.read_bytes()).hexdigest()
     assert frozen_file.read_text(encoding="utf-8") == "# survey\n"
-    assert row["by_node"] == "hypothesis"
+    assert row["by_node"] == "analysis"
     assert workspace_store(root).pinned() == {row["path"]: row["sha256"]}, \
         "咽喉读的钉死表要正好是这一条"
 

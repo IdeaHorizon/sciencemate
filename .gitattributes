@@ -1,4 +1,0 @@
-*.sh   text eol=lf
-*.ps1  text eol=lf
-*.md   text eol=lf
-*.png  binary

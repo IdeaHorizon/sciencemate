@@ -61,7 +61,8 @@ class ArtifactType(StrEnum):
     CLEAN_RESULTS = "clean_results"
     FIGURE_PACKAGE = "figure_package"
     HYPOTHESIS_INNOVATION_REPORT = "hypothesis_innovation_report"
-    HYPOTHESIS_RESEARCH_OVERVIEW = "hypothesis_research_overview"
+    ANALYSIS_RESEARCH_OVERVIEW = "analysis_research_overview"
+    HYPOTHESIS_RESEARCH_OVERVIEW = "hypothesis_research_overview"  # historical database rows
     LITERATURE_INDEX = "literature_index"
     WRITING_PREFLIGHT_PLAN = "writing_preflight_plan"
 

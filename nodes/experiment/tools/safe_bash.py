@@ -1857,6 +1857,9 @@ async def _exec_and_log(
             if action_token is not None
             else None
         )
+        if isinstance(exc, asyncio.CancelledError):
+            _v3_settle(state_name="cancelled", stderr_text="Owning tool task was cancelled")
+            raise
         if not isinstance(exc, Exception):
             raise
         if (
@@ -2117,7 +2120,9 @@ def _unified_highrisk_gate(state: Any, text: str, *, mode: str,
         from .execution_guard import classify_high_risk
     except ImportError:  # node runtime loads this module as tools.safe_bash
         from tools.execution_guard import classify_high_risk
-    category = classify_high_risk(text, mode=mode)
+    category = classify_high_risk(
+        text, mode=mode,
+        **({"syntax_tree": python_effects.syntax_tree} if python_effects is not None else {}))
     if category is None:
         return None
 
@@ -9900,6 +9905,12 @@ async def _safe_run_bash(state: Any, cmd: str, timeout: int = 600,
     并保留 `*_bypassed` 审计。源码基线、框架状态、未解析目标、路径角色、
     route/scope 身份和后台生命周期都是 validity 事实，任何模式都不能绕过。
     非阻断增强（build_env source、完整日志落盘、repro 采集）照常执行。"""
+    try:
+        from . import result_acceptance
+    except ImportError:
+        from tools import result_acceptance
+    if result_acceptance.restricted(state) and not result_acceptance.is_inspection_command(state, cmd):
+        return result_acceptance.refusal("safe_run_bash")
     timeout = _coerce_timeout(timeout, 600)
     from shared.lib import dangerous_commands as _danger
     _bypass = _danger.bypass_enabled()
@@ -10444,6 +10455,13 @@ async def _safe_write_file(state: Any, path: str, content: str,
         return {"status": "error", "error": str(exc)}
     base = str(working_directory(state))
     target = str(resolved_target)
+    try:
+        from . import result_acceptance
+    except ImportError:
+        from tools import result_acceptance
+    if result_acceptance.restricted(state) and resolved_target.exists():
+        return {"status": "error", "reason": "existing_results_only", "executed": False,
+                "error": "只验收已有结果时保留现有文件；请把验收报告写入新的节点输出文件。"}
     # write_file 不属于可执行路线步骤，但它是持久副作用：必须在任何
     # create_dirs/原始 writer 之前冻结 run scope。低风险文件写不生成
     # route attempt，也不被迫声明完整路线。
@@ -11490,6 +11508,12 @@ async def _safe_execute_python(state: Any, code: str, timeout: int = 300,
     bypass 只跳过可人工授权的环境类 scope；路径与路线有效性仍硬拒。"""
     # ``requirements`` 已从工具 schema 删除：依赖安装不是轻量 Python 能力。
     # 这里只兼容直接旧调用并给出结构化迁移提示，不把隐藏字段重新暴露给 LLM。
+    try:
+        from . import result_acceptance
+    except ImportError:
+        from tools import result_acceptance
+    if result_acceptance.restricted(state):
+        return result_acceptance.refusal("safe_execute_python")
     requirements = kw.pop("requirements", None)
     timeout = _coerce_timeout(timeout, 300)
     # 判决拆除·第三波（sb:4004 → schema，2026-09-02）：stage 词表由 schema enum 核。

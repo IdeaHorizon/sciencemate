@@ -405,8 +405,10 @@ def _reconcile_with_disk(
     # 不自造第二套 —— 详见 `_is_newer_run`。
     by_id = {r.run_id: r for r in records}
     for node_type in sorted(probe_node_types):
+        from core.naming import same_node
+
         unseen = [r for r in records
-                  if r.node_type == node_type and r.run_id not in seen_run_ids]
+                  if same_node(r.node_type, node_type) and r.run_id not in seen_run_ids]
         if not unseen:
             continue
         cand = unseen[0]                       # load_runs 已是新→旧

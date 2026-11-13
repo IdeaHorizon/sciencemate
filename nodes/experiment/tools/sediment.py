@@ -513,7 +513,7 @@ async def _resolve_prereg_hypotheses(
     """Resolve open hypothesis claims through frozen artifact provenance, not text search.
 
     This avoids the fragile/locale-dependent ``search_kb(query=...)`` path.  A
-    future hypothesis node records ``scope_dimensions.prereg_hypothesis_id``;
+    future Analysis node records ``scope_dimensions.prereg_hypothesis_id``;
     a legacy exact-criteria fallback is deliberately accepted only when unique.
     """
     prereg = _latest_prereg(state)
@@ -522,7 +522,11 @@ async def _resolve_prereg_hypotheses(
                 "hypotheses": [], "pre_registration_id": pre_registration_id,
                 "guidance": "verdict resolver must use the prereg selected by this run contract; do not override it per call."}
     if not prereg:
-        return {"status": "success", "resolution_status": "missing_pre_registration", "hypotheses": [], "guidance": "没有可读 pre_registration；在 experiment_log 写 verdict: inconclusive，并说明需 hypothesis 节点补建预注册。"}
+        return {
+            "status": "success", "resolution_status": "missing_pre_registration", "hypotheses": [],
+            "guidance": "没有可读 pre_registration；在 experiment_log 写 verdict: inconclusive，"
+                        "并说明需 analysis 节点补建预注册。",
+        }
     if not (prereg.get("metadata") or {}).get("frozen"):
         return {"status": "success", "resolution_status": "unfrozen_pre_registration", "hypotheses": [], "pre_registration_id": prereg["id"], "guidance": "pre_registration 尚未冻结；不得翻 hypothesis status。"}
 

@@ -23,6 +23,59 @@ function setup(overrides:Partial<Parameters<typeof createAcademicSearchSession>[
   return {session,requests};
 }
 
+test("CNKI reset is explicit, shared by categories, and retains collected results",async()=>{
+  const sleepers:(()=>void)[]=[];
+  const resets:string[][]=[];
+  let acknowledge:()=>void=()=>{},recovered=false;
+  const job=(id:string)=>({id,query:"主题",state:recovered?"completed":"paused",
+    error_code:recovered?null:"access_denied",detail:"HTTP 403",
+    result:papers("已有中文论文","cnki")} as CnkiJob);
+  const {session,requests}=setup({
+    status:async()=>({collector:{available:true,mode:"server",detail:""}}),
+    create:async(_query,_limit,kind)=>job(kind!),read:async id=>job(id),
+    resetSession:ids=>{resets.push(ids);return new Promise<void>(resolve=>{acknowledge=resolve;});},
+    retry:async()=>{throw Error("normal retry must not be used for a reset");},
+    sleep:()=>new Promise<void>(resolve=>{sleepers.push(resolve);}),
+  });
+  session.start({query:"问题",language:"zh"});
+  requests[0].progress({stage:"strategy",search_plan:plan});
+  requests[0].done(papers("已有英文论文"));
+  await tick();
+  assert.equal(session.getSnapshot().channels.cnki.resettable,true);
+  assert.equal(resets.length,0);
+  const before=session.getSnapshot().data;
+  session.resetChineseSession();session.resetChineseSession();
+  assert.equal(resets.length,1);
+  assert.equal(new Set(resets[0]).size,5);
+  assert.equal(session.getSnapshot().resettingCnki,true);
+  assert.equal(session.getSnapshot().data,before);
+  recovered=true;acknowledge();await tick();
+  sleepers.splice(0).forEach(resolve=>resolve());await tick();
+  assert.equal(session.getSnapshot().resettingCnki,false);
+  assert.equal(session.getSnapshot().channels.cnki.state,"completed");
+  assert.equal(Boolean(session.getSnapshot().channels.cnki.resettable),false);
+  assert.equal(session.getSnapshot().data?.total,2);
+  session.reset();session.resetChineseSession();
+  assert.equal(resets.length,1);
+});
+
+test("a late reset response cannot replace a new search or logout state",async()=>{
+  let finish:()=>void=()=>{};
+  const {session,requests}=setup({
+    status:async()=>({collector:{available:true,mode:"server",detail:""}}),
+    create:async()=>({id:"job",state:"paused",error_code:"session_paused"} as CnkiJob),
+    resetSession:()=>new Promise<void>(resolve=>{finish=resolve;}),
+    sleep:()=>new Promise<void>(()=>{}),
+  });
+  session.start({query:"旧问题",language:"zh"});
+  requests[0].progress({stage:"strategy",search_plan:plan});await tick();
+  session.resetChineseSession();session.reset();
+  finish();await tick();
+  assert.equal(session.getSnapshot().query,"");
+  assert.deepEqual(session.getSnapshot().channels,{});
+  assert.equal(session.getSnapshot().resettingCnki,false);
+});
+
 test("leaving every view does not cancel a search; remount gets finished results and draft",()=>{
   const {session,requests}=setup();
   const leave=session.subscribe(()=>{});

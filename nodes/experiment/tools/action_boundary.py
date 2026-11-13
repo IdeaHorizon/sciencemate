@@ -282,6 +282,23 @@ def settle(state: Any, handle: ActionHandle | None, *, outcome: str, exit_code: 
                                         "snapshot_error": f"{type(exc).__name__}: {exc}"}
     problems: list[str] = []
     try:
+        # A read-only/unchanged action may still have observed a break from an
+        # earlier producer. Keep the already captured before identities of
+        # known outputs; an empty delta must not erase that evidence. This is
+        # observation, not a new producer or another lifecycle record.
+        records = _ledger.open_ledger(state).records()
+        own_start = next((r["seq"] for r in records if r.get("kind") == "action_started"
+                          and r.get("action_id") == handle.action_id), 0)
+        known = {path for row in _ledger.project_output_observations(records)
+                 if row.get("seq", own_start) < own_start
+                 for path in [*(row.get("created") or []), *(row.get("modified") or [])]}
+        before = handle.before.get("entries") or {}
+        observed = {path: before[path] for path in sorted(known.intersection(before))}
+        # Reuse the existing overlap boundary. An intermediate identity inside
+        # another owned writer's window cannot prove an out-of-band break.
+        source_window = {"created": [], "modified": list(observed)}
+        _disclose_overlapping_actions(state, handle, source_window)
+        observed = {path: observed[path] for path in source_window["modified"]}
         observation = dict(
             created=diff.get("created"), modified=diff.get("modified"), deleted=diff.get("deleted"),
             unknown=diff.get("unknown", []),
@@ -294,6 +311,8 @@ def settle(state: Any, handle: ActionHandle | None, *, outcome: str, exit_code: 
             coverage={"before": handle.before.get("root_coverage", []), "after": after.get("root_coverage", [])},
             scan_errors=[x for x in (handle.before.get("snapshot_error"), diff.get("snapshot_error")) if x],
         )
+        if observed:
+            observation["source_observations"] = observed
         _ledger.record(state, "observation", action_id=handle.action_id,
                        **_capture.persist_observation(state, handle.action_id, observation))
     except Exception as exc:

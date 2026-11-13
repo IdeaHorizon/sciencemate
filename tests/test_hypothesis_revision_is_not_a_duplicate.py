@@ -3,7 +3,7 @@
 现场（jicq E2E 流体力学，Study3 假设4 `1786368519-4e0831` / 假设5）：
 hypothesis 冻结了新的 preregistration v5，带**新的** falsification_criteria_structured
 重建 claim。`create_claim` 反复返回语义相似的旧 claim，改措辞也照样命中；
-`validate_hypothesis_outputs` 于是一直失败，因为旧 claim 的旧判据还在。
+`validate_analysis_outputs` 于是一直失败，因为旧 claim 的旧判据还在。
 连着 5 次 incomplete，最后 blocked——**节点没有任何确定性的修复路径**。
 
 根因是两层判据都少了同一维："这条 hypothesis 受哪份冻结预注册约束"。

@@ -33,8 +33,9 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import JSON, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.config import settings
 from app.models.user import User
@@ -862,7 +863,7 @@ async def discover_for_subscriptions(
                 manager.local_index.mark_harvest_window(window_key, full=full_refresh, now=now)
     except Exception:
         logger.warning("Subscription index archive failed for %s", user.id, exc_info=True)
-        archived_records = []
+        raise  # Failed persistence must remain retryable, not a successful empty day.
     archived = len(archived_records)
     logger.info(
         "Subscription discovery for %s indexed %d item(s) across %d target(s)",
@@ -874,6 +875,7 @@ async def discover_for_subscriptions(
 
 
 SUBSCRIPTION_TARGET_TIMEOUT_SECONDS = 600
+SUBSCRIPTION_RETRY_SECONDS = 300
 _subscription_inflight: set[str] = set()
 _subscription_asset_inflight: set[str] = set()
 _subscription_active_targets: dict[str, str] = {}
@@ -894,8 +896,11 @@ def due_subscription_targets(
             if not isinstance(entry, dict) or not str(entry.get("name") or "").strip():
                 continue
             key = _subscription_key(kind, entry)
-            last = curation._coerce_datetime((history.get(key) or {}).get("attempted_at"))
-            if last is None or (moment - last).total_seconds() >= settings.feed_refresh_interval_seconds:
+            previous = history.get(key) or {}
+            last = curation._coerce_datetime(previous.get("attempted_at"))
+            interval = (min(SUBSCRIPTION_RETRY_SECONDS, settings.feed_refresh_interval_seconds)
+                        if previous.get("error") else settings.feed_refresh_interval_seconds)
+            if last is None or (moment - last).total_seconds() >= interval:
                 due.append(entry)
         result.append(due[:MAX_SUBSCRIPTION_TARGETS])
     return result[0], result[1]
@@ -905,8 +910,46 @@ def _subscription_key(kind: str, entry: dict) -> str:
     return f"{kind}:{str(entry.get('key') or entry.get('name') or '').strip().casefold()}"
 
 
+async def _record_subscription_attempt(
+    db: AsyncSession, user: User, *, key: str, started: str, found: int, error: str | None,
+) -> None:
+    """Merge progress without overwriting a follow committed after our read."""
+    user_id = user.id
+    for _ in range(4):
+        await db.refresh(user)
+        expected = user.preferences
+        preferences = dict(expected or {})
+        feed = dict(preferences.get("feed") or {})
+        history = dict(feed.get("subscription_discovery") or {})
+        previous = dict(history.get(key) or {})
+        previous.update(attempted_at=started, archived=found, error=error)
+        if error is None:
+            previous["succeeded_at"] = datetime.now(UTC).isoformat()
+        history[key] = previous
+        feed["subscription_discovery"] = history
+        preferences["feed"] = feed
+        unchanged = (
+            or_(User.preferences.is_(None), User.preferences == JSON.NULL)
+            if expected is None else User.preferences == expected
+        )
+        result = await db.execute(
+            update(User).where(User.id == user_id, unchanged)
+            .values(preferences=preferences)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 1:
+            set_committed_value(user, "preferences", preferences)
+            await db.commit()
+            return
+        # A user edit won the race. Drop this snapshot and merge into the
+        # committed preferences on the next attempt, never a stale ORM write.
+        await db.rollback()
+    raise RuntimeError("Subscription progress could not be saved after concurrent preference edits")
+
+
 async def _discover_subscription_batch(
     db: AsyncSession, *, user: User, journals: list[dict], scholars: list[dict],
+    complete_assets: bool = True,
 ) -> int:
     user_key = str(user.id)
     if user_key in _subscription_inflight:
@@ -917,6 +960,14 @@ async def _discover_subscription_batch(
         for kind, entries in (("journals", journals), ("scholars", scholars)):
             for entry in entries[:MAX_SUBSCRIPTION_TARGETS]:
                 key = _subscription_key(kind, entry)
+                # A user can unfollow while an earlier target is being fetched.
+                # Re-read before starting the next target, and release SQLite's
+                # transaction while the remote request is running.
+                await db.refresh(user)
+                selected = (curation.stored(user).get("subscriptions") or {}).get(kind) or []
+                if not any(_subscription_key(kind, value) == key for value in selected):
+                    continue
+                await db.commit()
                 _subscription_active_targets[user_key] = kind
                 started = datetime.now(UTC).isoformat()
                 logger.info("Subscription discovery started: user=%s target=%s", user.id, key)
@@ -935,26 +986,15 @@ async def _discover_subscription_batch(
                     await db.rollback()
                     error = f"{type(exc).__name__}: {exc}"[:500]
                     logger.warning("Subscription discovery failed: target=%s error=%s", key, error)
-                # 重新读取偏好，保留检索期间用户修改的订阅和课题挖掘结果。
-                await db.refresh(user)
-                preferences = dict(user.preferences or {})
-                feed = dict(preferences.get("feed") or {})
-                history = dict(feed.get("subscription_discovery") or {})
-                previous = dict(history.get(key) or {})
-                previous.update(attempted_at=started, archived=found, error=error)
-                if error is None:
-                    previous["succeeded_at"] = datetime.now(UTC).isoformat()
-                history[key] = previous
-                feed["subscription_discovery"] = history
-                preferences["feed"] = feed
-                user.preferences = preferences
-                await db.commit()
+                await _record_subscription_attempt(
+                    db, user, key=key, started=started, found=found, error=error,
+                )
                 archived += found
                 logger.info("Subscription discovery finished: target=%s archived=%d error=%s", key, found, error)
     finally:
         _subscription_active_targets.pop(user_key, None)
         _subscription_inflight.discard(user_key)
-    if archived:
+    if archived and complete_assets:
         await complete_subscription_assets_for_user(
             user_key, batches=10, journal_names=[str(x.get("name") or "") for x in journals]
         )
@@ -1199,7 +1239,7 @@ async def run_subscription_round() -> dict[str, int]:
             if (not journals and not scholars) or str(user.id) in _subscription_inflight:
                 continue
             totals["found"] += await _discover_subscription_batch(
-                db, user=user, journals=journals, scholars=scholars,
+                db, user=user, journals=journals, scholars=scholars, complete_assets=False,
             )
             totals["users"] += 1
             if totals["users"] >= MAX_USERS_PER_ROUND:
@@ -1245,22 +1285,19 @@ def request_subscription_discovery(
     journals: list[dict[str, object]] | None = None,
     scholars: list[dict[str, object]] | None = None,
 ) -> bool:
-    """从 HTTP 请求里挂一个后台订阅采集，不阻塞这次响应。
+    """Wake collection after subscriptions commit; never drop a busy follow.
 
-    与 `literature_harvester.request_subscription_refresh` 同一个模式（也是
-    同一个理由：用户点一下"关注"就让他等几十秒采完，是不可接受的）。
+    The worker re-reads saved subscriptions each round. An in-flight request
+    cannot consume a later follow's notification, and restarts retain the queue.
     """
     if not journals and not scholars:
         return False
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         return False
-    loop.create_task(
-        discover_subscriptions_for_user(user_id, journals=journals, scholars=scholars),
-        name=f"feed-subscription-discovery-{user_id}",
-    )
-    return True
+    from app.services.feed.scheduler import feed_collector
+    return feed_collector.request_subscription_refresh()
 
 
 __all__ = [

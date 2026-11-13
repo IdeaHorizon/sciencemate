@@ -27,7 +27,7 @@ const service = (nodeType: string, count: number, running = false) => ({ nodeTyp
 const services = (n: number) => Array.from({ length: n }, (_, i) => service(`svc${i}`, 1));
 
 test("只有一个车站时，只占车站那一条带", () => {
-  const { stationY, height } = mapBand([], idx(["hypothesis"]), [[]]);
+  const { stationY, height } = mapBand([], idx(["analysis"]), [[]]);
   // 上：呼吸圈 19 + 留白 3；下：小注那一行 38 + 留白 3。
   assert.equal(stationY, 22);
   assert.equal(height, 63);
@@ -65,12 +65,12 @@ test("服务行和车站小注不叠在同一行", () => {
 });
 
 test("最热闹的图也留在这个高度以内（这是「不许长回去」的那道线）", () => {
-  const types = idx(["hypothesis", "observation", "experiment", "writing"]);
+  const types = idx(["analysis", "observation", "experiment", "writing"]);
   const { height } = mapBand(
     [
-      { from: "hypothesis", to: "writing" },
-      { from: "writing", to: "hypothesis" },
-      { from: "hypothesis", to: "experiment" },
+      { from: "analysis", to: "writing" },
+      { from: "writing", to: "analysis" },
+      { from: "analysis", to: "experiment" },
       { from: "experiment", to: "observation" },
     ],
     types,

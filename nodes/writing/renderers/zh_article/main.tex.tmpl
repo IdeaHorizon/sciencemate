@@ -1,5 +1,6 @@
 % 由 writing 节点的渲染器装配；模型只写 sections/ 下的片段。
-\documentclass[12pt,a4paper]{ctexart}
+<<DOCUMENT_CLASS>>
+\usepackage{fontspec}
 \usepackage[margin=2.5cm]{geometry}
 % 浮动体页面比例：不让一张半页高的图独占一整页（iter9 实测第 5 页整页只有图 1 与大片空白）
 \renewcommand{\topfraction}{0.9}\renewcommand{\bottomfraction}{0.7}
@@ -9,7 +10,7 @@
 \addbibresource{refs.bib}
 \usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
 \captionsetup{font=small,labelfont=bf,labelsep=quad}
-\ctexset{section/format=\Large\bfseries,subsection/format=\large\bfseries,subsubsection/format=\normalsize\bfseries}
+<<SECTION_FORMAT>>
 \graphicspath{{./}{figures/}}
 \emergencystretch=3em
 \tolerance=1500
@@ -28,7 +29,7 @@
 
 <<SECTIONS>>
 
-\printbibliography[title=参考文献]
+\printbibliography[title=<<REFERENCES_TITLE>>]
 
 <<APPENDIX>>
 \end{document}

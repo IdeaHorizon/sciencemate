@@ -44,7 +44,7 @@ from tools.run_contract import (  # noqa: E402
     resolve_run_acceptance,
 )
 
-NODES = ("literature", "hypothesis", "data", "experiment", "postprocess", "writing")
+NODES = ("literature", "analysis", "data", "experiment", "postprocess", "writing")
 
 PARAMS = {"n_particles": 1000, "timestep": 0.005}
 
@@ -74,8 +74,8 @@ def _write_prereg(root: Path, **metadata) -> None:
     """Analysis 产出的预注册：落 `plan/`，账本记出处；`frozen=True` 再追一行 freeze。"""
     frozen = bool(metadata.pop("frozen", False))
     write_record(root, artifact_type="pre_registration", name="X", content="H1: ...",
-                 directory=_DIRS["hypothesis"], metadata=metadata,
-                 produced_by_node_type="hypothesis", produced_by_run_id="r-hyp",
+                 directory=_DIRS["analysis"], metadata=metadata,
+                 produced_by_node_type="analysis", produced_by_run_id="r-hyp",
                  frozen=frozen)
 
 
@@ -165,8 +165,8 @@ def test_no_prereg_still_falls_back_to_secondary(tmp_path: Path) -> None:
 
 def _write_named_prereg(root: Path, name: str, **metadata) -> None:
     write_record(root, artifact_type="pre_registration", name=name, content="H1: ...",
-                 directory=_DIRS["hypothesis"], metadata=metadata,
-                 produced_by_node_type="hypothesis", produced_by_run_id="r-hyp",
+                 directory=_DIRS["analysis"], metadata=metadata,
+                 produced_by_node_type="analysis", produced_by_run_id="r-hyp",
                  frozen=True)
 
 

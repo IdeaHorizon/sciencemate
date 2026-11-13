@@ -37,6 +37,7 @@ from uuid import uuid4
 from typing import Any
 
 from core import run_history
+from core.naming import canonical_node_fields, canonical_node_type, same_node
 from core.state import State
 from core.tool_registry import ToolDefinition, register_tool
 
@@ -140,7 +141,7 @@ def _unresolved_flow_reason(entry: dict) -> str | None:
         )
     if d == "deferred_to_analysis":
         return (
-            f"本轮裁决已顺延给 {entry.get('deferred_to_node') or 'hypothesis'}（Analysis）—— "
+            f"本轮裁决已顺延给 {entry.get('deferred_to_node') or 'analysis'}（Analysis）—— "
             "等它读完实验结果、更新 research_state。在那之前不能起别的 producing 节点。"
         )
     if d == "awaiting_manual_edit":
@@ -194,7 +195,7 @@ def _unresolved_flow_next_step(entry: dict) -> str:
             "  #   自动退回可重启状态；也可直接 present_decision_package 重新裁决。"
         )
     if entry.get("decision_state") == "deferred_to_analysis":
-        target = entry.get("deferred_to_node") or "hypothesis"
+        target = entry.get("deferred_to_node") or "analysis"
         return (
             f"  run_node(node_type={target!r}, node_inputs={{...}})\n"
             f"  # 裁决已顺延给 Analysis：它读 experiment/ 结果 → 更新假说状态 → 出新一版 research_state"
@@ -215,11 +216,11 @@ def _authorized_action_target(entry: dict) -> str | None:
         # 顺延 ≠ 放行。被授权的下一个 producing 节点**只有** Analysis；
         # 别的（writing / 再来一轮 experiment）照旧拦住 —— 否则"顺延"就
         # 退化成"跳过审查链"，那正是 #151 里我造过的静默路径。
-        return str(entry.get("deferred_to_node") or "hypothesis").strip() or None
+        return canonical_node_type(str(entry.get("deferred_to_node") or "analysis").strip()) or None
     if state_value != "action_authorized":
         return None
     target = str(entry.get("authorized_target_node") or "").strip()
-    return target or None
+    return canonical_node_type(target) or None
 
 
 # ── 「谁被起来执行这个 flow」只能有一个真相源 ─────────────────────────────
@@ -248,7 +249,7 @@ def _in_progress_target(entry: dict) -> str | None:
     for key in (_ACTION_TARGET_KEY, "authorized_target_node", "deferred_to_node"):
         value = str(entry.get(key) or "").strip()
         if value:
-            return value
+            return canonical_node_type(value)
     return None
 
 
@@ -285,7 +286,7 @@ def _find_in_progress_entry(flow: list | None, node_type: str) -> dict | None:
         if not isinstance(entry, dict):
             continue
         if (entry.get("decision_state") == "action_in_progress"
-                and _in_progress_target(entry) == node_type):
+                and same_node(_in_progress_target(entry), node_type)):
             return entry
     return None
 
@@ -316,24 +317,19 @@ def _reset_authorized_action(
 
 
 def recover_interrupted_decision_actions(state: State) -> int:
-    """Recover process-local revision work after a process restart.
-
-    ``run_node(background=True)`` children live inside the chat.py process.
-    Consequently a persisted ``action_in_progress`` state can never still be
-    running after that process has restarted.  Leaving it untouched creates a
-    permanent false wait: continuous mode sees "in progress" and correctly
-    refuses to launch a duplicate, although no child exists anymore.
-
-    This function is deliberately called only by session-resume entry points,
-    not during a live process.  It converts the transient state back to the
-    durable authorization, preserving the reviewer feedback and attempt count.
-    """
+    """Restore legacy unbound authorizations; accepted actions retain their handles."""
     recovered = 0
+    from core import child_dispatch
+    saved = child_dispatch.checkpoint(state)
+    handles = list((saved or {}).get("child_dispatches", {}).values())
     for entry in state.hook_state.get("pending_post_node_flow") or []:
         if not isinstance(entry, dict):
             continue
         if entry.get("decision_state") != "action_in_progress":
             continue
+        if any(same_node(record["node_type"], _in_progress_target(entry))
+               and record.get("task_id") == entry.get("task_id") for record in handles):
+            continue  # the original accepted action will resume through its handle
         entry["decision_state"] = _prior_state(entry)
         entry["action_last_failure"] = "parent process interrupted during authorized action"
         entry["action_recovered_at"] = datetime.now(UTC).isoformat()
@@ -367,108 +363,6 @@ def run_has_live_executor(run_id: str) -> bool:
     return find_child_state(run_id) is not None or has_driver(run_id)
 
 
-def _scan_child_runs(state: State) -> dict[str, dict]:
-    """读盘：runs 根下每条有 run_start 的子 run 的机械事实（身份、有没有 run_end、
-    checkpoint、会话……）。只读，不判。两个消费者各取所需：
-    :func:`scan_interrupted_child_runs`（被打断的）、:func:`live_same_task_children`（还活着的）。"""
-    runs_root = state.root.parent
-    if not runs_root.is_dir():
-        return {}
-    scanned: dict[str, dict] = {}
-    for run_dir in runs_root.iterdir():
-        transcript = run_dir / "transcript.jsonl"
-        if run_dir == state.root or not transcript.is_file():
-            continue
-        info: dict = {
-            "run_id": run_dir.name,
-            "node_type": None,
-            "task_instance_uuid": None,
-            "task_contract_revision": None,
-            "task_contract_digest": None,
-            "parent_run_id": None,
-            "parent_dispatch_id": None,
-            "has_end": False,
-            "n_tool_calls": 0,
-            "paths": [],
-            "last_narration": "",
-            "has_checkpoint": (run_dir / "messages_checkpoint.json").is_file(),
-            "session_id": None,
-        }
-        try:
-            with transcript.open(encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    event = record.get("event")
-                    if event == "run_start" and info["node_type"] is None:
-                        info["node_type"] = record.get("node_type")
-                        info["parent_run_id"] = record.get("parent_run_id")
-                        info["parent_dispatch_id"] = record.get("parent_dispatch_id")
-                        info["session_id"] = record.get("session_id")
-                        # 任务身份（#1080 第 5 条）：续跑要拿它逐字比对，
-                        # 不能再按 node_type + session 去猜。
-                        info["task_instance_uuid"] = record.get("task_instance_uuid")
-                        info["task_contract_revision"] = record.get("task_contract_revision")
-                        info["task_contract_digest"] = record.get("task_contract_digest")
-                    elif event == "run_end":
-                        info["has_end"] = True
-                        break
-                    elif event == "tool_call":
-                        info["n_tool_calls"] += 1
-                    elif event == "workspace_changed":
-                        for path in record.get("paths") or []:
-                            if path not in info["paths"]:
-                                info["paths"].append(path)
-                    elif event == "llm_response":
-                        text = str(
-                            record.get("content")
-                            or record.get("content_preview")
-                            or ""
-                        ).strip()
-                        if text:
-                            info["last_narration"] = text[:300]
-        except OSError:
-            continue
-        if info["node_type"]:
-            scanned[run_dir.name] = info
-    return scanned
-
-
-def scan_interrupted_child_runs(state: State, *, scope: str = "lineage") -> list[dict]:
-    """扫出本会话血缘内**被打断**的子 run（有 run_start、没 run_end、且没人在跑）。
-
-    判据全机械，来源是盘上的 transcript 加本进程的执行者登记。
-    `brief_interrupted_child_runs`（告知调度器）与 `_resumable_run_for`
-    （派发时自动转续跑）共用这一份 —— 两处各写一遍判据，迟早分叉。
-
-    "没人在跑"那一条见 :func:`run_has_live_executor`：还有执行者的 run 不是
-    被打断，是还在干活（#1164）。
-    """
-    scanned = _scan_child_runs(state)
-
-    def _descends_from_me(run_id: str) -> bool:
-        seen: set[str] = set()
-        current = scanned.get(run_id, {}).get("parent_run_id")
-        while current and current not in seen:
-            if current == state.run_id:
-                return True
-            seen.add(current)
-            current = scanned.get(current, {}).get("parent_run_id")
-        return False
-
-    return [
-        info for run_id, info in sorted(scanned.items())
-        if not info["has_end"]
-        and (scope == "all" or _descends_from_me(run_id))
-        and not run_has_live_executor(run_id)
-    ]
-
-
 def live_same_task_children(state: State, node_type: str, task_identity: dict | None) -> list[dict]:
     """同一任务身份、**还有执行者**的子 run（#1199，#1052 验收 4）。
 
@@ -484,16 +378,16 @@ def live_same_task_children(state: State, node_type: str, task_identity: dict | 
     want_digest = str(task_identity.get("task_contract_digest") or "")
     if not want_uuid:
         return []
-    live: list[dict] = []
-    for run_id, info in sorted(_scan_child_runs(state).items()):
-        if info["node_type"] != node_type or info["has_end"]:
-            continue
-        if (str(info.get("task_instance_uuid") or "") != want_uuid
-                or str(info.get("task_contract_digest") or "") != want_digest):
-            continue
-        if run_has_live_executor(run_id):
-            live.append(info)
-    return live
+    from core.pause import list_active_runs, list_paused
+
+    states = {info.run_id: info.state for info in list_active_runs()}
+    states.update({ctx.run_id: ctx.state for ctx in list_paused()})
+    return [{"run_id": child.run_id, "node_type": child.node_type,
+             "task_instance_uuid": child.task_instance_uuid,
+             "task_contract_digest": child.task_contract_digest}
+            for child in states.values()
+            if same_node(child.node_type, node_type) and child.session_id == state.session_id
+            and child.task_instance_uuid == want_uuid and child.task_contract_digest == want_digest]
 
 
 #: 这些节点的派发**必须**带任务身份（#1080 第 3 条）。
@@ -586,50 +480,6 @@ def _resolve_task_identity(state, node_type: str,
     }, None
 
 
-def _resumable_run_for(state: State, node_type: str,
-                       task_identity: dict | None = None) -> dict | None:
-    """这个节点类型有没有一个**可续**的被打断 run（有 checkpoint）。
-
-    ## 作用域是**会话**，不是"我的后代"（2026-08-18 实测修正）
-
-    第一版按血缘过滤，实测漏掉了最常见的一种：literature 上次由 orchestrator
-    派、这次由 hypothesis 派 —— 从 hypothesis 的视角，那条尸体不是它的后代，
-    于是又新开了一条。而"上次那个 literature 还没跑完"跟"这次是谁派的"没有
-    关系：它是**这个会话**里未完成的工作。
-
-    判据用 transcript 里的 `session_id`（append_transcript 每条都写），
-    精确且机械。CLI 那种没有 session_id 的场景退回血缘判定 —— 那里
-    runs 目录是按项目分的，不按会话，不能无差别地认。
-    """
-    my_session = getattr(state, "session_id", None)
-    scanned = scan_interrupted_child_runs(state, scope="all" if my_session else "lineage")
-    candidates = [
-        info for info in scanned
-        if info["node_type"] == node_type
-        and info["has_checkpoint"]
-        and (not my_session or info["session_id"] == my_session)
-    ]
-    # ── 续跑要**按任务身份**挑，不按 node_type 猜（#1080 第 5 条）───────────
-    #
-    # 从前这里只问三件事：同 node_type、同 session、有 checkpoint，然后取最后
-    # 一个。续上之后这次的 `node_inputs` 会覆盖进 hook_state，还会提示模型
-    # 「不一致就以这条为准」—— 于是**同一个 run_id 先后服务两个不同的任务**。
-    # #1052 的翼型会话就是这么让新任务落回旧 Experiment child 的上下文的。
-    #
-    # 带任务身份时：只认身份**逐字相等**的那些。对不上的不是候选 —— 它是
-    # 另一件事的尸体，不是这件事的半成品。
-    # 不带身份时（CLI、老 run、还没建任务的派发）：维持原样，否则每一条历史
-    # run 都会因为"没有身份"而永远续不上，那是把一条缺省改成了硬失败。
-    if task_identity:
-        want_uuid = str(task_identity.get("task_instance_uuid") or "")
-        want_digest = str(task_identity.get("task_contract_digest") or "")
-        candidates = [
-            info for info in candidates
-            if str(info.get("task_instance_uuid") or "") == want_uuid
-            and str(info.get("task_contract_digest") or "") == want_digest
-        ]
-    return candidates[-1] if candidates else None
-
 
 def task_identity_mismatch(info: dict, task_identity: dict | None) -> str | None:
     """这条 run 的任务身份和本次派发对得上吗；对不上返回一句人话。
@@ -655,91 +505,14 @@ def task_identity_mismatch(info: dict, task_identity: dict | None) -> str | None
     return None
 
 
-def brief_interrupted_child_runs(state: State) -> int:
-    """进程死亡恢复时，把被打断子 run 的**既成事实**机械送达调度器。
-
-    ## 现场（2026-08-18，会话 c9deb4f2）
-
-    curator 执行到第 35 个动作时 worker 被杀（后端重启连带子进程）。恢复后
-    调度器只知道"要跑 curator"，不知道上一个 curator **已经注册过 claim**
-    —— 于是重新派了一个从头跑，Q1 命题在 KB 里被注册了两次。中断的代价
-    不只是浪费，是**不幂等副作用做两遍造成的腐蚀**。
-
-    事实全在盘上（transcript + workspace_changed 记录），只是没人送达 ——
-    与 PR#398（截断≠做完）同方向：模型手工拿到事实立刻走对，修法是机械
-    送达，不是指望它猜。
-
-    ## 判据与来源（全部机械）
-
-    - "被打断" = transcript 有 run_start、没有 run_end；
-    - "是这一会话的后代" = 沿 run_start.parent_run_id 爬到本 orchestrator；
-    - "已经做了什么" = tool_call 计数 + workspace_changed 的文件清单
-      （不做工具名名单 —— 护栏要扫盘，不要写名单）+ 最后一条 llm_response；
-    - 防重复简报：hook_state["briefed_interrupted_child_runs"] 记账。
-
-    注入走 injected_messages —— agent_loop 每轮开头机械 drain，模型必见。
-    单个尸体解析失败跳过并留 witness，恢复流程不因corpse损坏而死。
-    """
-    briefed: list[str] = list(
-        state.hook_state.get("briefed_interrupted_child_runs") or []
-    )
-    my_session = getattr(state, "session_id", None)
-    interrupted = [
-        info for info in scan_interrupted_child_runs(
-            state, scope="all" if my_session else "lineage"
-        )
-        if info["run_id"] not in briefed
-        and (not my_session or info["session_id"] == my_session)
-    ]
-    if not interrupted:
-        return 0
-
-    sections: list[str] = []
-    for info in interrupted:
-        lines = [
-            f"- {info['node_type']}（run {info['run_id']}）：执行了 "
-            f"{info['n_tool_calls']} 次工具调用后进程被中断，没有完成记录。"
-        ]
-        if info["paths"]:
-            shown = info["paths"][:12]
-            more = len(info["paths"]) - len(shown)
-            lines.append(
-                "  已落盘的文件改动：" + "、".join(shown)
-                + (f"（另有 {more} 个）" if more > 0 else "")
-            )
-        if info["last_narration"]:
-            lines.append(f"  它最后的自述：「{info['last_narration']}」")
-        sections.append("\n".join(lines))
-        briefed.append(info["run_id"])
-        state.append_transcript(
-            "interrupted_child_briefed",
-            child_run_id=info["run_id"],
-            node_type=info["node_type"],
-            n_tool_calls=info["n_tool_calls"],
-            n_paths=len(info["paths"]),
-        )
-
-    state.hook_state["briefed_interrupted_child_runs"] = briefed
-    state.hook_state.setdefault("injected_messages", []).append({
-        "content": (
-            "（系统恢复简报）上次进程中断时，以下子节点跑到一半被杀，"
-            "它们**已经落盘的动作不会自动消失**：\n"
-            + "\n".join(sections)
-            + "\n**你不需要手工处理它们**：再次派发同类节点时，框架会自动"
-            "接上那条 run 的上下文续跑（不会从头再来），产物与 KB 状态都还在。"
-            "真要放弃某条，用 run_node(..., resume_run_id='fresh') 显式新开。"
-        ),
-        "source": "system_recovery",
-    })
-    return len(interrupted)
-
-
 def _is_allowed_callee(parent_callable_nodes: list[str], child_node_type: str) -> bool:
     if not parent_callable_nodes:
         return False
     if "*" in parent_callable_nodes:
         return True
-    return child_node_type in parent_callable_nodes
+    return canonical_node_type(child_node_type) in {
+        canonical_node_type(node) for node in parent_callable_nodes
+    }
 
 
 def _resolve_forward_artifacts(
@@ -1244,6 +1017,13 @@ async def _execute_with_infra_retry(state: State, node_type: str, exec_kwargs: d
     """
     from core.executor import execute_node
 
+    from core import child_dispatch
+
+    def on_state_ready(child):
+        child_dispatch.bind(state, exec_kwargs.get("parent_dispatch_id"), child)
+        exec_kwargs["resume_run_id"] = child.run_id
+
+    exec_kwargs["on_state_ready"] = on_state_ready
     return await _execute_with_infra_retry_inner(state, node_type, exec_kwargs, execute_node)
 
 
@@ -1266,11 +1046,8 @@ async def _execute_one(state: State, node_type: str, exec_kwargs: dict,
     summary 落盘了 —— 这里把它读回来，异常路径于是和返回路径合流，走同一套
     有限重试。读不回来就退回一份最小的等价 summary，绝不把异常吞掉。
     """
-    import time as _time
-
     from core.llm import describe_provider_error, is_transient_provider_error
 
-    started = _time.time()
     try:
         return await execute_node(**exec_kwargs)
     except Exception as exc:                        # noqa: BLE001
@@ -1282,7 +1059,11 @@ async def _execute_one(state: State, node_type: str, exec_kwargs: dict,
             attempt=attempt,
             error=describe_provider_error(exc),
         )
-        summary = _crashed_child_summary(state, node_type, started)
+        run_id = exec_kwargs.get("resume_run_id")
+        try:
+            summary = json.loads((state.root.parent / run_id / "summary.json").read_text(encoding="utf-8")) if run_id else None
+        except (OSError, ValueError):
+            summary = None
         if summary is not None:
             return summary
         # 读不回来（summary 也没写成）→ 最小等价件。**不写 produced_artifact_types**：
@@ -1296,31 +1077,6 @@ async def _execute_one(state: State, node_type: str, exec_kwargs: dict,
             "tool_call_count": 0,
             "turns": 0,
         }
-
-
-def _crashed_child_summary(state: State, node_type: str, started: float) -> dict | None:
-    """刚才那个被 provider 打死的子 run 自己写下的 summary。
-
-    executor 在 re-raise **之前**已经把 summary.json 落盘了（含
-    `produced_artifact_types` / `failure_category`）。读回它，重试判定就用得上
-    真实产出，而不是凭空假设"什么都没产出"——已经产出过东西的 run 重跑一遍
-    既浪费又可能覆盖成果。
-    """
-    from core import run_history
-
-    try:
-        runs = run_history.load_runs(
-            state.root.parent, project_id=state.project_id,
-            node_type=node_type, limit=5)
-    except Exception:                               # noqa: BLE001
-        return None
-    for record in runs:                             # load_runs 已按新鲜度排序
-        if float(getattr(record, "finished_at", 0) or 0) + 1 < started:
-            continue
-        raw = dict(getattr(record, "raw", None) or {})
-        if raw.get("status") == "error":
-            return raw
-    return None
 
 
 async def _execute_with_infra_retry_inner(
@@ -1551,21 +1307,14 @@ async def _run_node_tool(
     from core.loader import load_harness
     from core.project_workspace import note_delegated_workspace
 
-    # ── 派发前必须先跟用户说一句（2026-08-17）──────────────────────────────
-    #
-    # 实测一个真会话：跑完 hypothesis→reviewer→curator→dreaming→writing，
-    # **assistant 消息 0 条**，用户面前只有 51 条子节点内部独白 + 190 张工具卡。
-    # 调度器自己的 8 句话混在里面，跟节点独白同样式、同字号。用户原话：
-    # 「连他妈一开始都不说话了？起码得让用户了解现在在干啥吧」。
-    #
-    # 回复契约（chat.py:1818）管的是**一轮终态**必须有干净文本。而这一轮跨了
-    # 五个节点、一个多小时还没结束 —— 契约一次都没触发。粒度错了：用户需要的
-    # 是**每个决策点**说一句，不是等一轮跑完。
-    #
-    # 为什么不写进 prompt：prompt 里的「必须」不是机制（hypothesis 那次写了
-    # 三遍「结束前必须校验」，agent 56 次工具调用一次没调）。所以钉在 schema
-    # 上（required + minLength:1）—— 派发口核一次、报错直接说清要写什么；
-    # 工具体内不再手写第二份（判决拆除刀 1：契约声明一次、核一次）。
+    node_type = canonical_node_type(node_type)
+    if "pending_post_node_flow" in state.hook_state:
+        for entry in state.hook_state["pending_post_node_flow"] or []:
+            if isinstance(entry, dict):
+                entry.update(canonical_node_fields(entry))
+
+    # Legacy internal callers may supply a note. Task-bearing nodes below derive
+    # it from the actual request instead of requiring a second model-authored text.
     _note = (user_note or "").strip()
     # 宣告**不在这里**发 —— 见下方真正派发点前的那处。
 
@@ -1573,11 +1322,50 @@ async def _run_node_tool(
     # 必须是第一步：下面的偏离记账、委派登记都读它、也都有副作用。坏输入要在
     # 这些发生之前被说出来，而不是被当成"没给"一路放到子节点。
     node_inputs, _inputs_refusal = _node_inputs_as_object(node_inputs)
+    node_inputs = canonical_node_fields(node_inputs, recursive=False)
     if _inputs_refusal is not None:
         state.append_transcript(
             "run_node_inputs_rejected", node_type=node_type,
             error_code=_inputs_refusal["error_code"])
         return _inputs_refusal
+
+    # Business inputs belong to node_inputs. Unknown legacy control keywords
+    # remain compatible, but declared child inputs must never disappear in **_.
+    if _:
+        try:
+            declared = load_harness(node_type).expected_inputs or {}
+        except FileNotFoundError:
+            declared = {}
+        misplaced = sorted(set(_) & set(declared))
+        if misplaced:
+            conflicts = [key for key in misplaced
+                         if key in (node_inputs or {}) and node_inputs[key] != _[key]]
+            code = "node_inputs_conflict" if conflicts else "node_inputs_misplaced"
+            fields = ", ".join(f"node_inputs.{key}" for key in misplaced)
+            state.append_transcript("run_node_inputs_rejected", node_type=node_type,
+                                    error_code=code, misplaced_fields=misplaced)
+            return {
+                "status": "error", "error_code": code,
+                "error": (f"业务字段应放在 {fields}，不能放在 run_node 顶层。"
+                          + (f"两层的 {', '.join(conflicts)} 内容冲突。" if conflicts else "")
+                          + "没有启动子节点；保留原任务正文和任务身份，修正字段位置后重试。"),
+                "misplaced_fields": misplaced, "conflicting_fields": conflicts,
+            }
+
+    requested_inputs = json.loads(json.dumps(node_inputs, ensure_ascii=False, default=str))
+    recovering_call = getattr(state, "_recovering_child_call", None)
+    if recovering_call:
+        from core import child_dispatch
+        saved = child_dispatch.checkpoint(state)
+        candidates = [record for record in (saved or {}).get("child_dispatches", {}).values()
+                      if record.get("call_id") == recovering_call
+                      and same_node(record["node_type"], node_type)
+                      and record.get("requested_inputs") == requested_inputs
+                      and record.get("slot") == _.get("_call_slot")]
+        if len(candidates) == 1:
+            return await _resume_child_dispatch(state, candidates[0])
+        if len(candidates) > 1:
+            raise ValueError("More than one original child matches this nested dispatch")
 
     # ── 派发前范畴检查（2026-08-18）──────────────────────────────────────
     #
@@ -1903,10 +1691,6 @@ async def _run_node_tool(
             ),
         }
 
-    # 本 session 确实在做项目工作了 —— 维护类 hook（如 dreaming_due）据此判断
-    # 该不该打扰用户；纯问答/闲聊不会走到这里。
-    state.hook_state["_dispatched_any_child"] = True
-
     # ── 输入契约机械校验（v2.1）────────────────────────────────────────────
     # 实测事故（2026-08-07 UI）：orchestrator 直调 postprocess 服务时传了
     # `figure_spec`，而该节点所有 visual 工具都要 `visual_requests`。服务用
@@ -1923,6 +1707,23 @@ async def _run_node_tool(
     # 判据保守：只有"一个声明键都没命中"才拦（几乎必然是契约不匹配）；命中任一
     # 声明键、额外再带自定义字段照常放行。
     _expected_inputs = dict(child_harness.expected_inputs or {})
+    task_fields = child_harness.task_input_fields
+    if task_fields:
+        task_values = [(key, (node_inputs or {}).get(key)) for key in task_fields]
+        task_values = [(key, value) for key, value in task_values
+                       if (isinstance(value, str) and value.strip())
+                       or (isinstance(value, (dict, list)) and value)]
+        if not task_values:
+            return {
+                "status": "error", "error_code": "missing_dispatch_task",
+                "error": f"{node_type} 缺少本次实际任务；在 node_inputs 中提供 "
+                         f"{' 或 '.join(task_fields)}。进度说明直接来自该任务。",
+                "task_input_fields": task_fields,
+                "expected_inputs": _expected_inputs,
+            }
+        _note = "\n".join(value.strip() if isinstance(value, str)
+                          else json.dumps(value, ensure_ascii=False)
+                          for _, value in task_values)
     if node_inputs and _expected_inputs and not (set(node_inputs) & set(_expected_inputs)):
         return {
             "status": "error",
@@ -1934,6 +1735,10 @@ async def _run_node_tool(
             "expected_inputs": _expected_inputs,
             "received_keys": sorted(node_inputs),
         }
+
+    state.hook_state["_dispatched_any_child"] = True
+    if not _note:
+        _note = f"{node_type}: " + json.dumps(node_inputs or {}, ensure_ascii=False)
 
     # ── 服务节点不许异步（2026-08-04 e2e8 实测）────────────────────────────
     #
@@ -2219,17 +2024,7 @@ async def _run_node_tool(
     )
 
     sub_run_id = f"{state.node_type}->{node_type}@d{new_depth}"
-    # ── 被打断的同类 run：**续它，不新开**（wangd 2026-08-18）──────────────
-    #
-    #     「上一个 curator 被打断，然后就让继续，然后新开一个 curator ——
-    #       我觉得这都非常的离谱。」
-    #
-    # 离谱之处不只是浪费：新开的那个会把已经做过的不幂等操作再做一遍
-    # （实测 Q1 命题在 KB 被注册两次）。而续跑的原材料一直都在 —— 每轮写的
-    # messages_checkpoint 就在那个 run 目录里。
-    #
-    # 这一步**机械**：判据是"同类型 + 被打断 + 有 checkpoint"，不问模型。
-    # 模型要真想放弃重来，显式传 resume_run_id="fresh"。
+    # Recovery selects an exact saved child. New calls never guess an old run.
     _resume_run_id: str | None = None
     if resume_run_id == "fresh":
         # fresh = 放弃续跑另起一条，不是在旧的还活着时并排再起一条（#1199，#1052 验收 4）。
@@ -2253,7 +2048,6 @@ async def _run_node_tool(
             "run_node_fresh_requested", node_type=node_type)
     elif resume_run_id:
         # 指名的 run 还有执行者 = 它没被打断，续它就是同一个 run 上两个 loop（#1164）。
-        # 自动续跑那条路由扫描排除；显式指名这条在这里说清。
         if run_has_live_executor(resume_run_id):
             return {
                 "status": "error",
@@ -2269,11 +2063,18 @@ async def _run_node_tool(
         _resume_run_id = resume_run_id
         # 显式指名续跑：身份对不上**报错**，既不静默新开也不静默续上
         # （#1080 验收 5）。挑出那条 run 的记录来比 —— 比不到就是另一回事，
-        # 交给 executor 的续跑失败路径（#1081）如实说。
         if _identity:
-            _target = next(
-                (info for info in scan_interrupted_child_runs(state, scope="all")
-                 if info["run_id"] == resume_run_id), None)
+            _target = None
+            target_log = state.root.parent / resume_run_id / "transcript.jsonl"
+            if target_log.exists():
+                for line in target_log.read_text(encoding="utf-8").splitlines():
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if event.get("event") == "run_start":
+                        _target = event
+                        break
             _why = task_identity_mismatch(_target, _identity) if _target else None
             if _why:
                 return {
@@ -2286,33 +2087,6 @@ async def _run_node_tool(
                         "`resume_run_id='fresh'` 显式新开。"),
                     "requested_resume_run_id": resume_run_id,
                 }
-    else:
-        _candidate = _resumable_run_for(state, node_type, task_identity=_identity)
-        if _candidate:
-            _resume_run_id = _candidate["run_id"]
-            state.append_transcript(
-                "run_node_auto_resumed",
-                node_type=node_type,
-                resumed_run_id=_resume_run_id,
-                n_tool_calls_before=_candidate["n_tool_calls"],
-            )
-
-    # ── 宣告放在**所有闸门之后**（wangd 2026-08-18 实测）─────────────────
-    #
-    # 这句话原来发在函数开头 —— 而它和真正的派发之间隔着 18 个 error 出口
-    # （节点名校验 / 白名单 / 服务节点同步要求 / worktree 单车道 / 冻结闸 /
-    # 权限 …）。任何一个挡下来，用户已经看到"我要去做 X 了"，而 X 从没发生。
-    #
-    # 实测后果：writing 被宣告 17 次，磁盘上只有 1 条 writing run —— 对话里
-    # 16 句没兑现的承诺，用户看到的就是"怎么一直在说同一件事"。
-    #
-    # 宣告是**对用户的承诺**，必须发在承诺能兑现的地方：过了所有闸门、下一步
-    # 就是真的跑。这一行之后不再有 pre-dispatch 的拒绝出口。
-    state.append_transcript(
-        "node_dispatch_announced", node_type=node_type, user_note=_note[:1000],
-        background=bool(background),
-    )
-
     # ── 交付投影契约（2026-08-31）：派发时就把路径验掉 ────────────────────
     # 判据与落盘端同一份（validate_deliverable_projection）。在这里报错，
     # 好过让子节点跑完 26 分钟再发现用户点名的文件写不进去。
@@ -2345,6 +2119,13 @@ async def _run_node_tool(
                 return {"status": "error", "error": str(exc)}
         deliverable = {"artifact_type": _dl_type, "path": _dl_path}
 
+    # Announce only once all dispatch validation, including the delivery path,
+    # has succeeded. The visible brief and the child's request share one source.
+    state.append_transcript(
+        "node_dispatch_announced", node_type=node_type, user_note=_note[:1000],
+        background=bool(background),
+    )
+
     exec_kwargs = dict(
         node_type=node_type,
         state_dir=base_dir,
@@ -2373,6 +2154,22 @@ async def _run_node_tool(
     # #143 gap 3：绑定的 task 随 run 一起进 in_progress（best-effort）。
     _task_start_best_effort(state, task_id, node_type)
 
+    from core import child_dispatch
+
+    child_dispatch.prepare(state, {
+        "dispatch_id": _dispatch_id,
+        "node_type": node_type,
+        "execution": {key: value for key, value in exec_kwargs.items()
+                      if key not in {"llm", "parent_state", "state_dir"}},
+        "task_id": task_id,
+        "autoresolved_note": autoresolved_note,
+        "dispatch_deviations": _dispatch_deviations,
+        "background": background,
+        "owner_tool": "run_node",
+        "slot": _.get("_call_slot"),
+        "requested_inputs": requested_inputs,
+    })
+
     # ── background 模式：进程内后台跑，立即返回（R1 异步基座 v1）────────────
     if background:
         task = asyncio.create_task(
@@ -2384,7 +2181,7 @@ async def _run_node_tool(
                 autoresolved_note,
                 exec_kwargs,
                 task_id,
-            )
+            ), name=f"child-dispatch:{_dispatch_id}",
         )
         _BACKGROUND_TASKS.add(task)
         task.add_done_callback(_BACKGROUND_TASKS.discard)
@@ -2415,14 +2212,22 @@ async def _run_node_tool(
             _bg_out["dispatch_deviations"] = _dispatch_deviations
         return _bg_out
 
+    return await _run_child_dispatch(
+        state, node_type, node_inputs, child_harness, autoresolved_note,
+        exec_kwargs, task_id, _dispatch_id, _dispatch_deviations,
+    )
+
+
+async def _run_child_dispatch(state, node_type, node_inputs, child_harness,
+                              autoresolved_note, exec_kwargs, task_id, dispatch_id,
+                              dispatch_deviations=None, *, summary=None, run_post_flow=True):
+    """Normal execution and recovery share execution, pause and parent bookkeeping."""
     try:
-        summary = await _execute_with_infra_retry(state, node_type, exec_kwargs)
+        if summary is None:
+            summary = await _execute_with_infra_retry(state, node_type, exec_kwargs)
     except Exception as exc:
-        _reset_authorized_action(
-            state,
-            node_type,
-            reason=f"{type(exc).__name__}: {exc}",
-        )
+        if run_post_flow:
+            _reset_authorized_action(state, node_type, reason=f"{type(exc).__name__}: {exc}")
         raise
 
     # ── 子 run pause → 把 pause 沿着 run_node 工具结果**冒泡**给父 loop ───
@@ -2431,7 +2236,7 @@ async def _run_node_tool(
         # 给 paused 子 run 补上 parent_tool_call_id —— chat.py cascade resume 用
         from core.pause import get_paused_run
 
-        child_ctx = get_paused_run(summary["paused_run_id"])
+        child_ctx = get_paused_run(summary.get("paused_run_id") or summary["run_id"])
         if child_ctx is not None:
             # 父 agent_loop 还没把 tool_call_id 暴露给我；用 state.hook_state 临时存
             child_ctx.parent_tool_call_id = state.hook_state.get(
@@ -2444,7 +2249,7 @@ async def _run_node_tool(
             pause_question=(summary.get("pause_event") or {}).get("question", "")[:200],
             # 与 `subagent_call_start` 同一个派发身份（#1052）：平台按它把这次 pause
             # 链回**这一次**派发，而不是「同类型的某一次」。
-            dispatch_id=_dispatch_id,
+            dispatch_id=dispatch_id,
         )
         return {
             "status": "pause",
@@ -2456,31 +2261,38 @@ async def _run_node_tool(
 
     out = _finish_child(
         state, node_type, node_inputs, summary, child_harness, autoresolved_note, task_id=task_id,
-        dispatch_id=_dispatch_id,
+        dispatch_id=dispatch_id,
     )
 
     # 独立审查由运行时执行；把结果交回调度器，让它先解释判断再呈递选择。
-    flow_out = await _run_post_producing_flow(state, node_type, out)
+    flow_out = await _run_post_producing_flow(state, node_type, out) if run_post_flow else None
     result = flow_out if flow_out is not None else out
-    if _dispatch_deviations and isinstance(result, dict):
-        result = {**result, "dispatch_deviations": _dispatch_deviations}
+    if dispatch_deviations and isinstance(result, dict):
+        result = {**result, "dispatch_deviations": dispatch_deviations}
     return result
 
 
 async def _run_child_background(
-    parent_state: State,
-    node_type: str,
-    node_inputs: dict | None,
-    child_harness,
-    autoresolved_note: dict | None,
-    exec_kwargs: dict,
-    task_id: str | None = None,
+    parent_state: State, node_type: str, node_inputs, child_harness,
+    autoresolved_note, exec_kwargs, task_id=None, *, recovery=None,
 ) -> None:
-    """后台包装：跑 child + 完成后做同一套 bookkeeping + 双路通知。"""
-
+    """One background result/error boundary, including after a worker restart."""
     try:
-        summary = await _execute_with_infra_retry(parent_state, node_type, exec_kwargs)
+        if recovery is not None:
+            out = await _resume_child_dispatch(parent_state, recovery)
+        else:
+            out = await _run_child_dispatch(
+                parent_state, node_type, node_inputs, child_harness, autoresolved_note,
+                exec_kwargs, task_id, exec_kwargs.get("parent_dispatch_id"), run_post_flow=False,
+            )
     except Exception as e:
+        from core.conversation_store import UnconfirmedToolOutcome
+        if isinstance(e, UnconfirmedToolOutcome):
+            from core import child_dispatch
+            child_dispatch.mark_background_unconfirmed(parent_state, exec_kwargs.get("parent_dispatch_id"))
+            _inject_to_parent(parent_state, "原后台任务的动作结果尚未确认；框架保留原任务，允许只读核查。",
+                              "background_child")
+            return
         _reset_authorized_action(
             parent_state,
             node_type,
@@ -2501,7 +2313,10 @@ async def _run_child_background(
         )
         return
 
-    if summary.get("status") == "paused":
+    summary = {"run_id": out.get("child_run_id"), "status": out.get("child_status"),
+               "turns": out.get("child_turns"), "pause_event": out.get("pause_event")}
+    if out.get("status") == "pause":
+        summary["status"] = "paused"
         # 后台 child 等人工输入：登记续跑上下文，提示用 /answer 答复
         run_id = summary.get("run_id", "?")
         question = (summary.get("pause_event") or {}).get("question", "")
@@ -2524,20 +2339,12 @@ async def _run_child_background(
         )
         return
 
-    out = _finish_child(
-        parent_state,
-        node_type,
-        node_inputs,
-        summary,
-        child_harness,
-        autoresolved_note,
-        task_id=task_id,
-        dispatch_id=exec_kwargs.get("parent_dispatch_id"),
-    )
     _report_background_done(parent_state, node_type, summary, out)
 
 
 def _report_background_done(parent_state: State, node_type: str, summary: dict, out: dict) -> None:
+    from core import child_dispatch
+    child_dispatch.release_background(parent_state, summary.get("run_id"))
     run_id = summary.get("run_id", "?")
     status = summary.get("status", "?")
     # 服务结果到货即销账（与 run_node 里的 service_result_pending 成对）。
@@ -2740,7 +2547,7 @@ async def _run_post_producing_flow(
                 "post_node_review_skipped_no_artifacts",
                 producing_run_id=entry.get("producing_run_id"))
         else:
-            # user_note 是**无条件**必填（2026-08-17：派发前必须先跟用户说一句）。
+            # 内部审查说明绑定本次交付；不再要求模型另写一份派发说明。
             # 运行时自己派也一样要说 —— 用户在对话里看不到节点内部过程，这一句
             # 是他唯一的信号，而"谁发起的"不改变这一点。
             #
@@ -2807,6 +2614,11 @@ def _finish_child(
     `dispatch_id`：这个子 run 是哪一次 run_node 调用派出去的（= 子 State 的
     `parent_dispatch_id`），写进 `subagent_call_end`（#1052）。"""
     # ── 回填 required_output_artifact_types：从子 run dir 复制到父 ──────────
+    from core import child_dispatch
+    saved_result = child_dispatch.finished(state, dispatch_id)
+    if saved_result is not None:
+        return saved_result
+
     imported = (
         []
         if getattr(state, "project_worktree", None) is not None
@@ -3101,6 +2913,13 @@ def _finish_child(
         "final_text_preview": summary.get("final_text_preview", "")[:500],
         "child_state_dir": summary.get("state_dir"),
     }
+    # The preview is bounded prose; corrective dispatch decisions must retain
+    # their complete structured payload on the first return and in history.
+    if isinstance(summary.get("node_task_outcome"), dict):
+        out["node_task_outcome"] = summary["node_task_outcome"]
+        for key in ("dispatch_action", "redispatch_required", "resume_contract", "retry_target"):
+            if key in summary["node_task_outcome"]:
+                out[key] = summary["node_task_outcome"][key]
     # 失败原因三元组过投影。这张"给 LLM 看的精简返回"是按名点收的 ——
     # 不点名，summary 里写得再清楚的 failure_category/failure_human 也到不了
     # 调度器嘴边，它就只能自己造句（实测造出"被框架错误打断"）。
@@ -3123,18 +2942,6 @@ def _finish_child(
             scientific_contribution=_effect.get("scientific_contribution"),
             task_contract_revision_digest=_effect.get("task_contract_revision_digest"),
         )
-    _resume = summary.get("resume") or {}
-    if _resume.get("requested_run_id") and not _resume.get("resumed"):
-        out["resume_failed"] = {
-            "requested_run_id": _resume.get("requested_run_id"),
-            "started_fresh_run_id": summary.get("run_id"),
-            "reason": _resume.get("reason"),
-        }
-        out["note"] = (
-            f"⚠️ 请求续跑 {_resume.get('requested_run_id')} 没能续上"
-            f"（{_resume.get('reason')}），这一轮是**新开**的 "
-            f"{summary.get('run_id')} —— 上一轮的上下文和进度都不在里面。"
-        )
     if side_effects is not None and side_effects.promised_read_only:
         # 只读派发：三类改动当场交到调度器手上 —— 它下一句就要跟用户说结果，
         # 而那次事故里的「未修改文件」正是在这一刻写出来的。
@@ -3149,6 +2956,7 @@ def _finish_child(
         out["task_id"] = task_id
     if autoresolved_note:
         out["framework_autoresolved_inputs"] = autoresolved_note
+    child_dispatch.finished(state, dispatch_id, out)
     return out
 
 
@@ -3415,7 +3223,6 @@ def _import_required_outputs(parent_state: State, child_summary: dict, child_har
     return imported
 
 
-
 def _compact_run_node_result(content: str) -> str:
     """旧 run_node 结果 → 决策要点摘要（全文都在盘上，带指针）。
 
@@ -3432,13 +3239,47 @@ def _compact_run_node_result(content: str) -> str:
         head = (content or "")[:400]
         return f"[压缩的 run_node 结果 —— 非 JSON，前 400 字符] {head}"
     keep: dict = {}
-    for k in ("status", "child_run_id", "child_node_type", "verdict",
-              "completion_kind", "missing_required_outputs",
-              # #1097 第 4 条：压缩之后也要留住它。白名单漏掉一个新对象，
-              # 父侧就退回"只看 status"，而那正是这条 issue 的形状。
-              "child_obligation_effect", "node_task_outcome"):
+    for k in (
+        "status",
+        "child_run_id",
+        "child_node_type",
+        "verdict",
+        "completion_kind",
+        "missing_required_outputs",
+        # #1097 第 4 条：压缩之后也要留住它。白名单漏掉一个新对象，
+        # 父侧就退回"只看 status"，而那正是这条 issue 的形状。
+        "child_obligation_effect",
+        "node_task_outcome",
+        "dispatch_action",
+        "redispatch_required",
+        "resume_contract",
+        "retry_target",
+        "blockers",
+    ):
         if d.get(k) not in (None, "", []):
             keep[k] = d[k]
+    post_review = d.get("post_node_review")
+    if isinstance(post_review, dict):
+        keep["post_node_review"] = {
+            k: post_review[k]
+            for k in ("review_state", "review_critique_artifact_id", "review_failed_reason")
+            if k in post_review
+        }
+        critique = post_review.get("critique") or {}
+        if isinstance(critique, dict):
+            metadata = critique.get("metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            keep["post_node_review"]["review_metadata"] = {
+                k: metadata[k]
+                for k in (
+                    "verdict",
+                    "review_subject",
+                    "review_scope",
+                    "unverified_checks",
+                    "n_critical_concerns",
+                )
+                if k in metadata
+            }
     arts = d.get("produced_artifacts") or d.get("artifacts") or []
     if isinstance(arts, list) and arts:
         ids = [a.get("id") if isinstance(a, dict) else str(a) for a in arts]
@@ -3453,82 +3294,171 @@ def _compact_run_node_result(content: str) -> str:
     )
 
 
-def _recover_run_node_receipt(arguments, *, state, tool_call_id):
-    """Report the original child, not permission to create a replacement.
+def _import_child_dispatch(arguments, state, tool_call_id):
+    """Import a pre-handle checkpoint once, using its exact dispatch edge."""
+    from core import child_dispatch
 
-    The parent dispatch event and child run_start already share dispatch_id.
-    New dispatch events also record the original tool call identity explicitly.
-    Without that exact chain no recovery is asserted for legacy ambiguity.
-    """
+    saved = child_dispatch.checkpoint(state)
+    if not saved or saved.get("tool_dispatch") != tool_call_id:
+        return []
+    after = datetime.fromisoformat(saved["written_at"].replace("Z", "+00:00"))
     starts = []
-    try:
-        checkpoint = json.loads((state.root / "messages_checkpoint.json").read_text())
-        if checkpoint.get("tool_dispatch") != tool_call_id:
-            return None
-        dispatch_after = datetime.fromisoformat(checkpoint["written_at"].replace("Z", "+00:00"))
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-    try:
-        with state.transcript_path.open() as stream:
-            for line in stream:
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                if (record.get("event") == "subagent_call_start"
-                        and record.get("parent_tool_call_id") == tool_call_id
-                        and record.get("child_node_type") == arguments.get("node_type")):
-                    if dispatch_after is not None:
-                        try:
-                            at = datetime.fromisoformat(record["at"].replace("Z", "+00:00"))
-                        except (KeyError, TypeError, ValueError):
-                            continue
-                        if at < dispatch_after:
-                            continue
-                    starts.append(record)
-    except OSError:
-        return None
-    if not starts:
-        return None
-    dispatch = starts[-1]
-    children = [info for info in _scan_child_runs(state).values()
-                if info.get("parent_dispatch_id") == dispatch.get("dispatch_id")
-                and info.get("parent_run_id") == state.run_id
-                and info.get("node_type") == arguments.get("node_type")
-                and info.get("session_id") == state.session_id]
-    if len(children) != 1:
-        return None
-    child = children[0]
-    if run_has_live_executor(child["run_id"]):
-        return None  # the existing live child still owns this dispatch
-    root = state.root.parent / child["run_id"]
-    if child["has_end"]:
+    for line in state.transcript_path.read_text(encoding="utf-8").splitlines():
         try:
-            summary = json.loads((root / "summary.json").read_text())
-        except (OSError, ValueError):
+            event = json.loads(line)
+            at = datetime.fromisoformat(event["at"].replace("Z", "+00:00"))
+        except (ValueError, KeyError, TypeError):
+            continue
+        if (event.get("event") == "subagent_call_start"
+                and event.get("parent_tool_call_id") == tool_call_id
+                and same_node(event.get("child_node_type"), arguments.get("node_type"))
+                and at >= after):
+            starts.append(event)
+    if len(starts) != 1:
+        return []
+    dispatch = starts[0]
+    matches = {}
+    for path in state.root.parent.glob("*/transcript.jsonl"):
+        if path == state.transcript_path:
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if (event.get("event") == "run_start"
+                    and event.get("parent_dispatch_id") == dispatch.get("dispatch_id")
+                    and event.get("parent_run_id") == state.run_id
+                    and same_node(event.get("node_type"), arguments.get("node_type"))
+                    and event.get("session_id") == state.session_id):
+                matches[path.parent.name] = event
+    if len(matches) != 1:
+        return []
+    execution = {key: value for key, value in arguments.items() if key in {
+        "node_type", "node_inputs", "deliverable", "planned_stop_authorized", "planned_stop_note",
+        "read_only", "task_instance_uuid", "task_contract_digest"}}
+    run_id, identity = next(iter(matches.items()))
+    for key in ("task_instance_uuid", "task_contract_digest"):
+        if execution.get(key) and execution[key] != identity.get(key):
+            return []
+    for key in ("task_instance_uuid", "task_contract_digest", "task_contract_revision", "sub_run_id"):
+        if identity.get(key) is not None:
+            execution.setdefault(key, identity[key])
+    execution.update(resume_run_id=run_id, project_id=state.project_id,
+                     depth=state.depth + 1, parent_dispatch_id=dispatch["dispatch_id"])
+    record = {"dispatch_id": dispatch["dispatch_id"], "node_type": arguments["node_type"],
+              "execution": execution, "child_run_id": run_id,
+              "task_id": arguments.get("task_id"), "autoresolved_note": dispatch.get("autoresolved"),
+              "background": False}
+    old = state.hook_state.get("_current_tool_call_id_being_executed")
+    state.hook_state["_current_tool_call_id_being_executed"] = tool_call_id
+    try:
+        child_dispatch.prepare(state, record)
+    finally:
+        if old is None:
+            state.hook_state.pop("_current_tool_call_id_being_executed", None)
+        else:
+            state.hook_state["_current_tool_call_id_being_executed"] = old
+    state.append_transcript("legacy_child_dispatch_imported", tool_call_id=tool_call_id,
+                            child_run_id=run_id, dispatch_id=dispatch["dispatch_id"])
+    return child_dispatch.load(state, tool_call_id)
+
+
+async def _resume_child_dispatch(state, record):
+    from core import child_dispatch, job_wait
+    from core.loader import load_harness
+    from core.llm import LLMClient
+    from core.pause import get_paused_run
+
+    execution = {**record["execution"], "state_dir": state.root.parent,
+                 "parent_state": state, "llm": LLMClient()}
+    summary = None
+    run_id = record.get("child_run_id")
+    if run_id:
+        execution["resume_run_id"] = run_id
+        while run_has_live_executor(run_id) and get_paused_run(run_id) is None:
+            await job_wait.cancellable(state, asyncio.sleep(0.1))
+        _, summary = child_dispatch.child_facts(state, record)
+        paused = get_paused_run(run_id)
+        if paused is not None:
+            summary = {"run_id": run_id, "status": "paused", "paused_run_id": run_id,
+                       "pause_event": paused.pause_event.to_dict()}
+    return await _run_child_dispatch(
+        state, record["node_type"], execution.get("node_inputs"),
+        load_harness(record["node_type"]), record.get("autoresolved_note"), execution,
+        record.get("task_id"), record["dispatch_id"], record.get("dispatch_deviations"),
+        summary=summary, run_post_flow=not record.get("background"),
+    )
+
+
+async def _recover_run_node(arguments, *, state, tool_call_id):
+    from core import child_dispatch
+
+    if "_resume_dispatch_id" in arguments:
+        saved = child_dispatch.checkpoint(state)
+        record = (saved or {}).get("child_dispatches", {}).get(arguments["_resume_dispatch_id"])
+        if record is None or record.get("call_id") != tool_call_id:
             return None
-        if summary.get("status") == "paused":
-            return None  # a human pause is not permission for an autonomous model wake
-        return {"result": {"status": "recovered", "child_run_id": child["run_id"],
-                "child_node_type": child["node_type"], "child_status": summary.get("status"),
-                "child_state_dir": str(root), "summary": summary,
-                "do_not_start_fresh": True,
-                "note": "Original child is terminal. Use its saved outputs and existing flow; "
-                        "this receipt does not assert unfinished parent bookkeeping completed."}}
-    if not child["has_checkpoint"]:
+        records = [record]
+    else:
+        records = None
+    if "_dispatch_id" in arguments:
+        saved = child_dispatch.checkpoint(state)
+        record = (saved or {}).get("child_dispatches", {}).get(arguments["_dispatch_id"])
+        if record is None or record.get("call_id") != tool_call_id:
+            return None
+        _resume_background_dispatch(state, record)
         return None
-    return {"result": {"status": "interrupted", "child_run_id": child["run_id"],
-            "child_node_type": child["node_type"], "child_state_dir": str(root),
-            "resume_run_id": child["run_id"], "do_not_start_fresh": True,
-            "note": "Original child was interrupted and has its checkpoint. Continue it with "
-                    "run_node using this exact resume_run_id and the original task arguments; "
-                    "do not start a replacement child."}}
+    if records is None:
+        records = child_dispatch.load(state, tool_call_id)
+    if not records:
+        saved = child_dispatch.checkpoint(state)
+        if saved and "child_dispatches" in saved:
+            return True  # no child was accepted before this new-format checkpoint
+        records = _import_child_dispatch(arguments, state, tool_call_id)
+    if "_resume_dispatch_id" not in arguments:
+        records = [record for record in records
+                   if same_node(record["node_type"], arguments.get("node_type"))
+                   and record.get("slot") is None]
+    if len(records) != 1:
+        return None
+    if records[0].get("background"):
+        _resume_background_dispatch(state, records[0])
+        return {"result": {"status": "started_background", "child_node_type": records[0]["node_type"],
+                           "child_run_id": records[0].get("child_run_id")}}
+    old = state.hook_state.get("_current_tool_call_id_being_executed")
+    previous_recovery = getattr(state, "_recovering_child_call", None)
+    state._recovering_child_call = tool_call_id
+    state.hook_state["_current_tool_call_id_being_executed"] = tool_call_id
+    try:
+        return {"result": await _resume_child_dispatch(state, records[0])}
+    finally:
+        state._recovering_child_call = previous_recovery
+        if old is None:
+            state.hook_state.pop("_current_tool_call_id_being_executed", None)
+        else:
+            state.hook_state["_current_tool_call_id_being_executed"] = old
+
+
+def _resume_background_dispatch(state, record):
+    from core.loader import load_harness
+
+    name = f"child-dispatch:{record['dispatch_id']}"
+    if any(task.get_name() == name and not task.done() for task in _BACKGROUND_TASKS):
+        return
+    task = asyncio.create_task(_run_child_background(
+        state, record["node_type"], record["execution"].get("node_inputs"),
+        load_harness(record["node_type"]), record.get("autoresolved_note"),
+        record["execution"], record.get("task_id"), recovery=record,
+    ), name=name)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
 
 
 register_tool(
     ToolDefinition(
         name="run_node",
-        interrupted_recovery=_recover_run_node_receipt,
+        interrupted_recovery=_recover_run_node,
         result_compactor=_compact_run_node_result,
         description=(
             "把任意子节点当作 subagent 调起来。"
@@ -3561,7 +3491,7 @@ register_tool(
                 "node_type": {
                     "type": "string",
                     "description": (
-                        "要调起的节点名（如 'hypothesis'、'experiment'、'observation'、"
+                        "要调起的节点名（如 'analysis'、'experiment'、'observation'、"
                         "'_reviewer'）。\n"
                         "证据生产有两种模态，按**还欠哪类闭合条目**选：\n"
                         "  `experiment`  干预式 —— 让世界（或它的模型）产生新数据。"
@@ -3593,21 +3523,6 @@ register_tool(
                         "节点照常 save_artifact，**框架**在落账的同时把 content "
                         "投影到这个路径（项目根的无主之地或节点自己的目录）——"
                         "不需要你事后搬运。用户说了要一份具体文件时**总是带上它**。"
-                    ),
-                },
-                "user_note": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        "**必填。一到两句中文，直接说给用户听**（不是给你自己的备注）："
-                        "我现在要做什么、为什么是这一步、期望拿到什么。\n"
-                        "这是用户在对话里唯一能看到的「你在干什么」—— 节点内部的每轮"
-                        "独白和工具调用对他是噪音，这一句才是信号。\n"
-                        "写法：说人话，别复述参数。\n"
-                        "  ✅『先做文献调研：项目里还没有任何证据基础，我需要先摸清"
-                        "英国饮食声誉的既有研究，拿到一份综述再谈研究设计。』\n"
-                        "  ❌『调起 literature 节点』（复述了参数，用户看了等于没看）\n"
-                        "  ❌『Starting literature node with mode=landscape』（这是日志不是对话）"
                     ),
                 },
                 "task_instance_uuid": {
@@ -3663,7 +3578,11 @@ register_tool(
                 "node_inputs": {
                     "type": "object",
                     "description": (
-                        "传给子节点的 node_inputs（如 {research_question: '...'}）。\n"
+                        "传给子节点的本次实际任务"
+                        "（如 {research_question: '检验某项具体主张，返回证据与反例'}）。"
+                        "进度说明由同一份任务生成；literature 必须给 research_question，"
+                        "analysis 给 research_goal 或 research_question，"
+                        "writing 给 research_question 或 rewrite_spec。\n"
                         "  ⚠️ **本轮受哪份预注册约束，不在这里说** —— 它是任务合同的一部分："
                         "`task(action='contract', prereg_artifact_id=… | no_prereg_reason=…)`，"
                         "派发时随 `task_contract_digest` 一起到达子节点。\n"
@@ -3712,7 +3631,7 @@ register_tool(
                     ),
                 },
             },
-            "required": ["node_type", "user_note"],
+            "required": ["node_type"],
         },
         risk_level="high",  # 调起整个 agent loop —— 谨慎
     ),
@@ -3750,12 +3669,17 @@ async def _run_nodes_parallel(
                     "job_index": idx,
                 }
             try:
+                prior = next((record for record in _.get("_recovery_records", [])
+                              if record.get("slot") == idx), None)
+                if prior is not None:
+                    return {"job_index": idx, **(await _resume_child_dispatch(state, prior))}
                 return {
                     "job_index": idx,
                     **(
                         await _run_node_tool(
                             state,
                             node_type=job["node_type"],
+                            _call_slot=idx,
                             node_inputs=job.get("node_inputs") or {},
                             forward_artifact_ids=job.get("forward_artifact_ids") or [],
                             # 并行派发同样要先跟用户说一句 —— 漏传这一个参数，
@@ -3832,9 +3756,31 @@ async def _run_nodes_parallel(
     return out
 
 
+async def _recover_run_nodes_parallel(arguments, *, state, tool_call_id):
+    from core import child_dispatch
+
+    saved = child_dispatch.checkpoint(state)
+    if not saved or "child_dispatches" not in saved:
+        return None  # legacy parallel intents do not identify their accepted slots
+    records = child_dispatch.load(state, tool_call_id)
+    old = state.hook_state.get("_current_tool_call_id_being_executed")
+    previous_recovery = getattr(state, "_recovering_child_call", None)
+    state._recovering_child_call = tool_call_id
+    state.hook_state["_current_tool_call_id_being_executed"] = tool_call_id
+    try:
+        return {"result": await _run_nodes_parallel(state, **arguments, _recovery_records=records)}
+    finally:
+        state._recovering_child_call = previous_recovery
+        if old is None:
+            state.hook_state.pop("_current_tool_call_id_being_executed", None)
+        else:
+            state.hook_state["_current_tool_call_id_being_executed"] = old
+
+
 register_tool(
     ToolDefinition(
         name="run_nodes_parallel",
+        interrupted_recovery=_recover_run_nodes_parallel,
         description=(
             "并行调起 N 个子节点。每个 job 是一个 run_node 入参 dict（node_type / node_inputs / "
             "forward_artifact_ids）。返回各 job 顺序对应的结果列表。一个失败不阻塞其它。"
@@ -3857,14 +3803,6 @@ register_tool(
                                 "type": "array",
                                 "items": {"type": "string"},
                             },
-                            "user_note": {
-                                "type": "string",
-                                "minLength": 1,
-                                "description": (
-                                    "**必填**。一到两句说给用户听：这一路在做什么、为什么。"
-                                    "并行时用户更需要知道你同时铺开了几件事、各是什么。"
-                                ),
-                            },
                             "task_instance_uuid": {
                                 "type": "string",
                                 "description": (
@@ -3884,7 +3822,7 @@ register_tool(
                                 "description": "用户原话里不许改文件的那一句（同串行）。",
                             },
                         },
-                        "required": ["node_type", "user_note"],
+                        "required": ["node_type"],
                     },
                     "description": "要并行起的子节点 job 列表。",
                 },
@@ -4109,7 +4047,7 @@ async def _request_upstream_rework(
     """
     from core.upstream_routing import PIPELINE_ORDER, upstream_candidates
 
-    up = (upstream_node or "").strip()
+    up = canonical_node_type((upstream_node or "").strip())
     if up == state.node_type:
         return {
             "status": "error",

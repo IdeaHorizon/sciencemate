@@ -47,6 +47,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from core.naming import same_node
+
 log = logging.getLogger(__name__)
 
 _INFRA_FAILURE_KINDS = frozenset({
@@ -126,6 +128,12 @@ class RunRecord:
     跑到一半进程没了。两者在磁盘上无法区分，由调用方按新鲜度自行判断。"""
     has_pause: bool = False
     raw: dict = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        from core.naming import canonical_node_type
+
+        if self.node_type:
+            object.__setattr__(self, "node_type", canonical_node_type(self.node_type))
 
     # ── 语义谓词：别让每个消费者各自拼字符串 ────────────────────────────────
     @property
@@ -292,7 +300,9 @@ class RunRecord:
         return (ts, self.finished_at, self.run_id)
 
     def artifact_types(self) -> set[str]:
-        return {a.get("type") for a in self.artifacts
+        from core.naming import canonical_artifact_type
+
+        return {canonical_artifact_type(a.get("type")) for a in self.artifacts
                 if isinstance(a, dict) and a.get("id")}
 
 
@@ -412,7 +422,7 @@ def load_runs(
         if rec.project_id != project_id and not (
                 rec.in_flight and rec.project_id is None):
             continue
-        if node_type is not None and rec.node_type != node_type:
+        if node_type is not None and not same_node(rec.node_type, node_type):
             continue
         out.append(rec)
 
@@ -424,7 +434,7 @@ def latest(runs: Iterable[RunRecord], *, node_type: str | None = None
            ) -> RunRecord | None:
     """最近一次 run（runs 已是新→旧）。"""
     for r in runs:
-        if node_type is None or r.node_type == node_type:
+        if node_type is None or same_node(r.node_type, node_type):
             return r
     return None
 
@@ -457,7 +467,7 @@ def consecutive_failures(
     for r in runs:
         if r.in_flight:
             continue
-        if r.node_type != node_type:
+        if not same_node(r.node_type, node_type):
             if (break_on_other_producing_success and r.is_producing
                     and r.is_completed):
                 break
@@ -492,7 +502,7 @@ def best_attempt(runs: Iterable[RunRecord], node_type: str,
     """
     required = set(required_types or ())
     cands = [r for r in runs
-             if r.node_type == node_type and not r.in_flight and r.artifact_types()]
+             if same_node(r.node_type, node_type) and not r.in_flight and r.artifact_types()]
     if not cands:
         return None
 

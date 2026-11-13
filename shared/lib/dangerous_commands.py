@@ -22,6 +22,8 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 
+from shared.lib.shell_risk import UNPARSED, python_report_data
+
 log = logging.getLogger("dangerous_commands")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -128,9 +130,22 @@ _PYTHON_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
 )
 
 
-def match_high_risk(text: str, *, mode: str = "shell") -> str | None:
+def shell_risk_labels(text: str) -> set[str]:
+    from shared.lib.shell_risk import execution_fragments
+
+    fragments = execution_fragments(text or "")
+    return {label for pattern, label in _SHELL_PATTERNS
+            if any(pattern.search(fragment) for fragment in fragments)}
+
+
+def match_high_risk(text: str, *, mode: str = "shell", syntax_tree=UNPARSED) -> str | None:
     """返回命中的高危类别标签；未命中返 None。mode ∈ {'shell', 'python'}。"""
     if not text:
+        return None
+    if mode == "shell":
+        labels = shell_risk_labels(text)
+        return next((label for _, label in _SHELL_PATTERNS if label in labels), None)
+    if mode == "python" and python_report_data(text, syntax_tree=syntax_tree):
         return None
     patterns = _SHELL_PATTERNS if mode == "shell" else _PYTHON_PATTERNS
     for pat, label in patterns:

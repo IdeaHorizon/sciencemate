@@ -116,7 +116,7 @@ def test_run_node_targets_parallel():
     out = chat_mod._run_node_targets("run_nodes_parallel", {
         "jobs": [{"node_type": "literature"}, {"node_type": "hypothesis"}],
     })
-    assert out == "literature + hypothesis"
+    assert out == "literature + analysis"
 
 
 class _FakeState:

@@ -90,12 +90,12 @@ def test_web_fetch_scheme_and_emptiness_are_schema(tmp_path):
 
 # ── run_node ────────────────────────────────────────────────────────────────
 
-def test_run_node_blank_user_note_is_a_schema_violation(tmp_path):
+def test_run_node_needs_the_actual_task_instead_of_a_separate_note(tmp_path):
     st = _st(tmp_path, "_orchestrator")
     st.hook_state["_callable_nodes"] = ["*"]
     res = asyncio.run(execute("run_node", st, node_type="literature", user_note="  "))
-    assert res["status"] == "error" and "user_note" in res["error"], res
-    assert res.get("parameter_violations")
+    assert res["status"] == "error" and res["error_code"] == "missing_dispatch_task", res
+    assert res["task_input_fields"] == ["research_question"]
 
 
 def test_review_alias_is_answered_where_the_harness_is_looked_up(tmp_path):
@@ -109,9 +109,9 @@ def test_review_alias_is_answered_where_the_harness_is_looked_up(tmp_path):
 def test_run_node_schema_declares_the_deliverable_shape():
     schema = get_tool("run_node").parameters_schema["properties"]
     assert schema["deliverable"]["required"] == ["artifact_type", "path"]
-    assert schema["user_note"]["minLength"] == 1
+    assert "user_note" not in schema
     jobs = get_tool("run_nodes_parallel").parameters_schema["properties"]["jobs"]
-    assert jobs["minItems"] == 1 and jobs["items"]["required"] == ["node_type", "user_note"]
+    assert jobs["minItems"] == 1 and jobs["items"]["required"] == ["node_type"]
 
 
 # ── save_artifact ───────────────────────────────────────────────────────────

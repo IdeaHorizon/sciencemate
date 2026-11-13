@@ -192,7 +192,7 @@ async def test_shell_escape_fails_at_write_time(tmp_path: Path) -> None:
         assert "plan/escape.txt" in stderr
         # 且必须翻译成"这是谁的、该怎么做" —— 否则读起来像环境故障
         note = result.get("boundary_note") or ""
-        assert "hypothesis" in note and "chmod" in note and "run_node" in note
+        assert "analysis" in note and "chmod" in note and "run_node" in note
     finally:
         if state.sandbox_manifest:
             sandbox.evict_state_attempt(state)
@@ -467,6 +467,7 @@ def test_parent_guard_does_not_revert_a_dispatched_child_writing_its_own_dir(tmp
     """
     from core.project_workspace import (
         _delegated_workspaces,
+        capture_before_tool,
         enforce_after_tool,
         note_delegated_workspace,
     )
@@ -480,17 +481,27 @@ def test_parent_guard_does_not_revert_a_dispatched_child_writing_its_own_dir(tmp
     assert _delegated_workspaces(state) == []
 
     # 只登记**直接被派的那一个**。孙辈那次登记发生在子的 state 上（生产里
-    # experiment 调 data 是 experiment 自己的 run_node），父收不到 —— 所以
-    # 这里绝不能替父把 "data" 也登记一遍：那是在验证一个生产中不存在的场景。
+    # experiment 调 data / literature 是自己的服务入口），父收不到 —— 所以
+    # 这里绝不能替父把孙节点再登记一遍：那是在验证一个生产中不存在的场景。
     # 委派面必须由 note_delegated_workspace 自己按子树推导出来。
+    capture_before_tool(state)
     note_delegated_workspace(state, "experiment")
     # 记录必须**活到 enforce**：守卫的比对发生在工具返回之后
     # （capture_before_tool → 工具体 → enforce_after_tool）。做成退出即清的
     # contextmanager 时，enforce 时记录已空，子节点的正当产出照样被回滚 ——
     # 实测踩过，而且当时单元测试还是绿的。
-    assert {str(p) for p in _delegated_workspaces(state)} == {"experiments", "data"}
+    assert {str(p) for p in _delegated_workspaces(state)} == {
+        "experiments", "data", "literature",
+    }
+    produced = []
+    for workspace in ("experiments", "data", "literature"):
+        artifact = project / workspace / "artifacts" / "service-result.json"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text("{}", encoding="utf-8")
+        produced.append(artifact)
     # 由 enforce_after_tool 消费后清空：委派面的生命周期 = 这一次工具调用
-    enforce_after_tool(state, "run_node")
+    assert enforce_after_tool(state, "run_node") is None
+    assert all(artifact.exists() for artifact in produced)
     assert _delegated_workspaces(state) == []
 
     # 未绑 worktree（CLI）时是无操作，不影响既有行为

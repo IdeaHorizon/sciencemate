@@ -5,9 +5,8 @@ review_spec.md 是给模型读的散文，判据本身（切题不切题、值�
 
 - `redirect_upstream` 被正文要求使用（"打回上游重做"），却漏在 metadata 的
   `recommended_action` enum 里 —— 广告与默认不一致（2026-08-23 修）。
-- 第 133 行残留"orchestrator 在 user accept 后 freeze" —— 与 #617/#635 冲突
-  （冻结是作者签字、writing 自己冻、无 user-accept 步），会把交付路由带偏。
-  这跟 PR#635 解开的三处矛盾指令是同一个病，只是那次没扫到这份 spec。
+- 旧的 user-accept / 再派 writing freeze 指令会把交付路由带偏。当前重建版本用
+  submit_manuscript 登记源码快照、PDF 与审读元数据，审核规范要与实际工具一致。
 
 这条测试把这几处钉住，防它们悄悄漂回去。切题维度本身不写正则 —— 只断言
 "这一维在 spec 里被声明、且 reviewer 拿得到判它的材料"。
@@ -38,12 +37,7 @@ def test_redirect_upstream_is_in_the_action_enum():
 
 
 def test_no_stale_orchestrator_freeze_instruction():
-    """spec 不得再教人"orchestrator 冻结 / 等 user accept" —— 那与 #617/#635 冲突。
-
-    冻结是作者签字：writing 自己冻，orchestrator 代签会被机械拒。这份 spec 曾残留
-    旧流程"orchestrator 在 user accept 后 freeze"，PR#635 解开别处三份同类矛盾时
-    没扫到它。
-    """
+    """提交规范与当前工具一致，不教调度器为旧签字流程再派一次 writing。"""
     spec = _spec()
     # 允许出现 "orchestrator 不能代签 / 不冻结" 这类否定说明；禁止出现把冻结
     # 责任派给 orchestrator / user-accept 的正向指令。
@@ -58,12 +52,14 @@ def test_no_stale_orchestrator_freeze_instruction():
     hit = [p for p in bad_patterns if p in lowered]
     assert not hit, (
         f"spec 残留把冻结派给 orchestrator/user-accept 的旧指令：{hit}。"
-        f"应改为「approve 后 writing 自己 freeze」（作者签字，见 #617/#635）"
+        f"应指向当前 submit_manuscript，不增加冻结或 user-accept 步骤"
     )
-    # 正面契约：spec 必须说明 writing 自己冻
-    assert ("writing 自己" in spec and "freeze" in spec), (
-        "spec 必须点明 approve 后由 writing 自己 freeze"
+    # 重建后的工具面只有 submit_manuscript；它登记快照与 PDF，不执行 freeze。
+    # 不把已经消失的作者签字步骤重新变成一次无目的 writing 调用。
+    assert ("writing 自己" in spec and "submit_manuscript" in spec), (
+        "spec 必须指向 writing 实际使用的提交工具"
     )
+    assert "派 writing 自己 freeze" not in spec
 
 
 def test_responsiveness_dimension_is_declared_with_its_material():

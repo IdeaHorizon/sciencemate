@@ -24,7 +24,7 @@ function SessionRoute() {
       </div>
     );
   }
-  return <SessionWorkspace projectId={projectId} sessionId={sessionId} mode={demoMode ? "fixture" : "api"} />;
+  return <SessionWorkspace key={`${projectId}:${sessionId}`} projectId={projectId} sessionId={sessionId} mode={demoMode ? "fixture" : "api"} />;
 }
 
 export default function SessionPage() {

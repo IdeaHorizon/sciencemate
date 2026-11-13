@@ -76,7 +76,7 @@ async def test_auto_and_person_answers_keep_distinct_model_visible_provenance(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("target,same", [("experiment", True), ("hypothesis", False)])
+@pytest.mark.parametrize("target,same", [("experiment", True), ("analysis", False)])
 async def test_revise_inherits_exact_dispatch_only_for_same_producer(
     tmp_path, monkeypatch, target, same
 ):
@@ -207,7 +207,7 @@ async def test_finalized_child_carries_dispatch_contract_into_review_flow(tmp_pa
 
     parent = State.new("_orchestrator", tmp_path / "runs")
     child = State.new(
-        "hypothesis",
+        "analysis",
         tmp_path / "runs",
         task_instance_uuid="exact-task",
         task_contract_digest="exact-revision",
@@ -218,15 +218,15 @@ async def test_finalized_child_carries_dispatch_contract_into_review_flow(tmp_pa
     }
     child.save_artifact("pre_registration", "prereg", "protocol")
     harness = NodeHarness(
-        node_type="hypothesis", required_output_artifact_types=["pre_registration"]
+        node_type="analysis", required_output_artifact_types=["pre_registration"]
     )
     summary = await finalize_run(
         child, harness, LoopResult(final_text="done", turns=1, messages=[]), None
     )
-    _finish_child(parent, "hypothesis", {"research_goal": "original"}, summary, harness, None)
+    _finish_child(parent, "analysis", {"research_goal": "original"}, summary, harness, None)
     flow = parent.hook_state["pending_post_node_flow"][-1]
     assert flow["producing_dispatch_contract"] == {
-        "node_type": "hypothesis",
+        "node_type": "analysis",
         "task_instance_uuid": "exact-task",
         "task_contract_digest": "exact-revision",
         "deliverable": {"artifact_type": "pre_registration", "path": "prereg.md"},

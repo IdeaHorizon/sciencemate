@@ -52,6 +52,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from core.naming import artifact_id_aliases, canonical_artifact_name, canonical_artifact_type
+
 log = logging.getLogger("ledger")
 
 #: 工作区账本（相对 worktree 根）。目录带点：文件树把它折进「平台记账」。
@@ -246,8 +248,9 @@ class RecordStore:
             if event == "save":
                 head = Head(
                     artifact_id=artifact_id,
-                    artifact_type=str(row.get("type") or ""),
-                    name=str(row.get("name") or artifact_id),
+                    artifact_type=canonical_artifact_type(str(row.get("type") or "")),
+                    name=canonical_artifact_name(str(row.get("type") or ""),
+                                                 str(row.get("name") or artifact_id)),
                     path=str(row.get("path") or ""),
                     version=int(row.get("version") or 1),
                     sha256=str(row.get("sha256") or ""),
@@ -291,7 +294,8 @@ class RecordStore:
         return {k: v for k, v in heads.items() if not v.retired}
 
     def head(self, artifact_id: str) -> Head | None:
-        return self.heads().get(artifact_id)
+        heads = self.heads()
+        return next((heads[key] for key in artifact_id_aliases(artifact_id) if key in heads), None)
 
     def pinned_heads(self) -> list[Head]:
         """冻结且尚未修订的 head —— `pinned` 的同一判据，带着身份与版本。
@@ -365,16 +369,18 @@ class RecordStore:
         时 `content` 为空串 —— 但 `content_hash` 永远在，消费方按哈希核对即可。
         """
         heads = self.heads(include_retired=True)
-        head = heads.get(artifact_id)
+        head = next((heads[key] for key in artifact_id_aliases(artifact_id) if key in heads), None)
         if head is None:
             return []
+        artifact_id = head.artifact_id
         out: list[dict] = []
         for row in head.saves:
             version = int(row.get("version") or 1)
             frame = Head(
                 artifact_id=artifact_id,
-                artifact_type=str(row.get("type") or ""),
-                name=str(row.get("name") or artifact_id),
+                artifact_type=canonical_artifact_type(str(row.get("type") or "")),
+                name=canonical_artifact_name(str(row.get("type") or ""),
+                                             str(row.get("name") or artifact_id)),
                 path=str(row.get("path") or head.path),
                 version=version,
                 sha256=str(row.get("sha256") or ""),
@@ -461,7 +467,10 @@ class RecordStore:
         # 当场驳回；这里管的是进程内的调用方和修订时原样抄来的旧 metadata）。
         metadata = {k: v for k, v in dict(metadata or {}).items() if k not in FREEZE_OWNED_METADATA}
         existing = self.head(artifact_id)
+        artifact_type = canonical_artifact_type(artifact_type)
+        name = canonical_artifact_name(artifact_type, name)
         if existing is not None and existing.path:
+            artifact_id = existing.artifact_id
             relative = existing.path
             version = existing.version + 1
             prev_sha = existing.sha256
@@ -508,6 +517,7 @@ class RecordStore:
         head = self.head(artifact_id)
         if head is None:
             raise KeyError(artifact_id)
+        artifact_id = head.artifact_id
         stamp = frozen_at or datetime.now(timezone.utc).isoformat()
         patch = {**metadata_patch, "frozen": True, "frozen_at": stamp}
         self._append({
@@ -557,6 +567,7 @@ class RecordStore:
         head = self.head(artifact_id)
         if head is None:
             return False
+        artifact_id = head.artifact_id
         if head.frozen and head.frozen_version == head.version:
             raise PermissionError(f"{artifact_id} 已冻结，不能撤下")
         try:
@@ -625,6 +636,8 @@ def iter_heads(worktree: Path | str | None, *, artifact_type: str | None = None)
     """工作区里全部记录的 head（可按类型过滤），按 created_at 升序。"""
     if not worktree:
         return
+    if artifact_type:
+        artifact_type = canonical_artifact_type(artifact_type)
     store = workspace_store(worktree)
     heads = [h for h in store.heads().values() if not artifact_type or h.artifact_type == artifact_type]
     heads.sort(key=lambda h: (h.created_at, h.artifact_id))

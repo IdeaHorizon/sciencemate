@@ -67,6 +67,8 @@ def persist_observation(state: Any, action_id: str, observation: dict[str, Any])
     limit = OBSERVATION_SUMMARY_LIMIT
     sequences = ("created", "modified", "deleted", "unknown")
     mappings = ("identities", "identity_basis", "overlapping_actions")
+    if "source_observations" in observation:
+        mappings += ("source_observations",)
     coverage = observation.get("coverage") or {}
     managed_coverage = ("root_coverage", "baseline_root_coverage")
     coverage_lists = [*coverage.values(),

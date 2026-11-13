@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from core.naming import canonical_node_type
 from core.paths import projects_root
 from core.skill_loader import load_skill_from_folder
 from shared.lib.filelock import exclusive
@@ -251,7 +252,15 @@ def read_bindings(project_id: str, *, projects_home: Path | None = None) -> dict
     if not isinstance(value, dict) or not isinstance(value.get("bindings"), list):
         raise SkillLibraryError("unreadable_configuration")
     revision = hashlib.sha256(json.dumps(value["bindings"], sort_keys=True).encode()).hexdigest()
-    return {"bindings": value["bindings"], "revision": revision}
+    return {"bindings": normalize_node_bindings(value["bindings"]), "revision": revision}
+
+
+def normalize_node_bindings(bindings: list[dict]) -> list[dict]:
+    """Read old assignments without rewriting their file or revision receipt."""
+    return [{**binding, "nodes": list(dict.fromkeys(canonical_node_type(node)
+                                                    for node in binding["nodes"]))}
+            if isinstance(binding, dict) and isinstance(binding.get("nodes"), list)
+            else binding for binding in bindings]
 
 
 def write_bindings(
@@ -266,7 +275,7 @@ def write_bindings(
     with exclusive(path.with_suffix(".lock")):
         if read_bindings(project_id, projects_home=projects_home)["revision"] != expected_revision:
             raise SkillLibraryError("configuration_changed")
-        _write(path, {"bindings": bindings})
+        _write(path, {"bindings": normalize_node_bindings(bindings)})
     return read_bindings(project_id, projects_home=projects_home)
 
 
@@ -276,6 +285,7 @@ def snapshot_skills(state: Any, node_type: str) -> list:
     No global registry mutation: concurrent projects (or two versions of the
     same skill) cannot change one another. The receipt survives worker restarts.
     """
+    node_type = canonical_node_type(node_type)
     if not getattr(state, "project_id", None):
         return []
     if getattr(state, "node_type", node_type) != node_type and not getattr(
@@ -321,7 +331,7 @@ def snapshot_skills(state: Any, node_type: str) -> list:
                 )
             state.hook_state[cache_key] = snapshot
     out = []
-    for binding in state.hook_state[cache_key]:
+    for binding in normalize_node_bindings(state.hook_state[cache_key]):
         if node_type not in binding["nodes"]:
             continue
         folder = Path(state.root) / safe_asset_path(binding["source_dir"])

@@ -5,6 +5,7 @@ export type CnkiDocumentKind = "journal" | "thesis" | "conference" | "book" | "o
 export type CnkiJob = {
   id: string; query: string; category: CnkiCategory; recurring: boolean; enabled: boolean;
   state: string; count: number; total: number; page: number; detail: string;
+  error_code?: string | null;
   phase?: "index" | "metadata";
   last_completed_at: string | null; result?: LiteratureSearchResponse;
   paper_ids?: string[]; next_cursor?: string; has_more?: boolean;
@@ -19,6 +20,7 @@ export async function createCnkiJob(query: string, recurring = false, category: 
   return result;
 }
 export const retryCnkiJob = (id:string) => api.request<CnkiJob>(`/cnki/jobs/${encodeURIComponent(id)}/retry`,{method:"POST"});
+export const resetCnkiSession = (jobIds:string[]) => api.request("/cnki/session/reset",{method:"POST",body:JSON.stringify({job_ids:jobIds})});
 export const readCnkiJob = (id:string,cursor?:string) => api.request<CnkiJob>(`/cnki/jobs/${encodeURIComponent(id)}?page_size=200${cursor?`&cursor=${encodeURIComponent(cursor)}`:""}`);
 export const cancelCnkiJob = (id:string) => api.request(`/cnki/jobs/${encodeURIComponent(id)}`,{method:"DELETE"});
 

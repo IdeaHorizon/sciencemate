@@ -507,11 +507,13 @@ export function AcademicSearch() {
         {channelAlerts.map(alert => <p key={alert.key} role="status">
           {alert.key === "cnki" ? t({zh:"知网：",en:"CNKI: "}) : t({zh:"部分文献检索暂未完成：",en:"Some sources are still pending: "})}{alert.detail}
         </p>)}
-        {(search.cnkiPending || channelAlerts.some(alert => alert.key === "cnki")) && <div style={{display:"flex",gap:12,alignItems:"center"}}>
+        {(search.cnkiPending || channelAlerts.some(alert => alert.key === "cnki")) && <div style={{display:"flex",gap:12,alignItems:"center",flexWrap:"wrap"}}>
           {!channelAlerts.some(alert => alert.key === "cnki") && <span>{cnkiProgressLabel(search.channels.cnki,t)}</span>}
-          {["waiting_for_verification","error","paused","browser_closed"].includes(search.channels.cnki?.state) && <Button onClick={search.retryChinese}>{t({zh:"重试知网",en:"Retry CNKI"})}</Button>}
+          {["waiting_for_verification","error","paused","browser_closed"].includes(search.channels.cnki?.state) && <Button disabled={search.resettingCnki} onClick={search.retryChinese}>{t({zh:"重试知网",en:"Retry CNKI"})}</Button>}
+          {search.channels.cnki?.resettable && <Button disabled={search.resettingCnki} onClick={search.resetChineseSession}>{t({zh:"重建知网会话",en:"Reset CNKI session"})}</Button>}
           <Button onClick={search.stopWaiting}>{t({zh:"停止检索（保留已获取结果）",en:"Stop search (keep collected results)"})}</Button>
         </div>}
+        {search.channels.cnki?.resettable && <p>{t({zh:"若重试后仍为 403，可重建采集会话。旧会话会备份，已获取的文献保留；可能需要重新登录或验证知网。",en:"If retrying still returns 403, reset the collection session. The old session is backed up and collected papers are kept. CNKI may require a new login or verification."})}</p>}
         {unavailableSources.length > 0 && <p>{t({zh:"本次暂不可用的来源",en:"Sources unavailable in this search"})}：{unavailableSources.join("、")}</p>}
         {visibleWarnings.map(detail=><p key={detail}>{detail}</p>)}
       </CardBody></Card>}

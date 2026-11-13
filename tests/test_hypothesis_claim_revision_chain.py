@@ -3,7 +3,7 @@
 旧现场（jicq E2E Study3）：冻 prereg v5 带新判据重建 claim →
   · 语义去重 0.95 命中 → 静默 merge 只并 sources，新判据全部丢弃；或
   · v3.3 的 chunk 签名 → 新 claim id，旧 claim 无人标 superseded，新旧并存
-两条路殊途同归：validate_hypothesis_outputs 永远失败，节点没有确定性修复路径。
+两条路殊途同归：validate_analysis_outputs 永远失败，节点没有确定性修复路径。
 
 新模型：claim 身份 = (prereg 身份, hypothesis_id)。修订命中同一 id，原地更新、
 留 revision_history；判据变了机械把 status 退回 open。chunk 逐版快照自动闭链。

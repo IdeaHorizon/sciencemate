@@ -35,6 +35,7 @@ import pytest
 from app.services.project_repository import (
     ChildLaneConflictError,
     GitProjectRepository,
+    LaneAlreadyRunning,
     ProjectRepositoryError,
 )
 
@@ -86,6 +87,38 @@ def test_a_lane_is_its_own_worktree_branched_from_the_session_head(repository, s
     # 独立的树：在 lane 里写东西，session 树看不见。
     (Path(lane.path) / "experiments" / "note.md").write_text("lane work", encoding="utf-8")
     assert not (Path(session.path) / "experiments" / "note.md").exists()
+
+
+def test_old_lane_trailer_cannot_create_a_second_analysis_owner(repository, session):
+    lane = repository.open_child_lane(
+        project_id="p1", session_id="s1", lane_id="old", node_type="hypothesis")
+    assert lane.node_type == "analysis"
+    # Simulate the Git evidence created by a pre-rename release.
+    _write_and_commit(Path(lane.path), "plan/legacy.md", "Old plan",
+                      "Legacy checkpoint\n\nLane-Node-Type: hypothesis")
+    found = repository.open_child_lane(
+        project_id="p1", session_id="s1", lane_id="old", node_type="analysis")
+    assert found.node_type == "analysis"
+    with pytest.raises(LaneAlreadyRunning):
+        repository.open_child_lane(
+            project_id="p1", session_id="s1", lane_id="new", node_type="analysis")
+    message = subprocess.check_output(
+        ["git", "log", "-1", "--format=%B"], cwd=lane.path, text=True)
+    assert "Lane-Node-Type: hypothesis" in message
+
+
+def test_new_analysis_can_checkpoint_against_an_old_project_policy(repository, session):
+    canonical = repository.project_path("p1")
+    policy = canonical / "access/nodes.yaml"
+    _write_and_commit(canonical, "access/nodes.yaml",
+                      policy.read_text().replace("  analysis:", "  hypothesis:"),
+                      "Old node policy")
+    source = Path(session.path) / "plan/new.md"
+    source.write_text("Revised plan")
+    selected = repository._validate_checkpoint_paths(
+        Path(session.path), project_id="p1", node_type="analysis", run_id="revised",
+        workspace_prefix="plan", paths=["plan/new.md"])
+    assert selected.paths == ["plan/new.md"]
 
 
 def test_the_lane_worktree_lives_outside_the_session_worktree(repository, session):

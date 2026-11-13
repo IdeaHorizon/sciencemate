@@ -132,7 +132,10 @@ def test_no_runtime_switch_is_wired_to_only_one_frontend():
     不报错。判据是**扫出来的**，不是我写的名单 —— 名单对新开关默认漏过，
     那正是这个 bug 的成因（[[feedback_guardrails_must_scan_not_list]]）。
     """
-    cli = (ROOT / "chat.py").read_text(encoding="utf-8")
+    cli = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in [ROOT / "chat.py", *(ROOT / "cli").glob("*.py")]
+    )
     plat = (ROOT / "platform_runtime.py").read_text(encoding="utf-8")
     spine = (ROOT / "core" / "session_driver.py").read_text(encoding="utf-8")
 

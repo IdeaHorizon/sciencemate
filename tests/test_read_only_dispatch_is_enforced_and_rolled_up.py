@@ -190,6 +190,7 @@ def test_a_parallel_dispatch_carries_the_flag_the_same_way(tmp_path):
     with patch("core.executor.run_loop", work):
         out = asyncio.run(_run_nodes_parallel(orch, jobs=[{
             "node_type": "literature", "user_note": "并行做一次只读检查。",
+            "node_inputs": {"research_question": "只读核查现有材料"},
             "read_only": True, "read_only_note": "不要修改文件"}]))
     assert out["results"][0]["status"] == "success", out
     assert promised_read_only(work.child) is not None
@@ -258,6 +259,7 @@ def test_a_dispatch_whose_deliverable_lands_on_user_source_is_refused_up_front(t
     with patch("core.executor.run_loop", work):
         out = asyncio.run(_run_node_tool(
             orch, "literature", user_note="写一份综述。", read_only=True,
+            node_inputs={"research_question": "基于现有材料写一份综述"},
             deliverable={"artifact_type": "survey_report", "path": "LITERATURE_REVIEW.md"},
         ))
     assert out["status"] == "error" and "只读约束" in out["error"], out

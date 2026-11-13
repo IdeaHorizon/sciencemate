@@ -28,6 +28,16 @@
 #       probe_toolchain / resource_fetch / run_contract / hooks   共 +7
 #
 entries:
+  - file: shared/tools/run_node.py
+    class: C
+    why: >-
+      子节点已声明的业务输入放在 run_node 顶层会被额外关键字静默丢弃；
+      在派发前指出 node_inputs 内的精确位置和双层冲突，保留原任务与身份后可安全重试。
+  - file: shared/tools/run_node.py
+    class: C
+    why: >-
+      接收方声明的实际任务字段为空，派发输入不完整；拒绝启动没有本次任务的子节点。
+      进度文字从该任务投影，删除独立必填 user_note；不评判任务内容、创新性或可发表性。
   - file: nodes/experiment/tools/resource_manager.py
     class: C
     why: stage_in.mode 只接受 0644/0755，与提交确认内固定的文件模式一致；不接受任意权限或 setuid。
@@ -2278,3 +2288,16 @@ entries:
       durable submission receipts cannot be read or validated, report that
       integrity failure before any scheduler query, approval or cancellation.
       Project tasks and payload owner declarations cannot grant this authority.
+
+  - file: nodes/experiment/tools/result_acceptance.py
+    class: C
+    why: 已有结果专用验收禁止启动生成程序、其副本或实际提交作业；这是明确的任务执行协议，仍可读表、计算统计和写报告。
+  - file: nodes/experiment/tools/result_acceptance.py
+    class: B
+    why: Core 的表格读回已截断时不能把读到的前缀报告成整张表的统计；给出未计算结果。
+  - file: nodes/experiment/tools/result_acceptance.py
+    class: B
+    why: 列冲突、记录形状无效、无匹配记录或数值不可用时，不能为请求的分组作出数值报告。
+  - file: nodes/experiment/tools/safe_bash.py
+    class: B
+    why: 只验收已有结果时不覆盖现有文件；保留原证据及既往报告，允许在节点工作区写新的报告。

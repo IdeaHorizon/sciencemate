@@ -9,6 +9,7 @@ import type {
 import { audienceOf } from "./event-audience.ts";
 import { belongsToRun } from "./run-scope.ts";
 import { parseRunLineage } from "./research-map.ts";
+import { canonicalNodeType } from "../../../shared/node-type.ts";
 
 /**
  * 把一次 run 的叙述和动作**按发生顺序**排回一条时间线。
@@ -224,7 +225,7 @@ function foldChildIntoItsDispatchLine(items: RunTimelineItem[]): RunTimelineItem
         previous?.kind === "said"
         && !previous.child
         && previous.said.aboutNodeType
-        && nodeType === previous.said.aboutNodeType
+        && nodeType === canonicalNodeType(previous.said.aboutNodeType)
       ) {
         previous.child = item.step;
         continue;
@@ -244,7 +245,7 @@ function foldChildIntoItsDispatchLine(items: RunTimelineItem[]): RunTimelineItem
   // （派发被闸挡下等）就退回最近那张。
   for (const item of out) {
     if (item.kind !== "said" || item.child || !item.said.aboutNodeType) continue;
-    const cards = cardsByNodeType.get(item.said.aboutNodeType) ?? [];
+    const cards = cardsByNodeType.get(canonicalNodeType(item.said.aboutNodeType)) ?? [];
     const card = cards.find((c) => c.sequence >= item.sequence) ?? cards.at(-1);
     if (card) item.child = card;
   }
@@ -252,7 +253,7 @@ function foldChildIntoItsDispatchLine(items: RunTimelineItem[]): RunTimelineItem
 }
 
 function childNodeTypeOf(step: RunActivityStep): string {
-  return (step.runId && parseRunLineage(step.runId)?.nodeType) || step.title || "";
+  return canonicalNodeType((step.runId && parseRunLineage(step.runId)?.nodeType) || step.title || "");
 }
 
 /**

@@ -95,6 +95,6 @@ def test_existing_cnki_records_survive_head_merge(tmp_path, monkeypatch, install
     command.upgrade(config, "head")
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [
-            ("055_merge_cnki_progress_heads",)]
+            ("056_analysis_node_name",)]
         assert connection.execute("SELECT metadata_json, updated_at FROM cnki_papers").fetchone() == (
             metadata, "2026-11-09 10:00:00")

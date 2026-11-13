@@ -2,7 +2,15 @@
 
 > 当 _reviewer 节点审 writing 产的 manuscript 时，按本 spec 走 7 维度审稿。
 > writing 节点 2026-09-18 重建（docs/WRITING_NODE_REBUILD_PLAN_20260918.md）：交付物是渲染好的 PDF +
-> LaTeX 源 + 作者备注；稿件只面向期刊读者，账本类内容全在作者备注里。审的是 PDF，不是源码。
+> LaTeX 源 + 作者备注；稿件面向本次体裁的读者，账本类内容放作者备注。成品核查必须看实际 PDF。
+
+## 当前交付阶段
+
+先从简报与用户请求确定草稿、内部报告或正式投稿成品。证据诚信在各阶段一致；
+制作完整性和发表充分性按本次阶段评价。允许诚实披露的探索结果、负结果和证据缺口，
+不为让故事更漂亮而强求新发现，也不能把已知缺口写成完成。内部审读记录用于定位未解决问题，
+外部审核优先核查关键主张和新矛盾，复用仍适用的检查。每条问题说明证据、影响和受限用途；
+调度器决定是否补研究、缩小主张或形成有局限的交付，审核意见不自动授权新研究。
 
 ## 审稿前必做
 
@@ -11,7 +19,9 @@
 3. 读 manuscript metadata 里的机械事实：`hard_lines_passed`（标题块、空引用、图表编号与图题、
    参考文献闭合、简报硬性要求、版面、图内语言、图内字号、乱码、图文件对账、成品字号）、`referee_verdict` / `referee_round` /
    `referee_pdf_matches`（写作节点内部审读官对**这一版 PDF** 的结论）、`pages`、`pdf_path`、`author_notes_path`、`forced` / `force_reason`。
-   `hard_lines_passed=false` 或 `referee_pdf_matches=false` 的稿不是可交付状态，先记 critical 再读正文
+   对 `hard_lines_passed=false`、`referee_pdf_matches=false` 或 forced 提交，读取具体报告和理由，
+   判断哪些问题影响当前简报与交付阶段。旧 PDF 的审读不能冒充当前版本已审；
+   不仅因内部检查未完成就宣布草稿存在 critical 科学缺陷，相关未核查项如实保留。
    `bibliography_verification` 保存交付时的书目事实；unavailable 是未知，旧 resolved 只证明标识可达，不能升级成题名/作者已核对或引用支持。未知本身不构成草稿拒绝条件。
 4. **重建"用户到底要什么"**（判 Responsiveness 维度的材料，缺了就是无材料空判）：
    - `read_artifact('research_state__research_state')` 拿注册的研究问题（Q1/Q2…）及各自裁决；
@@ -26,20 +36,21 @@
    机械硬线**没有**核的东西（图画得对不对、数字口径是否自洽、论证是否成立）要么你在本次审稿里补上，要么在报告里
    原样记为"未执行" —— 没执行的检查和执行了没发现问题，在报告里长得一模一样。
 7. 备注里「缺口与未兑现」列出的项，核正文是否如实把它们当缺口交付（正文用读者语言写限制，不写过程话）。
-8. 投稿型研究论文（体裁 sci_article_*）执行下面的科研图片门槛
+8. 按本次简报、venue 明确要求或论证实际需要，执行适用的科研图片核验
 
 ## 科研图片门槛
 
-投稿型研究论文至少要有一张由上游结果生成的科研图片。表格不能替代图片。
+本次简报、适用 venue 规则或关键论证要求科研图片时，核验下面各项；说明具体依据。
+仅凭体裁名称不强加至少一张图的统一门槛；图与表按表达目的选择，允许有依据的等价表达。
 
 reviewer 必须逐项核对：
 
 1. PDF 里有图（不是表），每张图有编号、图题、正文引用（硬线 H4）；
 2. 图文件与提纲图键对账通过（H11），图内文字语言与字号过线（H8/H9）—— 这些在 `hard_lines_passed` 里；
 3. 图题说的与图里画的是同一张图：对照 figures/ 下图表服务的记录（figure__*.md 的 Caption）与稿件图题；
-4. 作者备注「图表事项」说明了每张图的来源与重画情况；用户交来的原图不得原样进稿（语言、命名、可读性都要按简报重画）。
+4. 作者备注「图表事项」说明每张图的来源与修改情况；用户原图按简报、授权和可读性决定是否重画，不能将重画本身作为普遍验收条件。
 
-任一项缺失都记为 critical concern，最终 action 不得为 `proceed`：
+缺失影响本次要求或关键科学表达时，按实际后果判断严重程度，说明受影响用途并建议修复：
 
 - 图表服务画错、画不出：`recommended_action=revise`，target_node=`writing`，反馈中写清需要
   绘制的数据、结构与证据来源。
@@ -61,7 +72,7 @@ reviewer 需要先按以下 5 个视角独立形成检查意见，再汇总到�
 3. **Logic Reviewer**：检查 Introduction → Methods → Results → Discussion 的 claim-evidence-conclusion 链条；重点找 Results 没支持但 Discussion 扩大的结论。
 4. **Devil's Advocate**：提出最强反驳、替代解释、过度声明和可能的 cherry-picking；若发现 critical issue，最终 verdict 不得为 approve。
 5. **Format / Production Reviewer**：检查 LaTeX、PDF、metadata、引用格式、figure/table 引用、venue 格式；确认 PDF 是本轮 compile_latex 产物。
-   对投稿型研究论文，缺少科研图片时该视角必须标为 `critical`。
+   必需图片缺失时说明要求来源及影响；不按体裁名称自动判为 `critical`。
    另查三件这次漏掉的：
    - **交付物本身**（不是源码）：clean PDF 的首页（标题/作者/机构/摘要/关键词，
      不该有模板占位符）、图表页、文后声明的位置与重复、异常分页。
@@ -164,7 +175,7 @@ limitations 段有吗？还是只报喜不报忧？有没有承认上游缺失�
 3. **修订账读作者备注与内部审读报告**：备注「未采纳的审读意见」每条要有理由；工作区 paper/referee_report.json
    是内部审读官对当前 PDF 的意见。判 `recommended_action` 时按缺陷归属：图画错归图表服务，而图表服务
    是 writing 自己调的（`revise`，target_node=writing，反馈里写明要重画哪张、按什么重画）；
-   数据本身的问题归产出那个数的节点（`redirect_upstream` 到 `hypothesis` / `experiment` /
+   数据本身的问题归产出那个数的节点（`redirect_upstream` 到 `analysis` / `experiment` /
    `observation` / `derivation`），别让 writing 在文字上打磨一个不归它的缺陷。备注里写了却没改的，检查稿件有没有**如实把它们当缺口交付** —— 改写掩盖比留着缺口更坏。
 4. **数量声明从交付物重新数**：论文说"42 篇参考文献""五张图均已对账""共 8 个
    switch"，就去 `.bbl` / 图目录 / 图合同里重新数一遍。声称的数量必须从交付物算
@@ -173,22 +184,18 @@ limitations 段有吗？还是只报喜不报忧？有没有承认上游缺失�
 ## 评分规则
 
 - 每维度打 1-5 整数（**不允许** 2.5 / 3.5 半档）
-- overall_score = 7 维平均，取整
+- overall_score 可用适用维度平均表达整体质量，不适用项不计；verdict 依据具体问题及其影响，不能由平均分自动决定。
 
 ### ⚠️ 红线优先于平均（anti-dilution）
 
 **先判红线，再看平均。** 平均分是"整体印象"，但一条红线足以否掉一篇论文——
 不能被另外几维的高分拉平（"review 红线被平均稀释"是这套系统反复栽的坑）：
 
-- **任一维度 = 1**，或**任一视角 = critical**，或 **responsiveness / logical_chain /
-  data_provenance / honesty 任一 ≤ 2** → verdict **最高只能到 `major_concerns`**，
-  无论平均分多高。critical 在 responsiveness（答非所问/跑偏）或 honesty（overclaim/
-  伪造）→ 直接 `block` 档，不许 approve。
-- 没有红线时，才用平均分定档：
-  - ≥ 4: approve
-  - = 3: approve_with_revisions
-  - = 2: major_concerns
-  - ≤ 1: block
+- **已证实的问题实质破坏关键论证或交付要求** → verdict **最高只能到 `major_concerns`**，
+  无论平均分多高。对伪造、关键失实或严重答非所问按实际证据判断 block；
+  分数触底不单独成为红线，不把可选提升或非适用维度升级为 critical。
+- 没有红线时，按实际用途和证据充分性判断 approve / approve_with_revisions / major_concerns / block；
+  评分辅助解释，不因追求满分、格式偏好或不适用维度反复修订。
 
 一句话：**一票否决优先于算术平均。** 你是审稿人，不是打分器。
 
@@ -220,20 +227,21 @@ review PDF SHA-256 和 clean PDF SHA-256，并生成下列权威 metadata：
 
 - _reviewer **不重做实验 / 分析**
 - _reviewer **不直接改 manuscript** —— writing 节点根据 critique 改
-- _reviewer **不冻结 manuscript** —— approve 后由 **writing 自己** freeze（作者签字，
-  orchestrator 不能代签；见 #617/#635）。你只给 verdict，别在反馈里写"orchestrator
-  freeze"或"等 user accept"（那是已废的旧流程，会把交付路由带偏）。
+- _reviewer **不冻结 manuscript** —— **writing 自己**通过 `submit_manuscript` 登记
+  源码快照、PDF 与审读元数据。当前提交工具不执行 freeze，不把冻结当作审核通过的前置条件，
+  也不为补一次签字再派 writing。先读取实际提交状态；你只给 verdict 和建议，不增加 user-accept 步骤。
 
 ## Recommended action 怎么填
 
 `review_critique.recommended_action`:
 
-- approve → `proceed`（orchestrator 随后**派 writing 自己 freeze**；仅当无 critical perspective、无红线、`hard_lines_passed=true` 且 `referee_pdf_matches=true`）
+- approve → `proceed`（在声明的交付阶段与用途内使用；终稿需核对机械硬线和审读 PDF 的绑定，
+  不把终稿条件普遍施加于探索稿，也不为已有的有效提交再派单 freeze）
 - approve_with_revisions → `revise` 或 `proceed`（看 concerns 是否影响 downstream）
 - major_concerns → `revise`（改法在 writing 层能解决时，target_node='writing'）**或**
   `redirect_upstream`（根因在上游——responsiveness 差是因为分析没回答该问题、
   或结论撑不起论文——target_node 只能是**跑完能把这条义务关掉**的 producing 节点：
-  `hypothesis` / `experiment` / `observation` / `derivation`，feedback_to_next_run
+  `analysis` / `experiment` / `observation` / `derivation`，feedback_to_next_run
   写清要补什么）。`postprocess`、`literature`、`data` 都已改造成按需调用的**服务**
   （`post_run_flow: none`），退不回去；框架的候选集会机械地把它们排除
   （`core/upstream_routing.upstream_candidates`）。**这是最重要的一条路径**：

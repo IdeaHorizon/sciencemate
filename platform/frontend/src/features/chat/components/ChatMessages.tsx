@@ -36,28 +36,32 @@ export function ChatMessages({
 } & ArtifactLinkContext) {
   const t = useT();
   const { settings: interfaceSettings } = useInterfaceSettings();
-  const endRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
   const prevCountRef = useRef(messages.length);
   const mountedRef = useRef(false);
   useEffect(() => {
+    const container = messagesRef.current;
+    if (!container || messages.length === 0) return;
     // 首次渲染也要定位到最新一条。原来 prevCountRef 初值就是 messages.length，
     // 于是 `!==` 在挂载时恒为假 —— 打开一个会话落在**记录最顶上**，长会话要自己
     // 一路往下滚才看得到刚才发生了什么。首次用 instant：进页面时来一段平滑滚动
     // 只是让人等，看不出信息。
     if (!mountedRef.current) {
       mountedRef.current = true;
-      if (messages.length > 0) endRef.current?.scrollIntoView({ behavior: "instant" });
+      container.scrollTo({ top: container.scrollHeight, behavior: "instant" });
       prevCountRef.current = messages.length;
       return;
     }
     if (interfaceSettings.follow_active_run && messages.length !== prevCountRef.current) {
-      endRef.current?.scrollIntoView({ behavior: "smooth" });
+      // Scroll only the transcript. scrollIntoView also moved app-main and the
+      // document, pushing the header outside the viewport during window changes.
+      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
     }
     prevCountRef.current = messages.length;
   }, [interfaceSettings.follow_active_run, messages.length]);
 
   return (
-    <div className="messages">
+    <div className="messages" ref={messagesRef}>
       {messages.map((m) => {
         const accessory = renderMessageAccessory?.(m);
         const bodyOwned = Boolean(accessory) && Boolean(bodyOwnedByAccessory?.(m));
@@ -101,7 +105,7 @@ export function ChatMessages({
         );
       })}
       {children}
-      <div ref={endRef} />
+      <div />
     </div>
   );
 }

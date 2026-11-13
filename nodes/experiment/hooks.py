@@ -2398,6 +2398,10 @@ def _foreign_blocker_owner(record: Any) -> str:
     owner = str(args.get("suggested_owner") or "").strip()
     if not owner or "experiment" in owner.lower():
         return ""                      # 空串 / 判给自己 → 不触发
+    if args.get("category") == "missing_capability":
+        from core.loader import list_harnesses
+        if owner in list_harnesses():
+            return ""                  # 父调度器可以重派给已注册节点
     return owner
 
 

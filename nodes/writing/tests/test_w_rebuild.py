@@ -85,6 +85,29 @@ def test_brief_language_free_text_normalized(tmp_path):
     assert r["brief"]["language"] == {"body": "zh", "figures": "en"}
 
 
+@pytest.mark.parametrize("language,document_class,bibliography", [
+    ("en", r"\documentclass[12pt,a4paper]{article}", "References"),
+    ("zh", r"\documentclass[scheme=chinese,12pt,a4paper]{ctexart}", "参考文献"),
+])
+def test_brief_language_owns_generated_furniture(tmp_path, language, document_class, bibliography):
+    """RSI: an English brief with the legacy genre produced 摘要/图/表/参考文献."""
+    from nodes.writing.tools.w_common import load_genre
+    from nodes.writing.tools.w_render import _assemble
+
+    state = _state(tmp_path, with_prompt=False)
+    brief = _brief(state)
+    brief["language"]["body"] = language
+    main = _assemble(state, brief, load_genre(brief["genre"]))
+    text = main.read_text()
+    assert document_class in text
+    if language == "en":
+        assert "ctex" not in text
+    else:
+        assert r"\ctexset{" in text
+    assert rf"\printbibliography[title={bibliography}]" in text
+    assert "<<" not in text
+
+
 # ── 卷宗 ────────────────────────────────────────────────────────────────────
 
 def test_dossier_figure_ids_stable_and_records_not_docs(tmp_path):
@@ -184,6 +207,23 @@ def test_hard_lines_text_layer_on_real_pages(tmp_path):
     for k in ("H1_title_block", "H3_references_resolved", "H4_figures_tables",
               "H6_must_haves", "H7_layout", "H10_no_mojibake", "H11_figure_files_match_outline"):
         assert hl[k]["passed"], (k, hl[k])
+
+
+def test_english_figure_labels_are_checked_instead_of_silently_counting_zero(tmp_path):
+    """The same real rendered pages with English labels retain the figure checks."""
+    import re
+    from nodes.writing.tools.w_render import hard_lines
+
+    state = _state(tmp_path)
+    pages = [re.sub(r"表\s*(?=\d)", " Table ", re.sub(r"图\s*(?=\d)", " Figure ", p))
+             for p in _pages(state)]
+    before = hard_lines(state, pages, "", None)["H4_figures_tables"]
+    assert before["passed"] and before["figures"]["numbers"]
+    pages = [p.replace("Figure 1 ", "Illustration X ") for p in pages]
+    pages = [re.sub(r"^(\s*)Figure\s*1(\s)", r"\1Illustration X\2", p, flags=re.M)
+             for p in pages]
+    after = hard_lines(state, pages, "", None)["H4_figures_tables"]
+    assert not after["passed"] and 1 in after["figures"]["no_caption"]
 
 
 def test_h3_literal_section_out_of_range_and_undefined_ref_location(tmp_path):

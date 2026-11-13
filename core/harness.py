@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-
 DEFAULT_MAX_CONTEXT_TOKENS = 256000
 """没有任何人说话时的上下文窗口 —— summarizer 在它的 70% 处开始压缩。
 
@@ -72,6 +71,7 @@ class NodeHarness:
     """
     node_type: str                                   # 例如 "literature"
     version: str = "0.1"
+
     risk_level: str = "low"                          # "low" | "medium" | "high"
 
     system_prompt: str = ""                          # LLM 的 system message
@@ -97,6 +97,9 @@ class NodeHarness:
 
     # I/O 契约
     expected_inputs: dict[str, str] = field(default_factory=dict)
+    # Alternative fields carrying the actual task; the dispatch announcement is
+    # projected from the same input, never authored as a separate requirement.
+    task_input_fields: list[str] = field(default_factory=list)
     expected_outputs: dict[str, str] = field(default_factory=dict)
 
     # 下游 handoff
@@ -156,6 +159,30 @@ class NodeHarness:
     #   - 没有 curator 就没有沉淀把关 → 服务节点**不给 KB 写入工具**。运维经验
     #     走 memory_note 排队，由日常 dreaming 统一加工。
     post_run_flow: str = "full"
+
+    def __post_init__(self) -> None:
+        from core.naming import (
+            canonical_artifact_type,
+            canonical_hook_name,
+            canonical_node_type,
+            canonical_tool_name,
+        )
+
+        self.node_type = canonical_node_type(self.node_type)
+        self.tools = list(dict.fromkeys(canonical_tool_name(name) for name in self.tools))
+        self.callable_nodes = list(dict.fromkeys(
+            canonical_node_type(node) for node in self.callable_nodes))
+        self.loop_hooks = [canonical_hook_name(name) for name in self.loop_hooks]
+        self.hook_config = {canonical_hook_name(name): value
+                            for name, value in self.hook_config.items()}
+        for field_name in ("required_outputs", "required_input_artifact_types",
+                           "required_output_artifact_types"):
+            setattr(self, field_name, [canonical_artifact_type(name)
+                                      for name in getattr(self, field_name)])
+        self.required_outputs_by_mode = {
+            mode: [canonical_artifact_type(name) for name in names]
+            for mode, names in self.required_outputs_by_mode.items()
+        }
 
     def max_turns_for(self, mode: str | None) -> int:
         """本次调用的轮次预算 —— 按请求模式解析，未声明回落到 max_turns。"""

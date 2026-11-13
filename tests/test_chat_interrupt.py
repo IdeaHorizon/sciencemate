@@ -71,7 +71,9 @@ def test_chat_imports_readline_for_wide_char_line_editing():
     （用户实测 bug，2026-07）。别把这个 import 删了。"""
     import sys
     _load_chat_module()
-    assert "readline" in sys.modules, "chat.py 应 import readline 修宽字符退格鬼影"
+    from cli.input import enable_line_editing
+    enable_line_editing()
+    assert "readline" in sys.modules, "CLI 应启用 readline 修宽字符退格鬼影"
 
 
 def test_sanitize_reply_strips_think_residue_and_control_tokens():

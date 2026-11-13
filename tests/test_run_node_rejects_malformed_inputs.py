@@ -126,3 +126,36 @@ async def test_omitted_inputs_are_still_omitted_not_rejected(tmp_path, calls):
     out = await rn._run_node_tool(parent, node_type="_curator", user_note="测试派发")
     assert out["status"] == "success", out
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested", [
+    None, {"experiment_spec": "different"}, {"experiment_spec": "original"},
+])
+async def test_top_level_business_input_is_rejected_before_dispatch(tmp_path, calls, nested):
+    parent = _parent(tmp_path)
+    out = await rn._run_node_tool(parent, node_type="experiment",
+                                  node_inputs=nested, experiment_spec="original")
+    assert out["status"] == "error"
+    assert out["error_code"] in {"node_inputs_misplaced", "node_inputs_conflict"}
+    assert "node_inputs.experiment_spec" in out["error"]
+    assert calls == []
+    assert "subagent_call_start" not in _transcript_kinds(parent)
+
+
+@pytest.mark.asyncio
+async def test_correct_nested_business_input_reaches_child_unchanged(tmp_path, calls):
+    from core.task_contract import TaskContractLog
+    from core.tasks import TaskList
+
+    parent = _parent(tmp_path)
+    task = TaskList(parent.project_root / "tasks").create(
+        "Original task", "", "experiment", parent.run_id)
+    TaskContractLog(parent.project_root / "tasks").append(
+        task_instance_uuid=task.task_instance_uuid, objective="Original task", actor="test")
+    inputs = {"experiment_spec": {"task": "Original task 中文", "values": [1, 2]}}
+    out = await rn._run_node_tool(parent, node_type="experiment", node_inputs=inputs,
+                                  task_instance_uuid=task.task_instance_uuid)
+    assert out["status"] == "success", out
+    assert calls[0]["node_inputs"] == inputs
+    assert calls[0]["task_instance_uuid"] == task.task_instance_uuid

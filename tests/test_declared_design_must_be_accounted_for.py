@@ -12,7 +12,7 @@ from core.project_workspace import _NODE_WORKSPACES
 def test_project_does_not_require_a_second_handwritten_execution_account(tmp_path, accounting):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
-    plan = _NODE_WORKSPACES["hypothesis"]
+    plan = _NODE_WORKSPACES["analysis"]
     prereg = write_record(
         worktree, artifact_type="pre_registration", name="measurement",
         content="Measure with two replicates.", directory=plan,

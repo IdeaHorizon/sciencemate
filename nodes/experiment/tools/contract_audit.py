@@ -4909,6 +4909,14 @@ def audit_experiment_delivery(state: Any) -> dict[str, Any]:
         # recovery: it validates exact Core heads/frozen identities and the
         # one same-closure finish row, without invoking any writer.
         sealed = _delivery_transaction._sealed(state, led, manifest)
+        # Historical C is still sealed. A later durable B observation can
+        # nevertheless invalidate the exact output source that supported its
+        # success claim; use the same reader as finish's replay decision.
+        try:
+            from .finish import delivery_source_findings
+        except ImportError:  # pragma: no cover - standalone node bootstrap
+            from tools.finish import delivery_source_findings
+        source_findings = delivery_source_findings(state, manifest, led.records())
     except _delivery_transaction.DeliveryTransactionError as exc:
         result = {
             "passed": False,
@@ -4946,6 +4954,17 @@ def audit_experiment_delivery(state: Any) -> dict[str, Any]:
         "artifact_ids": sealed["artifact_ids"],
         "artifact_identities": sealed["artifact_identities"],
         "finish_seq": sealed["finish_seq"],
+        "current_output_source": {
+            "status": ("unknown" if any(row["code"] == "delivery_source_history_unavailable"
+                                         for row in source_findings)
+                       else "invalidated" if source_findings else "no_recorded_invalidation"),
+            "findings": source_findings,
+            "limitation": (
+                "This is a read of recorded B facts about mutable working outputs, not continuous "
+                "filesystem monitoring or a downstream eligibility decision. The historical C "
+                "transaction remains sealed; use its frozen evidence and identities."
+            ),
+        },
     }
 
 

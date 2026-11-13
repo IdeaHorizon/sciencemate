@@ -89,7 +89,7 @@ def test_there_is_no_third_way_to_spell_a_relative_path() -> None:
 
 def test_named_helpers_all_live_under_outputs(tmp_path: Path) -> None:
     for helper, owner in (
-        (paths.hypothesis_drafts_dir, "hypothesis"),
+        (paths.analysis_drafts_dir, "analysis"),
         (paths.postprocess_figures_dir, "postprocess"),
         (paths.postprocess_scratch_dir, "postprocess"),
         (paths.postprocess_data_cache_dir, "postprocess"),
@@ -112,7 +112,7 @@ def test_prefer_existing_falls_back_for_nested_file(tmp_path: Path) -> None:
     legacy = tmp_path / "drafts" / "research_plan.md"
     legacy.parent.mkdir(parents=True)
     legacy.write_text("old", encoding="utf-8")
-    canonical = paths.hypothesis_drafts_dir(_unbound(tmp_path, 'hypothesis')) / "research_plan.md"
+    canonical = paths.analysis_drafts_dir(_unbound(tmp_path, 'analysis')) / "research_plan.md"
     assert paths.prefer_existing(tmp_path, canonical) == legacy
 
 
@@ -135,14 +135,17 @@ def test_prefer_existing_ignores_paths_outside_run_root(tmp_path: Path) -> None:
 def test_legacy_map_covers_every_migrated_dir() -> None:
     """每个迁移过的目录都必须登记回退映射，否则旧 run 读不回来。"""
     for helper, legacy in (
-        (paths.hypothesis_drafts_dir, "drafts"),
+        (paths.analysis_drafts_dir, "drafts"),
         (paths.postprocess_figures_dir, "figures"),
         (paths.postprocess_scratch_dir, ".postprocess"),
         (paths.writing_manuscript_dir, "manuscript_project"),
         (paths.writing_bundles_dir, "deliverables"),
     ):
         rel = helper(_unbound(Path("/run"))).relative_to(Path("/run")).as_posix()
-        assert paths.LEGACY_RUN_SUBDIRS[rel] == legacy
+        fallback = paths.LEGACY_RUN_SUBDIRS[rel]
+        while fallback in paths.LEGACY_RUN_SUBDIRS:
+            fallback = paths.LEGACY_RUN_SUBDIRS[fallback]
+        assert fallback == legacy
 
 
 # ── 4. 节点确实用了 helper（不是加了没人调）───────────────────────────────
@@ -153,7 +156,7 @@ def _src(rel: str) -> str:
 @pytest.mark.parametrize(
     ("rel", "helper"),
     [
-        ("nodes/hypothesis/tools/artifact_staging.py", "hypothesis_drafts_dir"),
+        ("nodes/analysis/tools/artifact_staging.py", "analysis_drafts_dir"),
         # B 刀后 postprocess 的路径读写都在 tools/figure.py：display_relpath
         # 写、resolve_display_relpath 读（成对锚点由
         # test_stored_relpaths_resolve_under_a_worktree 钉）。
@@ -175,7 +178,7 @@ _BANNED = re.compile(
 )
 
 _MIGRATED_FILES = [
-    "nodes/hypothesis/tools/artifact_staging.py",
+    "nodes/analysis/tools/artifact_staging.py",
     "nodes/postprocess/tools/figure.py",
 ]
 
@@ -275,7 +278,7 @@ def _worktree_state(tmp_path: Path, node_type: str) -> _FakeState:
         ("postprocess", paths.postprocess_figures_dir, "figures"),
         ("postprocess", paths.postprocess_scratch_dir, "scratch"),
         ("postprocess", paths.postprocess_data_cache_dir, "data_cache"),
-        ("hypothesis", paths.hypothesis_drafts_dir, "drafts"),
+        ("analysis", paths.analysis_drafts_dir, "drafts"),
         ("writing", paths.writing_bundles_dir, "bundles"),
     ],
 )

@@ -4,11 +4,8 @@ import type { Phrase } from "../i18n/language.ts";
 import { say, type Language } from "../i18n/language.ts";
 
 /**
- * 全局层（不在任何 Project 里）只暴露 Project 级的东西。
- *
- * Session 是 Project 内的概念：它的上下文、执行、产物全归属于某个 Project。
- * 所以这里既没有「新建 Session」的入口，也没有跨 Project 的活跃 Session 列表
- * —— 那些只在进入 Project 之后才出现（wangd 2026-08-21）。
+ * 项目与会话始终在同一侧栏中，按 Project → Session 两级展开。
+ * Session 的归属、权限和运行范围仍由 Project 决定；导航无需先进入项目页面。
  */
 /**
  * 全局层只放**还回答得出问题**的入口。

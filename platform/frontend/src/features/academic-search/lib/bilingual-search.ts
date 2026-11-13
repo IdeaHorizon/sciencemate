@@ -3,7 +3,7 @@ import type {LiteraturePaper, LiteratureQueryGroup, LiteratureSearchResponse} fr
 import type {CnkiCollector, CnkiJob, CnkiDocumentKind} from "../api/cnki";
 
 type CollectionProgress = {state: string; phase?: "index" | "metadata" | "mixed"};
-export type SearchChannel = CollectionProgress & {detail: string; count?: number;
+export type SearchChannel = CollectionProgress & {detail: string; count?: number; resettable?: boolean;
   groups?: (CollectionProgress & {label: string; count: number; detail: string})[]};
 
 // Use the persisted job phase: a batch can temporarily clear the detail message.
@@ -129,6 +129,7 @@ export async function collectChineseCategories(plan:LiteratureQueryGroup[], io:C
     const blocked=all.find(c=>blockedStates.includes(c.state));
     const pending=all.filter(c=>c.state!=="completed");
     io.update({state:blocked?.state || (!pending.length?"completed":pending.every(c=>c.state==="queued")?"queued":"searching"),
+      resettable:all.some(c=>c.resettable),
       phase:collectionPhase(all),
       count:[...results.values()].reduce((sum,result)=>sum+result.total,0),
       detail:channelDetail(blocked) || t({zh:"按类别采集中，每类最多 200 篇",en:"Collecting by category, up to 200 papers each"}),
@@ -139,7 +140,9 @@ export async function collectChineseCategories(plan:LiteratureQueryGroup[], io:C
     for (const group of plan) {
       if (!io.active() || (completed?.total || 0)>=200) break;
       let current:LiteratureSearchResponse|undefined;
-      await collectChinese([group],200,{...io,
+      // All query groups share this category's budget. A later group must not
+      // collect another 200 records which the merged results will never show.
+      await collectChinese([group],200-(completed?.total || 0),{...io,
         status:()=>status,
         create:(query,limit)=>{
           const next=creation.then(()=>{
@@ -212,7 +215,8 @@ export async function collectChinese(plan: LiteratureQueryGroup[], limit: number
         + (queued ? t({zh:"，{count} 组排队中",en:", {count} queued"},{count:queued}) : "")
         + (blocked ? t({zh:"，{count} 组暂未完成（展开查看原因）",en:", {count} pending (expand for details)"},{count:blocked}) : "")
         + (count && blocked ? t({zh:"。已取得的内容可正常查看",en:". Collected results remain available."}) : "");
-      update({state, phase:collectionPhase(jobs), detail, count, groups});
+      update({state, phase:collectionPhase(jobs), detail, count, groups,
+        resettable:jobs.some(j=>["access_denied","session_paused","browser_profile_in_use","browser_profile_backup_failed"].includes(j.error_code || ""))});
       if (!jobs.some(j=>j.has_more)) await io.sleep();
       if (!io.active()) return;
       await Promise.all(jobs.map(async (j, i) => {

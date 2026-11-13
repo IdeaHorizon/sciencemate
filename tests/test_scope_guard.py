@@ -31,7 +31,7 @@ SCOPE_YAML = """\
 wangd:
   - "*"
 nidy:
-  - "nodes/hypothesis/**"
+  - "nodes/analysis/**"
 _anyone:
   - "shared/contrib/**"
 """
@@ -57,7 +57,7 @@ def _commit_all(repo: Path, msg: str) -> str:
 
 @pytest.fixture()
 def repo(tmp_path, monkeypatch):
-    """main 上有 scope map + core/ + nodes/hypothesis/ 的最小 repo。"""
+    """main 上有 scope map + core/ + nodes/analysis/ 的最小 repo。"""
     r = tmp_path / "repo"
     r.mkdir()
     _git(r, "init", "-b", "main")
@@ -65,7 +65,7 @@ def repo(tmp_path, monkeypatch):
     _git(r, "config", "user.name", "test")
     _write(r, ".scope_map.yaml", SCOPE_YAML)
     _write(r, "core/framework.py", "# framework code\n")
-    _write(r, "nodes/hypothesis/h.py", "# hypothesis node\n")
+    _write(r, "nodes/analysis/h.py", "# hypothesis node\n")
     _commit_all(r, "init main")
     # hook 的 _run 在 CWD 跑 git —— 测试期间站到 repo 里
     monkeypatch.chdir(r)
@@ -88,7 +88,7 @@ def test_in_scope_change_passes(repo, monkeypatch):
     _as_author(monkeypatch, "nidy")
     main = _sha(repo, "main")
     _git(repo, "checkout", "-b", "feat/in-scope")
-    _write(repo, "nodes/hypothesis/h.py", "# edited by owner\n")
+    _write(repo, "nodes/analysis/h.py", "# edited by owner\n")
     new = _commit_all(repo, "edit own node")
     assert hook._check_one_ref(main, new, "refs/heads/feat/in-scope") is True
 
@@ -131,7 +131,7 @@ def test_self_lift_via_scope_map_rejected(repo, monkeypatch, capsys):
     main = _sha(repo, "main")
     _git(repo, "checkout", "-b", "feat/lift")
     _write(repo, ".scope_map.yaml", SCOPE_YAML.replace(
-        '  - "nodes/hypothesis/**"', '  - "*"', 1))
+        '  - "nodes/analysis/**"', '  - "*"', 1))
     new = _commit_all(repo, "give myself *")
     assert hook._check_one_ref(main, new, "refs/heads/feat/lift") is False
     assert ".scope_map.yaml" in capsys.readouterr().err
@@ -163,7 +163,7 @@ def test_owner_may_modify_scope_map(repo, monkeypatch):
 def _setup_diverged(repo) -> tuple[str, str]:
     """feat 分支上有合法 commit；之后 main 前进一格。返 (feat_tip, main_tip)。"""
     _git(repo, "checkout", "-b", "feat/merge-case")
-    _write(repo, "nodes/hypothesis/h.py", "# legit node edit\n")
+    _write(repo, "nodes/analysis/h.py", "# legit node edit\n")
     feat_tip = _commit_all(repo, "legit node work")
     _git(repo, "checkout", "main")
     _write(repo, "core/main_feature.py", "# landed via someone's PR\n")
@@ -206,7 +206,7 @@ def test_evil_merge_smuggling_scope_map_rejected(repo, monkeypatch, capsys):
     feat_tip, _ = _setup_diverged(repo)
     _git(repo, "merge", "main", "--no-ff", "--no-commit")
     _write(repo, ".scope_map.yaml", SCOPE_YAML.replace(
-        '  - "nodes/hypothesis/**"', '  - "*"', 1))
+        '  - "nodes/analysis/**"', '  - "*"', 1))
     _git(repo, "add", "-A")
     _git(repo, "commit", "-m", "merge main (map passenger)")
     merged = _sha(repo)
@@ -244,15 +244,15 @@ def test_stale_branch_merges_far_ahead_main_passes(repo, monkeypatch):
     _as_author(monkeypatch, "nidy")
     # owner 分支在旧 main 上做自己的活
     _git(repo, "checkout", "-b", "hypothesis")
-    _write(repo, "nodes/hypothesis/runtime_trace.py", "# nidy runtime\n")
-    _write(repo, "nodes/hypothesis/.gitignore", "*.local\n")
+    _write(repo, "nodes/analysis/runtime_trace.py", "# nidy runtime\n")
+    _write(repo, "nodes/analysis/.gitignore", "*.local\n")
     stale_tip = _commit_all(repo, "nidy: hypothesis 改动")
     # main 前进一大坨（别人的 core / data 改动）
     _advance_main_many(repo, 12)
     # owner merge main 再补一笔
     _git(repo, "checkout", "hypothesis")
     _git(repo, "merge", "main", "--no-ff", "-m", "merge v3.1 main")
-    _write(repo, "nodes/hypothesis/fixtures.yaml", "cases: []\n")
+    _write(repo, "nodes/analysis/fixtures.yaml", "cases: []\n")
     merged = _commit_all(repo, "nidy: fixtures")
     # base = 分支旧位置（正是 pre-receive 收到的 oldrev）
     assert hook._check_one_ref(stale_tip, merged,
@@ -285,12 +285,12 @@ def test_sh_honest_merge_of_far_ahead_main_passes(repo, monkeypatch):
     """部署版 .sh 必须和 .py 一样：owner merge 落后很多的 main 后 push 放行。
     这条测试是 nidy 生产 bug 的直接守卫 —— 旧 .sh 会 REJECT。"""
     _git(repo, "checkout", "-b", "hypothesis")
-    _write(repo, "nodes/hypothesis/x.py", "# nidy\n")
+    _write(repo, "nodes/analysis/x.py", "# nidy\n")
     stale = _commit_all(repo, "nidy work")
     _advance_main_many(repo, 8)
     _git(repo, "checkout", "hypothesis")
     _git(repo, "merge", "main", "--no-ff", "-m", "merge main")
-    _write(repo, "nodes/hypothesis/more.py", "# nidy more\n")
+    _write(repo, "nodes/analysis/more.py", "# nidy more\n")
     merged = _commit_all(repo, "nidy more")
     assert _run_sh_hook(repo, stale, merged, "refs/heads/hypothesis", "nidy") is True
 
@@ -309,7 +309,7 @@ def test_sh_out_of_scope_rejected(repo, monkeypatch):
 def test_sh_evil_merge_rejected(repo, monkeypatch):
     """部署版 .sh：evil merge 夹带 core/ 改动要拒（三点 diff 看最终 tree）。"""
     _git(repo, "checkout", "-b", "hypothesis")
-    _write(repo, "nodes/hypothesis/x.py", "# nidy\n")
+    _write(repo, "nodes/analysis/x.py", "# nidy\n")
     stale = _commit_all(repo, "nidy work")
     _advance_main_many(repo, 3)
     _git(repo, "checkout", "hypothesis")
@@ -323,7 +323,7 @@ def test_sh_evil_merge_rejected(repo, monkeypatch):
 def test_sh_in_scope_passes(repo, monkeypatch):
     """部署版 .sh：纯 scope 内改动放行。"""
     _git(repo, "checkout", "-b", "hypothesis")
-    _write(repo, "nodes/hypothesis/h.py", "# edit\n")
+    _write(repo, "nodes/analysis/h.py", "# edit\n")
     tip = _commit_all(repo, "node edit")
     base = _sha(repo, "main")
     assert _run_sh_hook(repo, base, tip, "refs/heads/hypothesis", "nidy") is True

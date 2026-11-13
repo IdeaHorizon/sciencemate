@@ -95,7 +95,7 @@ async def test_infeasible_forces_redirect_over_proceed(tmp_path: Path):
         "experiment_log", "blocked_run",
         "## Feasibility\nverdict: infeasible —— 无 benchmark 环境，probe+安装尝试均失败",
         metadata={"infeasible": True, "infeasible_reason": "无 benchmark 环境",
-                  "redirect_target": "hypothesis"})
+                  "redirect_target": "analysis"})
     critique = {"verdict": "approve", "confidence": 0.9, "concerns": [], "strengths": [],
                 "recommended_action": {"action": "proceed", "feedback_to_next_run": ""}}
     art = state.save_artifact(
@@ -116,7 +116,7 @@ async def test_infeasible_forces_redirect_over_proceed(tmp_path: Path):
     assert res["status"] == "pause"
     md = res["pause_event"]["metadata"]
     assert md["recommended_action"] == "redirect_upstream"
-    assert md["recommended_target_node"] == "hypothesis"
+    assert md["recommended_target_node"] == "analysis"
     assert "不可执行" in res["pause_event"]["context"]
 
 
@@ -128,7 +128,7 @@ async def test_infeasible_fires_even_when_review_failed(tmp_path: Path):
     state = State.new(node_type="_orchestrator", base_dir=tmp_path, project_id="p_d3")
     log = state.save_artifact("experiment_log", "blocked2", "…",
                                metadata={"infeasible": True,
-                                         "redirect_target": "hypothesis"})
+                                         "redirect_target": "analysis"})
     res = await execute_tool(
         "present_decision_package", state,
         source_node_type="experiment", producing_run_id="r_d3",
@@ -138,7 +138,7 @@ async def test_infeasible_fires_even_when_review_failed(tmp_path: Path):
     )
     md = res["pause_event"]["metadata"]
     assert md["recommended_action"] == "redirect_upstream"
-    assert md["recommended_target_node"] == "hypothesis"
+    assert md["recommended_target_node"] == "analysis"
 
 
 @pytest.mark.asyncio
@@ -175,7 +175,7 @@ async def test_normal_run_unaffected(tmp_path: Path):
         source_node_type="experiment", producing_run_id="r_d4",
         artifact_ids_produced=[log["id"]],
         review_critique_artifact_id=art["id"])
-    assert res["status"] == "success" and res["deferred_to"] == "hypothesis"
+    assert res["status"] == "success" and res["deferred_to"] == "analysis"
     assert res["recommended_action"] == "proceed"
     entry = state.hook_state["pending_post_node_flow"][0]
     assert entry["decision_recommended_action"] == "proceed"
@@ -315,7 +315,7 @@ def test_a_declared_target_that_cannot_take_the_handoff_falls_back(tmp_path: Pat
                               metadata={"infeasible": True, "redirect_target": "data"})
     decl = find_infeasibility_declaration(state, [art["id"]])
     assert decl is not None
-    assert decl["redirect_target"] == "hypothesis"
+    assert decl["redirect_target"] == "analysis"
     assert node_owes_post_node_flow(decl["redirect_target"]), (
         "回落值自己也得接得住 REDIRECT"
     )

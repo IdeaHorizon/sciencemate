@@ -119,21 +119,15 @@ def test_the_loop_actually_carries_the_cap_out(monkeypatch) -> None:
 
 def test_every_loop_exit_carries_it() -> None:
     """循环里每个 `LoopResult(` 构造点都要带 —— 漏一个就是一条静默失效的出口。"""
+    import ast
     import inspect
-    import re
 
-    src = inspect.getsource(agent_loop)
-    start = src.index("for turn in range(1, _max_turns + 1)")
-    # 只扫 run_loop 自己：`_max_turns` 是它的局部名。原来一路扫到文件末尾，把 resume_loop 里
-    # 一句 `max_turns=_max_turns` 也算成「带了上限」—— 那一句在 resume_loop 里一跑就是
-    # NameError（#1254 撞出来的），闸替一个崩溃背了书。
-    ends = [i for i in (src.find("\ndef ", start), src.find("\nasync def ", start)) if i != -1]
-    body = src[start:min(ends)] if ends else src[start:]
-    constructions = len(re.findall(r"LoopResult\(", body))
-    carried = len(re.findall(r"max_turns=_max_turns", body))
-    assert carried == constructions, (
-        f"{constructions} 个构造点里只有 {carried} 个带了上限"
-    )
+    tree = ast.parse(inspect.getsource(agent_loop))
+    constructions = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Name) and node.func.id == "LoopResult"]
+    assert constructions
+    assert all(any(keyword.arg == "max_turns" for keyword in node.keywords)
+               for node in constructions)
 
 
 def test_the_decision_layer_actually_reads_the_summary(tmp_path, monkeypatch) -> None:

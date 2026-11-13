@@ -63,6 +63,41 @@ async def test_author_retrieval_uses_id_and_rechecks_authorships(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('with_key', [False, True])
+async def test_author_pages_use_public_paging_without_key_and_stop_at_total(monkeypatch, with_key):
+    if with_key:
+        monkeypatch.setenv('OPENALEX_API_KEY', 'test-key')
+    else:
+        monkeypatch.delenv('OPENALEX_API_KEY', raising=False)
+    calls = []
+
+    async def handler(request):
+        query = request.url.params
+        calls.append(query)
+        assert query['per-page'] == '100'
+        assert 'authorships' in query['select']
+        if with_key:
+            assert query['cursor'] == ('*' if len(calls) == 1 else 'second-page')
+            assert query['api_key'] == 'test-key'
+            assert 'page' not in query
+        else:
+            assert query['page'] == str(len(calls))
+            assert 'cursor' not in query and 'api_key' not in query
+        start = (len(calls) - 1) * 100
+        return httpx.Response(200, json={'results': [
+            {'id': f'https://openalex.org/W{start+i}', 'title': f'Work {start+i}',
+             'authorships': [{'author': {'id': 'https://openalex.org/A123', 'display_name': 'Researcher'}}]}
+            for i in range(100)
+        ], 'meta': {'count': 200, 'next_cursor': 'second-page' if len(calls) == 1 else 'unneeded-third-page'}})
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(author_identity.httpx, 'AsyncClient', lambda **kw: original(transport=httpx.MockTransport(handler), **kw))
+    rows = await author_identity.papers({'author_id': 'A123'}, since='2025-11-01')
+    assert len(rows) == 200
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_legacy_subscription_never_falls_back_to_name_search(monkeypatch):
     call=AsyncMock()
     monkeypatch.setattr(author_identity,'papers',call)

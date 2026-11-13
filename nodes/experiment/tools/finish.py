@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import glob as _glob
+import hashlib
 import json
 import shlex
 from pathlib import Path
@@ -51,6 +52,52 @@ CheckRunner = Callable[[Any, dict[str, Any]], Awaitable[dict[str, Any]]]
 
 # ── 证据 ─────────────────────────────────────────────────────────────────────
 
+def _producer_generation(path: str, action_id: str, identity: dict[str, Any]) -> str:
+    """An observed output generation; metadata adjustments retain this anchor."""
+    payload = json.dumps([path, action_id, identity], sort_keys=True,
+                         ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _source_discontinuities(path: Path, rows: list[dict[str, Any]], observed: dict[str, Any],
+                            witness: dict[str, Any]) -> list[dict[str, Any]]:
+    """Project a definite observation, including absence, before early returns.
+
+    An inaccessible object or incomplete hash is not a proven change. Seeing
+    any known generation, including a retired one, does not prove that another
+    generation's object changed. Its own existing break still disqualifies it;
+    selecting it must neither revive it nor invalidate an untouched successor.
+    """
+    facts = [r["discontinuity"] for r in rows if r.get("discontinuity") and not r.get("invalidation")]
+    if observed.get("kind") in (None, "error") or observed.get("hash_error"):
+        return facts
+    if any(_identity_matches(r.get("after"), observed)[0] for r in rows):
+        return facts
+    known = {fact["producer_generation"] for fact in facts}
+    for row in rows:
+        same, basis = _identity_matches(row.get("after"), observed)
+        if (same or basis == "hash_unavailable" or row.get("invalidation")
+                or row["generation"] in known):
+            continue
+        facts.append({"path": str(path), "producer_action_id": row["action_id"],
+                      "producer_generation": row["generation"], "producer_identity": row["after"],
+                      "observed_identity": observed, "witness": witness})
+    return facts
+
+
+def _source_evidence(records: list[dict[str, Any]], path: Path,
+                     observed: dict[str, Any], *,
+                     view: _OutputView | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """The same source projection serves files, members and finish readbacks."""
+    rows = _producer_rows(records, path, view=view)
+    witness = {"kind": "finish_readback", "through_seq": max((r.get("seq", 0) for r in records), default=0)}
+    return rows, {"path": str(path), "identity_now": observed,
+                  "producers": [r["action_id"] for r in rows],
+                  "identity_basis": [r.get("basis") for r in rows],
+                  "identity_discontinuities": _source_discontinuities(path, rows, observed, witness),
+                  "invalidated_sources": [r["invalidation"] for r in rows if r.get("invalidation")]}
+
+
 class _OutputView:
     """A derived index for one ledger snapshot, never a cross-check cache.
 
@@ -62,8 +109,9 @@ class _OutputView:
     def __init__(self, records: list[dict[str, Any]]) -> None:
         self.by_path: dict[str, list[dict[str, Any]]] = {}
         for row in _ledger.project_output_observations(records):
-            paths = {path for field in ("created", "modified", "unknown")
+            paths = {path for field in ("created", "modified", "unknown", "deleted")
                      for path in (row.get(field) or []) if isinstance(path, str)}
+            paths.update((row.get("source_observations") or {}).keys())
             for path in paths:
                 self.by_path.setdefault(path, []).append(row)
 
@@ -79,9 +127,29 @@ def _producer_rows(records: list[dict[str, Any]], path: Path, *,
     """
     key = str(path)
     out: list[dict[str, Any]] = []
+    starts = {r.get("action_id"): r["seq"] for r in records if r.get("kind") == "action_started"}
+
+    def observe(identity, row, phase, sources=None):
+        for fact in _source_discontinuities(path, out if sources is None else sources, identity, {
+                "kind": phase, "action_id": row.get("action_id"), "observation_seq": row.get("seq")}):
+            for producer in out:
+                if producer["generation"] == fact["producer_generation"]:
+                    producer.setdefault("discontinuity", fact)
+
     for row in (view or _OutputView(records)).by_path.get(key, []):
         if key in (row.get("unknown") or []):
             out = []
+            continue
+        observed_before = (row.get("source_observations") or {}).get(key)
+        start = starts.get(row.get("action_id"))
+        if isinstance(observed_before, dict) and isinstance(start, int):
+            # Only generations already observed when this action started can
+            # be tested against its before snapshot. Later producers belong
+            # to a different window and must not be invalidated retroactively.
+            prior = [r for r in out if r.get("last_observation_seq", start) < start]
+            observe(observed_before, row, "action_before_snapshot", prior)
+        if key in (row.get("deleted") or []):
+            observe({"kind": "missing"}, row, "action_after_snapshot")
             continue
         if key not in (row.get("created") or []) and key not in (row.get("modified") or []):
             continue
@@ -92,6 +160,8 @@ def _producer_rows(records: list[dict[str, Any]], path: Path, *,
         before, after = frozen.get("before"), frozen.get("after")
         if any(isinstance(ident, dict) and ident.get("hash_error") for ident in (before, after)):
             continue
+        if isinstance(before, dict):
+            observe(before, row, "action_before_snapshot")
         same_file_object = (
             isinstance(before, dict) and isinstance(after, dict)
             and before.get("kind") == after.get("kind") == "file"
@@ -118,12 +188,25 @@ def _producer_rows(records: list[dict[str, Any]], path: Path, *,
         # must preserve its creator just as touching a file preserves content.
         if same_content_object or same_directory_object:
             out = [({**producer, "after": after,
+                     "last_observation_seq": row.get("seq"),
                      "identity_adjustments": [*producer.get("identity_adjustments", []), str(row.get("action_id"))]}
                     if _identity_matches(producer.get("after"), before)[0] else producer)
                    for producer in out]
             continue
+        # A real new object/content generation can recover this path, but its
+        # observation also proves older generations are no longer current.
+        # Restoring an older inode outside a recorded action cannot revive it.
+        observe(after, row, "action_after_snapshot")
         out.append({"action_id": str(row.get("action_id")), "after": frozen.get("after"),
+                    "generation": _producer_generation(key, str(row.get("action_id")), frozen["after"]),
+                    "last_observation_seq": row.get("seq"),
                     "basis": frozen.get("basis"), "before_unknown": bool(frozen.get("before_unknown"))})
+    invalidated = {row.get("producer_generation"): row for row in records
+                   if row.get("kind") == "output_identity_invalidated" and row.get("path") == key}
+    for producer in out:
+        fact = invalidated.get(producer["generation"])
+        if fact is not None and fact.get("producer_action_id") == producer["action_id"]:
+            producer["invalidation"] = fact
     return out
 
 
@@ -150,18 +233,17 @@ def _file_evidence(state: Any, records: list[dict[str, Any]], ob: dict[str, Any]
         path = _obligations.resolve_path(state, ob["path"])
     except (ValueError, OSError, RuntimeError) as exc:
         return {"passed": False, "gap": "path_unavailable", "evidence": {"path": ob["path"], "error": str(exc)}}
-    exists = path.is_file()
-    size = path.stat().st_size if exists else 0
-    rows = _producer_rows(records, path, view=view) if exists else []
-    evidence = {"path": str(path), "exists": exists, "bytes": size,
-                "producers": [r["action_id"] for r in rows]}
+    now = _capture.identity(path)
+    exists = now.get("kind") == "file"
+    size = now.get("size", 0) if exists else 0
+    rows, evidence = _source_evidence(records, path, now, view=view)
+    evidence.update(exists=exists, bytes=size)
     if not exists:
-        return {"passed": False, "gap": "missing", "evidence": evidence}
+        return {"passed": False, "gap": "path_unavailable" if now.get("kind") == "error" else "missing", "evidence": evidence}
     if ob.get("non_empty", True) and size == 0:
         return {"passed": False, "gap": "empty", "evidence": evidence}
     reference = _obligations.input_reference(state, path) if allow_input_reference else None
     if reference is not None:
-        now = _capture.identity(path)
         same, basis = _identity_matches(before_check, now) if before_check is not None else (True, "current")
         stable = now.get("kind") == "file" and same
         incomplete = (now.get("kind") == "error" or (before_check or {}).get("kind") == "error"
@@ -174,13 +256,18 @@ def _file_evidence(state: Any, records: list[dict[str, Any]], ob: dict[str, Any]
                 "evidence": evidence}
     if not rows:
         return {"passed": False, "gap": "unattributed", "evidence": evidence}
-    now = _capture.identity(path)
-    matches = [r for r in rows if _identity_matches(r.get("after"), now)[0]]
-    evidence["identity_now"] = {k: now.get(k) for k in ("kind", "size", "sha256", "inode", "mtime_ns")}
-    evidence["identity_basis"] = [r.get("basis") for r in rows]
+    matches = [r for r in rows if not (r.get("invalidation") or r.get("discontinuity"))
+               and _identity_matches(r.get("after"), now)[0]]
     if not matches:
         evidence["frozen_identities"] = [r.get("after") for r in rows][:3]
-        return {"passed": False, "gap": "identity_changed_since_the_action",
+        # Retain the existing mismatch diagnostic while the object visibly
+        # differs. Use the durable-loss diagnostic when old stat/hash fields
+        # match again but their source is no longer valid.
+        gap = ("output_identity_invalidated" if any(
+            (r.get("invalidation") or r.get("discontinuity"))
+            and _identity_matches(r.get("after"), now)[0] for r in rows)
+            else "identity_changed_since_the_action")
+        return {"passed": False, "gap": gap,
                 "evidence": evidence}
     if before_check is not None:
         same, basis = _identity_matches(before_check, now)
@@ -195,19 +282,76 @@ def _file_evidence(state: Any, records: list[dict[str, Any]], ob: dict[str, Any]
     return {"passed": True, "evidence": evidence}
 
 
+def _record_identity_discontinuities(led: _ledger.Ledger, checks: list[dict[str, Any]]) -> None:
+    """Append immutable B observations once, with no separate mutable state.
+
+    Replays confirm durability of the first observation instead of replacing
+    its observed identity with the latest readback. Scope is one path and one
+    recorded producer generation; an independent new generation is unaffected.
+    """
+    records = led.records()
+    existing = {row.get("producer_generation"): row for row in records
+                if row.get("kind") == "output_identity_invalidated"}
+    settled = {row.get("action_id") for row in records if row.get("kind") == "action_settled"}
+    pending = [row for row in records if row.get("kind") == "action_started"
+               and row.get("action_id") not in settled and row.get("tool") != "finish.check"]
+
+    def owned_by_pending_writer(path):
+        target = Path(path)
+        for row in pending:
+            if str(target) in (row.get("candidates") or []):
+                return True
+            roots = [*((row.get("observation_boundary") or {}).get("roots") or []),
+                     *([row["work_root"]] if row.get("work_root") else [])]
+            if any(target.is_relative_to(Path(root)) for root in roots):
+                return True
+        return False
+
+    def facts(evidence):
+        yield from evidence.get("identity_discontinuities", [])
+        for member in evidence.get("members", []):
+            yield from facts(member)
+
+    candidates = {}
+    for check in checks:
+        for fact in facts(check.get("evidence") or {}):
+            # A recorded writer that has not settled still owns its window.
+            # Its before/after observation, not an early finish, must decide
+            # whether the continuous chain was preserved.
+            if not owned_by_pending_writer(fact["path"]):
+                candidates.setdefault(fact["producer_generation"], fact)
+    # A previous row may be visible after fsync failed. Re-acknowledge it only
+    # through append_once, which confirms both file and parent durability.
+    for generation, fact in {**candidates, **existing}.items():
+        fields = {key: fact[key] for key in ("path", "producer_action_id", "producer_generation",
+                                             "producer_identity", "observed_identity")}
+        if "witness" in fact:
+            fields["witness"] = fact["witness"]
+        try:
+            led.append_once("output_identity_invalidated", f"output-identity:{generation}", **fields)
+        except (OSError, _ledger.LedgerError) as exc:
+            raise _FinishAssemblyError(
+                "output_identity_observation_not_durable",
+                "输出身份断链的观察未确认持久化；不能把后续快照匹配当成已恢复的来源。",
+                owner="experiment_runtime", payload_must_not_rerun=True,
+                next_action="保留当前产物；恢复账本写入后重试 finish。不要回拨时间戳或为改变来源重跑载荷。",
+                cause=f"{type(exc).__name__}: {exc}",
+            ) from exc
+
+
 def _empty_directory_evidence(state: Any, records: list[dict[str, Any]], path: Path,
                               current: dict[str, Any], *,
                               before_check: dict[str, Any] | None = None,
                               view: _OutputView | None = None) -> dict[str, Any]:
-    evidence: dict[str, Any] = {"path": str(path), "identity_now": current,
-                                "producers": [], "identity_adjustments": []}
+    sources, evidence = _source_evidence(records, path, current, view=view)
+    evidence["identity_adjustments"] = []
     reference = _obligations.input_reference(state, path)
     if reference is not None:
         evidence["input_reference"] = reference
         stable = before_check is None or _identity_matches(before_check, current)[0]
         return {"passed": stable, "gap": None if stable else "input_changed_during_check", "evidence": evidence}
-    rows = [row for row in _producer_rows(records, path, view=view)
-            if _identity_matches(row.get("after"), current)[0]]
+    rows = [row for row in sources if not (row.get("invalidation") or row.get("discontinuity"))
+            and _identity_matches(row.get("after"), current)[0]]
     evidence["producers"] = [row["action_id"] for row in rows]
     evidence["identity_adjustments"] = [aid for row in rows for aid in row.get("identity_adjustments", [])]
     return {"passed": bool(rows), "gap": None if rows else "unattributed_directory", "evidence": evidence}
@@ -231,6 +375,13 @@ def _directory_evidence(state: Any, records: list[dict[str, Any]], path: Path, *
         "producers": [], "identity_adjustments": [], "members": [],
     }
     if current.get("kind") != "dir":
+        # The current container can disappear or become inaccessible. Preserve
+        # observations of previously selected members, including absence;
+        # an unreadable member remains unknown, never a proved deletion.
+        evidence["members"] = [
+            {"passed": False, "gap": "object_kind_changed",
+             **_source_evidence(records, Path(value), _capture.identity(Path(value)), view=view)[1]}
+            for value in (before_members or {}).get("entries", {})]
         return {"passed": False, "gap": "object_kind_changed", "evidence": evidence}
     snapshot = _capture.snapshot([], [path], include_directories=True)
     coverage = snapshot.get("root_coverage") or []
@@ -300,6 +451,12 @@ def _directory_evidence(state: Any, records: list[dict[str, Any]], path: Path, *
                    or previous.get("kind") == "error" or observed.get("kind") == "error"
                    else "directory_member_changed_during_check")
             gaps.append({"path": value, "gap": gap, "basis": basis})
+    if after_complete:
+        # Do not inspect only survivors: a vanished member is an observation,
+        # not permission to resurrect its old producer if the file reappears.
+        for value in previous_entries.keys() - entries.keys():
+            facts = _source_evidence(records, Path(value), _capture.identity(Path(value)), view=view)[1]
+            evidence["members"].append({"passed": False, "gap": "missing", **facts})
     evidence["producers"] = sorted(producers)
     evidence["identity_adjustments"] = sorted(adjustments)
     evidence["member_count"] = len(evidence["members"])
@@ -349,7 +506,9 @@ def _glob_evidence(state: Any, records: list[dict[str, Any]], ob: dict[str, Any]
                 "producers": sorted({aid for row in witnesses for aid in row.get("producers", [])}),
                 "identity_adjustments": sorted({aid for row in witnesses for aid in row.get("identity_adjustments", [])}),
                 "input_references": [candidates[p]["evidence"] for p in selected if p in reference_paths],
-                "selected_objects": [{"path": p, "before_check": _capture.identity(Path(p))} for p in selected]}
+                "selected_objects": [{"path": p, "before_check": _capture.identity(Path(p))} for p in selected],
+                "identity_discontinuities": [fact for row in candidates.values()
+                                             for fact in row["evidence"].get("identity_discontinuities", [])]}
     return {"passed": passed, "gap": None if passed else "missing" if not matches else "unattributed", "evidence": evidence}
 
 
@@ -395,6 +554,9 @@ async def _default_check_runner(state: Any, ob: dict[str, Any]) -> dict[str, Any
     # Reuse execution's safety analysis; do not let verification be an alternate
     # launch/approval channel. Risky work belongs in the normal authorized tool,
     # after which its evidence can be checked here without repeating the effect.
+    from . import result_acceptance
+    if result_acceptance.restricted(state) and not result_acceptance.is_inspection_command(state, ob["command"]):
+        return {"exit_code": None, "stdout_tail": "", "stderr_tail": "", **result_acceptance.refusal("finish.check")}
     admission = _bash_static_validity_block(
         state, ob["command"], expected_duration_s=None, check_after_seconds=None)
     risk = classify_high_risk(ob["command"], mode="shell")
@@ -569,6 +731,28 @@ async def evaluate(state: Any, led: _ledger.Ledger, verification: Any = None,
             if ob["required"]:
                 for selected in row["evidence"].get("selected_objects", []):
                     objects.setdefault(selected["path"], selected)
+    # Persist the opening window before awaiting ANY checker. Otherwise a
+    # checker can restore old metadata after we already observed the break,
+    # and a later retry would have no durable memory of that observation.
+    opening = [{"evidence": row["evidence"]} for row in initial_globs.values()]
+    for obj in objects.values():
+        if obj.get("error"):
+            continue
+        snapshot = obj.get("before_members")
+        if snapshot is not None:
+            entries = snapshot.get("entries") or {}
+            parents = {str(Path(value).parent) for value in entries if value != obj["path"]}
+            selected = [(value, identity) for value, identity in entries.items()
+                        if identity.get("kind") != "dir" or value not in parents]
+        else:
+            selected = [(obj["path"], obj["before_check"])]
+        for value, identity in selected:
+            opening.append({"evidence": _source_evidence(records, Path(value), identity, view=view)[1]})
+    _record_identity_discontinuities(led, opening)
+    records = led.records()
+    # Initial glob witnesses were chosen before the checks, but may have just
+    # had a broken source persisted. Reuse the selection; final object checks
+    # below apply the same refreshed B view to every selected member.
     for ob in applicable:
         kind = ob["kind"]
         if kind == "task":
@@ -613,6 +797,8 @@ async def evaluate(state: Any, led: _ledger.Ledger, verification: Any = None,
                        "passed": row["passed"], "evidence": row["evidence"]})
         if not row["passed"]:
             gaps.append({"obligation": name, "kind": "delivery_object", "gap": row.get("gap"), "evidence": row["evidence"]})
+    _record_identity_discontinuities(led, checks)
+    records = led.records()
     contradictions = _job_contradictions(records) + _action_contradictions(
         records, {"obligations": obligations, "checks": checks, "task_verification": interpreted})
     # Object findings still constrain success, but are not additional task
@@ -1278,6 +1464,75 @@ def _owner_ledger(state: Any) -> tuple[_ledger.Ledger | None, dict[str, Any] | N
     return led, None
 
 
+def _accepted_source_objects(clean: dict[str, Any]) -> list[dict[str, Any]]:
+    objects: dict[str, dict[str, Any]] = {}
+
+    def accepted(evidence):
+        if (not evidence.get("members") and evidence.get("path")
+                and evidence.get("producers") and evidence.get("identity_now")):
+            objects[evidence["path"]] = evidence
+        for member in evidence.get("members", []):
+            if member.get("passed"):
+                accepted(member)
+
+    for check in clean.get("evaluation", {}).get("checks", []):
+        if check.get("passed"):
+            accepted(check.get("evidence") or {})
+    return list(objects.values())
+
+
+def delivery_source_findings(state: Any, persisted: dict[str, Any], records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Read later B invalidations of the exact generations accepted by this C.
+
+    This does not change historical C integrity. Old C without a usable B
+    pointer is unchanged when no related invalidation exists; with a related
+    fact its current source cannot be certified by guessing another window.
+    """
+    facts = [row for row in records if row.get("kind") == "output_identity_invalidated"]
+    raw = json.loads(persisted["artifacts"]["raw_results"]["content"])
+    clean = json.loads(persisted["artifacts"]["clean_results"]["content"])
+    objects = _accepted_source_objects(clean)
+    # A durable action's before snapshot can prove the break before finish
+    # has emitted the normalized invalidation row. Read the same projection
+    # here, or a stat-restored old C could be replayed without evaluation.
+    known = {row.get("producer_generation") for row in facts}
+    for obj in objects:
+        for producer in _producer_rows(records, Path(obj["path"])):
+            fact = producer.get("discontinuity")
+            if fact and fact["producer_generation"] not in known:
+                sequence = fact["witness"].get("observation_seq")
+                if type(sequence) is int:
+                    facts.append({**fact, "seq": sequence})
+                    known.add(fact["producer_generation"])
+    pointer = raw.get("ledger_pointer") or {}
+    through = pointer.get("through_seq")
+    usable = (type(through) is int and through >= 0
+              and through in {row.get("seq") for row in records}
+              and Path(str(pointer.get("path") or "")).resolve()
+              == (_ledger.ledger_dir(state) / "events.jsonl").resolve())
+    prefix = [row for row in records if usable and row.get("seq", through + 1) <= through]
+    findings = {}
+    for obj in objects:
+        related = [row for row in facts if row.get("path") == obj["path"]
+                   and row.get("producer_action_id") in obj["producers"]
+                   and (not usable or row.get("seq", 0) > through)]
+        if not related:
+            continue
+        sources = [row for row in _producer_rows(prefix, Path(obj["path"]))
+                   if row["action_id"] in obj["producers"] and not row.get("invalidation")
+                   and _identity_matches(row.get("after"), obj["identity_now"])[0]] if usable else []
+        generations = {row["generation"] for row in sources}
+        for fact in related:
+            if generations and fact["producer_generation"] not in generations:
+                continue
+            findings[fact["producer_generation"]] = {
+                "code": "delivery_source_invalidated" if generations else "delivery_source_history_unavailable",
+                "path": fact["path"], "producer_action_id": fact["producer_action_id"],
+                "producer_generation": fact["producer_generation"], "invalidation_seq": fact["seq"],
+            }
+    return list(findings.values())
+
+
 def _delivery_changed(
     state: Any, persisted: dict[str, Any], request: dict[str, Any], records: list[dict[str, Any]],
 ) -> bool:
@@ -1289,6 +1544,8 @@ def _delivery_changed(
     """
     raw = json.loads(persisted["artifacts"]["raw_results"]["content"])
     clean = json.loads(persisted["artifacts"]["clean_results"]["content"])
+    if delivery_source_findings(state, persisted, records):
+        return True
     if _delivery_transaction.canonical_digest(raw.get("finish_request")) != _delivery_transaction.canonical_digest(request):
         return True
     if raw.get("run_authority") != _project_authority(records):
@@ -1457,10 +1714,20 @@ async def _seal_finish(
                 settled = _delivery_transaction.settle_delivery(state, led, None)
                 return _adapt_settled_result(settled)
             _delivery_transaction._sealed(state, led, persisted)
+            clean = json.loads(persisted["artifacts"]["clean_results"]["content"])
+            records = led.records()
+            observations = []
+            view = _OutputView(records)
+            for obj in _accepted_source_objects(clean):
+                path = Path(obj["path"])
+                observations.append({"evidence": _source_evidence(records, path, _capture.identity(path), view=view)[1]})
+            _record_identity_discontinuities(led, observations)
             if not _delivery_changed(state, persisted, request, led.records()):
                 settled = _delivery_transaction.settle_delivery(state, led, None)
                 return _adapt_settled_result(settled)
         except _delivery_transaction.DeliveryTransactionError as exc:
+            return exc.as_result()
+        except _FinishAssemblyError as exc:
             return exc.as_result()
         except (ValueError, TypeError, KeyError, OSError) as exc:
             return {"status": "error", "error_code": "closure_observation_unavailable",
@@ -1561,6 +1828,8 @@ async def _seal_finish(
                     "先处理 gaps 中具体文件或检查命令及其输出，以及 contradictions 中的实际冲突。"
                     "核验方法写错可纠正后再次 finish；正式条件不能删除。"
                     "不要为改变来源而重写正确报告，也不要无变化重复 finish 或重跑已通过的计算。"
+                    "来源已失效时保留旧文件，回拨时间戳不能恢复来源；仅在任务确有需要且已获授权时生产新结果并核验，"
+                    "否则如实交付 partial/failed/blocked，不要求补内部字段。"
                     "只有格式检查不足以证明计算成功；须核对任务要求的阶段状态和实际结果。"
                     "无法补齐时按真实完成程度交付 partial/failed/blocked。"
                 ),

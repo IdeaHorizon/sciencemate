@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "harness-framework"
-version = "0.5.15"
+version = "0.5.16"
 description = "Minimal teaching scaffold for the AI4S research platform's node harness layer."
 requires-python = ">=3.11"
 dependencies = [
@@ -151,9 +151,13 @@ hf = "core.cli:main"
 # 显式声明包结构 —— 仓库是 flat-layout（core/、shared/、nodes/、templates/ 并列在根）
 # 不写这个，setuptools 看到多个 top-level dir 不敢自动 discover 就 refuse build。
 # 含 nodes 的全部子包；不含 templates（那是 owner 抄模板用，不当代码 ship）/ tests / scripts。
+[tool.setuptools]
+# The terminal package and existing workers reuse this shared session module.
+py-modules = ["chat"]
+
 [tool.setuptools.packages.find]
-include = ["core*", "shared*", "nodes*"]
-exclude = ["tests*", "scripts*", "templates*", "docs*", "output*"]
+include = ["core*", "shared*", "nodes*", "cli*"]
+exclude = ["tests*", "cli.tests*", "scripts*", "templates*", "docs*", "output*"]
 
 [tool.setuptools.package-data]
 core = ["_ssh_agent.py.in", "_ssh_askpass.cs"]

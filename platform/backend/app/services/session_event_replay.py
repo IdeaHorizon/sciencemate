@@ -20,8 +20,9 @@ worker 也一直在往 `events.jsonl` 落盘。但全后端**没有一个生产�
 
 ## 断点在哪：不存第二份
 
-"读到哪了"不落盘。每次恢复时从库里现算每份 transcript 的**高水位**
-（`MAX(byte_offset)`），字节位置在它之下的包装事件直接跳过。
+"读到哪了"不落盘。每次恢复时从事实表读出已经提交的源记录位置，
+只跳过确实存在的记录。最大 offset 不能证明它前面的每条都已提交：
+实时流可能先记下后面的记录，或者先前摄取曾失败。
 
 存一列 offset 会是第二个真相源，而它一定会和事件表分叉：一次半途失败的补齐
 把 offset 推上去了、记录却没落库，从此那段历史永远补不回来，且没有人报错。
@@ -37,12 +38,13 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.execution import ExecutionEvent
 from app.services.execution_ingest import ExecutionIngestService, IngestContext
 from app.services.harness_transcript_ingest import (
+    commit_transcript_wrapper,
     file_identity_of,
     ingest_transcript_wrapper,
     resolve_wrapper,
@@ -50,12 +52,6 @@ from app.services.harness_transcript_ingest import (
 from app.services.session_event_log import read_events
 
 logger = logging.getLogger(__name__)
-
-#: 每补这么多条提交一次。补齐可能有几万条，攒到最后一次性提交的话，中途
-#: 任何一次失败都会把已经做完的活全部回滚 —— 而这活是幂等的，没有理由让它
-#: 变成 all-or-nothing。
-_COMMIT_EVERY = 200
-
 
 @dataclass(frozen=True)
 class ReplayReport:
@@ -67,11 +63,11 @@ class ReplayReport:
     scanned: int = 0
     #: 真正补进库的条数。
     ingested: int = 0
-    #: 因为已在高水位之下而跳过的条数。
+    #: 源记录已经存在而跳过的条数。
     already_known: int = 0
     #: JSON 解析失败的行数（见证，不是故障）。
     malformed: int = 0
-    #: 摄取时报错的条数 —— 记下来，不让一条坏记录拦住整段补齐。
+    #: 摄取失败；停止本轮补录，保留已提交记录，下一轮重试缺口。
     failed: int = 0
 
     @property
@@ -79,27 +75,29 @@ class ReplayReport:
         return bool(self.ingested or self.failed or self.malformed)
 
 
-async def _high_water_marks(db: AsyncSession, context: IngestContext) -> dict[str, int]:
-    """这个 session 的每份 transcript 已经摄到哪个字节了。
+async def _known_source_positions(db: AsyncSession, context: IngestContext) -> set[tuple[str, int]]:
+    """这个 session 已经提交过哪些源记录位置。
 
     按 **session** 而不是按 run 取：`events.jsonl` 是会话级的，里面躺着这个
-    会话历次 turn 的包装事件。只看当前 run 的水位，历史那些会被当成"没摄过"
+    会话历次 turn 的包装事件。只看当前 run 的记录，历史那些会被当成"没摄过"
     重新摄一遍 —— 而摄取的幂等键含 run_id，换个 run_id 就不会被挡住，结果是
     同一段历史在库里出现两次、挂在错误的 run 名下。
     """
     rows = await db.execute(
-        select(ExecutionEvent.file_identity, func.max(ExecutionEvent.byte_offset))
+        select(ExecutionEvent.file_identity, ExecutionEvent.byte_offset)
         .where(
             ExecutionEvent.tenant_id == context.tenant_id,
+            ExecutionEvent.workspace_id == context.workspace_id,
+            ExecutionEvent.project_id == context.project_id,
             ExecutionEvent.session_id == context.session_id,
             ExecutionEvent.file_identity.is_not(None),
         )
-        .group_by(ExecutionEvent.file_identity)
+        .distinct()
     )
     return {
-        str(identity): int(offset or 0)
+        (str(identity), int(offset))
         for identity, offset in rows.all()
-        if identity is not None
+        if identity is not None and offset is not None
     }
 
 
@@ -112,23 +110,22 @@ async def replay_missed_events(
 ) -> ReplayReport:
     """把 `events_path` 里还没进库的 transcript 记录补进来。
 
-    幂等：重复调用不会产生第二份记录（高水位挡住），也不会漏（水位是现算的）。
+    幂等：跳过确实已提交的源记录，不把较大的 offset 当成完整前缀的证明。
     """
     path = Path(events_path)
     if not path.is_file():
         return ReplayReport(events_file=False)
 
-    high_water = await _high_water_marks(db, context)
+    known_sources = await _known_source_positions(db, context)
     harness_states: dict[str, dict] = {}
     offset = 0
     scanned = ingested = already_known = malformed = failed = 0
-    pending = 0
 
     while True:
         batch = read_events(path, offset=offset)
         if batch.truncated:
             # 文件比断点还短 —— 它被换过（新 worker 重建了会话目录）。从头再来
-            # 是安全的：高水位会把已知的部分全挡掉。
+            # 是安全的：事实表会把已知的记录挡掉。
             offset = 0
             continue
         malformed += batch.malformed
@@ -149,36 +146,38 @@ async def replay_missed_events(
             except (RuntimeError, OSError):
                 failed += 1
                 continue
-            if byte_start <= high_water.get(identity, -1):
+            if (identity, byte_start) in known_sources:
                 already_known += 1
                 continue
             try:
-                await ingest_transcript_wrapper(
+                await commit_transcript_wrapper(
                     db,
+                    ingest=ingest_transcript_wrapper,
                     service=service,
                     context=context,
                     event=record,
                     harness_states=harness_states,
                 )
+                # Match live ingestion: one source fact, one transaction.
+                # A failed flush must never poison a batch containing other
+                # records, or be followed by work on an inactive Session.
             except Exception:
-                # 一条补不进去不该让整段历史都补不回来。记下来，接着补 ——
-                # 报告里的 `failed` 就是这件事的见证。
+                await db.rollback()
                 logger.exception(
                     "Could not replay one worker event (run=%s offset=%s)",
                     context.run_id,
                     byte_start,
                 )
                 failed += 1
-                continue
+                # Do not advance the durable prefix past a missing fact.
+                # The next reconciliation retries this record, using fresh
+                # adapter state and the already committed source history.
+                return ReplayReport(
+                    events_file=True, scanned=scanned, ingested=ingested,
+                    already_known=already_known, malformed=malformed, failed=failed,
+                )
             ingested += 1
-            pending += 1
-            high_water[identity] = byte_start
-            if pending >= _COMMIT_EVERY:
-                await db.commit()
-                pending = 0
-
-    if pending:
-        await db.commit()
+            known_sources.add((identity, byte_start))
     return ReplayReport(
         events_file=True,
         scanned=scanned,

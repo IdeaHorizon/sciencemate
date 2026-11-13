@@ -62,6 +62,137 @@ _REQUIRED_MANIFEST_FIELDS = {
 }
 
 
+class _DeliveryReviewBlocked(Exception):
+    def __init__(self, result: dict, review_artifact_id: str):
+        super().__init__(result.get("summary") or "Existing delivery review could not complete.")
+        self.result = result
+        self.review_artifact_id = review_artifact_id
+
+
+def _delivery_review_record(
+    state, payload: dict, request_fingerprint: str
+) -> tuple[str, str, dict]:
+    identity = canonical_hash(
+        {
+            "files": sorted(
+                ({"path": item["path"], "sha256": item["sha256"]} for item in payload["files"]),
+                key=lambda item: item["path"],
+            ),
+            "request_fingerprint": request_fingerprint,
+        }
+    )
+    name = "delivery_recheck_" + identity[:24]
+    previous = state.read_artifact("preprocessing_review__" + name) or {}
+    saved = _json_object(previous.get("content"))
+    return identity, name, saved if saved.get("identity") == identity else {}
+
+
+async def _review_delivery_feedback(state, summary: dict, record: dict, plan: dict) -> dict | None:
+    """Check caller findings against published bytes; retain one review budget.
+
+    No generation occurs here. A confirmed defect is returned to the existing
+    pipeline; prose requests to change the old spec do not enter this path.
+    """
+    inputs = state.hook_state.get("node_inputs")
+    if not isinstance(inputs, dict):
+        inputs = state.hook_state["node_inputs"] = {}
+    feedback = inputs.get("review_feedback") or []
+    payload = _json_object(record.get("content"))
+    identity, name, saved = _delivery_review_record(state, payload, summary["request_fingerprint"])
+    if not feedback and not saved:
+        return None
+    # An unresolved finding does not disappear when the caller omits it.
+    if not feedback:
+        if (saved.get("review") or {}).get("status") == "pass":
+            return saved["review"]
+        feedback = saved.get("feedback") or []
+    feedback = deepcopy(feedback if isinstance(feedback, list) else [feedback])
+    inputs["review_feedback"] = feedback
+    if saved.get("review_state"):
+        state.hook_state["_data_authority_review"] = deepcopy(saved["review_state"])
+    elif not state.hook_state.get("_data_authority_review"):
+        source = (
+            Path(state.root).parent
+            / record["produced_by_run_id"]
+            / "planning/execution_checkpoint.json"
+        )
+        try:
+            checkpoint = json.loads(source.read_text())
+        except (OSError, ValueError):
+            checkpoint = {}
+        if checkpoint.get("authority_review_state"):
+            state.hook_state["_data_authority_review"] = checkpoint["authority_review_state"]
+    from nodes.data.review.authority_reviewer import review_delivery_against_authority
+
+    result = {
+        "status": "error",
+        "summary": "Delivery review interrupted; preserve the published assets.",
+    }
+    try:
+        result = await review_delivery_against_authority(
+            state,
+            files={
+                item["path"]: {"size_bytes": item.get("size", item.get("size_bytes", 0))}
+                for item in payload["files"]
+            },
+            # Findings are context, not a new authority or a new review budget.
+            preprocessing_request=plan["preprocessing_request"],
+            work_order=plan.get("preprocessing_work_order") or {},
+            plan_context={**plan, "delivery_destination": summary["package_dir"]},
+            # _validated_dataset_delivery already checked the complete byte bindings.
+            # This check claims integrity only, not new domain validation.
+            deterministic_review={
+                "status": "pass",
+                "common_checks": {"published_byte_bindings": True},
+                "issues": [],
+            },
+            package_dir=summary["package_dir"],
+        )
+    finally:
+        review_artifact = state.save_artifact(
+            "preprocessing_review",
+            name,
+            json.dumps(
+                {
+                    "identity": identity,
+                    "delivery_artifact_id": summary["artifact_id"],
+                    "feedback": feedback,
+                    "review": result,
+                    "review_state": state.hook_state.get("_data_authority_review") or {},
+                },
+                ensure_ascii=False,
+                default=str,
+            ),
+            metadata={
+                "delivery_artifact_id": summary["artifact_id"],
+                "review_status": result.get("status"),
+            },
+        )
+    state.append_transcript(
+        "data_delivery_feedback_reviewed",
+        artifact_id=summary["artifact_id"],
+        review_artifact_id=review_artifact["id"],
+        status=result.get("status"),
+    )
+    if result.get("status") not in {"pass", "fail"}:
+        raise _DeliveryReviewBlocked(result, review_artifact["id"])
+    if result.get("status") == "fail":
+        inputs["review_feedback"] = deepcopy(result.get("issues") or [])
+        state.hook_state["_data_confirmed_delivery_defects"] = {
+            "review_artifact_id": review_artifact["id"],
+            "revision_contract": result.get("revision_contract"),
+            "existing_delivery": {
+                "artifact_id": summary["artifact_id"],
+                "package_dir": summary["package_dir"],
+                "source_run_id": record["produced_by_run_id"],
+            },
+            "instruction": "Repair the verified findings using the existing delivery and producer plan. "
+            "Preserve valid independent assets and the original authority; do not regenerate "
+            "everything merely because this dispatch has a new run ID.",
+        }
+    return result
+
+
 def _same_request_identity(
     *,
     actual_hash: str,
@@ -84,34 +215,78 @@ async def _terminal_dataset_summary(
     request_fingerprint: str = "",
 ) -> dict | None:
     """Return a validated delivery only when it belongs to this request."""
-    for item in reversed([*state.list_artifacts("dataset"), *state.list_artifacts("preprocessing_document")]):
+    for item in reversed(
+        [*state.list_artifacts("dataset"), *state.list_artifacts("preprocessing_document")]
+    ):
         summary = _validated_dataset_delivery(
             state,
             item,
             request_spec_hash=request_spec_hash,
             request_fingerprint=request_fingerprint,
             current_run_only=False,
+            allow_review_recovery=True,
         )
         if summary is not None:
             record = state.read_artifact(item["id"]) or {}
+            plan = (
+                _unchanged_source_plan(state, record)
+                if summary["delivery_kind"] == "dataset_materialized"
+                else None
+            )
+            if (
+                plan is None
+                and summary["delivery_kind"] == "dataset_materialized"
+                and (state.hook_state.get("node_inputs") or {}).get("review_feedback")
+            ):
+                raise ValueError(
+                    "The original source plan/evidence is unavailable or changed. Preserve the published "
+                    "delivery and restore that evidence before reviewing the caller's findings."
+                )
+            if record.get("produced_by_run_id") != state.run_id and plan is None:
+                # Partial deliveries or changed sources do not suppress a
+                # legitimate attempt to materialize the requested assets.
+                continue
+            if plan is not None:
+                review = await _review_delivery_feedback(state, summary, record, plan)
+                if review is not None:
+                    if review.get("status") == "fail":
+                        return None  # existing planning/execution consumes verified repair findings
+                    summary["verification_summary"] = "\n".join(
+                        [
+                            str(review.get("summary") or ""),
+                            *(f"Delivery note: {note}" for note in review.get("warnings") or []),
+                        ]
+                    )
             if record.get("produced_by_run_id") != state.run_id:
-                # Partial deliveries are not a reason to suppress another
-                # attempt to materialize the user's requested assets.
-                plan = _unchanged_source_plan(state, record) if summary["delivery_kind"] == "dataset_materialized" else None
-                if plan is None:
-                    continue
                 summary["reused_from_run_id"] = record["produced_by_run_id"]
-                from nodes.data.review.namelist_inspection import mpas_atmosphere_schema, inspect_mpas_configuration
+                from nodes.data.review.namelist_inspection import (
+                    mpas_atmosphere_schema,
+                    inspect_mpas_configuration,
+                )
 
-                software = plan.get("simulation_software") or (plan.get("requirement_analysis") or {}).get("target_software") or {}
+                software = (
+                    plan.get("simulation_software")
+                    or (plan.get("requirement_analysis") or {}).get("target_software")
+                    or {}
+                )
                 files = _json_object(record.get("content"))["files"]
-                schema = await mpas_atmosphere_schema(state, software, [item["path"] for item in files])
+                schema = await mpas_atmosphere_schema(
+                    state, software, [item["path"] for item in files]
+                )
                 if schema:
-                    checks = [inspect_mpas_configuration((Path(summary["package_dir"]) / item["path"]).read_text(),
-                              item["path"], schema) for item in files
-                              if Path(item["path"]).name in {"namelist.atmosphere", "streams.atmosphere"}]
+                    checks = [
+                        inspect_mpas_configuration(
+                            (Path(summary["package_dir"]) / item["path"]).read_text(),
+                            item["path"],
+                            schema,
+                        )
+                        for item in files
+                        if Path(item["path"]).name in {"namelist.atmosphere", "streams.atmosphere"}
+                    ]
                     issues = [issue for check in checks for issue in check["issues"]]
-                    state.append_transcript("data_delivery_native_recheck", artifact_id=item["id"], checks=checks)
+                    state.append_transcript(
+                        "data_delivery_native_recheck", artifact_id=item["id"], checks=checks
+                    )
                     if issues:
                         inputs = state.hook_state.setdefault("node_inputs", {})
                         feedback = inputs.get("review_feedback") or []
@@ -191,6 +366,7 @@ def _validated_dataset_delivery(
     request_spec_hash: str = "",
     request_fingerprint: str = "",
     current_run_only: bool = True,
+    allow_review_recovery: bool = False,
 ) -> dict | None:
     """Return a summary only for a real, reviewed preprocessing delivery."""
     record = state.read_artifact(item["id"]) or {}
@@ -330,6 +506,13 @@ def _validated_dataset_delivery(
             state.append_transcript("data_delivery_recheck_failed", artifact_id=item["id"], issues=checked["issues"])
             return None
 
+    # A later verified defect supersedes the old passing receipt for these
+    # bytes. Recovery may inspect them; completion/freezing may not claim them
+    # as valid again merely because execution returned without a new delivery.
+    _, _, recheck = _delivery_review_record(state, payload, delivery_fingerprint)
+    if not allow_review_recovery and (recheck.get("review") or {}).get("status") == "fail":
+        return None
+
     return {
         "artifact_id": item["id"],
         "artifact_type": item.get("type"),
@@ -341,21 +524,44 @@ def _validated_dataset_delivery(
         "manifest_path": str(manifest_path),
         "request_spec_hash": str(payload.get("request_spec_hash") or ""),
         "request_fingerprint": delivery_fingerprint,
-        "review_summary": "\n".join([
-            *(f"Exported file: {item['path']}" for item in payload.get("workspace_exports") or []),
-            # run_node exposes only the first 500 characters. Keep the scope
-            # ahead of paths, otherwise a mesh delivery looks like a solver case.
-            ("Simulation readiness is declared in the manifest."
-             if payload.get("simulation_ready") is True else
-             "Requested preprocessing assets are delivered; a complete runnable simulation is not claimed. "
-             "Unrequested solver configuration or execution is not a missing preprocessing deliverable."),
-            "Review: audit/preprocessing_review.json and its cited native evidence. "
-            "Check those sources before inferring a missing validation or requesting regeneration.",
-            f"Published delivery directory: {package_dir}",
-            f"Manifest: {manifest_path}",
-            str((receipt.get("authority_review") or {}).get("summary") or ""),
-            *(f"Delivery note: {note}" for note in (receipt.get("authority_review") or {}).get("warnings") or []),
-        ]).strip(),
+        "request_authority": {
+            "authority": deepcopy((delivery_request or {}).get("authority") or {}),
+            "snapshot_sha256": canonical_hash(
+                (delivery_request or {}).get("authority_snapshot") or {}
+            ),
+            "original_request_excerpt": caller_request_text(
+                (delivery_request or {}).get("authority_snapshot") or {}
+            )[:2000],
+            "excerpt_truncated": len(
+                caller_request_text((delivery_request or {}).get("authority_snapshot") or {})
+            )
+            > 2000,
+        },
+        "review_summary": "\n".join(
+            [
+                *(
+                    f"Exported file: {item['path']}"
+                    for item in payload.get("workspace_exports") or []
+                ),
+                # run_node exposes only the first 500 characters. Keep the scope
+                # ahead of paths, otherwise a mesh delivery looks like a solver case.
+                (
+                    "Simulation readiness is declared in the manifest."
+                    if payload.get("simulation_ready") is True
+                    else "Requested preprocessing assets are delivered; a complete runnable simulation is not claimed. "
+                    "Unrequested solver configuration or execution is not a missing preprocessing deliverable."
+                ),
+                "Review: audit/preprocessing_review.json and its cited native evidence. "
+                "Check those sources before inferring a missing validation or requesting regeneration.",
+                f"Published delivery directory: {package_dir}",
+                f"Manifest: {manifest_path}",
+                str((receipt.get("authority_review") or {}).get("summary") or ""),
+                *(
+                    f"Delivery note: {note}"
+                    for note in (receipt.get("authority_review") or {}).get("warnings") or []
+                ),
+            ]
+        ).strip(),
     }
 
 
@@ -659,6 +865,11 @@ async def _advance_generation_revision(state, messages, execution: dict | None =
     from nodes.data.tools.preprocessing_planner import run_preprocessing_planning_loop
 
     feedback = planning_feedback
+    if feedback is None and state.hook_state.get("_data_confirmed_delivery_defects"):
+        feedback = {
+            "status": "needs_revision",
+            **deepcopy(state.hook_state["_data_confirmed_delivery_defects"]),
+        }
     seen = set()
     while True:
         planning = await run_preprocessing_planning_loop(
@@ -726,6 +937,11 @@ def _pipeline_result(
         detail=reason, reported_by="data.pipeline",
     )
     task_outcome["failure_category"] = details.get("failure_category")
+    for key in ("retry_target", "resume_contract", "revision_contract"):
+        if details.get(key) is not None:
+            task_outcome[key] = deepcopy(details[key])
+    if details.get("retry_target") == "authority_review":
+        task_outcome.update(dispatch_action="resolve_review_blocker", redispatch_required=False)
     if details.get("failure_category") == "saved_stage_available":
         task_outcome.update(dispatch_action=details.get("dispatch_action", "resume_saved_stage"), redispatch_required=False,
                             resume_run_id=(details.get("resume_contract") or {}).get("resume_run_id"))
@@ -789,6 +1005,7 @@ def _pipeline_result(
             "preprocessing_request": state.hook_state.get("_data_current_request") or {},
         },
     )
+    task_outcome["recovery_artifact_id"] = report["id"]
     return LoopResult(
         final_text=(f"{reason} (report: {report['id']})" + (
             "\n这是环境准备交接，不是前处理任务不可行。请读取报告中的 resume_contract，"
@@ -1074,7 +1291,8 @@ async def _advance_preprocessing_pipeline(state, messages, reason: str) -> LoopR
         dataset = _dataset_summary(state)
         if dataset is not None:
             record_task_outcome(state, "success" if dataset["delivery_kind"] == "dataset_materialized" else "partial",
-                                detail=dataset["artifact_id"], reported_by="data.pipeline")
+                                detail=dataset["artifact_id"], reported_by="data.pipeline").update(
+                                    request_authority=dataset["request_authority"])
             state.append_transcript("data_auto_execute_dataset_saved", **dataset)
             emit_progress(state, "delivery_found", f"{dataset['delivery_kind']} artifact saved by approved plan")
             return LoopResult(
@@ -1236,25 +1454,71 @@ async def run_loop(harness, state, messages, llm):
         try:
             _current_request_identity(state, messages)
         except ValueError as exc:
-            return _pipeline_result(state, messages, outcome="fatal",
-                                    reason=f"Invalid Data request identity: {exc}")
+            return _pipeline_result(
+                state, messages, outcome="fatal", reason=f"Invalid Data request identity: {exc}"
+            )
         try:
             terminal = await _terminal_dataset_summary(
                 state,
                 request_spec_hash=_request_hash_from_state(state),
                 request_fingerprint=_request_fingerprint_from_state(state),
             )
+        except _DeliveryReviewBlocked as exc:
+            return _pipeline_result(
+                state,
+                messages,
+                outcome="needs_input"
+                if exc.result.get("status") == "needs_input"
+                else "externally_blocked",
+                reason=str(exc),
+                details={
+                    **exc.result,
+                    "retry_target": "authority_review",
+                    "failure_category": exc.result.get("failure_category")
+                    or "delivery_review_unavailable",
+                    "resume_contract": {
+                        "kind": "delivery_review",
+                        "review_artifact_id": exc.review_artifact_id,
+                        "instruction": "Preserve the delivery and original request. Resolve the review service/evidence "
+                        "gap or explicitly extend its budget, then resubmit structured review_feedback. "
+                        "A different spec, directory or child ID does not reset this review.",
+                    },
+                },
+            )
         except (OSError, ValueError, TimeoutError, ImportError) as exc:
-            return _pipeline_result(state, messages, outcome="externally_blocked",
+            return _pipeline_result(
+                state,
+                messages,
+                outcome="externally_blocked",
                 reason=f"Existing delivery revalidation could not complete; preserve it without regenerating: {exc}",
-                details={"failure_category": "delivery_revalidation_unavailable"})
+                details={"failure_category": "delivery_revalidation_unavailable"},
+            )
         if terminal is not None:
-            task_outcome = record_task_outcome(state, "success" if terminal["delivery_kind"] == "dataset_materialized" else "partial",
-                detail=f"Reuse {terminal['artifact_id']}; this unchanged request needs no regeneration.", reported_by="data.pipeline")
-            task_outcome.update(dispatch_action="reuse_delivery", redispatch_required=False,
-                                artifact_id=terminal["artifact_id"])
+            task_outcome = record_task_outcome(
+                state,
+                "success" if terminal["delivery_kind"] == "dataset_materialized" else "partial",
+                detail=f"Reuse {terminal['artifact_id']}; this unchanged request needs no regeneration.",
+                reported_by="data.pipeline",
+            )
+            task_outcome.update(
+                dispatch_action="reuse_delivery",
+                redispatch_required=False,
+                artifact_id=terminal["artifact_id"],
+                request_authority=terminal["request_authority"],
+                review_scope={
+                    "request_fingerprint": terminal["request_fingerprint"],
+                    "delivery_kind": terminal["delivery_kind"],
+                    "simulation_ready": terminal.get("simulation_ready", False),
+                },
+            )
             state.append_transcript("data_terminal_dataset_already_present", **terminal)
-            emit_progress(state, "terminal_delivery", terminal["artifact_id"], status=terminal["status"], delivery_kind=terminal["delivery_kind"])
+            emit_progress(
+                state,
+                "terminal_delivery",
+                terminal["artifact_id"],
+                status=terminal["status"],
+                delivery_kind=terminal["delivery_kind"],
+            )
             return LoopResult(
                 final_text=(
                     terminal.get("verification_summary", "") + "\n"

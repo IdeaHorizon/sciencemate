@@ -594,7 +594,7 @@ async def _build_feed_pool(user: User, db: AsyncSession, lang: Language | None =
         # 开关。它们默认都是 True 且个人档从不覆盖，所以只看开关的话，一台
         # 永不采集的机器会走到"第一轮几分钟内完成"那一句 —— 一句永远兑现不了
         # 的承诺，而用户只会以为再等等就好。
-        if not assembly.background_collection_enabled():
+        if not assembly.background_collection_enabled() and not (profile.domains or profile.journals or profile.scholars):
             empty_reason = t("empty.no_collector_here", lang)
         elif not settings.feed_external_fetch_enabled:
             empty_reason = t("empty.collection_disabled", lang)
@@ -1082,6 +1082,14 @@ async def put_interests(
         await db.delete(today)
         await db.flush()
 
+    # Detached workers use a different DB session: persist the selection before
+    # they build the user's preparation/translation pool (also after a re-save).
+    await db.commit()
+    if feed_prefs["domains"]:
+        from app.services.feed.scheduler import feed_collector
+
+        feed_collector.request_subscription_refresh()
+
     # 资讯改为在线即时获取：只刷新用户刚选中的学科，不再等待后台遍历全部
     # 二级学科。任务由生命周期内的单例托管，重复保存会取消旧方向的在途任务。
     from app.services.literature_harvester import literature_index_harvester
@@ -1142,9 +1150,21 @@ async def put_subscriptions(
         "journals": [value.model_dump() for value in data.journals],
         "scholars": [value.model_dump() for value in data.scholars],
     }
+    # A re-follow is a new request, even if an earlier follow succeeded today.
+    history = dict(feed.get("subscription_discovery") or {})
+    for kind, entries, previous_keys in (
+        ("journals", data.journals, previous_journal_keys),
+        ("scholars", data.scholars, previous_scholar_keys),
+    ):
+        for value in entries:
+            if value.key not in previous_keys:
+                history.pop(f"{kind}:{value.key.strip().casefold()}", None)
+    feed["subscription_discovery"] = history
     preferences["feed"] = feed
     user.preferences = preferences
-    await db.flush()
+    # Workers use their own sessions; a flush is invisible to them (and can
+    # leave SQLite locked). Persist the queue before waking its consumer.
+    await db.commit()
     newly_followed = [value for value in data.journals if value.key not in previous_journal_keys]
     newly_followed_scholars = [value for value in data.scholars if value.key not in previous_scholar_keys]
     if newly_followed:
@@ -1180,32 +1200,16 @@ async def search_subscriptions(
     db: AsyncSession = Depends(get_db),
     lang: Language = Depends(language_on_screen),
 ) -> SubscriptionSearchOut:
-    needle = " ".join(q.split()).casefold()
-    compact_needle = needle.replace("-", "")
     if kind == "journal":
-        from nodes.literature.tools.journal_metrics import database_path
-        path = database_path()
-        if not path.is_file():
-            return SubscriptionSearchOut()
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """SELECT journal,issn,eissn,impact_factor,jcr_quartile
-                     FROM journals
-                    WHERE lower(journal) LIKE ? OR lower(coalesce(journal_abbr, '')) LIKE ?
-                       OR replace(lower(coalesce(issn, '')), '-', '') LIKE ?
-                       OR replace(lower(coalesce(eissn, '')), '-', '') LIKE ?
-                    ORDER BY impact_factor DESC NULLS LAST, journal LIMIT ?""",
-                (f"%{needle}%", f"%{needle}%", f"%{compact_needle}%", f"%{compact_needle}%", limit),
-            ).fetchall()
-        return SubscriptionSearchOut(journals=[
-            JournalSubscription(
-                key=str(row["issn"] or row["eissn"] or row["journal"]).casefold(),
-                name=journal_display_name(row["journal"]), issn=str(row["issn"] or ""),
-                eissn=str(row["eissn"] or ""), impact_factor=row["impact_factor"],
-                jcr_quartile=row["jcr_quartile"],
-            ) for row in rows
-        ])
+        from app.services.feed import journal_search
+        try:
+            candidates = await journal_search.search(q, limit=limit)
+        except journal_search.JournalSearchUnavailable:
+            raise HTTPException(status_code=503, detail=say({
+                "zh": "期刊目录查询暂不可用，请稍后重试。",
+                "en": "The journal directory is temporarily unavailable. Please try again later.",
+            }, lang))
+        return SubscriptionSearchOut(journals=[JournalSubscription.model_validate(row) for row in candidates])
 
     from app.services.feed import author_identity
     try:

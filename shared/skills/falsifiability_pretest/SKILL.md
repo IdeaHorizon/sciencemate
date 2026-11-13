@@ -1,14 +1,14 @@
 ---
 name: falsifiability_pretest
 description: |
-  Analysis（hypothesis）预注册之前的可证伪性自检框架。对每条 hypothesis 先想清楚"什么观察会反驳它"，
+  Analysis预注册之前的可证伪性自检框架。对每条 hypothesis 先想清楚"什么观察会反驳它"，
   写成结构化 falsification_criteria（metric / op / threshold），然后 freeze artifact 防回头改。
   不要用在：实验已跑完想反推证伪条件 —— 那是确认偏差的最大温床；该时机用
   adversarial_evidence_search 找反例而不是 retroactively 改 falsifier。
 applies_when:
   - 设计新 hypothesis 准备测试
   - 写 pre-registration artifact 时
-  - hypothesis 节点的核心工作流
+  - analysis 节点的核心工作流
 expected_outcome: Analysis 的预注册判据；消费方交付适用性检查与缺口，不另写预注册或科学终态
 status: validated
 relevant_concepts: []
@@ -16,11 +16,11 @@ relevant_concepts: []
 
 ## 工作流
 
-**按 owner 消费**：只有 Analysis（hypothesis）保存/修订预注册与研究计划。
+**按 owner 消费**：只有 Analysis保存/修订预注册与研究计划。
 Observation / Experiment 用本 skill 检查冻结判据是否能被观察或测量，并把歧义、能力缺口交回
 调用方；不另写一份预注册，不创建 hypothesis claim，不更改判据来适配已有结果。
 探索任务没有待检验命题时此预检不适用，不为启动取证强设预注册。
-科学终态以 `nodes/hypothesis/harness.yaml` 的“轮次与裁决权”为准。
+科学终态以 `nodes/analysis/harness.yaml` 的“轮次与裁决权”为准。
 
 1. **逐条思考反驳条件**：对**每条** hypothesis 写出至少一个能反驳它的可观察结果：
    - 例："如果 force_MAE > 100 meV/Å on OOD subset，则 H1 被反驳"

@@ -44,7 +44,7 @@ export const PROJECT_STOPS: TourStop[] = [
   {
     anchor: '[data-tour="research"]',
     title: { zh: "研究", en: "Research" },
-    body: { zh: "在这里新建会话，把研究问题交给助手。助手会检索文献、运行计算、撰写文稿，每一步都实时显示，你可以随时补充说明或让它停下。", en: "Start a session here and hand your question to the assistant. It searches the literature, runs computations and writes, showing every step as it goes; you can add instructions or stop it at any time." },
+    body: { zh: "展开左侧项目即可切换会话，用项目旁的加号新建会话，把研究问题交给助手。助手会检索文献、运行计算、撰写文稿，每一步都实时显示，你可以随时补充说明或让它停下。", en: "Expand a project to switch sessions, or use its plus button to start one and hand your question to the assistant. It searches the literature, runs computations and writes, showing every step as it goes; you can add instructions or stop it at any time." },
   },
   {
     anchor: '[data-tour="outputs"]',

@@ -1,271 +1,52 @@
-# Review spec for project-level synthesis（项目级宏观综合评估）
+# 项目综合审核（project_synthesis）
 
-> 触发：`_reviewer(node_inputs={'source_node_type': '_project', 'project_id': '<id>'})`。
-> 这是 `_reviewer` 的**第二种 scope**（区别于 single_artifact 单 artifact 审稿）。
-> 用途：项目级综合建议与 loop-internal 复盘；不是派发 Writing 的机械门禁。
+source_node_type='_project' 时核查跨产物的主张、证据与研究目标。
+这是独立科学评估与准备程度建议，不是写作准入许可，也不是另一位项目负责人。
+Analysis（analysis）维护研究状态和解释，调度器在授权及预算内决定路线与停止。
 
-## 为什么 reviewer 干这事
+科学终态以 `nodes/analysis/harness.yaml` 的轮次与裁决权为准；Reviewer 独立批评这些判断，
+不改写 research_state 或已有 KB 科学终态，Curator 按采纳的判断整合 KB。
 
-科学终态的 owner 是 **Analysis（hypothesis）**，以
-`nodes/hypothesis/harness.yaml` 的“轮次与裁决权”为准。Experiment / Observation
-交付证据、执行层评估和可信度，不替 Analysis 下 validated/refuted 科学终态。
-reviewer 独立检查这些判断与证据，综合项目的主张、边界和写作准备程度，产出建议；
-不改写研究状态或 KB 中已有科学终态。_curator 按采纳的判断整合 KB。
+## 确定范围
 
-## 两种 mode（自动判别，不需要 caller 传）
+读当前请求/用户修正、research_state、适用的冻结计划和关键结果，确定科学问题与交付阶段。
+PROJECT/PROFILE、KB 和记忆是有来源的上下文，不静默覆盖当前任务。
+user_requirement_summary 保留可追溯原话，current_state_summary 区分事实、解释和未完成工作。
 
-### Research mode（默认）
+- research：核查研究结果的跨实验/观察/推导论证与适用范围。
+- material：核查外来材料或直接写作请求的范围、来源和保真；不为内部手续重做已有研究。
 
-触发条件：项目 KB 中**存在 frozen `pre_registration` artifact + 至少 1 个
-`experiment_log` artifact**（即真做过研究 loop）。
+## 专业核查
 
-跑完整 6 维评估 + 给详细 actionable_next_steps。
+1. 目标回应：回答了什么、遗漏什么，是否静默换成更容易回答的问题。
+2. 证据充分性：关键主张与证据、适用条件、误差和替代解释相符；
+   不将“两个独立来源”普遍化为全部领域和全部主张的门槛。
+3. 跨产物一致性：数值、单位、版本、对象和支持/反驳方向一致；各节点分别通过不证明整体论证成立。
+4. 科学解释：Analysis 是否处理反证、混杂和未决证据；负结果与没有新发现都是合法结果。
+   区分数值支持与证明、探索与确证、执行核验与现实观测验证。
+5. 本次用途：探索总结、内部稿和投稿成品的充分程度不同；可缩小主张或披露局限，
+   不能把缺证据写成完成。新颖性、叙事与发表前景属于建议，不擅自提高目标。
+6. 资源与增益：补证能否改变重要判断，是否有更便宜的区分性核查；
+   不要求固定数量的 methodological claim、finding 或 dead_end 来换取写作资格。
 
-### Material mode（轻量）
+复用有效核查，新证据、具体遗漏和跨产物矛盾支持定向重查，不做无目的全项目复审。
+每条问题说明证据、受影响主张/用途与最小补证目标，建议实现不是唯一合法做法。
 
-触发条件：**没有 frozen prereg + experiment_log**（user 拎一堆材料直接想
-write 的场景）。
+## 结果与行动分别记录
 
-只做 3 件事：
-- scope_check：user 想 write 什么 vs 提供的材料能不能支撑（quick coverage 检查）
-- evidence_chain_check：材料里 cited claim 是否真存在、方向是否一致
-- writing readiness verdict（依然是 4 选 1 的 verdict）
+保留 project_verdict 词表作为综合建议：
 
-不跑 6 维全量评，2-3 min 内完成。
+- ready_to_write：证据足以支撑本次范围的写作，说明范围和限制。
+- iterate：某些主张需补证或修正，允许不依赖这些主张的工作继续。
+- pivot：当前路径可能难以回应目标，提出改向选项，不自行授权改变用户目标。
+- abort：建议停止当前路径，说明证据、成本或授权原因，不自动终止整个项目。
 
-**判别代码**（伪）：
-```
-prereg = list_artifacts(type='pre_registration', frozen=True)
-exp_log = list_artifacts(type='experiment_log')
-if prereg and exp_log:
-    mode = 'research'
-else:
-    mode = 'material'
-```
+blocks_writing 表示对所指出写作主张/用途的影响，why/how 说明具体范围；
+不能当成禁止调用 writing 的全局门槛。没有新建议时 actionable_next_steps 可以为空，
+不为配合 verdict 凭空造任务。评分描述质量，不要求每维 >=4，也不自动映射为流程动作。
 
-## 审稿前必做
-
-### 1. 重建"user 真实要求"（research / material 都要做）
-
-读以下来源，**综合**出一段 ≤ 300 字的 `user_requirement_summary`：
-
-```
-read_file('PROFILE.md')                     # user 全局偏好
-read_file('PROJECT.md')                     # 项目级设置（target_venue 等）
-memory_recall(query='directives')             # 当下 runtime directive
-memory_recall(query='user_preferences')       # curator 沉淀的偏好
-list_artifacts(type='research_intake')       # 项目初始 intake（user 原话）
-list_artifacts(type='research_plan')         # 计划 artifact 如有
-memory_recall()                              # 目标/铁律/叙事/手册 —— 看意图漂移
-```
-
-这段 summary **必须**：
-- 含 user 原话片段（≥ 1 处引用，可追溯）
-- 含具体科学目标（不是抽象"做好科研"）
-- 含 target_venue / 论文 scope 等具体约束
-
-### 2. 现状盘点
-
-读以下来源，综合出 ≤ 500 字的 `current_state_summary`：
-
-```
-search_kb()                                  # 不传 entity_type = 4 entity + claim_type 分布
-search_kb(claims, claim_type='hypothesis', status_filter='all')
-                                             # 全 hypothesis verdict 状态
-search_kb(claims, claim_type='methodological')
-                                             # methodological sediment
-search_kb(claims, claim_type='dead_end')     # 失败教训
-search_kb(claims, claim_type='synthesis')    # 已有 synthesis
-list_artifacts(frozen=True)                  # 全 frozen artifact
-read_artifact() × N                           # 关键 artifact 内容（按需）
-read_producer_transcript(...)                 # 看 run 流程（transcript 是权威）
-```
-
-要点：盘清"我们到底产出了什么 evidence、它支持什么"，**不是**简单列工件。
-
-### 3. Research mode 才做的额外步骤
-
-- **跨项目检查**：`search_kb(scope='org', query='<topic>')` 看 org 层是否类似工作已存在 → `kb_evidence_check.duplicate_work_risk`
-- **覆盖度审计**：列出 user_requirement 隐含的 hypothesis 集 vs 实际测过的 → gap
-- **统计严谨度抽查**：抽查 Analysis 的科学判断与所引 experiment_log / observation_log，按当前可用工具核对推理；不能重算的部分明确记录，不能声称已独立重算。
-
-### 4. Material mode 才做的额外步骤
-
-- **scope_check**：user 提的写作 scope（write_request）vs 实际材料能不能支撑
-- **evidence_chain spot check**：抽 5-10 个材料里的 cited claim_id / chunk_id，验真存在 + 方向
-
-## 评分维度
-
-### Research mode（6 维，每维 1-5 整数；**不允许** 2.5/3.5）
-
-#### 1. Narrative coherence
-
-所有 hypothesis verdict + KB sediment 组合起来讲了**一个清楚的故事**吗？还是
-散点没主线？
-
-- 5: 主线清楚 + 子论点 1-3 个互相支持 + 没有 contradictions
-- 1: 一堆独立 verdict 拼不出叙事
-
-#### 2. Evidence sufficiency
-
-关键 claim 都有足够 evidence 支持吗？写出来 reviewer (peer) 会不会要补数据？
-
-- 5: 每条 published-grade claim ≥ 2 个独立 source + robustness checked
-- 1: 关键 claim 只有 1 trial / no robustness / cherry-picked
-
-#### 3. Direction validity
-
-`user_requirement` 的问题这些 verdict 真**回答了**吗？还是答非所问？
-
-- 5: verdict 集精准 map 到 user 的科学问题
-- 1: 跑了一堆但 user 原始问题没碰到
-
-#### 4. Coverage
-
-该测的 hypothesis 都测了吗？有没有显著 confound 没排？
-
-- 5: hypothesis tree 完整 + 主要 confound 都有对照实验
-- 1: 关键 confound 没测 / 关键 baseline 缺
-
-#### 5. Methodological return
-
-本项目有**跨项目可复用** finding 吗？（methodological / dead_end claim 数 + 质量）
-
-- 5: ≥ 3 条 high-confidence methodological claim，或 ≥ 1 条 well-documented dead_end
-- 1: 0 个 methodological / dead_end，全是 project-bound empirical
-
-#### 6. Publishability
-
-假设投目标 venue（从 PROJECT.md / user_requirement 提取），这个故事**够**吗？
-
-- 5: 故事完整 + 严谨度过线 + novelty 在 venue 期待范围
-- 1: 故事缺关键支撑 / novelty 不足 / 严谨度过差
-
-### Material mode（2 维，每维 1-5）
-
-#### 1. Scope match
-
-user 想 write 的 scope vs 材料覆盖：
-- 5: 材料完全覆盖 user 描述的 scope
-- 1: scope 跟材料严重错位（user 想写 A，材料只支持 B）
-
-#### 2. Evidence chain integrity
-
-材料里 cited claim / chunk / paper 是否真存在 + 方向一致：
-- 5: 抽查 5-10 个全 verify pass
-- 1: 出现 phantom citation / 引用方向反 (critical 红线)
-
-## 强制 metadata（reviewer 存 review_critique 时必填）
-
-**4-verdict 紧凑设计**：所有"为啥这个 verdict / 该怎么办"全在 `actionable_next_steps[]`，
-不在 verdict 字段里塞细节。
-
-```json
-{
-  "scope": "project_synthesis",
-  "mode": "research" | "material",
-
-  "project_verdict": "ready_to_write" | "iterate" | "pivot" | "abort",
-
-  "user_requirement_summary": "...（≤ 300 字，含 user 原话片段）",
-  "current_state_summary": "...（≤ 500 字）",
-
-  "actionable_next_steps": [
-    {
-      "action": "redo_experiment | new_hypothesis | deeper_literature | fix_evidence_gap | rescope | flag_duplicate_work",
-      "target_node": "experiment | hypothesis | literature | writing | _curator | null",
-      "target_artifact": "<artifact_id or null>",
-      "why": "...（具体到具体 hypothesis / metric / 段）",
-      "how": "...（actionable 指令，可直接喂给 target_node）",
-      "blocks_writing": true | false
-    }
-  ],
-
-  "scores": {
-    "narrative_coherence": <int>,
-    "evidence_sufficiency": <int>,
-    "direction_validity": <int>,
-    "coverage": <int>,
-    "methodological_return": <int>,
-    "publishability": <int>
-  }
-}
-```
-
-material mode 时 `scores` 只填 `scope_match` + `evidence_chain_integrity`。
-
-这些字段必须通过 typed builder 分步提交，不能塞进普通 `summary` 后指望门禁解析：
-
-```
-compose_review_critique(action='set_verdict', verdict='approve', confidence=0.9, summary='...')  # 普通审稿 4 枚举之一
-compose_review_critique(action='set_project_synthesis', project_verdict='ready_to_write', mode='research', user_requirement_summary='...', current_state_summary='...')  # 项目级 4 枚举之一
-compose_review_critique(action='set_scores', scores={...})
-compose_review_critique(action='add_actionable_next_step', step_action='...', step_target_node='...', step_target_artifact='...', step_why='...', step_how='...', blocks_writing=true)  # 一条一调
-compose_review_critique(action='set_recommended_action', recommended_action='...', feedback_to_next_run='...')
-compose_review_critique(action='finalize', name='project_synthesis_<short_id>', artifact_under_review='<artifact_id>', source_node_type='_project')
-```
-
-`finalize` 会机械地把 project synthesis 字段同步铸入 content 与 metadata；模型无须、
-也不能用通用 `save_artifact` 补写 typed-only 凭证。
-
-## verdict 决策规则
-
-4 选 1。**严格按下表**：
-
-| verdict | 触发条件 |
-|---|---|
-| `ready_to_write` | research mode: 所有维度 ≥ 4 + 无 blocks_writing=true step。<br>material mode: scope_match ≥ 4 + 0 critical evidence_chain 问题。 |
-| `iterate` | 有 blocks_writing=true 的 step（无论几个）但**方向对**。这些 step 完成后可重新评估。这是**最常见**的 mid-project 输出。 |
-| `pivot` | 任一维度 ≤ 2 + 修复需要**改变研究方向**（不是补实验）。比如 direction_validity=1 → user_requirement 跟实际工作严重错位，得 rescope。 |
-| `abort` | duplicate_work_risk 严重（org KB 已有相同 claim）/ 数据本身不可救（fabricated 嫌疑）/ user_requirement 内在矛盾。需 request_human_input。 |
-
-## orchestrator 怎么用这份 verdict
-
-`actionable_next_steps` 是 orchestrator dispatch 的工作清单。`project_verdict`
-选分支，`actionable_next_steps[]` 给细节：
-
-```
-verdict = metadata.project_verdict
-steps = metadata.actionable_next_steps
-
-if verdict == "ready_to_write":
-    → run_node(node_type="writing", node_inputs={...})
-
-elif verdict == "iterate":
-    → for step in [s for s in steps if s.blocks_writing]:
-          task(action='create', title=step.how, owner_node=step.target_node)
-      → 起 target_node 跑 step.how，blocked-writing 完成后回头复评
-
-elif verdict == "pivot":
-    → run_node(node_type="hypothesis", node_inputs={...new direction...})
-
-elif verdict == "abort":
-    → request_human_input(question='项目终止建议，see project_synthesis_<id>')
-```
-
-## 跟 single_artifact scope 的区别
-
-| 维度 | single_artifact | project_synthesis |
-|---|---|---|
-| 输入 | 单个 artifact + lineage | 全项目 artifact + KB + memory |
-| 输出 | review_critique （per-artifact verdict）| review_critique（项目级 verdict + next_steps）|
-| 用 hook | 自动 post-producing flow | orchestrator 显式触发项目综合复盘 |
-| 加载 spec | `nodes/<source>/review_spec.md` | 本文件 |
-| 工具白名单 | read-only KB / 仅写 review_critique + memory_candidate + propose | 同上 + create_claim（写 synthesis claim_type）|
-
-## 跟 _curator dreaming 的区别
-
-curator dreaming 做**跨项目 KB 维护**（找 org promotion 候选 / synthesis 候选 / stale claim 复审）；
-project_synthesis 做**本项目内 narrative 综合**（这些 verdict 拼出什么故事 / 能不能写论文了）。
-
-两者方向相反：curator dreaming 输出是给 KB 用的；project_synthesis 输出是给
-orchestrator 用的（决定起 writing 还是 iterate）。
-
-## Anti-patterns（容易犯的错）
-
-- ❌ 不读 PROFILE/PROJECT/directives 就直接判 readiness —— user 真实要求是判断基准
-- ❌ 把 6 维全 5 分套用："故事 perfect"但 actionable_next_steps 列了 5 条 blocks_writing → 自相矛盾
-- ❌ verdict=iterate 但 actionable_next_steps[] 为空 → orchestrator 不知道做啥
-- ❌ verdict=ready_to_write 但还有 blocks_writing=true 的 step → 互斥
-- ❌ material mode 跑 6 维全量评 → 浪费时间
-- ❌ 不引 user 原话进 user_requirement_summary → 后续 audit 不知道依据啥
+使用 compose_review_critique：set_verdict、set_project_synthesis、按需 set_scores、
+add_concern、add_actionable_next_step、set_recommended_action、finalize。
+mode 使用 research/material；project_verdict 使用既有四值；recommended_action 保持建议性质。
+Review subject 及版本由框架绑定，未执行检查明确记录。调度器选择补研究、缩小主张、
+有限使用、有局限交付或结束；所有选择保留原审核结论与实际任务状态。

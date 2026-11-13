@@ -2,7 +2,7 @@
 
 import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
-import { SessionIndex } from "@/features/sessions/components/SessionIndex";
+import { ProjectChatRedirect } from "@/features/sessions/components/ProjectChatRedirect";
 import { useProjectId } from "@/shared/routing/route-params";
 
 function ProjectResearchRoute() {
@@ -10,7 +10,7 @@ function ProjectResearchRoute() {
   const query = useSearchParams();
   const fixtureMode =
     query.get("mode") === "demo" || process.env.NEXT_PUBLIC_SESSION_MODE === "demo";
-  return <SessionIndex projectId={projectId} mode={fixtureMode ? "fixture" : "api"} />;
+  return <ProjectChatRedirect projectId={projectId} mode={fixtureMode ? "fixture" : "api"} />;
 }
 
 export default function ProjectResearchPage() {

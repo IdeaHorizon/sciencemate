@@ -1,214 +1,209 @@
-# ScienceMate (Agent for Science) — Research Platform
+# harness-framework
 
-English | [简体中文](README.zh-CN.md)
+AI4S 研究平台的开发版脚手架。同事在这里设计自己负责的研究节点（literature /
+hypothesis / analysis / writing / …）；架构师在这里维护框架核心 + 主 harness。
 
-Install it, open it, and say what you want to research — it writes the code, runs the computation, reads the results, and writes the paper.
-
-Data and computation stay **on your own machine or a personal Linux server you choose**: every project is a git repository on its selected machine, and model keys are stored encrypted there. Python, git, LaTeX (tectonic), and a bash shell for running experiments ship with the app — **nothing to set up first**.
-
-- Current version: [v0.5.15](../../releases/tag/v0.5.15) · [Download for macOS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.15/ScienceMate-0.5.15-arm64.dmg) · [Download for Windows](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.15/ScienceMate-Setup.exe) · changelog in [Releases](../../releases)
-- This repository holds the **source code** of the Personal edition and its **releases** (installers and updates). The installers are built from this tree; see [DEVELOPMENT.md](DEVELOPMENT.md) to run it from source.
-- This is the **Personal edition**: projects run on this computer by default, with optional personal Linux servers over SSH. The Professional edition adds a shared organization server for teams and is not distributed here.
-
-## A look at the interface
-
-Open a research session inside a project and say what you need in the input box — model, collaboration mode, and files are all attached right next to it:
-
-![ScienceMate research session: say what you want to research in the input box](docs/screenshot.png)
+设计原则：每个节点是一个独立 agent loop；orchestrator 管协调；artifact 是显式
+契约；memory + KB 跨节点持久化；前端 / 数据库 / 调度器都不在这里 —— 这是研究节点
+本身的开发场。
 
 ---
 
-## What it does
-
-- **Personal remote runtimes** — select a Linux server and its root folder when creating a project; remote workers continue after Desktop closes. Configure SSH and server-side models in Settings → Runtime environments.
-
-- **One sentence in, a study out** — code, computation, results, and a written paper, on your computer or chosen personal server
-- **Projects are git repositories** — one repository per project on its selected machine; git is the record of what changed and when
-- **Research intelligence built in** — follow fields, journals, and scholars; the feed uses them to pick what is worth your time; literature search in English and Chinese
-- **Figures** — charts are laid out to a print type area, and the type area decides the canvas; data plots follow a design contract
-- **Experiment nodes** — experiment orchestration with run contracts and output postconditions
-
-## Install
-
-### Download the installer
-
-| Platform | Download | Size |
-|---|---|---|
-| macOS (Apple Silicon) | [ScienceMate-0.5.15-arm64.dmg](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.15/ScienceMate-0.5.15-arm64.dmg) | See release assets |
-| Windows 10 / 11 (64-bit) | [ScienceMate-Setup.exe](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.15/ScienceMate-Setup.exe) | See release assets |
-
-Checksums: [SHA256SUMS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.15/SHA256SUMS) · all files: [Releases](../../releases/latest)
-
-- **macOS**: open the dmg and drag ScienceMate into Applications. The first launch is blocked once because the app is not yet signed: **System Settings → Privacy & Security → scroll down → "Open Anyway"**, then confirm. One time per machine.
-- **Windows**: run `ScienceMate-Setup.exe`. If SmartScreen shows "Windows protected your PC", click **More info → Run anyway**. One time per machine.
-
-### Or install with one command
-
-#### macOS (Apple Silicon)
-
-One command:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/IdeaHorizon/sciencemate/main/install.sh | sh
-```
-
-The app opens itself when the install finishes. **No "unidentified developer" prompt** — Gatekeeper only inspects files carrying the quarantine mark, and that mark is added by browsers when saving files. `curl` doesn't add it.
-
-<details>
-<summary>See what the script does first, or install manually</summary>
-
-The script does five things: download the dmg → verify against `SHA256SUMS` → mount → copy into Applications → open. It stops on any failure.
-
-Read before you run:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/IdeaHorizon/sciencemate/main/install.sh -o install.sh
-less install.sh
-sh install.sh
-```
-
-Just show what it would do, touch nothing: `AFS_DRY_RUN=1 sh install.sh`
-
-You can also download the `.dmg` from [Releases](../../releases) and drag it into Applications. If you download through a browser, the system blocks the first launch (the app has no signing certificate yet): **System Settings → Privacy & Security → scroll down → "Open Anyway" → confirm once more**. One time per machine.
-
-</details>
-
-#### Windows (10 / 11, 64-bit)
-
-One command (PowerShell):
-
-```powershell
-irm https://raw.githubusercontent.com/IdeaHorizon/sciencemate/main/install.ps1 | iex
-```
-
-The app opens itself when the install finishes. **No "Windows protected your PC" prompt** — SmartScreen only blocks files carrying the mark-of-the-web, and that mark is added by browsers when saving files. `irm` doesn't add it.
-
-Double-clicking the installer gives you a wizard with three questions: where to install (default shown on screen, editable, with a "Browse…" button), a desktop shortcut, and a Start-menu entry. The Start menu gets an uninstall shortcut, so does "Apps & features", and your data is kept by default. **Paths with Chinese characters work, and no administrator rights are needed** (everything installs into your own user profile).
-
-<details>
-<summary>See what the script does first, or install unattended</summary>
-
-The script does four things: download `Setup.exe` → verify against `SHA256SUMS` → remove the mark-of-the-web → run the installer. It stops on any failure.
-
-Read before you run:
-
-```powershell
-irm https://raw.githubusercontent.com/IdeaHorizon/sciencemate/main/install.ps1 -OutFile install.ps1
-notepad install.ps1
-.\install.ps1
-```
-
-Environment variables (`irm | iex` cannot take parameters, so configuration goes through env vars):
-
-```powershell
-$env:AFS_SILENT=1        # unattended: no wizard, no launch after install; shortcuts still created
-$env:AFS_NO_LAUNCH=1     # install without launching
-$env:AFS_DRY_RUN=1       # print what it would do, do nothing
-$env:AFS_INSTALL_DIR="D:\Tools\ScienceMate"   # where to install
-.\install.ps1
-```
-
-</details>
-
-> The app is a self-contained window — double-click the icon and go. The backend starts and stops with the app; closing the window is the exit.
-
-## Quick start
-
-On first launch it asks three things. Every step can be skipped, and anything you skip is waiting for you in Settings:
-
-1. **Which model** — pick a provider, address, and API key. The key is stored encrypted on this machine and never sent anywhere else.
-2. **Which fields you follow** — a few research directions; the feed uses them to choose what is worth your time today.
-3. **What to open first** — the page the app lands on each time you open it.
-
-![First-run wizard: which model](docs/onboarding-model.png)
-
-Then walk through a real task. Say you have experiment data you want to understand:
-
-**① Create a project**, give it a name, and drop your data file (say `runs.csv`) into it — a git repository is created on the selected machine.
-
-![New project: just give it a name](docs/new-project.png)
-
-**② Say what you want in the input box**, for example:
-
-> `runs.csv` holds measurements for three treatment groups, 12 samples each. Check normality, choose an appropriate test for mean differences, produce a print-ready comparison figure with significance markers, and write the conclusion in the voice of a Results section — two or three sentences.
-
-**③ It takes over**: writes the code, runs the computation, reads the results, and hands you the figure and the analysis — every step committed to the project's git repository, always reviewable with `git log`.
-
-**④ Keep talking if it's not right**: different colors, different size, a different test, one more control group — iterate inside the same project.
-
-That's the whole pitch: **say what you want to research, and it does the rest.**
-
-## Updates
-
-The app checks for new versions by itself; when one exists you'll see a line in the UI — "new version · update now". Click it and the app downloads, verifies the signature, and restarts. **Updates only replace the program; your project data is never touched.**
-
-An in-app update replaces the platform code and the interface. Some releases also change parts it cannot replace — the bundled Python, the TeX engine, or the window itself. When that happens the app says so and points you to the installer; installing over the old copy keeps your projects and settings.
-
-Settings → About shows the current version and update source, and can check for updates manually.
-
-## Working with a team
-
-This edition runs on your machine only. Shared organization servers, accounts, and invitations are part of the Professional edition.
-
-## Where your things live
-
-**macOS**
+## 文件结构
 
 ```
-~/.harness-framework/
-  db.sqlite            settings and index (readable by you only)
-  project-worktrees/   one git repository per project
-  logs/backend.log     look here when something breaks
+harness-framework/
+├── core/                       # 框架核心（团队不改）
+│   ├── harness.py                  NodeHarness 数据类（硬契约）
+│   ├── loader.py                   YAML → NodeHarness
+│   ├── bootstrap.py                启动时一次性 import 所有工具 / skill
+│   ├── llm.py                      OpenAI-compatible LLM client（默认 GLM via Maas，可切 7 provider）
+│   ├── state.py                    run 级 + project 级 state 存储
+│   ├── tool_registry.py            工具注册 + 调度
+│   ├── skill_registry.py           skill 注册 + 渲染
+│   ├── context_engine.py           构建 system + user prompt
+│   ├── agent_loop.py               LLM ↔ tools 循环（带 hook + summarizer 钩子）
+│   ├── executor.py                 端到端单节点执行 + 子调度
+│   ├── summarizer.py               每节点 context 压缩（llm / truncate / drop_tool_results）
+│   ├── loop_hooks.py               Hook 系统（4 钩点）
+│   ├── loop_hooks_builtin.py       memory_delta / kb_delta / scratchpad / reflection
+│   └── mcp_client.py               可选 MCP server 集成
+│
+├── nodes/                      # 每个节点一个目录
+│   ├── _orchestrator/              主 harness（用户对话入口；架构师维护）
+│   │   ├── harness.yaml
+│   │   ├── tools/                  （可选）orchestrator 专属工具
+│   │   ├── skills/                 （可选）
+│   │   └── fixtures/               （可选）
+│   ├── literature/                 参考 #1 —— 写完整，建议通读
+│   │   ├── harness.yaml
+│   │   └── fixtures/minimal.yaml
+│   ├── analysis/                   参考 #2 —— 结构差异较大的另一种设计
+│   │   ├── harness.yaml
+│   │   └── fixtures/minimal.yaml
+│   ├── hypothesis/                 stub（owner 从零写起）
+│   ├── data/                       stub
+│   ├── experiment/                 stub
+│   ├── postprocess/                stub
+│   ├── writing/                    stub
+│   └── review/                     stub
+│
+├── shared/                     # 跨节点共享层
+│   ├── tools/                      默认自动注册的工具池
+│   │   ├── builtin.py                  ~16 个核心工具（artifact/memory/文件/shell/budget/...）
+│   │   ├── papers.py                   semantic_scholar + arxiv
+│   │   ├── run_node.py                 run_node + run_nodes_parallel + read_external + query_project_status + forward_artifact
+│   │   ├── mcp_loader.py
+│   │   └── library/                    opt-in（freeze_artifact / KB / evidence / latex / python_exec）
+│   ├── skills/                     跨节点 skill 池
+│   │   └── examples.py                 3 个示例 skill
+│   └── lib/                        helper 库（按需扩）
+│
+├── tests/                      # smoke test（每批次一组）
+├── docs/                       # 设计文档（先读 docs/architecture.md）
+├── templates/                  # harness / tool / skill 起手模板
+├── cli/                        # 次要终端 UI（nidy 维护）
+├── chat.py                     # 共享会话实现 + 旧终端启动入口兼容
+├── run_node.py                 # 单节点 runner
+├── pyproject.toml
+└── mcp_servers.yaml.example
 ```
-
-**Windows**
-
-```
-%LOCALAPPDATA%\afs\                    data (same three items)
-%LOCALAPPDATA%\Programs\ScienceMate\   the app itself
-```
-
-Uninstall = drag the app from Applications to the Trash on macOS; on Windows use the Start-menu uninstall entry, or delete the `%LOCALAPPDATA%\Programs\ScienceMate` folder. Data stays in the data directory on both platforms — deleting it is up to you.
-
-## System requirements
-
-|  | macOS | Windows |
-|---|---|---|
-| Version | 13 or newer, Apple Silicon (M series) | 10 / 11, 64-bit |
-| Disk | about 1.5 GB | about 1 GB (915 MB installed) |
-| Privileges | standard user | standard user, **no administrator** |
-
-Both platforms need a working model API key.
-
-## Security & signatures
-
-- The install scripts verify every download against the release's `SHA256SUMS`; a mismatch aborts the install.
-- Update payloads carry an ed25519 signature (`manifest.json.sig`); anything that doesn't verify is rejected.
-- Installers are **not code-signed**: installers downloaded through a browser get stopped once by SmartScreen / Gatekeeper (see the install section above for the one-time unblock); installs via the scripts raise no prompt.
-
-## Troubleshooting
-
-1. Read the last few dozen lines of the log:
-   - macOS: `~/.harness-framework/logs/backend.log`
-   - Windows: `%LOCALAPPDATA%\afs\logs\backend.log`
-2. Run the self-check:
-
-   macOS
-
-   ```sh
-   "/Applications/ScienceMate.app/Contents/Resources/python/bin/python3" -m app.launcher doctor
-   ```
-
-   Windows
-
-   ```powershell
-   cd $env:LOCALAPPDATA\Programs\ScienceMate
-   & ".\Resources\python\python.exe" -B -m app.launcher doctor
-   ```
-
-   It prints where the data root, UI, harness, git, model shell, PDF engine, and sandbox live — whichever line says `not found` is your culprit.
-3. Still stuck? Paste both into a [new issue](../../issues/new) and send it over.
 
 ---
 
-*Licensed under the [Apache License 2.0](LICENSE). Third-party notices for the bundled components (Python, git, tectonic, biber, Node dependencies) are being finalised.*
+## 安装
+
+```bash
+cd harness-framework
+cp .env.example .env
+# 编辑 .env 填三个字段：LLM_API_KEY + LLM_BASE_URL + LLM_MODEL
+# .env.example 里列了 7 个 provider 的样例配置（团队 Maas / DeepSeek /
+# OpenAI / OpenRouter / 本地 ollama / vLLM / Anthropic via proxy）任选一组。
+# 详见 docs/quick-start.md § 3。
+
+pip install -e .
+
+# v0.3.2+: 预下载 KB embedding model（~120MB，一次性，之后离线可用）
+bash scripts/install_embedding_model.sh
+# 国内网络：脚本默认走 HF mirror（hf-mirror.com）
+# 海外用户：export HF_ENDPOINT=https://huggingface.co 再跑
+# 离线 GPU server：在有网机跑完后拷 ~/.cache/huggingface/ 到目标机，设 HF_HOME
+# 不想要 semantic dedup（CI / 老 KB 设备）：export HARNESS_DISABLE_SEMANTIC_DEDUP=1
+```
+
+---
+
+## 跑起来
+
+```bash
+# 次要终端 UI（主要交互产品为 Desktop）：
+python -m cli --project my-project-2026
+# 目录职责与维护边界见 cli/README.md；python chat.py 继续兼容。
+
+# 无人值守持续运行：自动包含 auto-approve + bypass-permissions
+python chat.py --project my-project-2026 --continuous
+
+#  > 输入文字 → orchestrator 处理。
+#  > /status   → 查项目状态
+#  > /btw <text> → 软注入（下一轮 system message）
+#  > /reset   → 清对话（保留 memory + KB）
+#  > /continuous on|off → 切持续运行；/stop 随时停止
+#  > /exit    → 退出（自动保存）
+
+# 单节点跑（开发自己节点时用）：
+python run_node.py --harness literature \
+    --fixture nodes/literature/fixtures/minimal.yaml \
+    --project-id my-project-2026
+
+# 检查输出
+ls output/                                       # 每次 run 一个目录
+cat output/orchestrator__my-project-2026/conversation.json | jq .
+cat output/<sub_run>/transcript.jsonl | jq .
+ls output/<sub_run>/artifacts/
+
+# 项目级 memory / KB（持久化）：
+ls ~/.harness-framework/projects/my-project-2026/
+```
+
+`--continuous` 是项目级持续状态机。普通文字回复、provider 空回复、可恢复错误和
+后台节点完成都不会让项目静默掉回 REPL；框架会继续唤醒 orchestrator。只有明确
+完成、只剩真人/外部状态才能解除的阻塞，或用户主动 `/stop` / `/continuous off`
+才停止自动续轮。
+
+---
+
+## 团队成员要做什么
+
+**先读 2 篇必读**：
+
+1. **`docs/architecture.md`** —— 整体框架（节点契约 / 状态层 / agent loop / hook 系统 / 框架契约 vs 自留地）
+2. **`docs/owner-guide.md`** —— 从零到交付的 worked example（含 LAMMPS 节点完整 walkthrough）
+
+**然后**：
+
+1. 选自己节点目录（如 `nodes/analysis/`）
+2. 通读 2 个参考 harness：`nodes/literature/harness.yaml` + `nodes/analysis/harness.yaml`
+3. 抄 templates：
+
+   | 想做什么 | 抄哪个 |
+   |---|---|
+   | 改 harness | `templates/harness.yaml.template` |
+   | 加新工具 | `templates/tool.py.template` |
+   | 加新 skill | `templates/SKILL.md.template`（folder + .md 形态） |
+   | 写节点专属 hook | `templates/hooks.py.template` |
+   | Override summarizer | `templates/summarizer.py.template` |
+   | 写测试 fixture | `templates/fixture.yaml.template` |
+   | 项目 / user 偏好 | `templates/PROFILE.md.template` / `PROJECT.md.template` |
+
+4. 本地测：`python run_node.py --harness {your_node} --fixture nodes/{your_node}/fixtures/minimal.yaml`
+5. 反复迭代
+6. 提交：**只 push `nodes/{your_node}/` 下的改动**
+
+**框架契约（不要改）**：`core/` 全部、`shared/tools/builtin.py`、`shared/tools/library/*`、`shared/skills/*`（非你节点本地的）。
+**自留地**：`nodes/{your_node}/` 全部 + 你节点本地的 skills / tools / hooks / summarizer。
+
+---
+
+## 从哪里开始读
+
+**文档**：
+
+🌐 **HTML 站点（推荐入口）**：`docs-html/index.html`，或团队站
+`https://desktop-9el2944.taile9f15e.ts.net:8443/`。
+用 `python scripts/build_docs_html.py` 重建（需要 `pip install -e .[docs]`）。
+生成器带三道闸：过期页面扫盘删除、站内死链失败、文档点名的工具必须真的存在。
+
+📖 原始 markdown 在 `docs/`，按站上的顺序读：
+
+| 组 | 文件 |
+|---|---|
+| **开始** | `quick-start.md` |
+| **设计总纲** | `design-principles.md`（★ 五条判据，先读这个）· `architecture.md` |
+| **研究循环** | `research-loop.md` · `evidence-modalities.md` · `node-lifecycle.md` |
+| **承诺与证据** | `commitment-and-evidence.md` · `artifact-model.md` |
+| **知识与记忆** | `kb-system.md` · `memory-system.md` |
+| **人在回路** | `human-in-the-loop.md` |
+| **运行时** | `runtime.md` · `context-and-hooks.md` |
+| **Owner 手册** | `owner-guide.md` · `node-iteration-guide.md` · `dev-workflow.md` |
+| **决策档案** | `RFC_*.md` / `PROPOSAL_*.md` / 事故账本 —— **设计逻辑住在这里** |
+
+节点 / 工具 / skill / hook 的清单**不写在 markdown 里** ——
+它们由生成器从 `harness.yaml` 与注册表现算，见站上的「目录 · 自动生成」。
+
+**代码**：
+1. `core/harness.py`（80 行）—— NodeHarness 契约
+2. `nodes/literature/harness.yaml` —— 完整 producing 节点范例
+3. `nodes/_curator/harness.yaml` —— KB 整合节点范例
+4. `nodes/_orchestrator/harness.yaml` —— 主 harness 范例
+5. `core/agent_loop.py` —— LLM ↔ tools + hook + summarizer + pause/resume
+6. `core/executor.py` —— sub-agent 调用 + auto-forward
+7. `core/state.py` —— Artifact / KB / Memory 的家
+8. `core/pause.py` —— pause/resume 机制
+
+---
+
+## 跑测试
+
+```bash
+python -m pytest tests/ -q       # 182 个 unit + integration test，不联网，不调真实 LLM
+```

@@ -12,7 +12,7 @@ import types
 
 import pytest
 
-from nodes.hypothesis import hooks
+from nodes.analysis import hooks
 
 
 class _Harness:
@@ -30,7 +30,7 @@ def _ctx(turn=1, max_turns=40, baseline=0):
 
 
 def _patch(monkeypatch, *, frozen_ids, version):
-    import nodes.hypothesis.tools.research_state as rs
+    import nodes.analysis.tools.research_state as rs
     monkeypatch.setattr(rs, "frozen_prereg_hypothesis_ids", lambda s: set(frozen_ids))
     monkeypatch.setattr(rs, "current_state", lambda s: {"metadata": {"version": version}})
     monkeypatch.setattr(rs, "_meta", lambda a: (a or {}).get("metadata") or {})

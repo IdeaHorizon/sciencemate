@@ -136,13 +136,13 @@ def _analysis_worktree(tmp_path, *, verdicts):
     from core.project_workspace import _NODE_WORKSPACES as _DIRS
 
     root = tmp_path / "wt"
-    (root / _DIRS["hypothesis"]).mkdir(parents=True)
+    (root / _DIRS["analysis"]).mkdir(parents=True)
     for args in (["init", "-b", "main"], ["config", "user.name", "T"],
                  ["config", "user.email", "t@e.test"]):
         subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
     # research_state 是 plan/ 下的原生文件，出处与版本在工作区账本里。
     write_record(root, artifact_type="research_state", name="research_state", content="",
-                 directory=_DIRS["hypothesis"],
+                 directory=_DIRS["analysis"],
                  metadata={"version": 1, "hypotheses": verdicts},
                  produced_by_node_type="hypothesis", produced_by_run_id="r-hyp")
     subprocess.run(["git", "-C", str(root), "add", "--all"], check=True, capture_output=True)

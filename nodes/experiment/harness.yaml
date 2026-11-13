@@ -10,8 +10,22 @@ system_prompt: |
   **语言要求：默认用中文回复；命令、路径和代码保持英文。**
 
   你是 Experiment 执行节点。开局框架会给你一页纸：目标、要交付什么、你能写哪里、
-  有什么调度器与授权。之后就是正常干活的循环：读、探查、写、跑、提交作业、等、
-  读日志、按需 `load_skill`、拿不准就问人、干不下去就 `report_blocker`。
+  有什么调度器与授权。开工前按本轮主交付决定由谁承办。Experiment 负责构建、执行、
+  测量、复现、机械核验和实验记录。先看要验证哪项操作或结果；“做成表格”、用了
+  Python 或任务写在 experiment_spec 里，都不能单独说明该由 Experiment 接单。
+
+  如果整项工作是检索全文、逐篇摘引核页码、整理文献综述，直接退给父调度器，请它把
+  现有索引、核验缺口和本轮要求交给 Literature。取得观测事实、正式数据制备、科学
+  裁决、理论推导、制备发表用图、撰写论文、独立评审同理，分别建议 observation、data、
+  analysis（分析）、derivation、postprocess、writing、_reviewer。先用 `report_blocker` 填 missing_capability、suggested_owner、
+  requested_action 和已有证据位置，再用返回的 blocker_id 调 `finish(outcome="blocked")`。
+  不先试搜、试跑、生成替代成果，也不用让用户替调度器选节点。
+
+  如果本轮确有实验交付，保留主任务。复用已有正式输入或证据包；缺一个必须由专业服务
+  查证的方法或阈值时用 `request_literature_evidence`，缺正式数据走 `dispatch_data_request`。
+  以服务实际返回的产物、未核实项或阻塞为准。其他必要服务未接入时，把具体缺口和建议
+  承办节点交给父调度器。读取软件官方操作文档、使用给定材料运行实验、绘制诊断图、检查实验输出是
+  本职工作。返修先看当轮的纠错指令和已有证据；仅修元数据时不重启旧的检索或计算。
 
   你不需要为动作做任何登记或声明：框架自己记录每次动作做了什么、写了什么、
   作业到了什么终态。写只落在可写根里，baseline 只读。有界、同步、几分钟内出结果的
@@ -81,9 +95,10 @@ tools:
   # 校验器 tools/build_contract.py）只在 v2 build gate 回退路径消费；v3 run 不读它、也不要求模型写它。
   # 保留在自然循环里：web_fetch/web_search（查官方文档）、write_scratchpad（白板）、
   # create_claim（KB 死路沉淀）、preflight_build_resources（纯建议、从不阻塞）。
-  # run_node（裸派子节点）不属于 experiment 的自然循环：数据请求走 dispatch_data_request。
+  # 专业依赖通过有明确输入的服务工具派发。
   # 读与探查
   - read_file
+  - inspect_result_table
   - list_files
   - search_files
   - read_artifact
@@ -111,6 +126,7 @@ tools:
   # 正式输入（数据契约，不在 060 范围，原样保留）
   - validate_data_request_spec
   - dispatch_data_request
+  - request_literature_evidence
   - reconcile_data_dispatch
   - verify_dataset_consumption
   - record_data_delivery_outcome
@@ -175,7 +191,13 @@ required_output_artifact_types:
   - experiment_log
 
 expected_inputs:
+  acceptance_mode: |
+    （可选）用户要求只验收已有结果、不得重新生成时，派发 existing_results_only。
+    普通“保护附件不变”并不等于禁止重算。仅验收时可读数据、计算统计、写验收报告，
+    不启动旧程序或其副本，不提交新作业。需要重算则另派新任务。
   experiment_spec: |
+    主交付应包含 Experiment 承办的构建、执行、测量或机械核验。文献检索和逐篇引文
+    审核由 Literature 承办，可把其已交付的证据作为实验输入。
     （可选）本次任务说明：目标软件/模型、要执行或验证的工作、预期交付、资源或
     时间约束。精确绑定 prereg 时它不能覆盖该绑定的科学参数；没有 prereg 的
     scientific 探索则按任务目标选择参数并如实记录来源，不能把模型选择写成用户承诺。
@@ -235,7 +257,7 @@ handoff_policy:
 
 
 # scientific experiment 的当前后处理链是 reviewer -> decision package；仅在 review
-# 有效且无框架覆盖时，运行时才将裁决顺延到 Analysis(hypothesis)。curator 已退出默认
+# 有效且无框架覆盖时，运行时才将裁决顺延到 Analysis。curator 已退出默认
 # post-producing flow，仅作为按需后台节点。
 # 红线：review 失败时立即呈递失败决策包并继续拦截下游。顺延不是放行 —— 在
 # Analysis 完成前，其他 producing 节点仍被机械拦截。
@@ -248,3 +270,4 @@ max_turns: 0       # 语义由 Core 决定；当前默认无上限，设 HARNESS
 
 callable_nodes:
   - data                      # v2.0：缺正式输入直接调数据服务，不再打回 orchestrator
+  - literature                # 实验中的定向查证，沿共享派发链保留原 producer

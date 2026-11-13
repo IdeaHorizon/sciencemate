@@ -36,7 +36,7 @@ from core.project_workspace import bind_project_workspace
 from core.state import State
 from shared.tools.library.artifact_intake import _import_artifact, _owning_node_of
 
-NODES = ("literature", "hypothesis", "data", "experiment", "postprocess", "writing")
+NODES = ("literature", "analysis", "data", "experiment", "postprocess", "writing")
 
 from core.project_workspace import _NODE_WORKSPACES as _DIRS  # 节点 → 目录
 
@@ -182,7 +182,7 @@ def test_producing_nodes_still_cannot_import_at_all() -> None:
     tool = get_tool("import_artifact")
     assert tool is not None
     assert tool.allowed_node_types == ["_orchestrator"]
-    for node in ("writing", "experiment", "literature", "hypothesis"):
+    for node in ("writing", "experiment", "literature", "analysis"):
         names = {t.name for t in list_tools_for_node(node, ["import_artifact"])}
         assert "import_artifact" not in names, node
     assert {t.name for t in list_tools_for_node("_orchestrator", ["import_artifact"])} == {"import_artifact"}

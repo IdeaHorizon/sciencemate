@@ -8,11 +8,19 @@ from pathlib import Path
 from typing import Any
 
 from core.tool_registry import ToolDefinition, register_tool
+from nodes.writing.renderers import render_template
 
 from .w_brief import load_brief, load_outline
 from .w_common import (
-    RENDERERS_DIR, bib_keys, cite_keys, clip, load_genre, manuscript_dir,
-    paper_dir, read_json, write_json, worktree_root,
+    bib_keys,
+    cite_keys,
+    clip,
+    load_genre,
+    manuscript_dir,
+    paper_dir,
+    read_json,
+    worktree_root,
+    write_json,
 )
 from .w_dossier import build_dossier
 
@@ -145,7 +153,6 @@ def _assemble(state: Any, brief: dict, genre: dict) -> Path:
     mdir = manuscript_dir(state)
     _fit_tables(mdir)
     renderer = (genre["structure"].get("renderer") or "zh_article")
-    tmpl = (RENDERERS_DIR / renderer / "main.tex.tmpl").read_text(encoding="utf-8")
     variants = genre["structure"].get("variants") or {}
     parts = variants.get(brief.get("structure_variant") or "", {}).get("parts") or genre["structure"].get("required_parts") or []
     includes = []
@@ -159,6 +166,11 @@ def _assemble(state: Any, brief: dict, genre: dict) -> Path:
         (mdir / "sections" / "abstract.tex").write_text("", encoding="utf-8")
     if not (mdir / "refs.bib").is_file():
         (mdir / "refs.bib").write_text("", encoding="utf-8")
+    # A genre selects structure; the brief owns the manuscript language.
+    # Keep one template instead of forking the complete article scaffold by locale.
+    language = (brief.get("language") or {}).get("body") or (
+        genre["structure"].get("language") or {}).get("body", "zh")
+    tmpl = render_template(renderer, language)
     main = (tmpl.replace("<<TITLE>>", _tex_escape(brief.get("title") or ""))
             .replace("<<AUTHORS>>", _authors_block(brief))
             .replace("<<SECTIONS>>", "\n".join(includes))
@@ -263,7 +275,8 @@ def hard_lines(state: Any, pages: list[str], log_text: str, main_pdf: Path | Non
         no_caption = [n for n in nums if n not in cap_nums]
         return {"numbers": nums, "captions": cap_nums, "contiguous": contiguous, "unreferenced": unreferenced,
                 "no_caption": no_caption}
-    figs, tabs = _seq("图"), _seq("表")
+    figs = _seq(r"(?:图|\b[Ff]igure|\b[Ff]ig\.)")
+    tabs = _seq(r"(?:表|\b[Tt]able)")
     out["H4_figures_tables"] = {"passed": figs["contiguous"] and tabs["contiguous"] and not figs["unreferenced"]
                                           and not tabs["unreferenced"] and not figs["no_caption"] and not tabs["no_caption"],
                                 "figures": figs, "tables": tabs}

@@ -21,7 +21,7 @@ export function ProjectCard({ project }: { project: Project }) {
   return (
     <>
     <Link
-      href={`/projects/${encodeURIComponent(project.id)}/research`}
+      href={`/projects/${encodeURIComponent(project.id)}/chat`}
       className="project-list-row"
       onContextMenu={menu.onContextMenu}
     >

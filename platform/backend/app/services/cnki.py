@@ -10,7 +10,7 @@ import re
 import secrets
 import unicodedata
 from datetime import UTC, datetime, timedelta
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from fastapi import HTTPException
 from sqlalchemy import and_, func, or_, select, update
@@ -60,6 +60,8 @@ def job_state(job: CnkiJob) -> str:
         return "cancelled"
     if job.last_completed_at and (job.checkpoint or {}).get("finished"):
         return "completed"
+    if (job.checkpoint or {}).get("reset_session"):
+        return "queued"
     if job.lease_until and job.lease_until > now():
         return "working"
     return (job.last_report or {}).get("state", "queued") if (job.last_report or {}).get("state") in {
@@ -78,8 +80,16 @@ async def job_view(db, job: CnkiJob, *, papers=False, page_size: int | None = No
               "phase": (job.checkpoint or {}).get("phase", "index"),
               "page": (job.checkpoint or {}).get("page", 1), "total": (job.checkpoint or {}).get("total", 0),
               "detail": (job.last_report or {}).get("detail", ""), "last_completed_at": job.last_completed_at,
+              "error_code": (job.last_report or {}).get("code"),
               "executor": (job.checkpoint or {}).get("executor", "server"),
               "document_kind": (job.checkpoint or {}).get("document_kind")}
+    # Existing installations stored the denial only in the human-readable
+    # receipt. Keep the recovery action available after upgrading those jobs.
+    if (result["state"] == "paused" and not result["error_code"]
+            and result["executor"] == "server" and "HTTP 403" in result["detail"]):
+        result["error_code"] = "access_denied"
+    if (job.checkpoint or {}).get("reset_session"):
+        result.update(detail="正在备份旧会话并建立新的知网采集会话", error_code=None)
     if papers:
         statement = select(CnkiPaper).join(CnkiJobPaper, CnkiJobPaper.paper_id == CnkiPaper.id).where(
             CnkiJobPaper.job_id == job.id, CnkiPaper.user_id == job.user_id)
@@ -162,6 +172,10 @@ async def claim_job(db, device: CnkiDevice, *, executor="local", server_slots=1)
         statement = statement.with_for_update(skip_locked=True)
     jobs = list((await db.scalars(statement)).all())
     if executor == "server":
+        # A reset belongs to the shared browser, not one category's tab. The
+        # coordinator must quiesce both lanes before any new claim for this user.
+        if any((job.checkpoint or {}).get("reset_session") for job in jobs):
+            return None
         # Collect every queued query's indexes before spending time on abstracts.
         jobs.sort(key=lambda job: (
             (job.checkpoint or {}).get("phase") == "metadata"
@@ -206,6 +220,31 @@ async def claim_job(db, device: CnkiDevice, *, executor="local", server_slots=1)
                 "phase":checkpoint.get("phase", "index"), "total":checkpoint.get("total", 0),
                 "limit":job.result_limit, "lease":lease}
     return None
+
+
+async def request_session_reset(db, user_id, job_ids, *, lang="zh"):
+    """Explicit user action only; polls, retries and recurring jobs never call it."""
+    await lock_user(db, user_id)
+    jobs = list((await db.scalars(select(CnkiJob).where(CnkiJob.user_id == user_id))).all())
+    selected = [job for job in jobs if job.id in job_ids and job.enabled]
+    if len(selected) != len(job_ids):
+        raise HTTPException(404, say({"zh": "采集任务不存在", "en": "Collection task not found."}, lang))
+    if any((job.checkpoint or {}).get("executor", "server") != "server" for job in selected):
+        raise HTTPException(422, say({"zh": "此操作仅适用于平台管理的知网浏览器", "en": "Only the managed CNKI browser can be reset."}, lang))
+    selected = [job for job in selected if job_state(job) != "completed"]
+    if not selected:
+        raise HTTPException(409, say({"zh": "这些检索已经完成，无需重建会话", "en": "These searches are complete; a session reset is unnecessary."}, lang))
+    request_id = next(((job.checkpoint or {}).get("reset_session") for job in jobs
+                       if job.enabled and (job.checkpoint or {}).get("reset_session")), None)
+    if not request_id:
+        moment = now()
+        attempts = [(job.checkpoint or {}).get("session_reset_at") for job in jobs]
+        if any(stamp and moment-datetime.fromisoformat(stamp) < timedelta(seconds=60) for stamp in attempts):
+            raise HTTPException(429, say({"zh": "刚刚已重建过知网会话，请先检查新窗口，至少一分钟后再试", "en": "The CNKI session was just reset. Check the new window and wait at least one minute before retrying."}, lang))
+        request_id = str(uuid4())
+    for job in selected:
+        job.checkpoint = {**(job.checkpoint or {}), "reset_session": request_id}
+    return {"state": "queued", "request_id": request_id}
 
 
 async def leased_job(db, device: CnkiDevice, job_id: str, lease: str, *, lang: str = "zh") -> CnkiJob:

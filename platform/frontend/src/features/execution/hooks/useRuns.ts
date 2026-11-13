@@ -13,7 +13,6 @@ import { createExecutionReadClient } from "../lib/execution-read-client";
 import type { ExecutionEvent } from "../lib/execution-event";
 import {
   mergeCanonicalRunEvents,
-  readCanonicalRunEvents,
   readCanonicalRunEventsAfter,
 } from "../lib/run-event-reader";
 import { readCanonicalRunEventStream } from "../lib/run-event-stream";
@@ -81,21 +80,24 @@ export function useRunEvents(
   }), []);
   const query = useQuery({
     queryKey: key,
-    queryFn: async () => mergeCanonicalRunEvents(
-      queryClient.getQueryData<ExecutionEvent[]>(key) ?? [],
-      // 「这一轮干了什么」包含它派出去的子节点做的事 —— 不带的话，用户只
-      // 看得到编排器自己那一坨工具名（wangd 2026-08-11：「literature 都结束
-      // 了…还是在下面显示一大坨」）。
-      await readCanonicalRunEvents(client, sessionId, runId),
-      sessionId,
-      runId,
-    ),
+    queryFn: async ({ signal }) => {
+      const cached = queryClient.getQueryData<ExecutionEvent[]>(key) ?? [];
+      const incoming = await readCanonicalRunEventsAfter(
+        client, sessionId, runId, cached.at(-1)?.sequence ?? 0, signal,
+      );
+      return mergeCanonicalRunEvents(
+        queryClient.getQueryData<ExecutionEvent[]>(key) ?? [], incoming, sessionId, runId,
+      );
+    },
     enabled: enabled && !!sessionId && !!runId,
     staleTime: Number.POSITIVE_INFINITY,
   });
 
   useEffect(() => {
-    if (!enabled || !follow || !sessionId || !projectId || !runId) return;
+    // Seed the observer with the completed paginated snapshot. Starting at zero
+    // concurrently replayed thousands of old events one at a time, repeatedly
+    // rebuilding history and invalidating session state for old lifecycle events.
+    if (!enabled || !follow || !query.isSuccess || !sessionId || !projectId || !runId) return;
 
     const storeEvents = (incoming: readonly ExecutionEvent[]) => {
       let merged: ExecutionEvent[] = [];
@@ -172,7 +174,7 @@ export function useRunEvents(
       setAssistantDraft(snapshot.assistantDraft);
       setStreamError(snapshot.phase === "error" ? snapshot.error : undefined);
     });
-  }, [client, enabled, follow, key, projectId, queryClient, runId, sessionId]);
+  }, [client, enabled, follow, key, projectId, queryClient, query.isSuccess, runId, sessionId]);
 
   return {
     ...query,

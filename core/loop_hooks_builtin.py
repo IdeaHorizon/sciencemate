@@ -14,8 +14,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from core.naming import canonical_node_type
+
 from . import closure as _closure
-from .llm import LLMMessage, framework_notice_body, is_framework_notice
+from .llm import LLMMessage, framework_notice, framework_notice_body, is_framework_notice
 from .loop_hooks import HookContext, LoopHook, register_loop_hook
 
 #: 本模块的四处 `except` 都用它记账。它此前**根本不存在** —— 于是那几个
@@ -291,6 +293,9 @@ def _callee_contracts_on_turn_start(ctx: HookContext) -> list[LLMMessage] | None
         kind = "service" if child.is_service else "producing"
         lines.append("")
         lines.append(f"### `{node_type}`（{kind}）")
+        if child.task_input_fields:
+            lines.append("本次任务必填其一：" + " / ".join(child.task_input_fields)
+                         + "；同一任务也用于进度说明。")
         for key, desc in expected.items():
             lines.append(f"  - `{key}`：{str(desc).strip()}")
     if not found:
@@ -493,6 +498,89 @@ def _reflection_on_turn_end(ctx: HookContext) -> list[LLMMessage] | None:
 # curator 已不在 post-producing flow 里（wangd 2026-08-19）——它是按需调取的
 # 后台节点。原先这里有一个 legacy hook 每轮强提醒"pending_curator_integrations
 # 非空，先去整合"；那份镜像连同这条提醒一起删除。
+def _dispatch_receipt_on_turn_start(ctx: HookContext) -> list[LLMMessage] | None:
+    """Put a child's recovery/reuse receipt beside the next scheduling choice.
+
+    This reports a runtime result; it never approves a scientific claim or
+    closes the parent's overall goal. Fresh human input supersedes old notices.
+    """
+    if ctx.state.node_type not in {"_orchestrator", "orchestrator"}:
+        return None
+    import hashlib
+    import json
+
+    seen = ctx.state.hook_state.setdefault("_dispatch_receipt_notices", [])
+    notices = []
+    for message in reversed(ctx.messages):
+        if message.role == "assistant" or (
+            message.role == "user" and not is_framework_notice(message)
+        ):
+            break
+        if message.role != "tool" or message.name not in {"run_node", "run_nodes_parallel"}:
+            continue
+        try:
+            content = str(message.content or "")
+            result, _ = json.JSONDecoder().raw_decode(content[content.index("{"):])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(result, dict):
+            continue
+        children = result.get("results") if isinstance(result.get("results"), list) else [result]
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            child = child.get("result") if isinstance(child.get("result"), dict) else child
+            outcome = child.get("node_task_outcome")
+            if not isinstance(outcome, dict) or outcome.get("redispatch_required") is not False:
+                continue
+            action = outcome.get("dispatch_action")
+            if action not in {"reuse_delivery", "resume_saved_stage", "resolve_review_blocker"}:
+                continue
+            receipt = {key: outcome[key] for key in (
+                "outcome", "dispatch_action", "redispatch_required", "artifact_id",
+                "request_authority", "review_scope", "retry_target", "resume_contract",
+            ) if key in outcome}
+            encoded = json.dumps(receipt, ensure_ascii=False, sort_keys=True, default=str)
+            identity = hashlib.sha256((str(message.tool_call_id) + encoded).encode()).hexdigest()
+            if identity in seen:
+                continue
+            seen.append(identity)
+            if action == "reuse_delivery" and outcome.get("outcome") == "success":
+                guidance = (
+                    "该子任务已按回执绑定的原始要求交付。没有新的真实用户修正时，"
+                    "你先前 assistant 消息中的偏好仍是你自己的建议，不能改称用户新增要求。"
+                    "不要为这些偏好再次派同一任务。若有具体新矛盾，先用结构化 review_feedback "
+                    "复核现有实物。若用户本轮目标仅是这次服务，交付结束；整体目标中其它已授权工作可继续。"
+                )
+            elif action == "reuse_delivery":
+                guidance = (
+                    "回执只确认已有内容可复用，原任务未确认成功。保留实际的部分完成或受阻状态，"
+                    "说明仍缺什么；不要将已有报告或可复用文件提升为整个任务成功。"
+                )
+            else:
+                guidance = (
+                    "按回执恢复已有工作或解决审核阻塞，保留原始要求和成功产物。"
+                    "换 spec、目录或 child ID 不会解除该恢复条件，也不产生新预算。"
+                    "审核服务不可用不证明产物有缺陷。"
+                )
+            excerpt = encoded[:6000]
+            if len(encoded) > 6000:
+                excerpt += "\n[回执摘要已截断，完整恢复契约见原 run_node 返回]"
+            notices.append(framework_notice(
+                "节点调度回执（框架事实，不是用户新指令）：\n" + excerpt
+                + "\n" + guidance + "\n这份子任务回执不自动决定整个研究目标是否完成。"
+            ))
+    del seen[:-32]
+    return notices or None
+
+
+register_loop_hook(LoopHook(
+    name="dispatch_receipt",
+    description="Expose verified child reuse/recovery facts at the next scheduling choice.",
+    on_turn_start=_dispatch_receipt_on_turn_start,
+))
+
+
 # ── post_node_review_flow_reminder (v0.4 完整 3-step flow) ───────────────────
 #
 # 取代 producing_integration_reminder。当 hook_state["pending_post_node_flow"]
@@ -812,7 +900,7 @@ def _external_signal_on_turn_start(ctx: HookContext) -> list[LLMMessage] | None:
     if not ctx.state.project_id:
         return None
     try:
-        from .signal import read_signal, clear_signal
+        from .signal import clear_signal, read_signal
     except ImportError:
         return None
     sig = read_signal(ctx.state.project_id)
@@ -873,7 +961,8 @@ def _citation_integrity_on_turn_end(ctx: HookContext) -> list[LLMMessage] | None
     （v3.2 item#3）manuscript 的 verdict ↔ KB status 一致性。"""
     try:
         from shared.lib.citation_integrity import (
-            validate_artifact_citations, check_verdict_consistency,
+            check_verdict_consistency,
+            validate_artifact_citations,
         )
     except ImportError:
         return None
@@ -1487,7 +1576,7 @@ _ORG_ORIENTATION_KEY = "_org_orientation_shown"
 #: 哪些节点该在开局收到 org 知识。判据是"它在**立问题/定方向**"——
 #: 那是组织已知最该起作用的时刻。执行类节点开局不需要（它们的输入由
 #: 派发决定），配方注入在实验阶段另行接入。
-_ORG_ORIENTATION_NODES = ("hypothesis", "_orchestrator")
+_ORG_ORIENTATION_NODES = ("analysis", "_orchestrator")
 
 
 def _org_orientation_on_turn_start(ctx: HookContext) -> list[LLMMessage] | None:
@@ -1501,7 +1590,7 @@ def _org_orientation_on_turn_start(ctx: HookContext) -> list[LLMMessage] | None:
     org_delivery 决定要不要说，这里不编造）。
     """
     state = ctx.state
-    if str(getattr(state, "node_type", "")) not in _ORG_ORIENTATION_NODES:
+    if canonical_node_type(str(getattr(state, "node_type", ""))) not in _ORG_ORIENTATION_NODES:
         return None
     if state.hook_state.get(_ORG_ORIENTATION_KEY):
         return None
@@ -1581,7 +1670,7 @@ register_loop_hook(LoopHook(
 #
 # 2026-08-17 实测（英国饮食文化开题）：新项目第一条消息，orchestrator 按训练
 # 先验走了 literature→hypothesis→writing 老管线 —— v2.1 的"开题入口是
-# hypothesis(Analysis)"写在 prompt 第 200 行上下，没竞争过第 75 行的老示例。
+# analysis"写在 prompt 第 200 行上下，没竞争过第 75 行的老示例。
 #
 # 本 hook 把"局面"变成机械判定 + 每轮一条**覆盖式**注入：
 #   - 局面(flow_debt / fresh / in_research)框架判，语义意图仍归模型 ——
@@ -1650,7 +1739,10 @@ def _detect_situation(state) -> tuple[str, list[str]]:
     rs_path, verdict = _latest_research_state(state)
     if rs_path is None:
         lines.append("本项目还没有研究计划（无 research_state）。")
-        lines.append("- 用户提出研究目标 → 起 `hypothesis`（Analysis）开题：定研究问题、冻结预注册；literature/data 它自己按需调，不要先替它铺一轮 landscape 综述。")
+        lines.append(
+            "- 用户提出研究目标 → 起 `analysis` 开题：定研究问题、冻结预注册；"
+            "literature/data 它自己按需调，不要先替它铺一轮 landscape 综述。"
+        )
         lines.append("- 用户明确只要一次独立服务（调研/画图/备数据）→ 直接调对应 service 节点。")
         lines.append("- 用户带来外部已完成的材料 → `import_artifact` 登记，别起节点重做一遍。")
         lines.append("- 闲聊 / 问答 / 状态查询 → 直接回答，不起节点。")
@@ -1662,7 +1754,7 @@ def _detect_situation(state) -> tuple[str, list[str]]:
     lines.append("- 下一步看 research_state 的 verdict / next_steps，不按固定管线顺序。")
     hint = "" if rs_path.startswith("artifact:") else "（read_file 可读）"
     lines.append(f"- 最新 research_state：`{rs_path}`{hint}")
-    lines.append("- 每轮 experiment 之后回到 `hypothesis`（Analysis）更新裁决，再决定下一步。")
+    lines.append("- 每轮 experiment 之后回到 `analysis` 更新裁决，再决定下一步。")
     lines.extend(_research_facts(state, rs_path=rs_path, verdict=verdict))
     return "in_research", lines
 

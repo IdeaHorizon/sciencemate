@@ -1,4 +1,5 @@
 import { say, type Language, type Phrase } from "../../../shared/i18n/language.ts";
+import { canonicalNodeType } from "../../../shared/node-type.ts";
 
 /**
  * 机器值 → 给人看的名字：节点、执行事件类型、工具参数名。
@@ -20,8 +21,7 @@ import { say, type Language, type Phrase } from "../../../shared/i18n/language.t
  */
 export const NODE_DISPLAY_NAMES: Record<string, Phrase> = {
   literature: { zh: "文献调研", en: "Literature review" },
-  // hypothesis 节点承担 Analysis 角色：提假设、出研究协议与实验设计、判定实验证据。
-  hypothesis: { zh: "假设与分析", en: "Hypothesis & analysis" },
+  analysis: { zh: "分析", en: "Analysis" },
   data: { zh: "数据准备", en: "Data preparation" },
   experiment: { zh: "实验", en: "Experiment" },
   observation: { zh: "观察研究", en: "Observation" },
@@ -43,7 +43,7 @@ export const NODE_DISPLAY_NAMES: Record<string, Phrase> = {
 
 export function nodeDisplayName(nodeType: string | null | undefined, lang: Language): string {
   if (!nodeType) return say(NODE_DISPLAY_NAMES.research, lang);
-  const label = NODE_DISPLAY_NAMES[nodeType];
+  const label = NODE_DISPLAY_NAMES[canonicalNodeType(nodeType)];
   return label ? say(label, lang) : nodeType;
 }
 

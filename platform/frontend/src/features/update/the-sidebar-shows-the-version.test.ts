@@ -12,9 +12,8 @@ const SHELL = strip(readFileSync("src/shared/layout/AppShell.tsx", "utf8"));
 const VERSION = strip(readFileSync("src/features/update/AppVersion.tsx", "utf8"));
 const API = strip(readFileSync("src/lib/api.ts", "utf8"));
 
-test("the version sits in the sidebar after either navigation, once", () => {
-  assert.match(SHELL, /<GlobalNavigation pathname=\{pathname\} \/>\}\s*<AppVersion \/>\s*<\/aside>/,
-    "版本号没挂在 aside 里、两种侧栏之后 —— 项目里或全局某一边会看不到");
+test("the version sits in the sidebar after the unified navigation, once", () => {
+  assert.match(SHELL, /<aside[^>]*>[\s\S]*<GlobalNavigation[^>]*\/>[\s\S]*<AppVersion \/>[\s\S]*<\/aside>/, "版本号应挂在统一侧栏中");
   assert.equal(SHELL.match(/<AppVersion \/>/g)?.length, 1, "挂了不止一处：两处会各自演化");
 });
 

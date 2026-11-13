@@ -566,9 +566,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from app.services.feed import scholar_migration
         scholar_migration.start()
     else:
-        # 个人档不做后台爬取：一个刚装好的软件不该在用户还没说要什么之前
-        # 就开始连外网。资讯流功能本身没删，用户点开时按需采（RFC X8）。
-        logger.info("background collection is off in this profile")
+        # A clean desktop stays idle. Existing explicit follows resume their
+        # acquisition, preparation and translation after an application restart.
+        resumed = await feed_collector.resume_saved_subscriptions()
+        logger.info("public background collection is off; requested subscriptions resumed=%s", resumed)
 
     # 交付对账：把已完成的自主 run 补发到 Artifacts（命门交付链的自愈网）。
     # 触发挂在 DB 完成状态而不是 execute_local_turn 尾部——见
@@ -605,11 +606,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         # 先停采集：它持有出网连接和一条 DB 事务，而下面的关机步骤会开始
         # 拆进程。让它在自己的边界上退出，别在一次 HTTP 抓取中间被撕掉。
-        await feed_collector.stop()
-        from app.services.literature_harvester import literature_index_harvester
-        await literature_index_harvester.stop()  # 没起过也安全
         from app.services.feed import scholar_migration
         await scholar_migration.stop()
+        from app.services.literature_harvester import literature_index_harvester
+        await literature_index_harvester.stop()  # 没起过也安全
+        # Producers can wake feed preparation while finishing; stop the
+        # downstream workers after all such producers have been drained.
+        await feed_collector.stop()
         # 交付对账同理：它每轮持一条 DB 事务，让它在自己的节拍边界退出。
         await delivery_reconciler.stop()
 

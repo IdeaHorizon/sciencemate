@@ -119,7 +119,7 @@ def _compact_job_result(content: str) -> str:
 
 
 def register(name, description, properties, required, executor, *, interrupted_recovery=None,
-             result_compactor=None):
+             result_compactor=None, replayable_read=False):
     register_tool(
         ToolDefinition(
             name=name,
@@ -127,6 +127,7 @@ def register(name, description, properties, required, executor, *, interrupted_r
             risk_level="medium",
             interrupted_recovery=interrupted_recovery,
             result_compactor=result_compactor,
+            replayable_read=replayable_read,
             parameters_schema=dict(
                 type="object", properties=properties, required=required, additionalProperties=False
             ),
@@ -162,6 +163,7 @@ register(
     ),
     ["action"],
     resource,
+    replayable_read=lambda arguments: arguments.get("action") == "list",
 )
 register(
     "remote_exec",
@@ -212,6 +214,7 @@ register(
     remote_job,
     interrupted_recovery=_can_reconcile_job,
     result_compactor=_compact_job_result,
+    replayable_read=lambda arguments: arguments.get("action") in {"list", "status", "wait"},
 )
 register(
     "remote_file",

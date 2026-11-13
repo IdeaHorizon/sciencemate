@@ -570,9 +570,11 @@ async def execute_authorized_action(state, entry: dict | None) -> dict | None:
     }
     decision_actor = "调度器决定" if entry.get("decided_by") == "orchestrator" else "人工决定"
     inherited = {}
-    if target == entry.get("producing_node"):
+    from core.naming import same_node
+
+    if same_node(target, entry.get("producing_node")):
         contract = entry.get("producing_dispatch_contract") or {}
-        if contract.get("node_type") == target:
+        if same_node(contract.get("node_type"), target):
             inherited = {key: contract[key] for key in
                          ("task_instance_uuid", "task_contract_digest", "deliverable")
                          if contract.get(key) is not None}

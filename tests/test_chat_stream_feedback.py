@@ -283,86 +283,12 @@ def test_silent_llm_tolerates_fake_llm_without_spawn():
 
 # ── 非 tty：必须 flush，否则管道/tee 下完全没反馈 ───────────────────────────
 
-def test_emit_above_prompt_flushes_when_not_tty(monkeypatch):
-    """管道下 stdout 是块缓冲的：不 flush 的话进度提示要等一轮跑完才吐出来 ——
-    用户看到的就是"完全没反馈"。"""
-    import chat as chat_mod
-
-    flushed: list[bool] = []
-
-    class _Spy(io.StringIO):
-        def isatty(self):
-            return False
-
-        def flush(self):
-            flushed.append(True)
-            super().flush()
-
-    spy = _Spy()
-    monkeypatch.setattr(chat_mod, "_IS_TTY", False)
-    monkeypatch.setitem(chat_mod._PROMPT_LIVE, "on", False)
-    monkeypatch.setattr(sys, "stdout", spy)
-    chat_mod._emit_above_prompt("⏳ 处理中…")
-
-    assert "⏳ 处理中…" in spy.getvalue()
-    assert flushed, "非 tty 下必须 flush"
 
 
-def test_reasoning_display_writes_and_flushes_when_not_tty(monkeypatch):
-    """非 tty 下思考指示同样要即时可见。"""
-    import chat as chat_mod
-
-    flushed: list[bool] = []
-
-    class _Spy(io.StringIO):
-        def isatty(self):
-            return False
-
-        def flush(self):
-            flushed.append(True)
-            super().flush()
-
-    spy = _Spy()
-    monkeypatch.setattr(chat_mod, "_IS_TTY", False)
-    monkeypatch.setattr(chat_mod, "_REASON_MODE", "brief")
-    monkeypatch.setattr(chat_mod, "_REASON_STATE",
-                        {"active": False, "chars": 0, "t0": 0.0, "last_tick": 0.0})
-    monkeypatch.setattr(sys, "stdout", spy)
-
-    chat_mod._reasoning_display("思考内容")
-    chat_mod._reasoning_display(None)
-
-    out = spy.getvalue()
-    assert "思考中" in out, f"思考阶段没有任何指示：{out!r}"
-    assert out.endswith("\n"), "推理段必须以换行收尾，别跟正文挤一行"
-    assert flushed
 
 
-def test_reasoning_display_off_mode_silent(monkeypatch):
-    import chat as chat_mod
-
-    spy = io.StringIO()
-    monkeypatch.setattr(chat_mod, "_REASON_MODE", "off")
-    monkeypatch.setattr(chat_mod, "_REASON_STATE",
-                        {"active": False, "chars": 0, "t0": 0.0, "last_tick": 0.0})
-    monkeypatch.setattr(sys, "stdout", spy)
-    chat_mod._reasoning_display("x")
-    chat_mod._reasoning_display(None)
-    assert spy.getvalue() == ""
 
 
-def test_reasoning_display_full_mode_streams_text(monkeypatch):
-    import chat as chat_mod
-
-    spy = io.StringIO()
-    monkeypatch.setattr(chat_mod, "_IS_TTY", False)
-    monkeypatch.setattr(chat_mod, "_REASON_MODE", "full")
-    monkeypatch.setattr(chat_mod, "_REASON_STATE",
-                        {"active": False, "chars": 0, "t0": 0.0, "last_tick": 0.0})
-    monkeypatch.setattr(sys, "stdout", spy)
-    chat_mod._reasoning_display("推理正文")
-    chat_mod._reasoning_display(None)
-    assert "推理正文" in spy.getvalue()
 
 
 # ── 状态快照慢时有提示 ──────────────────────────────────────────────────────

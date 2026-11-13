@@ -1,5 +1,6 @@
 from typing import Literal
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -27,6 +28,10 @@ class JobIn(StrictModel):
         if not value.strip():
             raise ValueError("检索词不能为空")
         return value.strip()
+
+
+class SessionResetIn(StrictModel):
+    job_ids: list[UUID] = Field(min_length=1, max_length=100)
 
 
 class IndexIn(StrictModel):

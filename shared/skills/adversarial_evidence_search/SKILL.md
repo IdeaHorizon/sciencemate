@@ -6,9 +6,9 @@ description: |
   不要用在：刚写下 claim 还没数据支撑时 —— 那时该用 falsifiability_pretest 先设计反驳判据，
   不是搜反例。
 applies_when:
-  - Analysis（hypothesis）给研究问题下科学结论前
+  - Analysis给研究问题下科学结论前
   - review 节点检查 manuscript 是否做过对抗扫描
-  - hypothesis 节点 finalize prereg 前，确认 claim 真的可证伪 + 有反例搜过
+  - analysis 节点 finalize prereg 前，确认 claim 真的可证伪 + 有反例搜过
 expected_outcome: 至少跑过 3-5 个 adversarial query；读过 abstract 判断是否真矛盾；记 observation memory
 status: validated
 relevant_concepts: []
@@ -29,8 +29,8 @@ run_node(node_type="literature", user_note="正在委派反向检索，随后检
 
 用 `read_artifact` 消费返回的 `literature_evidence_package`；把支持、反对、无法取得的材料
 分开记录。两种入口都没有时向调用方报告缺口，不尝试未授予工具。
-本 skill 不授予 `update_claim_status`。科学终态的 owner 是 Analysis（hypothesis），
-见 `nodes/hypothesis/harness.yaml` 的“轮次与裁决权”；Observation / Experiment 只交证据与执行层评估，
+本 skill 不授予 `update_claim_status`。科学终态的 owner 是 Analysis，
+见 `nodes/analysis/harness.yaml` 的“轮次与裁决权”；Observation / Experiment 只交证据与执行层评估，
 _curator 按采纳的科学判断整合 KB，reviewer 给独立审查意见。
 
 1. **明确要审的 claim**：一句话写出准备 validate 的 claim 全文。例：

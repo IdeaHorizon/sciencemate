@@ -62,6 +62,7 @@ from app.services.harness_transcript_ingest import (  # noqa: F401
     _owning_transcript,
     _session_runtime_root,
     ingest_transcript_wrapper,
+    commit_transcript_wrapper,
 )
 from app.services.instructions import publish_research_settings
 from app.services.model_backends import effective_backend, resolve_role_bindings
@@ -725,6 +726,14 @@ def rejoin_adopted_session(session: "_ProjectHarnessSession") -> None:
 
 
 async def _rejoin_worker_session(session: "_ProjectHarnessSession") -> None:
+    # The observer may lose its DB/transport while the scientific RPC keeps
+    # running. Retain this one collector, rebuilding its DB transaction each
+    # pass, until it obtains the real terminal result. Never resend the RPC.
+    while await _collect_worker_turn(session):
+        await asyncio.sleep(1)
+
+
+async def _collect_worker_turn(session: "_ProjectHarnessSession") -> bool:
     """接回那一轮的两种形状，同一条收尾。
 
     1. **在飞**（接回时 activity 自报 working / parked，带 turn_id）：登记观众、
@@ -765,7 +774,8 @@ async def _rejoin_worker_session(session: "_ProjectHarnessSession") -> None:
             )
             owner_id = session.owner_user_id
         if run is None or run.status not in live_statuses:
-            return  # 上一个后端已经收过尾，或者这条 run 根本不在 —— 没有账要补
+            return False  # 已经收过尾，或者没有这条 run
+        recovered_run_id = run.id
         user = await db.get(User, owner_id)
         conversation = await db.get(SessionProjection, run.session_id)
         project = await db.get(Project, run.project_id)
@@ -773,16 +783,19 @@ async def _rejoin_worker_session(session: "_ProjectHarnessSession") -> None:
             logger.warning(
                 "Cannot rejoin run %s: its user/session/project row is missing", run.id
             )
-            return
+            return False
         request_id = session.inflight_request_id
-        disk_result: dict | None = None
+        disk_result, disk_request_id = terminal_result_on_disk(run)
+        if request_id and disk_request_id != request_id:
+            disk_result = None
         if not request_id:
-            disk_result, request_id = terminal_result_on_disk(run)
+            request_id = disk_request_id
             if disk_result is None:
                 # 既没有在飞的一轮，盘上也没有这条 run 的终止 result：那它就是
                 # 真的没收到派发（上一个后端在建行之后、发 RPC 之前退场了）。
                 # 留给启动对账按既有判据处理，这里不编一个结局、也不认主。
-                return
+                return False
+        if disk_result is not None:
             disk_result = {**disk_result, "_session_resumable": session.paused}
         if binding is None:
             # 让接下来的路径（占用判据、答复闸、下一次接回）都认得这条 run 有主。
@@ -791,20 +804,17 @@ async def _rejoin_worker_session(session: "_ProjectHarnessSession") -> None:
             )
 
         async def _fill_the_gap() -> None:
-            # 断连到重连之间落盘的事件（幂等：按水位补）。在飞那一类放在观众
+            # 断连到重连之间落盘的事件（按源记录幂等）。在飞那一类放在观众
             # 登记**之后**跑（`before_wait`），两段之间才没有缝。
             async with factory() as replay_db:
                 await _replay_worker_events(replay_db, run=run, owner_user_id=binding.user_id)
                 await replay_db.commit()
 
-        if disk_result is not None:
-            await _fill_the_gap()
-
         async def _no_observer(_event: dict) -> None:
             return None
 
         try:
-            await execute_local_turn(
+            outcome = await execute_local_turn(
                 db,
                 user=user,
                 conversation=conversation,
@@ -815,15 +825,21 @@ async def _rejoin_worker_session(session: "_ProjectHarnessSession") -> None:
                     request_id=request_id,
                     run_id=run.id,
                     disk_result=disk_result,
-                    before_wait=None if disk_result is not None else _fill_the_gap,
+                    before_wait=_fill_the_gap,
                 ),
             )
+            retry = outcome.get("status") == "running" and (
+                session.alive or disk_result is not None)
+            if not retry and disk_result is not None:
+                session.inflight_request_id = ""
+            return retry
         except asyncio.CancelledError:
             raise  # 关机：worker 照跑，下一个后端再接
         except Exception:
             # execute_local_turn 自己把失败落成 run 的终态了（transport_failure）；
             # 这里只留一条日志，别让一个后台任务的异常变成"未被等待"的警告。
-            logger.exception("Rejoining run %s ended in an error", run.id)
+            logger.exception("Rejoining run %s ended in an error", recovered_run_id)
+        return False
 
 
 def interrupted_by_our_own_shutdown(exc: BaseException) -> bool:
@@ -987,6 +1003,8 @@ async def _model_reply(
         # worker 在断连窗口里就跑完了的那种，result 已在 events.jsonl 里
         # （`disk_result`），不再等 socket —— 它不会再来第二次。
         if rejoin.disk_result is not None:
+            if rejoin.before_wait is not None:
+                await rejoin.before_wait()
             result = rejoin.disk_result
         else:
             result = await harness_session_manager.rejoin(
@@ -1341,6 +1359,17 @@ async def execute_local_turn(
     # 自己提交；`db` 从此只有 turn 协程一个写者。
     _fact_writer = asyncio.Lock()
 
+    if rejoin is not None and rejoin.before_wait is not None:
+        replay_gap = rejoin.before_wait
+
+        async def replay_before_live_ingestion() -> None:
+            # Register the observer first, but serialize its socket callbacks
+            # with the historical replay. Both write the same source records.
+            async with _fact_writer:
+                await replay_gap()
+
+        rejoin = replace(rejoin, before_wait=replay_before_live_ingestion)
+
     async def _drain_fact_writer() -> None:
         """等在飞的摄取落完，然后让 `db` 重新去库里读。
 
@@ -1397,8 +1426,9 @@ async def execute_local_turn(
         attempt_no = await latest_attempt_no(fact_db, run_id)
         if attempt_no and attempt_no != context.attempt_no:
             fact_context = replace(context, attempt_no=attempt_no)
-        native_event = await ingest_transcript_wrapper(
+        native_event = await commit_transcript_wrapper(
             fact_db,
+            ingest=ingest_transcript_wrapper,
             service=service,
             context=fact_context,
             event=event,
@@ -2120,16 +2150,26 @@ async def execute_local_turn(
                 # 没有 `view`：这条路径上库里的事务未必还能查。缺席是诚实的
                 # ——客户端据此重新查一次会话，而不是拿一份编出来的局面往下走。
             }
-        if getattr(exc, "details", {}).get("worker_alive"):
-            # The worker still owns its run. Preserve the open command so the
-            # ordinary reconciler can adopt/rejoin the exact RPC on its next pass.
+        owns_rejoined_request = rejoin is not None and (
+            rejoin.disk_result is not None or harness_session_manager.owns_request(
+                project_id, session_id, run_id, rejoin.request_id)
+        )
+        if getattr(exc, "details", {}).get("worker_alive") or owns_rejoined_request:
+            # A live owner or its durable terminal result is stronger evidence
+            # than an observer exception. Restore observation of this request;
+            # never replace the scientific execution with another command.
             await record_app_event(
                 db, session_id=session_id, kind="run.transport_disconnected", run_id=run_id,
-                payload={"workerAlive": True, "safeToResubmit": False},
+                payload={
+                    "workerAlive": harness_session_manager.has_live_runtime(project_id, session_id),
+                    "terminalResultAvailable": bool(rejoin and rejoin.disk_result is not None),
+                    "observerFailureCode": getattr(exc, "code", "") or type(exc).__name__,
+                    "safeToResubmit": False,
+                },
                 dedupe_key=f"transport-disconnected:{run_id}:{operation_id}",
             )
             await db.commit()
-            return {"reply": "Execution is continuing while its control connection is restored.",
+            return {"reply": "Restoring the execution record for the existing research request.",
                     "command_id": command_id, "run_id": run_id, "session_id": session_id,
                     "status": "running", "model_backend_id": backend_id}
         if is_answer:

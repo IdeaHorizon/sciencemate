@@ -101,7 +101,9 @@ def _collect_appeals(state: Any, runs: list) -> list[Obligation]:
         for a in r.upstream_rework_requests:
             if not isinstance(a, dict):
                 continue
-            target = str(a.get("upstream_node") or "").strip()
+            from core.naming import canonical_node_type
+
+            target = canonical_node_type(str(a.get("upstream_node") or "").strip())
             if not target:
                 continue
             # 申诉之后，被点名节点有没有成功跑过
@@ -223,7 +225,7 @@ def _collect_unmeasured(state: Any, runs: list) -> list[Obligation]:
 
 # ── 来源 4：实验出了结果，Analysis 还没看过 ─────────────────────────────────
 
-_ANALYSIS_NODE = "hypothesis"
+_ANALYSIS_NODE = "analysis"
 _WRITING_NODE = "writing"
 
 
@@ -452,11 +454,14 @@ def _latest_by_created(worktree, artifact_type: str):
 
 
 def _manuscript_pdf_hashes(worktree, manuscript: dict) -> dict[str, str]:
-    variants = ((manuscript.get("metadata") or {}).get("pdf_variants") or {})
+    metadata = manuscript.get("metadata") or {}
+    variants = metadata.get("pdf_variants") or {}
+    if not variants and metadata.get("pdf_path"):
+        variants = {"primary": {"pdf_path": metadata["pdf_path"]}}
     hashes: dict[str, str] = {}
     if not isinstance(variants, dict):
         return hashes
-    for name in ("review", "clean"):
+    for name in ("review", "clean", "primary"):
         variant = variants.get(name)
         raw = variant.get("pdf_path") if isinstance(variant, dict) else None
         if not isinstance(raw, str) or not raw.strip():

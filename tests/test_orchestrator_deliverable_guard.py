@@ -185,7 +185,8 @@ def _dispatch_writing(state: State, monkeypatch) -> tuple[dict, dict]:
     monkeypatch.setattr("shared.tools.run_node._run_post_producing_flow", no_flow)
     monkeypatch.setattr("core.llm.LLMClient", lambda: MagicMock())
     res = asyncio.run(execute(
-        "run_node", state, node_type="writing", user_note="测试派发", node_inputs={},
+        "run_node", state, node_type="writing",
+        node_inputs={"research_question": "基于现有结果撰写论文并披露限制"},
     ))
     return res, captured
 

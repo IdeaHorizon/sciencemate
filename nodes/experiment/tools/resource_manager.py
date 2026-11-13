@@ -7049,6 +7049,9 @@ async def _submit_job(
     **_: Any,
 ) -> dict:
     """Render or submit a job through local/SLURM/PBS/Kubernetes."""
+    from . import result_acceptance
+    if not dry_run and result_acceptance.restricted(state):
+        return result_acceptance.refusal("submit_job")
     # 判决拆除·第三波（rm:1799/1803/1806/1820/1822/1825 → schema，2026-09-02）：
     # command 非空、整数/正数下限、stage 与 scheduler 枚举、expected_duration_s
     # 下限全部由 submit_job schema 在派发口核；工具体内不再手写。

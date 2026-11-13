@@ -82,11 +82,7 @@ NAV = [
 ]
 
 
-#: 节点的**显示身份**。判身份看 harness 自述与调用链，不看目录名。
-#: `nodes/hypothesis/` 的 harness.yaml 第一句就是「你是 **Analysis**」，
-#: `core/obligations.py` 也写着 `_ANALYSIS_NODE = "hypothesis"` —— 目录名与
-#: node_type 还没跟上而已（改名是独立的一条线，会碰 48 处按名寻址 + 活项目
-#: 工作区目录）。站上只显示一个身份，旧名生成跳转页，站外链接不断。
+#: 节点身份已统一为 analysis；只为历史文档和外部链接解析旧名。
 NODE_DISPLAY_NAME = {
     "hypothesis": "analysis",
 }
@@ -673,8 +669,8 @@ def page_nodes(data: dict) -> str:
 <a href="evidence-modalities.html">证据模态</a>。</p>
 
 <p><strong>显示名以 harness 自述为准，不按目录名。</strong>
-<code>nodes/hypothesis/</code> 的 harness 第一句是「你是 <strong>Analysis</strong>」，
-所以站上叫 analysis；<code>node_type</code> 与目录名的改名是独立的一条线。</p>
+<code>nodes/analysis/</code> 的 harness 第一句是「你是 <strong>Analysis</strong>」，
+正式目录和 <code>node_type</code> 均为 <code>analysis</code>；旧记录仍可读取。</p>
 
 <h2 id="quan-jing">全景（{len(nodes)} 个）</h2>
 <table>
@@ -930,6 +926,14 @@ def page_tool_detail(tool: dict, data: dict) -> str:
         )
     else:
         requires_row = ""
+
+    from core.naming import TOOL_ALIASES
+
+    aliases = [old for old, new in TOOL_ALIASES.items() if new == tool["name"]]
+    if aliases:
+        requires_row += "<dt>旧调用别名</dt><dd>" + ", ".join(
+            f"<code>{html.escape(name)}</code>" for name in aliases
+        ) + "（仅用于兼容读取）</dd>"
 
     src_html = _highlight_python(tool["source_code"]) if tool["source_code"] else \
                 "<p class='muted'>(source not available)</p>"
@@ -1325,7 +1329,11 @@ def main():
     print(f"  tools: {n_tools}  nodes: {len(data['nodes'])}  skills: {len(data['skills'])}")
 
     # ── 闸 3：文档点名的工具必须存在（在写任何文件之前就该失败）────────
-    dead_tools = check_tool_names_in_docs(set(data["tools_index"]))
+    from core.naming import TOOL_ALIASES
+
+    known_tools = set(data["tools_index"])
+    known_tools.update(old for old, new in TOOL_ALIASES.items() if new in known_tools)
+    dead_tools = check_tool_names_in_docs(known_tools)
     if dead_tools:
         raise BuildError(
             "docs 里点名了不存在的工具（读的人会照着调）：\n  "
@@ -1375,6 +1383,13 @@ def main():
     detail_pages: dict[str, tuple[str, str]] = {}
     for tname, tinfo in data["tools_index"].items():
         detail_pages[f"tools/{tname}.html"] = (f"Tool: {tname}", page_tool_detail(tinfo, data))
+    for old, new in TOOL_ALIASES.items():
+        if new in data["tools_index"]:
+            detail_pages[f"tools/{old}.html"] = (
+                f"Tool: {old} → {new}",
+                f'<h1>{old} → <a href="{new}.html">{new}</a></h1>'
+                f'<meta http-equiv="refresh" content="0; url={new}.html">',
+            )
     for s in data["skills"]:
         detail_pages[f"skills/{s['name']}.html"] = (f"Skill: {s['name']}", page_skill_detail(s, data))
     for h in data["hooks"]:
@@ -1389,7 +1404,7 @@ def main():
             f"Node: {old} → {new}",
             f'''<h1>{old} 现在叫 <a href="{new}.html">{new}</a></h1>
 <p class="muted">这个节点的身份以 harness 自述为准。目录名与 <code>node_type</code>
-仍是 <code>{old}</code>（改名是独立的一条线），站上只显示一个身份。</p>
+现已统一为 <code>{new}</code>；历史记录和旧调用名继续兼容读取。</p>
 <p><a href="{new}.html">→ 前往 {new}</a></p>
 <meta http-equiv="refresh" content="0; url={new}.html">''',
         )

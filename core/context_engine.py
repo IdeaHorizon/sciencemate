@@ -391,6 +391,13 @@ def _build_system_prompt(harness: NodeHarness, state: State | None = None) -> st
         sections.extend(f"- {g}" for g in harness.guidelines)
         _mark("guidelines")
 
+    from core.review_policy import review_policy_section
+
+    review_policy = review_policy_section(harness.node_type)
+    if review_policy:
+        sections.append(review_policy)
+        _mark("review_policy")
+
     # v3.4 平台资源登记（E2E#1/#2：prereg 两次承诺平台没有的 GPT-4o/人工标注员，
     # 且节点无从知道"这里有什么"—— 资源可用性是运行时事实，必须由框架主动注入，
     # 不能指望节点自己去查）。prereg 冻结门禁（artifacts_extra）按同一登记核对。
@@ -610,15 +617,16 @@ def _owner_review_spec_section(
     if harness.node_type not in ("_reviewer", "reviewer"):
         return None
     source = str((node_inputs or {}).get("source_node_type") or "").strip()
-    if not source or source.startswith("_"):
-        return None      # project_synthesis scope 用架构 spec，另一条路径
+    if not source or (source.startswith("_") and source != "_project"):
+        return None
 
     from pathlib import Path
 
     from core.loader import node_dir
 
     try:
-        spec_path = Path(node_dir(source)) / "review_spec.md"
+        spec_path = (Path(node_dir("_reviewer")) / "specs/project_synthesis.md"
+                     if source == "_project" else Path(node_dir(source)) / "review_spec.md")
     except Exception:
         return None
     if state is not None:
@@ -626,7 +634,7 @@ def _owner_review_spec_section(
         # rubric_source 由 compose_review_critique 从这里机械读取 ——
         # 不让模型手写（实测：模型手写把 JSON 写坏，字段成了废纸）。
         state.hook_state["_owner_review_spec_delivery"] = {
-            "owner_spec_loaded": spec_path.is_file(),
+            "owner_spec_loaded": False,
             "owner_spec_path": str(spec_path) if spec_path.is_file() else None,
             "source_node_type": source,
         }
@@ -637,10 +645,20 @@ def _owner_review_spec_section(
             f"`rubric_source.owner_spec_loaded` 如实记 false。"
         )
     try:
-        body = spec_path.read_text(encoding="utf-8", errors="replace")
+        spec_bytes = spec_path.read_bytes()
+        body = spec_bytes.decode("utf-8", errors="replace")
     except OSError:
-        return None
+        return (f"## 📋 `{source}` 的 owner review_spec\n"
+                "框架未能读取本次判据；按通用 rubric 审并披露覆盖不足，"
+                "`rubric_source.owner_spec_loaded` 记 false。")
+    if state is not None:
+        import hashlib
+
+        state.hook_state["_owner_review_spec_delivery"].update(
+            owner_spec_loaded=True, owner_spec_sha256=hashlib.sha256(spec_bytes).hexdigest())
     truncated = len(body) > _REVIEW_SPEC_MAX_CHARS
+    if state is not None:
+        state.hook_state["_owner_review_spec_delivery"]["owner_spec_truncated"] = truncated
     return "\n".join([
         f"## 📋 `{source}` 的 owner review_spec（框架组装，无需你去找）",
         f"来源：`{spec_path}`" + ("（已截断）" if truncated else ""),

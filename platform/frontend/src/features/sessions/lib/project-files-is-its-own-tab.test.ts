@@ -6,25 +6,14 @@ function source(path: string) {
   return readFileSync(new URL(path, import.meta.url), "utf8");
 }
 
-/**
- * Project files 从会话内联面板挪成左侧导航的一个页面。
- *
- * 现场（wangd，2026-08-11 试用）：「你不说那个 Project Files 我都没注意…
- * 现在在那上面感觉点开就很占地方」。
- *
- * 它和 Artifacts / Research state / Memory 是同一层级的东西 —— 那几个都在
- * 左侧栏，只有它内联在会话里，本来就不一致；展开还把对话挤下去。
- *
- * 会话内保留的是 **SessionChangesPanel**（本轮改了什么）—— 那才是你打开会话
- * 想知道的；「项目里一共有哪些文件」是另一个问题，去它自己的页面看。
- */
-test("Project files 是左侧导航的一页，不再内联在会话里", () => {
-  const shell = source("../../../shared/layout/AppShell.tsx");
+/** Project files open from the workspace toolbar, without embedding the tree in a conversation. */
+test("Project files 从工作区顶部打开，不再内联在会话里", () => {
+  const shell = source("../../projects/components/ProjectToolbar.tsx");
   const page = source("../../../app/(workspace)/projects/[id]/files/page.tsx");
   const view = source("../components/ProjectFilesView.tsx");
   const workspace = source("../components/SessionWorkspace.tsx");
 
-  assert.match(shell, /\/files`, label: \{ zh: "项目文件"/);
+  assert.match(shell, /id: "files", label: \{ zh: "文件"/);
   assert.match(page, /ProjectFilesView/);
   assert.match(view, /ProjectFileTree/, "页面 → View → 树 这条链要接上");
   assert.doesNotMatch(

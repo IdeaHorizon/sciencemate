@@ -14,7 +14,7 @@ test("personal workspace naming never repeats the signed-in user identity", () =
   assert.equal(workspaceDisplayName({ kind: "group", id: "g", name: "Robotics Lab" }, "en"), "Robotics Lab");
 });
 
-test("global rail is Project-level only: no Session entry point, no Session list", () => {
+test("global destinations stay distinct from project-scoped session links", () => {
   // 2026-09-12 核查后砍掉三个：Inbox（唯一写入方零调用 → 永远空）、学术搜索
   // （孤岛，那套端点只有它在用）、Artifacts（与项目级「研究产出」同问题不同
   // 数据源，且分叉不报错）。理由逐条写在 navigation-state.ts 的表上面。
@@ -64,21 +64,10 @@ test("every global destination has an icon and a highlight rule", () => {
   }
 });
 
-/**
- * 判据落在渲染全局侧栏那段源码上，不落在导航表上：上一版的「Active」列表根本
- * 不走 GLOBAL_NAVIGATION —— 它自己去查 runs 再拼 /projects/x/sessions/y 的链接。
- * 只断言导航表干净，这类新增的旁路一条都拦不住。
- */
-test("the global sidebar renders no Session rows of its own", () => {
+test("all workspace pages share the same project tree", () => {
   const shell = readFileSync(new URL("./AppShell.tsx", import.meta.url), "utf8");
-  const global = shell.slice(
-    shell.indexOf("function GlobalNavigation"),
-    shell.indexOf("function ProjectNavigation"),
-  );
-  assert.ok(global.length > 0, "GlobalNavigation must exist");
-  for (const forbidden of [/sessions\//, /useVisibleRuns/, /useProjectSessions/, /app-recent-item/]) {
-    assert.doesNotMatch(global, forbidden);
-  }
+  assert.match(shell, /<ProjectTree \/>/);
+  assert.doesNotMatch(shell, /ProjectNavigation|SessionRecentItem/);
 });
 
 const SRC = fileURLToPath(new URL("../..", import.meta.url));

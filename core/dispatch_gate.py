@@ -87,7 +87,9 @@ def upstream_fingerprint(worktree: Path | str | None, node_type: str) -> str | N
     parts: list[str] = []
     for head in workspace_store(root).heads().values():
         owner = head.produced_by_node_type
-        if owner == node_type or owner.lstrip("_") == node_type.lstrip("_"):
+        from core.naming import same_node
+
+        if same_node(owner, node_type) or owner.lstrip("_") == node_type.lstrip("_"):
             continue          # 自己的产出不算局面变化
         parts.append(f"{head.artifact_id}@v{head.version}:{head.sha256}")
     if not parts:

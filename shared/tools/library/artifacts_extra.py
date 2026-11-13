@@ -514,7 +514,7 @@ async def _freeze_artifact(
 
     # 用跨节点查找，不要只看自己目录。
     #
-    # 预注册是 **Analysis/hypothesis 节点**的产物（落在 `plan/`），
+    # 预注册是 **Analysis/analysis 节点**的产物（落在 `plan/`），
     # 而调 freeze 的往往是 orchestrator —— 只看本节点目录就永远
     # 找不到它。E2E v24 实测活死锁：experiment 拒绝启动（"pre_registration 未
     # freeze"），orchestrator 去 freeze 却得到"找不到 artifact"，于是反复重派，

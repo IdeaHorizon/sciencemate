@@ -3298,7 +3298,6 @@ async def run_platform_request(
     from core.paths import runs_parent
     from core.pause import get_deepest_paused
     from shared.tools.run_node import (
-        brief_interrupted_child_runs,
         recover_interrupted_decision_actions,
         set_child_event_sink,
     )
@@ -3325,9 +3324,6 @@ async def run_platform_request(
         else:
             messages = existing
             recover_interrupted_decision_actions(state)
-            # 上次进程死亡时跑到一半的子 run：把它的既成事实机械送达本轮
-            # （防止盲目重派把不幂等副作用做两遍 —— 实测 claim 重复注册）。
-            brief_interrupted_child_runs(state)
         repairs = chat._repair_message_tool_protocol(messages)
         if repairs:
             state.append_transcript(
@@ -3923,8 +3919,7 @@ class PlatformSession:
 
     def _conversation_step(self, chat: Any) -> list[Any]:
         from shared.tools.run_node import (
-            brief_interrupted_child_runs,
-            recover_interrupted_decision_actions,
+                recover_interrupted_decision_actions,
         )
 
         existing = chat._load_conversation(self.state)
@@ -3935,7 +3930,6 @@ class PlatformSession:
         # **这条 serve 路径才是平台实际走的入口** —— 2026-08-18 实测：
         # 简报只接在了一次性执行那条上，平台上一次都没触发过。
         # 「机制存在但没接到路径」的同款，这次是我自己现造的。
-        brief_interrupted_child_runs(self.state)
         return existing
 
     def _transcript_step(self, chat: Any) -> None:

@@ -242,6 +242,7 @@ async def spawn_and_wait(
     out_f = tempfile.NamedTemporaryFile(prefix="hf_out_", suffix=".log", delete=False)
     err_f = tempfile.NamedTemporaryFile(prefix="hf_err_", suffix=".log", delete=False)
     out_path, err_path = out_f.name, err_f.name
+    proc = spawn_task = wait_task = kill_task = None
     try:
         spawn = (asyncio.create_subprocess_shell(args[0], cwd=cwd, env=spawn_env,
                                                  stdout=out_f, stderr=err_f,
@@ -253,7 +254,8 @@ async def spawn_and_wait(
                                                 stdin=asyncio.subprocess.DEVNULL,
                                                 **process_control.group_spawn_kwargs()))
         try:
-            proc = await spawn
+            spawn_task = asyncio.ensure_future(spawn)
+            proc = await asyncio.shield(spawn_task)
         except Exception as e:
             return "spawn_failed", None, b"", str(e).encode()
 
@@ -375,7 +377,35 @@ async def spawn_and_wait(
 
             _out_b, _err_b = to_utf8(_out_b), to_utf8(_err_b)
         return status, returncode, _out_b, _err_b
+    except asyncio.CancelledError:
+        # Task.cancel() bypasses the kill_event/timeout branch above. Settle the
+        # same owned launch before propagating cancellation to its caller.
+        if proc is None and spawn_task is not None:
+            try:
+                proc = await asyncio.shield(spawn_task)
+            except Exception as exc:
+                log.warning("cancelled process creation failed: %s", exc)
+        if proc is not None:
+            if wait_task is None:
+                wait_task = asyncio.ensure_future(proc.wait())
+            if sandbox_launch is not None:
+                try:
+                    await asyncio.to_thread(sandbox_launch.terminate)
+                except Exception as exc:
+                    log.error("failed to terminate cancelled launch: %s", exc)
+            group_killer(proc)()
+            if wait_task is not None:
+                try:
+                    await asyncio.wait_for(asyncio.shield(wait_task), timeout=_DRAIN_GRACE_S)
+                except Exception:
+                    group_killer(proc)()
+        raise
     finally:
+        for pending in (kill_task, wait_task):
+            if pending is not None and not pending.done():
+                pending.cancel()
+        await asyncio.gather(*(task for task in (kill_task, wait_task) if task is not None),
+                             return_exceptions=True)
         if sandbox_launch is not None:
             if launch_marker and not getattr(sandbox_launch, "stop_argv", None):
                 # 没有 cgroup 可停（无 systemd --user scope 的 Linux、macOS）：进程组杀不到

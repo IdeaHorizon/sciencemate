@@ -96,6 +96,7 @@ def _materialize_content_sources(
     """
     from pathlib import Path as _P
 
+    from core.paths import prefer_existing
     from core.project_workspace import working_directory
 
     sources = (content_from_file if isinstance(content_from_file, list)
@@ -117,6 +118,7 @@ def _materialize_content_sources(
         src = _P(raw)
         if not src.is_absolute():
             src = working_directory(state) / raw
+        src = prefer_existing(state.root, src)
         try:
             src = src.resolve()
         except OSError as e:
@@ -695,8 +697,8 @@ async def _run_bash(state: State, cmd: str, timeout: int = 600,
     # 等**进程退出**、输出落文件 —— 不接管道。后台子孙攥着管道会让
     # communicate() 永远等不到 EOF（E2E-5 实测：服务 30 秒起好，调用方等了
     # 15.5 小时）。判据必须是"直接子进程退没退"，不是"管道断没断"。
-    from shared.lib import output_spill as _spill
     from core.project_workspace import validate_tool_cwd
+    from shared.lib import output_spill as _spill
 
     try:
         effective_cwd = str(validate_tool_cwd(state, cwd))
@@ -1139,7 +1141,7 @@ async def _request_human_input(state: State, question: str,
     if normalized:
         from uuid import uuid4
 
-        from core.decision_offer import Choice, Offer, PAUSE_OFFER_KEY
+        from core.decision_offer import PAUSE_OFFER_KEY, Choice, Offer
 
         choices = tuple(
             Choice(id=o["id"], label=o["label"], description=o.get("description") or "")

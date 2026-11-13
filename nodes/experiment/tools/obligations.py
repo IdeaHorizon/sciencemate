@@ -167,6 +167,8 @@ def freeze(state: Any, *, supplied: list[Any] | None = None,
         raise ObligationError(f"duplicate obligation ids: {sorted({i for i in ids if ids.count(i) > 1})}")
     payload = {"obligations": rows, "derived_from": sources,
                "task_source": derived["task_source"], "frozen": True}
+    if _node_inputs(state).get("acceptance_mode") == "existing_results_only":
+        payload["acceptance_mode"] = "existing_results_only"
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -22,6 +22,20 @@ from core.llm import LLMMessage
 from core.state import State
 
 
+def write_snapshot(path: Path, payload: dict) -> None:
+    """The atomic write boundary shared by messages and their child handles."""
+    import os
+    from core.secrets import redact
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as stream:
+        json.dump(redact(payload), stream, ensure_ascii=False)
+        stream.flush()
+        os.fsync(stream.fileno())
+    tmp.replace(path)
+
+
 class UnconfirmedToolOutcome(RuntimeError):
     """A saved call intent has no saved result; replaying it could repeat effects."""
 
@@ -39,10 +53,23 @@ def unresolved_tool_calls(messages) -> dict[str, str]:
                 value = json.loads(message.content or "null")
             except (ValueError, TypeError):
                 value = None
-            if not (isinstance(value, dict) and value.get("outcome") == "unknown"
-                    and value.get("do_not_resubmit")):
+            unfinished = isinstance(value, dict) and (
+                (value.get("outcome") == "unknown" and value.get("do_not_resubmit"))
+                or bool(value.get("paused_jobs"))
+            )
+            if not unfinished:
                 pending.pop(message.tool_call_id, None)
     return pending
+
+
+def dispatch_anchors(checkpoint: dict | None) -> dict[str, str]:
+    if not isinstance(checkpoint, dict):
+        return {}
+    anchors = dict(checkpoint.get("tool_dispatches") or {})
+    current = checkpoint.get("tool_dispatch")
+    if current and checkpoint.get("written_at"):
+        anchors.setdefault(current, checkpoint["written_at"])
+    return anchors
 
 
 def restore_recorded_tool_results(state, messages, *, turn: int,
@@ -52,26 +79,27 @@ def restore_recorded_tool_results(state, messages, *, turn: int,
     if not pending or not state.transcript_path.is_file():
         return
     results = {}
-    with state.transcript_path.open() as stream:
+    anchors = dispatch_anchors(checkpoint)
+    with state.transcript_path.open(encoding="utf-8") as stream:
         for line in stream:
             try:
                 record = json.loads(line)
             except ValueError:
                 continue
             call_id = record.get("tool_call_id")
-            if isinstance(checkpoint, dict) and call_id == checkpoint.get("tool_dispatch"):
+            if call_id in anchors:
                 # Tool-call IDs can be reused by a provider on a later request.
                 # A result before this dispatch's checkpoint cannot confirm it.
                 from datetime import datetime
 
                 try:
                     at = datetime.fromisoformat(str(record.get("at", "")).replace("Z", "+00:00"))
-                    after = datetime.fromisoformat(checkpoint["written_at"].replace("Z", "+00:00"))
+                    after = datetime.fromisoformat(anchors[call_id].replace("Z", "+00:00"))
                 except (KeyError, TypeError, ValueError):
                     continue
                 if at < after:
                     continue
-            if (record.get("event") == "tool_result" and call_id in pending
+            if (record.get("event") in {"tool_result", "tool_result_recovered"} and call_id in pending
                     and isinstance(record.get("content"), str)):
                 results[call_id] = record
     updated = list(messages)
@@ -102,7 +130,10 @@ def retire_undispatched_calls(state, messages, *, checkpoint: dict | None,
     pending = unresolved_tool_calls(messages)
     planned = set()
     if isinstance(checkpoint, dict) and "tool_dispatch" in checkpoint:
-        planned = set(pending) - {checkpoint["tool_dispatch"]}
+        latest = next((message for message in reversed(checkpoint.get("messages") or [])
+                       if message.get("role") == "assistant"), {})
+        ids = {call.get("id") for call in latest.get("tool_calls") or []}
+        planned = (ids & set(pending)) - set(dispatch_anchors(checkpoint))
     elif selected_wait and not selected_wait.get("finished"):
         wait_id = selected_wait.get("tool_call_id")
         for message in messages:
@@ -131,7 +162,24 @@ def retire_undispatched_calls(state, messages, *, checkpoint: dict | None,
     return True
 
 
-async def reconcile_reentrant_calls(state, messages, *, turn: int) -> None:
+async def reconcile_reentrant_calls(state, messages, *, turn: int):
+    import asyncio
+    from core.child_dispatch import checkpoint
+
+    saved = checkpoint(state)
+    lock = getattr(state, "_tool_recovery_lock", None)
+    if lock is None:
+        lock = state._tool_recovery_lock = asyncio.Lock()
+    async with lock:
+        state.hook_state.pop("_unconfirmed_tool_calls", None)
+        try:
+            restore_recorded_tool_results(state, messages, turn=turn, checkpoint=saved)
+            return await _reconcile_reentrant_calls(state, messages, turn=turn)
+        finally:
+            state.hook_state["_unconfirmed_tool_calls"] = unresolved_tool_calls(messages)
+
+
+async def _reconcile_reentrant_calls(state, messages, *, turn: int):
     """Replay only shapes declared safe by their existing tool/adapter owner."""
     from core import tool_registry
     from core.agent_loop import _persist_messages_checkpoint
@@ -148,28 +196,36 @@ async def reconcile_reentrant_calls(state, messages, *, turn: int) -> None:
                 continue
             raw = function.get("arguments") or "{}"
             arguments = json.loads(raw) if isinstance(raw, str) else dict(raw)
-            recovery = (
-                definition.interrupted_recovery(arguments, state=state, tool_call_id=call_id)
-                if callable(definition.interrupted_recovery) else None
-            )
-            if isinstance(recovery, dict) and "result" in recovery:
-                # A child/adapter owner can recover a receipt directly from its
-                # existing durable facts without executing the original tool.
-                result = recovery["result"]
-            else:
-                if not (definition.replayable_read or recovery is True):
-                    continue
-                state.hook_state["_current_tool_call_id_being_executed"] = call_id
-                try:
-                    _persist_messages_checkpoint(state, messages, turn=turn)
-                    result = await tool_registry.execute(function["name"], state, **arguments)
-                    if result.get("status") == "error":
-                        raise UnconfirmedToolOutcome(
-                            "Adapter could not reconcile the original operation: "
-                            + json.dumps(result, ensure_ascii=False)
-                        )
-                finally:
-                    state.hook_state.pop("_current_tool_call_id_being_executed", None)
+            try:
+                recovery = (
+                    definition.interrupted_recovery(arguments, state=state, tool_call_id=call_id)
+                    if callable(definition.interrupted_recovery) else None
+                )
+                import inspect
+                if inspect.isawaitable(recovery):
+                    recovery = await recovery
+                if isinstance(recovery, dict) and "result" in recovery:
+                    # A child/adapter owner can recover a receipt directly from its
+                    # existing durable facts without executing the original tool.
+                    result = recovery["result"]
+                else:
+                    if not (tool_registry.is_read_only(function["name"], arguments) or recovery is True):
+                        continue
+                    state.hook_state["_current_tool_call_id_being_executed"] = call_id
+                    try:
+                        _persist_messages_checkpoint(state, messages, turn=turn)
+                        result = await tool_registry.execute(function["name"], state, **arguments)
+                        if result.get("status") == "error":
+                            raise UnconfirmedToolOutcome(
+                                "Adapter could not reconcile the original operation: "
+                                + json.dumps(result, ensure_ascii=False)
+                            )
+                    finally:
+                        state.hook_state.pop("_current_tool_call_id_being_executed", None)
+            except Exception as exc:
+                state.append_transcript("tool_recovery_observation_failed", tool_call_id=call_id,
+                                        error=f"{type(exc).__name__}: {exc}")
+                continue
             actual = LLMMessage(role="tool", tool_call_id=call_id, name=function["name"],
                                 content=json.dumps(result, ensure_ascii=False))
             updated = list(messages)
@@ -182,9 +238,13 @@ async def reconcile_reentrant_calls(state, messages, *, turn: int) -> None:
                 updated.insert(index, actual)
             else:
                 updated[index] = actual
+            state.append_transcript("tool_result_recovered", turn=turn, name=function["name"],
+                                    tool_call_id=call_id, content=actual.content, recovered=True)
             render_context_change(state, messages, updated, turn=turn,
                                   source="adapter_operation_reconciled")
             _persist_messages_checkpoint(state, messages, turn=turn)
+            if result.get("status") == "pause":
+                return {"call": call, "result": result}
 
 
 def conversation_path(state: State) -> Path:
@@ -379,9 +439,9 @@ def _drop_unjsonable(d: dict) -> dict:
     return out
 
 
-def save_conversation(state: State, messages: list[LLMMessage]) -> None:
-    """把 messages + state 元数据存盘（dict schema，唯一合法写入格式）。"""
-    payload = {
+def state_snapshot(state: State) -> dict:
+    """One state format for turn checkpoints and completed conversations."""
+    return {
         "run_id": state.run_id,
         "node_type": state.node_type,
         "tenant_id": state.tenant_id,
@@ -392,19 +452,26 @@ def save_conversation(state: State, messages: list[LLMMessage]) -> None:
         "scratchpad": state.scratchpad,
         "scratchpad_revision": state.scratchpad_revision,
         "scratchpad_revised_turn": state.scratchpad_revised_turn,
-        "hook_state": _drop_unjsonable(state.hook_state),
-        "messages": [msg_to_jsonable(m) for m in messages],
+        "hook_state": {key: value for key, value in _drop_unjsonable(state.hook_state).items()
+                       if key != "_current_tool_call_id_being_executed"},
     }
-    path = conversation_path(state)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # 原子替换（2026-07-09）：进程在写一半时被杀（Ctrl-C / 崩溃）不能留下截断的
-    # JSON —— 那会让下次续连 load_conversation 判损坏、静默丢整段对话历史。
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    from core.secrets import redact
-    payload = redact(payload)
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str),
-                   encoding="utf-8")
-    tmp.replace(path)
+
+
+def restore_snapshot(state, data: dict) -> None:
+    for key in ("tokens_used", "tool_calls_made", "scratchpad_revision", "scratchpad_revised_turn"):
+        if key in data:
+            setattr(state, key, int(data[key] or 0))
+    if "scratchpad" in data:
+        state.scratchpad = data["scratchpad"] if isinstance(data["scratchpad"], str) else ""
+    from core.naming import canonical_node_fields
+
+    state.hook_state.update(canonical_node_fields(data.get("hook_state") or {}))
+
+
+def save_conversation(state: State, messages: list[LLMMessage]) -> None:
+    write_snapshot(conversation_path(state), {
+        **state_snapshot(state), "messages": [msg_to_jsonable(m) for m in messages],
+    })
 
 
 def checkpoint_path(state: State) -> Path:
@@ -413,7 +480,7 @@ def checkpoint_path(state: State) -> Path:
 
 
 def _load_checkpoint_messages(state: State, *, record_origins: bool = True) -> list[LLMMessage] | None:
-    """读 turn 级 checkpoint。只有 messages，没有 scratchpad/hook_state 元数据。"""
+    """Read messages and, when requested, their matching saved state."""
     path = checkpoint_path(state)
     if not path.exists():
         return None
@@ -424,42 +491,20 @@ def _load_checkpoint_messages(state: State, *, record_origins: bool = True) -> l
     msgs = data.get("messages") if isinstance(data, dict) else data
     if not isinstance(msgs, list) or not msgs:
         return None
+    if record_origins and isinstance(data, dict):
+        restore_snapshot(state, data)
     return restore_messages(state, [m for m in msgs if isinstance(m, dict)],
                             through=data.get("written_at") if isinstance(data, dict) else None,
                             record_origins=record_origins)
 
 
 def load_conversation(state: State, *, restore_state: bool = True) -> list[LLMMessage] | None:
-    """读对话 + 恢复 state 元数据。两份都没有 / 都损坏 → None。
+    """Load the newer atomic snapshot; legacy message-only checkpoints remain readable.
 
-    `restore_state=False` 只取消息：供常驻 worker 的待命轮查看，不覆盖内存中的
-    新插话、运行计数与白板。
-
-    兼容两种历史格式：
-      - dict（标准）：恢复 tokens_used / tool_calls_made / scratchpad / hook_state
-      - list（旧 dogfood 写的裸数组）：只有 messages，元数据保持 State 默认值
-
-    ## 为什么要看两个文件（2026-08-04 实测事故）
-
-    盘上一直有两份编排历史，写入时机不同：
-
-      conversation.json          chat.py 在**一轮 REPL 对话结束**时写
-      messages_checkpoint.json   agent_loop 在**每个 turn 末**写
-                                 （docstring 原文："kill 后能从这里 resume"）
-
-    而续连此前只读前者。于是：**第一轮 REPL 没跑完就重启 = 编排历史全丢**，
-    尽管盘上躺着一份完整的 turn 级 checkpoint。e2e8 实测：一小时四十五分钟的
-    编排工作没了，58 条消息的 checkpoint 就在旁边，没人读。
-
-    这是"机制存在但没接到路径"——不是没做持久化，是写它的人和读它的人没接上。
-
-    规则：**取更新的那份**。checkpoint 缺元数据（scratchpad/hook_state），
-    所以 conversation.json 同样新时优先它；只有 checkpoint 严格更新（说明
-    上一轮 REPL 之后又跑了 turn 才崩）才用 checkpoint。
-
-    checkpoint 可能停在半截工具协议上（assistant 发了 tool_calls 但没有对应
-    tool 结果）——调用方 chat.py 紧接着就跑 `_repair_message_tool_protocol`，
-    那条路本来就在，不用另建。
+    Turn checkpoints and conversation snapshots share their state format.
+    Standby readers request messages only and never replace a live worker's
+    counters, pending interjections or scratchpad. A damaged file can fall back
+    to the other saved snapshot.
     """
     path = conversation_path(state)
     cp_path = checkpoint_path(state)
@@ -499,13 +544,6 @@ def load_conversation(state: State, *, restore_state: bool = True) -> list[LLMMe
         return restore_messages(state, data.get("messages", []), through=data.get("written_at"),
                                 record_origins=restore_state)
 
-    state.tokens_used = int(data.get("tokens_used", 0) or 0)
-    state.tool_calls_made = int(data.get("tool_calls_made", 0) or 0)
-    # 白板是一块 str 板子（2026-08-13 起）；不是 str 的值当空板。
-    scratchpad = data.get("scratchpad")
-    state.scratchpad = scratchpad if isinstance(scratchpad, str) else ""
-    state.scratchpad_revision = int(data.get("scratchpad_revision", 0) or 0)
-    state.scratchpad_revised_turn = int(data.get("scratchpad_revised_turn", 0) or 0)
-    state.hook_state.update(data.get("hook_state") or {})
+    restore_snapshot(state, data)
     return restore_messages(state, data.get("messages", []), through=data.get("written_at"),
                             record_origins=restore_state)

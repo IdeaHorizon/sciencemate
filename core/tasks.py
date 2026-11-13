@@ -75,6 +75,11 @@ class Task:
     task_instance_uuid: str = ""
     notes: list[str] = field(default_factory=list)   # complete/update 时 append
 
+    def __post_init__(self) -> None:
+        from core.naming import canonical_node_type
+
+        self.owner_node = canonical_node_type(self.owner_node)
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -158,7 +163,9 @@ class TaskList:
         if status:
             tasks = [t for t in tasks if t.status == status]
         if owner_node:
-            tasks = [t for t in tasks if t.owner_node == owner_node]
+            from core.naming import canonical_node_type
+
+            tasks = [t for t in tasks if t.owner_node == canonical_node_type(owner_node)]
         return tasks
 
     # ── 写 ─────────────────────────────────────────────────────────────────

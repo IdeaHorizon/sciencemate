@@ -106,3 +106,33 @@ test("Run event merge fails loudly on sequence or canonical identity conflicts",
     /conflicting canonical content/,
   );
 });
+
+test("duplicate history preserves array and event identity without reading shared payloads", () => {
+  let payloadReads = 0;
+  const original = event(1);
+  Object.defineProperty(original, "payload", {
+    enumerable: true,
+    get() { payloadReads += 1; return { output: "large output" }; },
+  });
+  const history = [original];
+  assert.equal(mergeCanonicalRunEvents(history, history, "session-a", "run-a"), history);
+  assert.equal(payloadReads, 0, "shared immutable events do not need deep serialization");
+  const delivered = structuredClone(event(2));
+  const existing = [delivered];
+  assert.equal(mergeCanonicalRunEvents(existing, [event(2)], "session-a", "run-a"), existing);
+});
+
+test("leaving a page aborts history pagination before another request", async () => {
+  const controller = new AbortController();
+  let requests = 0;
+  await assert.rejects(readCanonicalRunEventsAfter({
+    async listSessionEvents(_sessionId, afterSequence, _limit, _runId, _children, signal) {
+      requests += 1;
+      assert.equal(signal, controller.signal);
+      controller.abort();
+      return { items: [event(1)], afterSequence, nextAfterSequence: 1, hasMore: true };
+    },
+    async listCurrentDecisions() { return { items: [] }; },
+  }, "session-a", "run-a", 0, controller.signal), { name: "AbortError" });
+  assert.equal(requests, 1);
+});

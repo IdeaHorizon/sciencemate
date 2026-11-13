@@ -1292,7 +1292,7 @@ def _clearable_tools() -> dict[str, object]:
         compactor = getattr(td, "result_compactor", None)
         if compactor is not None:
             out[name] = compactor
-        elif getattr(td, "replayable_read", False):
+        elif getattr(td, "replayable_read", False) is True:
             out[name] = None
     return out
 

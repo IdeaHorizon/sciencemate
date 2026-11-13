@@ -147,6 +147,27 @@ test('each display category has 200 unique places and there is no combined cap',
  assert.equal(limited.source_counts?.crossref,1400);
 });
 
+test('later query groups receive only the unused category budget and stop at 200',async()=>{
+ const labels:Record<string,string>={journal:'中文期刊',thesis:'学位论文',conference:'会议文章',book:'书籍',other:'其他'};
+ const queries=['第一组','第二组','不应执行的第三组'];
+ const groups=queries.map(zh=>({...plan[0],zh}));
+ const limits:Record<string,number[]>={};
+ let final:LiteratureSearchResponse[]=[];
+ await collectChineseCategories(groups,{status:async()=>({collector}),
+  create:async(query,limit,kind)=>{
+   assert.notEqual(query,queries[2]);
+   (limits[kind!] ||= []).push(limit!);
+   const count=query===queries[0]?150:limit!;
+   const rows=Array.from({length:count},(_,i)=>paper(`${kind} ${query} ${i}`,'cnki',{publication_category:labels[kind!]}));
+   return {...job('completed',rows),id:`${kind}-${query}`};
+  },read:async()=>{throw Error('completed jobs must not be polled');},
+  sleep:async()=>{},active:()=>true,update:(_state,results)=>{final=results;},
+ },'zh');
+ assert.equal(Object.keys(limits).length,5);
+ for(const values of Object.values(limits)) assert.deepEqual(values,[200,50]);
+ assert.equal(mergeLiteratureResults('query',groups,final).total,1000);
+});
+
 for (const language of ['zh','en'] as const) {
 test(`a waiting journal job cannot prevent theses from arriving or taking their own 200 places (${language})`,async()=>{
  const labels:Record<string,string>={journal:'中文期刊',thesis:'学位论文',conference:'会议文章',book:'书籍',other:'其他'};

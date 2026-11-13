@@ -35,7 +35,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.models.execution import (
     AttemptStatus,
@@ -222,6 +222,161 @@ async def _rejoin_is_waiting(seeded: Seeded, request_id: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_observer_failure_does_not_permanently_consume_the_worker_request(
+    seeded, monkeypatch,
+):
+    item, factory = seeded
+    monkeypatch.setattr(harness_session_manager, "_sessions", {})
+    harness_session_manager.set_adoption_handler(None)
+    request_id = "turn-observer-retry"
+    declare_activity(item.state_root, pid=item.proc.pid, spawn_token=TOKEN,
+                     state="working", turn_id=request_id, app_binding=item.binding())
+    assert await _adopt_through_the_real_entry(factory) == 0
+
+    async def ignore(event):
+        pass
+
+    async def broken_observer():
+        raise RuntimeError("observer database unavailable")
+
+    kwargs = dict(user_id=item.user_id, project_id=item.project_id,
+                  session_id=item.session_id, run_id=item.run_id, request_id=request_id,
+                  on_progress=ignore, on_protocol_event=ignore)
+    with pytest.raises(RuntimeError, match="observer database unavailable"):
+        await harness_session_manager.rejoin(**kwargs, before_wait=broken_observer)
+    session = harness_session_manager._sessions[
+        harness_session_manager._key(item.project_id, item.session_id)]
+    assert not session.conversation_in_flight
+    assert session.inflight_request_id == request_id
+    assert item.proc.poll() is None
+
+    retry = asyncio.create_task(harness_session_manager.rejoin(**kwargs))
+    try:
+        await _rejoin_is_waiting(item, request_id)
+        declare_activity(item.state_root, pid=item.proc.pid, spawn_token=TOKEN, state="idle")
+        cue(item.cue_dir, type="result", request_id=request_id,
+            data=_completed_result(item, request_id, "same RPC finished"))
+        result = await asyncio.wait_for(retry, timeout=15)
+        assert result["final_text"] == "same RPC finished"
+        assert session.inflight_request_id == ""
+    finally:
+        if not retry.done():
+            retry.cancel()
+        await asyncio.gather(retry, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_finished", [False, True])
+async def test_recovery_retries_the_observer_without_resubmitting_the_research(
+    adoption_wired, seeded, monkeypatch, already_finished,
+):
+    from app.services import session_event_replay
+
+    item, factory = seeded
+    request_id = "turn-automatic-observer-retry"
+    original = session_event_replay.ingest_transcript_wrapper
+    replayed = asyncio.Event()
+    calls = 0
+
+    async def unavailable_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        result = await original(*args, **kwargs)
+        if calls == 1:
+            db = args[0]
+            values = (await db.execute(select(ExecutionEvent.__table__).where(
+                ExecutionEvent.file_identity.is_not(None)))).mappings().first()
+            db.expunge_all()
+            duplicate = dict(values)
+            duplicate["id"] = uuid4().hex
+            db.add(ExecutionEvent(**duplicate))
+            await db.flush()  # actual source-identity conflict; rollback belongs to replay
+        replayed.set()
+        return result
+
+    monkeypatch.setattr(session_event_replay, "ingest_transcript_wrapper", unavailable_once)
+    raw = {"event": "llm_response", "at": "2026-11-12T00:00:00+00:00",
+           "usage": {"prompt_tokens": 13, "completion_tokens": 3, "total_tokens": 16}}
+    transcript = item.state_root / "transcript.jsonl"
+    transcript.write_text(json.dumps(raw) + "\n")
+    cue(item.cue_dir, type="transcript", transcript_path=str(transcript), byte_start=0,
+        byte_end=transcript.stat().st_size, event=raw)
+    await _wait_until(lambda: any(e.get("type") == "transcript" for e in _events(item.state_root)),
+                      timeout=10, what="源记录落盘")
+    declare_activity(item.state_root, pid=item.proc.pid, spawn_token=TOKEN, state="working",
+                     turn_id=request_id, app_binding=item.binding())
+    if already_finished:
+        cue(item.cue_dir, type="result", request_id=request_id,
+            data=_completed_result(item, request_id, "finished before observer recovered"))
+        await _wait_until(lambda: any(e.get("type") == "result" for e in _events(item.state_root)),
+                          timeout=10, what="result 落盘")
+        declare_activity(item.state_root, pid=item.proc.pid, spawn_token=TOKEN, state="idle")
+    assert await _adopt_through_the_real_entry(factory) == 0
+    await asyncio.wait_for(replayed.wait(), timeout=15)
+    if not already_finished:
+        await _rejoin_is_waiting(item, request_id)
+        async with factory() as db:
+            run = await db.get(Run, item.run_id)
+            command = await db.get(Command, item.command_id)
+            assert run.status == "running"
+            assert command.result is None and command.error is None
+        assert item.proc.poll() is None
+        assert detached_execution_count(REJOIN_KIND) == 1
+        declare_activity(item.state_root, pid=item.proc.pid, spawn_token=TOKEN, state="idle")
+        cue(item.cue_dir, type="result", request_id=request_id,
+            data=_completed_result(item, request_id, "finished without another dispatch"))
+    await _wait_until(lambda: detached_execution_count(REJOIN_KIND) == 0, timeout=20,
+                      what="自动恢复的观察者收尾")
+    async with factory() as db:
+        assert (await db.get(Run, item.run_id)).status == "completed"
+        assert await db.scalar(select(func.count()).select_from(Command).where(
+            Command.run_id == item.run_id)) == 1
+        assert await db.scalar(select(func.count()).select_from(Run).where(
+            Run.session_id == item.session_id, Run.parent_run_id.is_(None))) == 1
+        assert await db.scalar(select(func.count()).select_from(ExecutionEvent).where(
+            ExecutionEvent.run_id == item.run_id, ExecutionEvent.kind == "usage.updated")) == 1
+
+
+@pytest.mark.asyncio
+async def test_two_collectors_cannot_both_consume_one_terminal_result(seeded, monkeypatch):
+    from app.services.harness_sessions import HarnessSessionStaleError
+
+    item, factory = seeded
+    monkeypatch.setattr(harness_session_manager, "_sessions", {})
+    harness_session_manager.set_adoption_handler(None)
+    request_id = "one-result-two-collectors"
+    declare_activity(item.state_root, pid=item.proc.pid, spawn_token=TOKEN, state="working",
+                     turn_id=request_id, app_binding=item.binding())
+    assert await _adopt_through_the_real_entry(factory) == 0
+
+    async def ignore(event):
+        pass
+
+    kwargs = dict(user_id=item.user_id, project_id=item.project_id,
+                  session_id=item.session_id, run_id=item.run_id, request_id=request_id,
+                  on_progress=ignore, on_protocol_event=ignore)
+    first = asyncio.create_task(harness_session_manager.rejoin(**kwargs))
+    second = None
+    try:
+        await _rejoin_is_waiting(item, request_id)
+        second = asyncio.create_task(harness_session_manager.rejoin(**kwargs))
+        await asyncio.sleep(0)
+        assert not second.done()
+        declare_activity(item.state_root, pid=item.proc.pid, spawn_token=TOKEN, state="idle")
+        cue(item.cue_dir, type="result", request_id=request_id,
+            data=_completed_result(item, request_id, "one terminal result"))
+        assert (await asyncio.wait_for(first, timeout=10))["status"] == "completed"
+        with pytest.raises(HarnessSessionStaleError, match="not running turn"):
+            await asyncio.wait_for(second, timeout=2)
+    finally:
+        tasks = [task for task in (first, second) if task is not None]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_an_inflight_turn_is_settled_by_the_backend_that_adopted_it(
     adoption_wired, seeded,
 ):
@@ -336,6 +491,38 @@ async def test_a_turn_that_finished_while_nobody_listened_is_settled_from_disk(
     # 顺带：接回来的空闲 worker 现在认得这条 run 是它的（下一次接回 / 答复闸都靠它）。
     live = harness_session_manager.live_binding(item.project_id, item.session_id)
     assert live is not None and live.run_id == item.run_id
+
+
+@pytest.mark.asyncio
+async def test_a_control_ack_timeout_does_not_kill_the_scientific_worker(adoption_wired, seeded):
+    from app.services.harness_sessions import HarnessSessionError
+
+    item, factory = seeded
+    request_id = "science-survives-control-timeout"
+    declare_activity(item.state_root, pid=item.proc.pid, spawn_token=TOKEN, state="working",
+                     turn_id=request_id, app_binding=item.binding())
+    assert await _adopt_through_the_real_entry(factory) == 0
+    await _rejoin_is_waiting(item, request_id)
+    session = harness_session_manager._sessions[
+        harness_session_manager._key(item.project_id, item.session_id)]
+    with pytest.raises(HarnessSessionError) as error:
+        # A lost management acknowledgement, while the real scientific waiter
+        # remains registered on this same worker and socket.
+        await session._await_terminal(asyncio.Queue(), terminal_types={"accepted"},
+                                      timeout_seconds=0.01)
+    assert error.value.code == "harness_control_timeout"
+    assert error.value.details["safe_to_resubmit"] is False
+    assert item.proc.poll() is None
+    assert harness_session_manager.is_occupied(item.project_id, item.session_id)
+    declare_activity(item.state_root, pid=item.proc.pid, spawn_token=TOKEN, state="idle")
+    cue(item.cue_dir, type="result", request_id=request_id,
+        data=_completed_result(item, request_id, "continued after control timeout"))
+    await _wait_until(lambda: detached_execution_count(REJOIN_KIND) == 0, timeout=20,
+                      what="研究在控制请求超时后正常收尾")
+    async with factory() as db:
+        assert (await db.get(Run, item.run_id)).status == "completed"
+        assert await db.scalar(select(func.count()).select_from(Command).where(
+            Command.run_id == item.run_id)) == 1
 
 
 @pytest.mark.asyncio

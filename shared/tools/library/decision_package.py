@@ -37,15 +37,14 @@ def _now_iso() -> str:
 #   B. 红线一票否决：reviewer 的 verdict 本是 8 维平均整数取整，"1分=critical 红线"
 #      只是 review_spec 里的**文字**、没有机制。于是 execution_completeness=1（连实验
 #      都没做）被 honesty=5/deviation=5 平均稀释成 overall 3 → approve_with_revisions
-#      → 推荐 PROCEED。现在：只要 critique 报了 critical concern 或任一维度分触底
-#      （≤1），机械否决 PROCEED，不看平均分。
+#      → 推荐 PROCEED。现在保留具体 critical concern 的保守推荐；描述性分值
+#      不再自行创造阻塞理由。实际动作及其理由单独记账，不改写原审核意见。
 #   C. fail-closed：reviewer 没产出可解析 critique 时，旧逻辑默认推荐 PROCEED
 #      （fail-open，等于无质量信号直接放行）。改为默认 REVISE。
 #
 # 注意区分"review 失败"（fail-closed → REVISE）与"owner opt-out 跳过 review"
 # （合法，PROCEED 不变）。
 
-_CRITICAL_SCORE_FLOOR = 1     # per_dimension_score ≤ 此值视为红线（spec 里 1 就是失败档）
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
 
 
@@ -125,9 +124,7 @@ def _parse_critique_json(content: str) -> dict | None:
 
 
 def _red_line_reason(critique: dict) -> str | None:
-    """返回红线原因字符串（None=无红线）。机械依据，不看 overall 平均分：
-      ① 任一 severity=critical 的 concern，或 n_critical_concerns≥1；
-      ② 任一 per_dimension_score ≤ _CRITICAL_SCORE_FLOOR。"""
+    """Preserve concrete critical findings; a descriptive score is not a defect."""
     for c in (critique.get("concerns") or []):
         if isinstance(c, dict) and str(c.get("severity", "")).lower() == "critical":
             return f"critical concern：{str(c.get('description', ''))[:120]}"
@@ -136,13 +133,6 @@ def _red_line_reason(critique: dict) -> str | None:
             return f"n_critical_concerns={critique.get('n_critical_concerns')}"
     except (TypeError, ValueError):
         pass
-    scores = critique.get("per_dimension_scores") or {}
-    if isinstance(scores, dict):
-        floored = sorted(k for k, v in scores.items()
-                         if isinstance(v, int | float) and not isinstance(v, bool)
-                         and v <= _CRITICAL_SCORE_FLOOR)
-        if floored:
-            return f"维度触底(≤{_CRITICAL_SCORE_FLOOR})：{', '.join(floored)}"
     return None
 
 
@@ -201,8 +191,8 @@ _OPTION_LABELS_REVIEW_FAILED = [
 _REVIEW_FAILED_ACTIONS = ["retry_reviewer", "revise", "redirect_upstream", "abort", "edit"]
 _NORMAL_ACTIONS = ["proceed", "revise", "redirect_upstream", "abort", "edit"]
 
-#: Analysis 节点的物理 node_type（Phase 5 改名前仍叫 hypothesis）。
-_ANALYSIS_NODE_TYPE = "hypothesis"
+#: Analysis 节点的正式 node_type。
+_ANALYSIS_NODE_TYPE = "analysis"
 
 
 
@@ -571,7 +561,7 @@ def _render_decision_package(
     if review_failed_reason:
         lines.append("🔍 Review (from _reviewer)")
         lines.append(f"  ⚠️ review 失败/不可用: {_capped_text(review_failed_reason, 400)}")
-        lines.append("  → fail-closed：默认推荐 REVISE（不在无质量信号时直接放行）")
+        lines.append("  → fail-closed：优先恢复独立审核并复用产物；审核不可用本身不是产物缺陷。")
     elif review_critique_json is None:
         lines.append("🔍 Review")
         lines.append("  (skipped — owner opted out via skip_post_node_review)")
@@ -580,6 +570,17 @@ def _render_decision_package(
         confidence = review_critique_json.get("confidence", "?")
         lines.append("🔍 Review (from _reviewer)")
         lines.append(f"  Verdict: {verdict}  (confidence: {confidence})")
+        if review_critique_json.get("review_scope"):
+            lines.append(
+                f"  Review scope: {_capped_text(str(review_critique_json['review_scope']), 600)}"
+            )
+        if review_critique_json.get("unverified_checks"):
+            lines.append(
+                "  Not verified: "
+                + _capped_text(
+                    "; ".join(str(x) for x in review_critique_json["unverified_checks"]), 600
+                )
+            )
         # 自报失效必须有消费者：critique 逐条如实记着 owner_spec_loaded，却
         # 从来没人读 —— 于是"owner 判据从未生效"跨越全部历史 E2E 无人发现。
         # 决策包是人看审查结果的唯一入口，就在这里亮出来。
@@ -588,7 +589,8 @@ def _render_decision_package(
             lines.append(
                 "  ⚠️ 本次审查**未按 owner 的 review_spec**（rubric_source."
                 "owner_spec_loaded=false）—— 用的是通用 rubric，节点特有判据"
-                "（阈值依据/任务退化/定义锁定等）可能没有被检查。")
+                "（阈值依据/任务退化/定义锁定等）可能没有被检查。"
+            )
         strengths = review_critique_json.get("strengths") or []
         if strengths:
             lines.append("")
@@ -608,6 +610,9 @@ def _render_decision_package(
                 sev = c.get("severity", "?")
                 desc = _capped_text(c.get("description", ""), 600)
                 lines.append(f"    [{sev}] {desc}")
+                for key in ("basis", "evidence", "impact", "affected_use"):
+                    if c.get(key):
+                        lines.append(f"      {key}: {_capped_text(str(c[key]), 400)}")
             if len(_ordered) > 12:
                 lines.append(f"    … （另有 {len(_ordered) - 12} 条未列出）")
         # reviewer 自报的 action 仅供参考；实际推荐以框架否决后的
@@ -857,7 +862,10 @@ _REVIEWER_NODE_TYPE = "_reviewer"
 
 
 def _flow_entry_for(state: State, producing_run_id: str) -> dict | None:
+    from core.naming import canonical_node_fields
+
     for e in (state.hook_state.get("pending_post_node_flow") or []):
+        e.update(canonical_node_fields(e))
         if e.get("producing_run_id") == producing_run_id:
             return e
     return None
@@ -963,6 +971,9 @@ async def _present_decision_package(
     # 个产物。现场：literature 的 survey_report 被连审 4 轮，reviewer 每轮都
     # APPROVE(4/5)，orchestrator 自己都写了"四轮一致给出 proceed 判断"，流水线
     # 就是出不去。一个 truthy 的 "null" 把整条管线钉死在第一个节点上。
+    from core.naming import canonical_node_type
+
+    source_node_type = canonical_node_type(source_node_type)
     review_failed_reason = _normalize_absent(review_failed_reason)
     # issue #268（lujy 实测）：**critique id 也要同样归一化** —— 上面只修了
     # review_failed_reason 那一半，字符串 "null" 从另一个参数照样钻进来：
@@ -1342,6 +1353,8 @@ async def _present_decision_package(
     # 处理过了（保留 REDIRECT 意图 + 空 target + review_failed_reason 要求补齐），
     # 那条路刻意**不**降级 —— 降了就抹掉"根因在上游"这个诊断。第一版把两者混成
     # 一条判据，当场让两个既有测试转红，正是它们在守这条线。
+    recommended_target_node = (canonical_node_type(recommended_target_node)
+                               if recommended_target_node else None)
     _named_target = str(recommended_target_node or "").strip()
     _unexecutable_reco = (
         _why_this_target_cannot_close_the_flow(_named_target)
@@ -1688,7 +1701,7 @@ async def _present_decision_package(
         }
     entry = record_decision_answer(
         state, package["pause_event"],
-        {"offer_id": offer.offer_id, "choice_id": action, "note": ""},
+        {"offer_id": offer.offer_id, "choice_id": action, "note": reasoning},
         decided_by="orchestrator",
     )
     if entry is None or entry.get("decision_rejection") or entry.get("decision_validation_error"):
@@ -1843,7 +1856,9 @@ def record_decision_answer(
     # 说两遍，research_plan 里 `S1 | 1 维 normal form` 一字未动，而调度器
     # 把这一轮总结成"reviewer 指出维度混淆，需同维对照"）。
     # 挂到 entry 上，`_execute_authorized_action` 才够得着。
-    entry["human_note"] = str(getattr(outcome, "note", "") or "")
+    entry["human_note"] = str(getattr(outcome, "note", "") or "") if decided_by == "human" else ""
+    if decided_by == "orchestrator":
+        entry["orchestrator_reasoning"] = outcome.note
     # #761：决策附言是**用户的话**，和开题原文同级。此前它只走
     # `human_directive` 送给被打回的那一个节点；reviewer 做 provenance 对账时的
     # 「用户权威原文」只有开题 brief，于是附言里给的数字（阈值 0.02、种子数）
@@ -1956,6 +1971,9 @@ def record_decision_answer(
                 (pause_metadata or {}).get("recommended_target_node")
                 or entry.get("recommended_target_node")
             )
+        from core.naming import canonical_node_type
+
+        target = canonical_node_type(target) if target else target
         _unexecutable = _why_this_target_cannot_close_the_flow(target)
         if _unexecutable is not None:
             entry["decision_state"] = "awaiting_human"
@@ -2121,9 +2139,93 @@ def describe_recorded_decision(entry: dict | None) -> str | None:
         return f"（规范动作：{action}）"
 
 
+async def _recover_decision_dispatch(arguments, *, state, tool_call_id):
+    """Reconcile the child dispatched by this exact interrupted decision call."""
+    from core import child_dispatch
+    from core.conversation_store import dispatch_anchors
+    from shared.tools.run_node import _import_child_dispatch, _recover_run_node, run_has_live_executor
+
+    action = arguments.get("action")
+    if action not in {"revise", "redirect_upstream"}:
+        return None
+    try:
+        checkpoint = json.loads((state.root / "messages_checkpoint.json").read_text())
+        anchor = dispatch_anchors(checkpoint).get(tool_call_id)
+        if not anchor:
+            return None
+        boundary = datetime.fromisoformat(anchor.replace("Z", "+00:00"))
+        authorizations = []
+        with state.transcript_path.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    row = json.loads(line)
+                    if (row.get("event") == "decision_action_authorized"
+                            and row.get("producing_run_id") == arguments.get("producing_run_id")
+                            and row.get("chosen_action") == action
+                            and datetime.fromisoformat(
+                                row["at"].replace("Z", "+00:00")) >= boundary):
+                        authorizations.append(row)
+                except (ValueError, KeyError, TypeError):
+                    continue
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    # Ambiguous/foreign authorization cannot establish ownership of an effect.
+    if len(authorizations) != 1:
+        return None
+    target = authorizations[0].get("authorized_target_node")
+    if not target:
+        return None
+    records = [record for record in child_dispatch.load(state, tool_call_id)
+               if record["node_type"] == target and record.get("slot") is None]
+    if "child_dispatches" in checkpoint and not records:
+        return None
+    if records and "requested_inputs" in records[0]:
+        # New calls carry the original execution continuation. Rejoin the same
+        # owner, including its pause, review and parent bookkeeping boundaries.
+        if len(records) != 1:
+            return None
+        recovered = await _recover_run_node(
+            {"_resume_dispatch_id": records[0]["dispatch_id"]},
+            state=state, tool_call_id=tool_call_id)
+        if recovered is None:
+            return None
+        execution = recovered["result"]
+        if execution.get("status") == "pause":
+            return recovered
+    else:
+        # Pre-handle decisions lack the original dispatch inputs. Import their
+        # exact edge once, but do not claim to have finished parent bookkeeping.
+        records = records or _import_child_dispatch({"node_type": target}, state, tool_call_id)
+        if len(records) != 1:
+            return None
+        record = records[0]
+        root, summary = child_dispatch.child_facts(state, record)
+        if run_has_live_executor(record["child_run_id"]):
+            status = "in_progress"
+        elif summary is not None:
+            status = "recovered"
+        elif (root / "messages_checkpoint.json").is_file():
+            status = "interrupted"
+        else:
+            status = "outcome_unknown"
+        execution = {"status": status, "child_run_id": record["child_run_id"],
+                     "child_node_type": target, "child_state_dir": str(root),
+                     "do_not_start_fresh": True}
+        if summary is not None:
+            execution.update(child_status=summary.get("status"), summary=summary)
+        if status == "outcome_unknown":
+            return {"result": {"status": status, "outcome": "unknown",
+                               "execution": execution, "do_not_resubmit": True}}
+    return {"result": {"status": "recovered", "action": action,
+            "producing_run_id": arguments.get("producing_run_id"),
+            "execution": execution, "do_not_resubmit": True}}
+
+
+
 register_tool(
     ToolDefinition(
         name="present_decision_package",
+        interrupted_recovery=_recover_decision_dispatch,
         description=(
             "Post-producing decision point —— **只在 _orchestrator 用**。\n\n"
             "run_node 完成科研产出后会自动做独立审查，并把 post_node_review 返回给你。"
@@ -2142,8 +2244,8 @@ register_tool(
             "**Recommended option index** 自动从 review_critique 的 recommended_action 推：\n"
             "  proceed → 0；revise → 1；redirect_upstream → 2；abort → 3；escalate_to_human → 4\n\n"
             "**REDIRECT 场景**：reviewer 判定 source_node 已尽力，根因在更上游 "
-            "（典型例：experiment 输出弱，根因在 hypothesis prereg 不严谨；"
-            "hypothesis 设计 plan 时 baseline 不清，根因在 literature 覆盖不全）。"
+            "（典型例：experiment 输出弱，根因在 analysis prereg 不严谨；"
+            "analysis 设计 plan 时 baseline 不清，根因在 literature 覆盖不全）。"
             "此时 reviewer 写 `recommended_action.action='redirect_upstream'` + "
             "`target_node='<upstream>'` + `feedback_to_next_run='<focused query>'`。"
             "orchestrator 收到 [3] 选择后调上游节点带这个 focused query，跑完整 "

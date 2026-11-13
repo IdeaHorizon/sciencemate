@@ -32,7 +32,7 @@ test("类型名只有这一张表", () => {
   const src = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
   for (const file of [
     "../components/ProjectOutputsView.tsx",
-    "../../sessions/components/SessionDeliverables.tsx",
+    "../../artifacts/components/ArtifactDetail.tsx",
   ]) {
     assert.doesNotMatch(src(file), /_LABEL\s*:\s*Record<string,\s*string>/, `${file} 自己又写了一张类型名表`);
     assert.match(src(file), /artifactKindLabel\(/, `${file} 没有用共用的那张表`);

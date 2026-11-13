@@ -195,6 +195,7 @@ async def execute_node(
     task_contract_revision: int | None = None,
     task_contract_digest: str | None = None,
     parent_dispatch_id: str | None = None,
+    on_state_ready=None,
 ) -> dict[str, Any]:
     """端到端跑完一个节点。
 
@@ -212,6 +213,9 @@ async def execute_node(
     返回：
         一份 summary dict —— 同时也写入 output/{run_id}/summary.json。
     """
+    from core.naming import canonical_node_type
+
+    node_type = canonical_node_type(node_type)
     harness = harness_override or load_harness(node_type)
     # v3.1：per-harness 模型异构 —— harness 指定 model 时忽略传入的共享 llm，
     # 为该节点构造独立 client（api key 走 env 间接，yaml 不放密钥）。
@@ -257,14 +261,10 @@ async def execute_node(
         parent_dispatch_id=parent_dispatch_id or None,
     )
     # 续跑：**同一个 run** 接着走，不是新开一个（wangd 2026-08-18）。
-    # 拿不到那个目录就退回新开 —— 续跑失败不该让这次派发整个死掉。
+    # An explicit resume always retains its original run identity.
     resumed_messages: list[LLMMessage] | None = None
     resumed_from_turn = 0
-    # 续跑成没成，是**调用方**要知道的事实（#1081）。此前退回新开只留一行
-    # `log.warning`：返回的是新 run_id 的正常 `status=completed` summary，没有
-    # 任何字段说明它换过 run，新 run 的 transcript 里也找不到"曾请求续跑"。
-    # 于是"接着上一轮"和"从头来过"在调用方眼里一模一样 —— 而两者的产物、花费
-    # 和上下文完全不同。
+    # 调用方需要知道续跑身份；无法恢复时由异常保留原动作的未知状态。
     #
     # 这条事实是全函数：没请求续跑也照写（requested=None），否则"没请求"和
     # "请求了但字段丢了"又分不开。
@@ -284,28 +284,27 @@ async def execute_node(
             raise RunStillLiveError(
                 f"run {resume_run_id} 在本进程里还有执行者，拒绝 reopen：同一个 run "
                 f"上第二个 loop 会重复分析、补记录和 finish（#1164）。")
-        try:
-            state = State.reopen(run_id=resume_run_id, **_state_kwargs)
-        except (FileNotFoundError, OSError) as exc:
-            reason = f"{type(exc).__name__}: {exc}"
-            log.warning("run %s 续跑失败，改为新开：%s", resume_run_id, exc)
-            state = State.new(**_state_kwargs)
-            resume_outcome["reason"] = reason[:400]
-            state.append_transcript(
-                "resume_failed_started_fresh",
-                requested_run_id=resume_run_id,
-                fresh_run_id=state.run_id,
-                error=reason[:400],
-            )
-        else:
-            from .agent_loop import load_messages_checkpoint
+        state = State.reopen(run_id=resume_run_id, **_state_kwargs)
+        from .agent_loop import load_messages_checkpoint
 
-            resume_outcome["resumed"] = True
-            restored = load_messages_checkpoint(state)
-            if restored:
-                resumed_messages, resumed_from_turn = restored
+        resume_outcome["resumed"] = True
+        restored = load_messages_checkpoint(state)
+        if restored:
+            resumed_messages, resumed_from_turn = restored
+        elif (state.root / "messages_checkpoint.json").exists():
+            raise ValueError(f"Original run {resume_run_id} has an unreadable checkpoint")
+        elif state.transcript_path.exists():
+            for line in state.transcript_path.read_text(encoding="utf-8").splitlines():
+                try:
+                    event = json.loads(line).get("event")
+                except ValueError:
+                    continue
+                if event in {"tool_call", "loop_start", "agent_loop_mode", "llm_request"}:
+                    raise ValueError(f"Original run {resume_run_id} executed without a recoverable checkpoint")
     else:
         state = State.new(**_state_kwargs)
+    if on_state_ready is not None:
+        on_state_ready(state)
     state.hook_state["_resume_outcome"] = resume_outcome
     # 「这个任务允许中途停下作业吗」—— 由派发方给出，开工前冻住，子 run 只能
     # 引用（#1084 第二节）。执行者不能自己给自己发授权。
@@ -609,6 +608,7 @@ async def execute_node(
     # 同事反馈：长 run 跑到 turn N 撞 RemoteProtocolError，executor 没 wrap →
     # 异常冒泡 → summary.json 永远不写 → 事后只能靠 transcript 拼现场。
     from core import cancellation as _cancel
+    from core.conversation_store import UnconfirmedToolOutcome
 
     try:
         # #284：绑在**这一层**而不是只绑 run_loop —— 自定义 loop（data 就是）
@@ -616,7 +616,12 @@ async def execute_node(
         # 绑定只覆盖 loop 本体，不覆盖下面的 finalize：取消了照样要能写 summary、
         # 跑 run-end hook（那些也调模型），否则"取消"会退化成"卡死"。
         with _cancel.bind_run(state):
-            if custom is not None:
+            from .agent_loop import restore_pause
+
+            restored_pause = await restore_pause(harness, state, messages, llm)
+            if restored_pause is not None:
+                loop_result = restored_pause
+            elif custom is not None:
                 state.append_transcript(
                     "agent_loop_mode", mode="custom", source=f"nodes/{node_type}/agent_loop.py"
                 )
@@ -646,6 +651,11 @@ async def execute_node(
             status="cancelled",
             cancel_meta={**exc.signal, "cancelled_at": exc.where, "cancelled_at_turn": _turn},
         )
+    except UnconfirmedToolOutcome:
+        # Uncertainty suspends the accepted execution. It is not a failed
+        # computation, and must not acquire a terminal summary/run_end.
+        unregister_active(state.run_id)
+        raise
     except Exception as exc:
         # 只 catch Exception，CancelledError/KeyboardInterrupt 等 BaseException
         # 让 cancellation/中断语义照常向上冒，不在 except 里做 I/O。

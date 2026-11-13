@@ -8,7 +8,7 @@ frozen_at / freeze_reason。experiment 的规矩是"未声明 → secondary"
 
 规则本身是对的（防挑数据：不能"跑出了数字"就算证据）。坏在两点，都在这里堵上：
   1. 要求只写在下游 experiment 的 harness 里，Analysis 那边一个字都没有
-     （`grep -rn "run_role" nodes/hypothesis/` 零命中）
+     （`grep -rn "run_role" nodes/analysis/` 零命中）
   2. freeze 工具压根没有这两个参数，知道了也没地方写
 
 2026-09-21（#979）：这道门原先还要求同时申报 `analysis_eligible`，而它唯一的消费方
@@ -113,7 +113,7 @@ class _FakeState:
     跨节点读，`mark_frozen` 落一行 freeze、文件一个字节不动。
     """
 
-    node_type = "hypothesis"
+    node_type = "analysis"
 
     def __init__(self, tmp_path, *, records_dir=None):
         self.root = Path(tmp_path)
@@ -154,9 +154,9 @@ def _write(state, artifact_id, record, *, directory=None):
         artifact_id=artifact_id, artifact_type=record["type"], name=record["name"],
         content=record["content"], metadata=dict(record.get("metadata") or {}),
         directory=Path(directory) if directory else state.records_dir,
-        created_at="2026-08-20T00:00:00+00:00", provenance=produced("hypothesis", "r-hyp"),
-        produced_by_node_type="hypothesis", produced_by_run_id="r-hyp",
-        by_node="hypothesis", by_run="r-hyp",
+        created_at="2026-08-20T00:00:00+00:00", provenance=produced("analysis", "r-hyp"),
+        produced_by_node_type="analysis", produced_by_run_id="r-hyp",
+        by_node="analysis", by_run="r-hyp",
     )
 
 
@@ -314,7 +314,7 @@ class _CrossNodeState(_FakeState):
 
     def __init__(self, tmp_path):
         own = Path(tmp_path) / _DIRS["experiment"]
-        other = Path(tmp_path) / _DIRS["hypothesis"]
+        other = Path(tmp_path) / _DIRS["analysis"]
         own.mkdir(parents=True)
         other.mkdir(parents=True)
         super().__init__(tmp_path, records_dir=own)
@@ -371,7 +371,7 @@ class _OwnedState(_FakeState):
         root = Path(tmp_path)
         own = root / _DIRS[node_type]
         own.mkdir(parents=True, exist_ok=True)
-        (root / _DIRS["hypothesis"]).mkdir(parents=True, exist_ok=True)
+        (root / _DIRS["analysis"]).mkdir(parents=True, exist_ok=True)
         super().__init__(root, records_dir=own)
         self.project_worktree = root
         self.node_type = node_type
@@ -381,7 +381,7 @@ def _put_prereg(state) -> Path:
     """hypothesis 的预注册：落 plan/，返回正文文件路径。"""
     _write(state, "pre_registration__P",
            {"type": "pre_registration", "name": "P", "content": _STUB_CONTENT, "metadata": {}},
-           directory=state.project_worktree / _DIRS["hypothesis"])
+           directory=state.project_worktree / _DIRS["analysis"])
     return state.find_artifact_path("pre_registration__P")
 
 
@@ -397,10 +397,10 @@ async def test_another_node_cannot_freeze_your_commitment(tmp_path) -> None:
     )
 
     assert result["status"] == "error"
-    assert result.get("owner_node") == "hypothesis"
+    assert result.get("owner_node") == "analysis"
     # 报错必须指名下一步，否则调用方只能重试
     assert "run_node" in result["error"]
-    assert "hypothesis" in result["error"]
+    assert "analysis" in result["error"]
     # 而且**没有动过**那份产物 —— 不是写了再回滚：账本上没有 freeze 行，文件原样
     assert state.store.head("pre_registration__P").frozen is False
     assert _meta(state, "pre_registration__P").get("frozen") is not True
@@ -410,7 +410,7 @@ async def test_another_node_cannot_freeze_your_commitment(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_the_owner_can_still_freeze_its_own(tmp_path) -> None:
     """闸门不能只会挡：所有者自己冻必须照常放行。"""
-    state = _OwnedState(tmp_path, node_type="hypothesis")
+    state = _OwnedState(tmp_path, node_type="analysis")
     target = _put_prereg(state)
 
     result = await _freeze_artifact(

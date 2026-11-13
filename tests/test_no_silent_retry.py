@@ -308,11 +308,14 @@ async def test_a_child_that_already_produced_something_is_not_rerun(tmp_path, mo
     """
     import shared.tools.run_node as rn
 
-    monkeypatch.setattr(rn, "_crashed_child_summary", lambda *a, **k: {
-        "status": "error",
-        "failure_category": "provider_unavailable",
+    import json
+    parent = _state(tmp_path)
+    child = parent.root.parent / "existing-child"
+    child.mkdir()
+    (child / "summary.json").write_text(json.dumps({
+        "status": "error", "failure_category": "provider_unavailable",
         "produced_artifact_types": ["survey_report"],
-    })
+    }))
     calls = {"n": 0}
 
     async def _down_after_work(**kwargs):
@@ -320,7 +323,7 @@ async def test_a_child_that_already_produced_something_is_not_rerun(tmp_path, mo
         raise httpx.ReadTimeout("read timed out")
 
     summary = await rn._execute_with_infra_retry_inner(
-        _state(tmp_path), "literature", {}, _down_after_work)
+        parent, "literature", {"resume_run_id": "existing-child"}, _down_after_work)
 
     assert calls["n"] == 1, "这一轮已经产出了 survey_report，不该原样重跑"
     assert summary["failure_category"] == "provider_unavailable"

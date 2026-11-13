@@ -43,9 +43,9 @@ test("项目状态只剩两种", () => {
 });
 
 test("开会话、收起会话的按钮跟着这个项目的 drive 能力走，不只看账号角色", () => {
-  const index = shown("src/features/sessions/components/SessionIndex.tsx");
-  assert.match(index, /const drivesThisProject = project\.data\?\.capabilities\?\.includes\("drive"\) \?\? false;/);
-  assert.match(index, /const canCreate = canCreateSessions\(user\) && mode === "api" && drivesThisProject;/,
+  const index = shown("src/shared/layout/ProjectTree.tsx");
+  assert.match(index, /const drivesThisProject = project\.capabilities\?\.includes\("drive"\) \?\? false;/);
+  assert.match(index, /const canCreate = canCreateSessions\(user\) && mode === "api" && drivesThisProject && project\.status !== "archived";/,
     "归档的项目（和只读进来的人）还画着一个点了就 403 的「新建会话」");
-  assert.match(index, /const canArchive = canCreateSessions\(user\) && mode === "api" && drivesThisProject;/);
+  assert.match(index, /const canArchive = canCreate;/);
 });

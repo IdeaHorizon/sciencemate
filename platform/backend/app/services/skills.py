@@ -182,6 +182,7 @@ def save_project_skills(
     project_id: str, owner_id: str, bindings: list[dict], revision: str
 ) -> dict:
     lib, home = library(), the_projects_home()
+    bindings = lib.normalize_node_bindings(bindings)
     old = lib.read_bindings(project_id, projects_home=home)
     authorized = {(b["owner_id"], b["name"], b["revision"]) for b in old["bindings"]}
     known_nodes = {node["id"] for node in nodes()}

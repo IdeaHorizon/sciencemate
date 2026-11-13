@@ -769,9 +769,12 @@ async def test_an_unmanaged_unknown_external_effect_stops_without_repeating(tmp_
     import chat
     chat._repair_message_tool_protocol(messages)
     resumed = ScriptedLLM(reply(content="must not run"))
-    with pytest.raises(UnconfirmedToolOutcome):
-        await run_loop(node, state, messages, resumed)
-    assert resumed.calls == 0 and effect.read_text() == "one\n"
+    result = await run_loop(node, state, messages, resumed)
+    assert result.status == "completed" and resumed.calls == 1
+    assert effect.read_text() == "one\n"
+    rejected = await execute("remote_exec", state, resource_id="r", command="resubmit")
+    assert rejected["error_code"] == "unconfirmed_tool_outcome" and rejected["executed"] is False
+    assert effect.read_text() == "one\n"
 
 
 @pytest.mark.asyncio
@@ -792,6 +795,6 @@ async def test_an_old_result_with_a_reused_call_id_cannot_confirm_a_new_effect(t
     _persist_messages_checkpoint(state, messages, turn=1)
     state.hook_state.pop("_current_tool_call_id_being_executed")
     llm = ScriptedLLM(reply(content="must not run"))
-    with pytest.raises(UnconfirmedToolOutcome):
-        await run_loop(harness(), state, messages, llm)
-    assert llm.calls == 0
+    await run_loop(harness(), state, messages, llm)
+    assert llm.calls == 1
+    assert state.hook_state["_unconfirmed_tool_calls"] == {call_id: "remote_exec"}

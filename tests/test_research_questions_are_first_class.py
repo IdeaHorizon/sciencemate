@@ -305,7 +305,7 @@ def _goal_brief(tmp_path, inputs: dict) -> tuple[dict, str]:
     """走真实入口 —— briefing 就是节点第 0 轮看到的那段文本。"""
     import asyncio
 
-    from nodes.hypothesis.tools.research_goal import _get_research_goal
+    from nodes.analysis.tools.research_goal import _get_research_goal
 
     st = State.new(node_type="hypothesis", base_dir=tmp_path / "runs", project_id="p_g")
     st.hook_state["node_inputs"] = inputs
@@ -349,14 +349,14 @@ _EXPLORATORY_WITH_ASSUMPTION = """## Research Questions
 
 def test_a_concise_output_kind_is_not_too_short():
     """「一张相图」四个字被 `>=6 字` 判过短 —— 查长度就是查形式，会逼出凑字。"""
-    from nodes.hypothesis.tools.research_questions import assess_research_questions
+    from nodes.analysis.tools.research_questions import assess_research_questions
 
     assert assess_research_questions(_EXPLORATORY_WITH_ASSUMPTION)["passed"] is True
 
 
 def test_vague_output_kind_still_rejected():
     """放宽的是长度，不是空话。"""
-    from nodes.hypothesis.tools.research_questions import assess_research_questions
+    from nodes.analysis.tools.research_questions import assess_research_questions
 
     doc = _EXPLORATORY_WITH_ASSUMPTION.replace("- output_kind: 一张相图",
                                                "- output_kind: 待定")
@@ -365,7 +365,7 @@ def test_vague_output_kind_still_rejected():
 
 def test_every_question_must_declare_its_assumptions():
     """探索型也要 —— 「扫这个区间」预设了答案在区间里。"""
-    from nodes.hypothesis.tools.research_questions import assess_research_questions
+    from nodes.analysis.tools.research_questions import assess_research_questions
 
     doc = _EXPLORATORY_WITH_ASSUMPTION.replace(
         "- assumption: 值得看的相变落在 100-400K 这个窗口内\n", "")
@@ -381,7 +381,7 @@ def test_restatement_check_covers_questions_without_a_proposition(tmp_path):
     上一版这条挂在 claim 上，而无命题的问题不产生 claim —— 于是探索/表征/解释
     型研究一项内容质量判据都拿不到（实测 3 个问题只审了 1 个）。
     """
-    from nodes.hypothesis.tools.research_questions import assess_question_restatement
+    from nodes.analysis.tools.research_questions import assess_question_restatement
 
     finding = "NHC chain 在高密度 LJ 上比 single Nosé-Hoover 收敛更快且更 ergodic"
     st = State.new(node_type="hypothesis", base_dir=tmp_path / "runs", project_id="p_rs")
@@ -406,7 +406,7 @@ def test_value_assessment_must_cover_every_question(tmp_path):
     """价值/可信性评估按**问题**对账，缺谁报谁 —— 不再只评有 claim 的那一条。"""
     import json as _json
 
-    from nodes.hypothesis.tools.research_questions import assess_question_value_coverage
+    from nodes.analysis.tools.research_questions import assess_question_value_coverage
 
     st = State.new(node_type="hypothesis", base_dir=tmp_path / "runs", project_id="p_v")
     st.save_artifact("pre_registration", "P", MIXED.replace(
@@ -426,7 +426,7 @@ def test_value_coverage_accepts_a_markdown_assessment(tmp_path):
     只认 JSON 里 `"label": "Q1"` 的对账判它「没评」。**认序列化格式不认事实**，
     跟长度阈值是同一个病。
     """
-    from nodes.hypothesis.tools.research_questions import assess_question_value_coverage
+    from nodes.analysis.tools.research_questions import assess_question_value_coverage
 
     st = State.new(node_type="hypothesis", base_dir=tmp_path / "runs", project_id="p_md")
     st.save_artifact("pre_registration", "P", EXPLORATORY.replace(
@@ -483,8 +483,8 @@ def test_threshold_rationale_survives_parsing():
     assert "10.1063" in item.rationale.get("citation_or_derivation", "")
     assert item.rationale.get("scientific_meaning")
 
-    from nodes.hypothesis.committed import _extract_yaml_block_falsifiers
-    from nodes.hypothesis.tools.threshold_grounding import (
+    from nodes.analysis.committed import _extract_yaml_block_falsifiers
+    from nodes.analysis.tools.threshold_grounding import (
         assess_threshold_grounding,
     )
     fs = _extract_yaml_block_falsifiers(doc)
@@ -500,7 +500,7 @@ def test_a_question_is_not_a_restatement_of_its_own_fresh_claim(tmp_path):
     根因：查重把 status="open" 也当已知，而新建 claim 默认就是 open，
     正文又正是从这个问题的 proposition 抄来的 → 100% 自我重合。
     """
-    from nodes.hypothesis.tools.research_questions import assess_question_restatement
+    from nodes.analysis.tools.research_questions import assess_question_restatement
 
     prop = "在 rho*=0.85、T*=0.8–2.0 区间 D(T) 服从 Arrhenius 形式"
     doc = f"""## Research Questions

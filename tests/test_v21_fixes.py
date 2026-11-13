@@ -204,10 +204,10 @@ async def test_finish_gate_blocks_completion_when_mandatory_selfcheck_never_ran(
     """收尾闸：节点声明的强制自检没跑过就不许收尾 —— prompt 里的'必须'不是机制。
 
     E2E 实测（2026-08-07 真课题 LJ 冷却）：hypothesis 的 prompt 里"结束前必须
-    validate_hypothesis_outputs() passed=true"写了三遍（工作流第 11 步 /
+    validate_analysis_outputs() passed=true"写了三遍（工作流第 11 步 /
     rules / QC 描述），agent 全程 56 次工具调用**一次没调**，最后一轮还在
     create_claim 就收工。on_end hook 补跑校验时 loop 已结束 —— 失败的两项
-    （research_plan_complete 的 DAG 说明、hypothesis_research_overview）都是
+    （research_plan_complete 的 DAG 说明、analysis_research_overview）都是
     它当场能补的，却只能判 incomplete，还拖累下游 reviewer 白跑 40 轮。
     """
     from core import loop_hooks

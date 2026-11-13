@@ -59,7 +59,7 @@ TYPED_ONLY_ARTIFACT_OWNERS: dict[str, frozenset[str]] = {
     # 不是普通文档。它的全部完整性判据（版本链、假说不得消失、裁决必须挂
     # 证据、冻结 prereg 假说必须在册）都在 update_research_state 里；若通用
     # save_artifact 也能造一份，那些判据就只是建议 —— 绕过它只要换个工具名。
-    "research_state": frozenset({"hypothesis"}),
+    "research_state": frozenset({"analysis"}),
 }
 
 
@@ -147,7 +147,9 @@ def validate_artifact_write(
             f"survey_report），再由属主节点的生命周期工具去产出正式那份 —— "
             f"换个工具名把它铸出来不是出路。"
         )
-    if node_type not in owners:
+    from core.naming import canonical_node_type
+
+    if canonical_node_type(node_type) not in owners:
         raise PermissionError(
             f"node_type={node_type!r} is not an owner of typed artifact "
             f"{artifact_type!r}; owners={sorted(owners)}"

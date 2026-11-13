@@ -259,7 +259,7 @@ def test_model_facing_write_of_a_proposal_stage_hypothesis_is_marked_not_refused
     assert res["status"] == "success", res          # 墙若加回来这条转红
     assert res["adoption"] == "proposed"
     rec = st.get_kb_record("claims", res["id"])
-    assert rec["adoption"] == "proposed" and rec["created_by_node_type"] == "hypothesis"
+    assert rec["adoption"] == "proposed" and rec["created_by_node_type"] == "analysis"
     assert _events(st, "hypothesis_claim_written_before_adoption")
 
 

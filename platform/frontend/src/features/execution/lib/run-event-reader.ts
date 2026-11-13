@@ -24,6 +24,7 @@ export async function readCanonicalRunEventsAfter(
   sessionId: string,
   runId: string,
   initialAfterSequence: number,
+  signal?: AbortSignal,
 ): Promise<ExecutionEvent[]> {
   if (!Number.isSafeInteger(initialAfterSequence) || initialAfterSequence < 0) {
     throw new ExecutionReadContractError("Run event cursor must be a non-negative integer");
@@ -32,11 +33,13 @@ export async function readCanonicalRunEventsAfter(
   let afterSequence = initialAfterSequence;
 
   while (true) {
+    signal?.throwIfAborted();
     // **一律**带上子节点。这里原来是个参数，而所有调用点取值都一样 ——
     // 结果我只接了首屏那一次，实时轮询那条路照旧不带，UI 上正在跑的那一轮
     // 一个子节点都看不到（2026-08-12 实测）。只有一个取值被走到的参数，
     // 唯一的作用是给"忘了传"留位置。
-    const page = await client.listSessionEvents(sessionId, afterSequence, 200, runId, true);
+    const page = await client.listSessionEvents(sessionId, afterSequence, 200, runId, true, signal);
+    signal?.throwIfAborted();
     // 契约照旧：读回来的每一条都必须属于这条 run。要子代时，"属于"扩到
     // 「它自己，或它派出去的直接子节点」—— 边界放宽了，但**仍然是边界**，
     // 不是取消检查（别人的 run 混进来照样要吵）。
@@ -91,14 +94,20 @@ export function mergeCanonicalRunEvents(
       );
     }
     const idOwner = byId.get(event.id);
-    if (idOwner && eventSignature(idOwner) !== eventSignature(event)) {
+    // A registry snapshot shares immutable event objects with the Query cache.
+    // Only a separately delivered copy needs canonical content comparison.
+    if (idOwner && idOwner !== event && eventSignature(idOwner) !== eventSignature(event)) {
       throw new ExecutionReadContractError(
         `Run event id ${event.id} has conflicting canonical content`,
       );
     }
-    bySequence.set(event.sequence, event);
-    byId.set(event.id, event);
+    bySequence.set(event.sequence, idOwner ?? event);
+    byId.set(event.id, idOwner ?? event);
   }
 
-  return [...bySequence.values()].sort((left, right) => left.sequence - right.sequence);
+  const merged = [...bySequence.values()].sort((left, right) => left.sequence - right.sequence);
+  // Token/connection notifications must not create a new history projection.
+  return current.length === merged.length && current.every((event, index) => event === merged[index])
+    ? current as ExecutionEvent[]
+    : merged;
 }

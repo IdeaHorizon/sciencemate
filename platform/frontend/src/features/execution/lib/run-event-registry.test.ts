@@ -130,6 +130,47 @@ test("a transport loss pages after the in-memory cursor before reconnecting", as
   registry.stopAll();
 });
 
+test("long-history tokens notify drafts without republishing durable history", async () => {
+  const registry = new CanonicalRunEventRegistry();
+  const stream = deferred<{ runId: string; status: string; nextAfterSequence: number }>();
+  let emitToken!: Parameters<RunEventRegistryOptions["readStream"]>[3];
+  let emitEvent!: Parameters<RunEventRegistryOptions["readStream"]>[2];
+  let cursor = -1;
+  let historyWrites = 0;
+  let draft = "";
+  registry.acquire({
+    key: "long-history",
+    sessionId: "session-a",
+    runId: "run-a",
+    initialEvents: Array.from({ length: 4000 }, (_, index) => event(index + 1)),
+    readStream(after, _signal, onEvent, onToken) {
+      cursor = after;
+      emitEvent = onEvent;
+      emitToken = onToken;
+      return stream.promise;
+    },
+    async readFallback() { return []; },
+    onEvents() { historyWrites += 1; },
+    onTerminal() {},
+  }, (snapshot) => { draft = snapshot.assistantDraft; });
+  assert.equal(cursor, 4000, "live stream must start after the seeded history");
+  assert.equal(historyWrites, 1);
+  for (let index = 0; index < 100; index += 1) {
+    emitToken({ runId: "run-a", text: "a" });
+  }
+  assert.equal(draft.length, 100);
+  assert.equal(historyWrites, 1, "text tokens must not re-merge 4000 durable events");
+  emitEvent(event(4001));
+  assert.equal(historyWrites, 2);
+  emitEvent(event(4001));
+  assert.equal(historyWrites, 2, "duplicate delivery must preserve history identity");
+  stream.resolve({ runId: "run-a", status: "completed", nextAfterSequence: 4001 });
+  await Promise.resolve();
+  assert.equal(draft, "");
+  assert.equal(historyWrites, 2);
+  registry.stopAll();
+});
+
 test("after the reconnect limit, re-acquiring on a re-render does not reopen the stream", async () => {
   // 2026-09-09 node20：一条永远契约失败的流，五次失败进 error 后，每次重渲染的
   // acquire 又起一次 follow、又数五次 —— 以渲染的节奏无限重开，每次一条连接。

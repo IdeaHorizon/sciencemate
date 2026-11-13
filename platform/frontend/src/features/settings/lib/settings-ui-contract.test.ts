@@ -60,7 +60,7 @@ test("settings center has one searchable shell and dedicated personal, research,
 test("general settings are real startup and Session usage controls", () => {
   const page = source("../../../app/(workspace)/settings/page.tsx");
   const landing = source("./default-landing.ts");
-  const sessionIndex = source("../../sessions/components/SessionIndex.tsx");
+  const sessionIndex = source("../../../shared/layout/ProjectTree.tsx");
   const execution = source("../../execution/components/SessionExecutionView.tsx");
   const canonicalActivity = source("../../chat/components/CanonicalRunActivity.tsx");
   const chatMessages = source("../../chat/components/ChatMessages.tsx");
@@ -216,7 +216,8 @@ test("应用外壳定高：左栏不被右栏的内容推走", () => {
   assert.match(shell, /\.app-shell \{[^}]*height: 100dvh/);
   assert.match(shell, /\.app-shell \{[^}]*overflow: hidden/);
   assert.match(shell, /\.app-main \{[^}]*overflow: auto/);
-  assert.match(shell, /\.app-sidebar \{[^}]*overflow-y: auto/);
+  assert.match(shell, /\.app-sidebar \{[^}]*overflow: hidden/);
+  assert.match(shell, /\.project-tree \{[^}]*overflow-y: auto/);
   assert.equal(/\.app-shell \{[^}]*min-height: 100vh/.test(shell), false);
   assert.equal(/\.app-sidebar \{[^}]*min-height: 100vh/.test(shell), false);
 });
@@ -261,7 +262,8 @@ test("Settings navigation is one-line and keeps one global entry outside Project
   const shell = source("../components/SettingsShell.tsx");
   const appShell = source("../../../shared/layout/AppShell.tsx");
   assert.equal(shell.includes("<small>{item.description}</small>"), false);
-  assert.match(appShell, /label: \{ zh: "项目设置"/);
+  const tree = source("../../../shared/layout/ProjectTree.tsx");
+  assert.match(tree, /label: t\(\{ zh: "项目设置"/);
   assert.equal((appShell.match(/GLOBAL_NAVIGATION\.settings\.href/g) ?? []).length, 1);
   assert.equal(appShell.includes("Research settings"), false);
   assert.equal(appShell.includes("settings/governance"), false);

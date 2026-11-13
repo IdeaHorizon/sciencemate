@@ -117,8 +117,8 @@ custom_agent_loops:
 #
 # 下面登记的是**别人的节点**上同形状的存量，按 owner 红线不代改。
 blocking_check_aggregates:
-  - node: hypothesis
-    check: hypothesis_output_validation_passed
+  - node: analysis
+    check: analysis_output_validation_passed
     field: passed
     owner: TBD（Analysis/hypothesis 节点 owner）
     reason: "阻断门 require validation report 顶层 passed；该报告若含 advisory 级条目，它们会被这条门变成完成门"

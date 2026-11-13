@@ -19,7 +19,7 @@ prompt 文字，零机械后果。
   metadata:
     infeasible: true                  # 必须
     infeasible_reason: "<缺什么、试过什么获取手段、为什么不行>"
-    redirect_target: "hypothesis"     # 可选；建议回哪个上游节点降级设计（默认 hypothesis）
+    redirect_target: "analysis"     # 可选；建议回哪个上游节点降级设计（默认 analysis）
 
   或在 content 里写显式段落（LLM 更容易做到）：
     ## Feasibility（或 ## 可行性）
@@ -70,7 +70,7 @@ def artifact_declares_infeasible(rec: dict | None) -> bool:
 
 
 #: 声明里没给目标时的落点。它必须自己先满足"能接 REDIRECT"这个条件。
-_DEFAULT_REDIRECT_TARGET = "hypothesis"
+_DEFAULT_REDIRECT_TARGET = "analysis"
 
 
 def _target_that_can_take_the_handoff(declared: Any) -> str:
@@ -85,8 +85,9 @@ def _target_that_can_take_the_handoff(declared: Any) -> str:
     正是 infeasible 这条路当初要避免的。回落到既有默认值，语义原样保留、且执行得了。
     """
     from core.loader import node_owes_post_node_flow
+    from core.naming import canonical_node_type
 
-    name = str(declared or "").strip()
+    name = canonical_node_type(str(declared or "").strip())
     if name and node_owes_post_node_flow(name):
         return name
     if name:

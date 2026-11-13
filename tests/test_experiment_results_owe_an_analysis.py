@@ -66,14 +66,14 @@ def _research_state(root: Path, version: int, created_at: str,
     """按版本原语落一版 research_state：同一身份再 save 一次就是下一版。"""
     return write_record(
         root, artifact_type="research_state", name="research_state",
-        content=f"# Research State v{version}", directory=_DIRS["hypothesis"],
+        content=f"# Research State v{version}", directory=_DIRS["analysis"],
         metadata={
             "version": version,
             "verdict": "continue",
             "completed_experiments": completed or [],
             "hypotheses": [{"id": "H1", "status": "active"}],
         },
-        produced_by_node_type="hypothesis", produced_by_run_id="r-hyp",
+        produced_by_node_type="analysis", produced_by_run_id="r-hyp",
         created_at=created_at,
     )
 
@@ -96,7 +96,7 @@ _LATER_ISO = "2026-08-11T05:00:00+00:00"
 @pytest.fixture()
 def worktree(tmp_path: Path) -> Path:
     root = tmp_path / "wt"
-    (root / _DIRS["hypothesis"]).mkdir(parents=True)
+    (root / _DIRS["analysis"]).mkdir(parents=True)
     (root / _DIRS["experiment"]).mkdir(parents=True)
     return root
 
@@ -110,7 +110,7 @@ def test_a_finished_experiment_with_no_newer_analysis_is_owed(worktree: Path) ->
     hits = [o for o in owed if o.kind == obligations.KIND_UNANALYZED_RESULTS]
 
     assert hits, "实验出了结果、Analysis 没被调用过 —— 这条账必须记上"
-    assert hits[0].owed_by == "hypothesis"
+    assert hits[0].owed_by == "analysis"
     assert "1786410296-fc9b0b" in json.dumps(hits[0].extra, ensure_ascii=False)
     assert hits[0].blocking, "结果没被分析过就收尾 = 做完实验直接去写论文"
 
@@ -157,7 +157,7 @@ def test_the_discharge_hint_names_the_node_and_the_run(worktree: Path) -> None:
 
     hit = [o for o in obligations._collect_unanalyzed_results(_State(worktree), runs)
            if o.kind == obligations.KIND_UNANALYZED_RESULTS][0]
-    assert "hypothesis" in hit.discharge_hint
+    assert "analysis" in hit.discharge_hint
     assert "1786410296-fc9b0b" in hit.discharge_hint
     assert "research_state" in hit.acceptance
 
@@ -176,7 +176,7 @@ def test_it_is_actually_wired_into_collect(tmp_path: Path, monkeypatch) -> None:
     `collect()` 会不会把它吞在 try/except 里？
     """
     root = tmp_path / "wt"
-    (root / _DIRS["hypothesis"]).mkdir(parents=True)
+    (root / _DIRS["analysis"]).mkdir(parents=True)
     _research_state(root, 1, _STATE_CREATED_ISO)
     finished = _iso_epoch("2026-08-11T02:20:42+00:00")
 
@@ -199,7 +199,7 @@ def test_it_is_actually_wired_into_collect(tmp_path: Path, monkeypatch) -> None:
     # 而且它必须真的挡收尾 —— blocking 不只是个字段。终态闸的牙齿在消费端
     # （chat 读 blocking()），这里断言账进了 blocking 集合。
     blocked = obligations.blocking(obligations.collect(_Full()))
-    assert blocked and any("hypothesis" in (o.owed_by or "") for o in blocked)
+    assert blocked and any("analysis" in (o.owed_by or "") for o in blocked)
 
 
 # ── 只有"有结论要裁决"的运行才欠这笔账（issue #413）──────────────────────────

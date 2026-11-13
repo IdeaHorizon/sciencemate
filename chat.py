@@ -1,372 +1,46 @@
-"""chat.py —— 项目级 REPL（持续对话入口）。
+"""Shared research-session implementation and legacy terminal launcher.
 
-用法：
-  python chat.py                              # 临时项目（不持久化）
-  python chat.py --project my-proj-2026       # 持久化到 ~/.harness-framework/projects/my-proj-2026/
-
-设计：
-  一个 project = 一个对话 = 一个 orchestrator state。
-  每次用户输入会被加进 orchestrator 的 messages，跑一次 agent_loop。
-  orchestrator 用 run_node 工具调起其它节点（子 agent loop）。
-  conversation 持久化到 ~/.harness-framework/runs/orchestrator__<project_id>/conversation.json。
-
-**Phase 1：异步中途打断**
-  user 在 child 跑的时候插话 → 后台 stdin task 接到 → chat.py 主控判断模式：
-    - 主 orchestrator turn idle（user 输入开新一轮） → 进 orchestrator
-    - child 正在跑（active 但没 pause）        → 跑 interrupt 决策 mini-loop
-                                                  → 调 inject_into_node / cancel_node
-    - child 已 pause（在等 user 答 question）  → 答复路由到 pause_driver
-
-特殊命令：
-  /exit / /quit       退出
-  /status             一次性 dump 项目状态（artifacts + memory + KB + 最近 run）
-  /reset              清空对话（保留 memory + KB；只重置 orchestrator messages）
-  /btw <text>         软注入：把这段话作为 system 消息插到下一轮 LLM 调用前面
-  /help               帮助
+The secondary terminal UI lives in cli/ and is maintained by nidy. Existing
+runtime imports remain compatible while shared session helpers stay here.
+Run python -m cli, or use the compatible python chat.py launcher.
 """
 from __future__ import annotations
 
-import argparse
 import asyncio
-import atexit
 import hashlib
 import json
 import logging
 import os
 import re
 import sys
-import threading
 import time
 import uuid
 from pathlib import Path
 
 from shared.lib import filelock
 
-# import readline 让内建 input() 用 readline 的行编辑器（对全进程所有 input()
-# 生效，含后台 stdin 线程里那个）。不导入时 input() 走 TTY cooked 模式：退格
-# 对**双列宽字符**（中文/emoji）只擦一列 → 删了 buffer 但屏幕残留一个"删不掉"
-# 的鬼影列（用户实测 bug）。readline 按 wcwidth 正确擦两列，鬼影消失；顺带白
-# 送输入历史（上箭头）。某些平台（Windows 原生）无 readline → 静默降级。
-try:
-    import readline  # noqa: F401
-    # #140：显式打开 bracketed paste —— 不依赖用户 shell 的 .inputrc / bash
-    # 进程设置。开了之后，粘贴的多行文本整段进 readline buffer、内部换行不触发
-    # accept-line，用户最后按一次 Enter 才作为**一条**消息提交（GNU readline 8.1+）。
-    # 这样大段粘贴不受 _coalesce_pasted_lines 那个 50ms 时序窗口影响（SSH 上大
-    # 粘贴分多个 TCP 段到达、段间 >50ms 时时序合并会漏）。老 readline / libedit
-    # 不认这条 → 静默无效，退回时序合并兜底（见 _coalesce_pasted_lines）。
-    try:
-        readline.parse_and_bind("set enable-bracketed-paste on")
-    except Exception:
-        pass
-except ImportError:
-    pass
-
-
-# ── 终端 termios 状态复原（2026-07-13 修 qinp 报告的退出后不回显 bug）──────────
-# 现象：/exit 或 Ctrl-C 退出 chat.py 后，终端残留 `-icanon -echo`，键盘输入不
-# 回显、无行编辑（要手动 `stty sane` 才恢复）。
-# 根因：后台 stdin daemon 线程阻塞在 readline 的 input() 里，把 TTY 切成了 raw
-# 态（关 canonical + echo 做逐字符行编辑）；进程退出时 daemon 线程被强杀，
-# readline 没机会跑它的 TTY 复原逻辑 → 终端卡在 raw 态。
-# 修法：启动时（任何 input() 之前）抓一份 termios 快照，退出时无条件复原。用
-# atexit（覆盖 Ctrl-C / 异常 / sys.exit 各条退出路径）+ _main finally 双保险。
-# 非 tty（管道/重定向）/ 无 termios（Windows）→ 静默跳过。
-
-def _save_terminal_state():
-    """抓 stdin 的 termios 快照。非 tty / 无 termios → 返 None。"""
-    try:
-        import termios
-        fd = sys.stdin.fileno()
-        if not os.isatty(fd):
-            return None
-        return (fd, termios.tcgetattr(fd))
-    except Exception:
-        return None
-
-
-def _restore_terminal_state(saved) -> None:
-    """把终端 termios 复原成 saved 快照（幂等；saved 为 None 时无操作）。"""
-    if not saved:
-        return
-    fd, attrs = saved
-    try:
-        import termios
-        termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
-    except Exception:
-        pass
-
 # 把当前目录加进 path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from core import agent_loop as _agent_loop  # noqa: E402
+from core import agent_loop as _agent_loop  # noqa: E402, F401
 from core import closure as _closure  # noqa: E402
 from core import run_history
 from core.agent_loop import run_loop  # noqa: E402
-from core.bootstrap import bootstrap  # noqa: E402
-from core.context_engine import build_messages, _build_system_prompt  # noqa: E402
+from core.bootstrap import bootstrap as bootstrap  # noqa: E402
+from core.context_engine import _build_system_prompt
+from core.context_engine import build_messages as build_messages  # noqa: E402
 from core.harness import DEFAULT_MAX_CONTEXT_TOKENS  # noqa: E402
 from core.llm import (  # noqa: E402
-    LLMClient, LLMMessage, framework_notice, opening_system_prompt,
+    LLMClient,
+    LLMMessage,
+    framework_notice,
+    opening_system_prompt,
     sanitize_assistant_content,
 )
-from core.loader import load_harness  # noqa: E402
+from core.loader import load_harness as load_harness  # noqa: E402
 from core.pause import PauseEvent  # noqa: E402
 from core.session_driver import SessionFrontend  # noqa: E402
 from core.state import State, _project_root  # noqa: E402
-from shared.lib.console_box import draw_box  # noqa: E402
-from shared.tools.mcp_loader import load_mcp_servers, stop_mcp_servers  # noqa: E402
-
-# ── 终端上色（非 tty / NO_COLOR / dumb term 自动降级为纯文本）────────────────
-_USE_COLOR = (
-    sys.stdout.isatty()
-    and os.getenv("NO_COLOR") is None
-    and os.getenv("TERM") != "dumb"
-)
-
-
-def _c(code: str, s: str) -> str:
-    return f"\033[{code}m{s}\033[0m" if _USE_COLOR else s
-
-
-def _dim(s: str) -> str: return _c("2", s)
-def _bold(s: str) -> str: return _c("1", s)
-def _cyan(s: str) -> str: return _c("38;5;44", s)
-def _amber(s: str) -> str: return _c("38;5;179", s)
-def _green(s: str) -> str: return _c("38;5;71", s)
-
-
-def _print_startup_banner(
-    *, run_id: str, project_id: str | None, is_continue: bool,
-    n_messages: int, model: str, dreaming_line: str | None,
-) -> None:
-    """启动 banner —— CJK 宽度感知的圆角框（见 shared/lib/console_box）。"""
-    label = lambda s: _dim(s.ljust(6))  # noqa: E731  固定 6 列标签，值左对齐
-    rows: list[str] = [
-        f"{_cyan('🔬')}  {_bold('AI4Science 研究平台')}  {_dim('·')}  Orchestrator",
-        "",
-    ]
-    if is_continue:
-        rows.append(f"{label('会话')}{_green('续连')}  {_dim(f'· {n_messages} 条历史消息')}")
-    else:
-        rows.append(f"{label('会话')}新对话  {_dim(f'· {run_id}')}")
-    rows.append(
-        f"{label('项目')}{project_id or _dim('（临时，不持久化）')}"
-        + (f"  {_dim('· memory + KB 跨 run 持久化')}" if project_id else "")
-    )
-    rows.append(f"{label('模型')}{model}")
-    if dreaming_line:
-        rows.append(f"{label('记忆')}{dreaming_line}")
-    print(draw_box(rows, border_style=_dim))
-    print(_dim("   /help 命令  ·  /exit 退出") + "\n")
-
-
-def _print_end_banner(status: str, detail: str | None = None) -> None:
-    """会话结束 banner —— 正常/中断/异常三态都给醒目提示（issue #132）。
-
-    status ∈ {'normal', 'interrupted', 'crashed'}。跟启动 banner 同款圆角框，
-    让"程序到底是正常退出、被 Ctrl-C 打断、还是崩了"一眼可辨，不再是静默结束。
-    """
-    if status == "normal":
-        head = f"{_green('✅')}  {_bold('会话正常结束')}"
-        tip = "下次带同一 --project 可续连（memory + KB 保留）。"
-        style = _green
-    elif status == "interrupted":
-        head = f"{_amber('🛑')}  {_bold('会话已中断')}  {_dim('· Ctrl-C 强制退出')}"
-        tip = "本轮可能未跑完；已尽力保存对话。重启带同一 --project 可续连。"
-        style = _amber
-    else:  # crashed
-        head = f"{_c('38;5;203', '❌')}  {_bold('会话异常退出')}"
-        tip = "详细堆栈见日志文件（--verbose 可在终端看全量日志）。"
-        style = lambda s: _c("38;5;203", s)  # noqa: E731
-    rows = [head, ""]
-    if detail:
-        rows.append(_dim(detail[:200]))
-    rows.append(_dim(tip))
-    print("\n" + draw_box(rows, border_style=style))
-
-
-# ── 对话身份标签（分清"你说的" vs "系统回的"）──────────────────────────────
-# 之前 REPL 用 input("") 无提示符 + print(reply) 无标签 → 屏幕上分不清哪行是
-# user 输入、哪行是 orchestrator 回复。加两个 speaker 标记。
-_USER_PROMPT = _cyan(_bold("你")) + _dim(" › ")
-
-# readline 安全版提示符（2026-07-09 修退格删提示符 bug）：把提示符**传给
-# input()** 而不是单独 print —— 否则 readline 以为自己的行从 col 0 起，退格触发
-# redisplay 时 `\r` 回到 col 0 重画（空提示符），把已打印的 `你 ›` 一起抹掉。
-# 传给 readline 的提示符里，不可见的 ANSI 颜色码必须用 \001…\002 包起来，
-# readline 才能正确算提示符显示宽度（否则光标/换行算错列）。
-_ANSI_RE = re.compile(r"(\033\[[0-9;]*m)")
-_USER_PROMPT_RL = _ANSI_RE.sub("\001\\1\002", _USER_PROMPT) if _USE_COLOR else _USER_PROMPT
-
-
-# ── 统一 IO：所有非提示符输出走"在提示符上方打印"，保持底部输入行整洁 ─────────
-# 一个后台 daemon 线程持续 input(_USER_PROMPT_RL) 持有底部输入行；主协程要打印
-# 任何东西（回复 / 进度 / 通知 / 流式 token）时，先清掉当前输入行，打印内容，
-# 再把提示符重画到下方。readline 下一次 redisplay（用户按键时）会在同一行用
-# `\r`+提示符+缓冲重画，与我们手写的提示符逐字重合 → 不脱节、不闪烂。
-_STREAM_STATE = {"active": False}
-# stdin 线程启动后置 True：此后底部输入行由线程的 input(prompt) 持有，任何输出
-# 都要"在提示符上方打印"。启动阶段（banner 等）为 False → 退化成普通 print。
-_PROMPT_LIVE = {"on": False}
-# 只在真 tty 上做光标控制（\r + 清行 + 重画提示符）；管道/重定向/测试捕获里
-# 这些控制码是垃圾，退化成普通换行打印。
-_IS_TTY = sys.stdout.isatty()
-
-
-def _norm_text(s: str) -> str:
-    """折叠空白，用于判断"回复是否已流式显示过"（流式与最终文本可能只差空白）。"""
-    return re.sub(r"\s+", "", s or "")
-
-
-def _clear_input_line() -> None:
-    if _IS_TTY:
-        sys.stdout.write("\r\033[K")
-
-
-def _redraw_prompt() -> None:
-    # 写 display 版提示符（真 ANSI）——用户按键时 readline 用 _USER_PROMPT_RL
-    # 在同一行重画，二者渲染一致，无缝。非 tty 不画（无交互输入行）。
-    if _IS_TTY:
-        sys.stdout.write(_USER_PROMPT)
-        sys.stdout.flush()
-
-
-def _emit_above_prompt(text: str) -> None:
-    """在活动提示符上方打印一段（整段/多行），然后把提示符重画到下方。
-
-    提示符尚未由线程接管时（启动阶段）或非 tty 时退化成普通 print。
-
-    非 tty 必须 flush=True：管道 / tee / `chat.py | cat` 下 stdout 是块缓冲的，
-    不 flush 的话进度提示会全堆在缓冲区里，等一轮跑完才一次性吐出来 —— 用户看到
-    的就是"说完话完全没反馈"（issue #166）。"""
-    line = text.rstrip("\n")
-    if not (_PROMPT_LIVE["on"] and _IS_TTY):
-        print(line, flush=True)
-        return
-    _clear_input_line()
-    sys.stdout.write(line + "\n")
-    _redraw_prompt()
-
-
-class _PromptSafeStderr:
-    """包一层 sys.stderr：拦截任何直接写 stderr 的裸 print（比如 node hook 自己
-    的进度上报，见 nodes/experiment/hooks.py::_emit_experiment_progress），让它们
-    也走"清掉输入行 → 写 → 重画提示符"这套协议，不再跟底部 `你 ›` 提示符打架。
-
-    子节点 run 是同进程内的 asyncio task，跟主 REPL 共享同一个终端 —— 任何裸写
-    都会在提示符正显示的时候插进来，如果不清行/重画就直接写，视觉上会跟 readline
-    自己的重绘互相打断，看起来像提示符被"顶"了好几份（2026-07 实测 bug）。
-
-    按行缓冲：print() 内部可能分多次 write（消息 + 换行符），只在凑齐整行时才
-    清行/写/重画，避免半行触发一次无意义的重绘。
-    """
-
-    def __init__(self, real):
-        self._real = real
-        self._buf = ""
-
-    def write(self, s: str) -> int:
-        if not s:
-            return 0
-        if not (_PROMPT_LIVE["on"] and _IS_TTY):
-            return self._real.write(s)
-        self._buf += s
-        while "\n" in self._buf:
-            line, self._buf = self._buf.split("\n", 1)
-            _clear_input_line()
-            self._real.write(line + "\n")
-            _redraw_prompt()
-        return len(s)
-
-    def flush(self) -> None:
-        self._real.flush()
-
-    def isatty(self) -> bool:
-        return self._real.isatty()
-
-    def __getattr__(self, name):
-        return getattr(self._real, name)
-
-
-def _stream_write(token: str, *, header: str | None = None) -> None:
-    """流式逐 token 写：首个 token 先接管输入行（清掉提示符）+ 打 header，
-    之后 token 直接顺着写（自然成为 scrollback），提示符期间不在底部。"""
-    if not _STREAM_STATE["active"]:
-        _clear_input_line()
-        if header:
-            sys.stdout.write(header + "\n")
-        _STREAM_STATE["active"] = True
-    sys.stdout.write(token)
-    sys.stdout.flush()
-
-
-def _stream_end() -> None:
-    """一段流式输出收尾：换行 + 把提示符重画回底部。幂等。"""
-    if _STREAM_STATE["active"]:
-        sys.stdout.write("\n")
-        _STREAM_STATE["active"] = False
-        _redraw_prompt()
-        sys.stdout.flush()      # 非 tty 下 _redraw_prompt 是 no-op，这里补 flush
-
-
-# ── 推理（思维链）阶段可见化（issue #166）─────────────────────────────────────
-# 主诉："和模型说话第一时间模型没反馈"。根因不是提示打晚了（⏳ 处理中… 位置是对
-# 的），而是打完之后到首个正文 token 之间**全静默**：deepseek-v4-pro 这类推理模型
-# 的思考阶段常占一次调用的绝大部分时间，而 reasoning 增量原来在 core/llm.py 里被
-# 整体丢弃 → 屏幕全黑几十秒，用户以为卡死。
-#
-# 两种呈现，CHAT_REASONING_DISPLAY 控制：
-#   brief（默认）— 打一个「💭 思考中」指示，之后每 _REASON_TICK_S 秒补一个点做
-#                  心跳，收尾报「思考 N 字 / X 秒」。看得见活着且在推进，又不会
-#                  让几千 token 的思维链淹掉真正的回复。
-#   full         — 思维链本体暗色实时流出（要看模型怎么想时用）。
-#   off          — 完全关掉（回到改造前的行为）。
-_REASON_MODE = (os.getenv("CHAT_REASONING_DISPLAY") or "brief").strip().lower()
-_REASON_TICK_S = 2.0
-_STATUS_SLOW_HINT_S = 1.5     # 项目状态快照超过这么久没回来就提示一句"在读"
-_REASON_STATE = {"active": False, "chars": 0, "t0": 0.0, "last_tick": 0.0}
-
-
-def _raw_write(s: str) -> None:
-    """直接写 stdout 并 flush（流式/心跳都要即时可见，含非 tty）。"""
-    sys.stdout.write(s)
-    sys.stdout.flush()
-
-
-def _reasoning_display(delta: str | None) -> None:
-    """LLMClient.stream_reasoning_display 回调：delta=增量，None=推理段结束。
-
-    收尾时补换行 + 重画提示符 —— 正文流随后会自己清行接管，两者不会挤在一行。
-    """
-    if _REASON_MODE == "off":
-        return
-    now = time.monotonic()
-
-    if delta is None:
-        if not _REASON_STATE["active"]:
-            return
-        _REASON_STATE["active"] = False
-        if _REASON_MODE == "full":
-            _raw_write("\n")
-        else:
-            _raw_write(_dim(f" （思考 {_REASON_STATE['chars']} 字，"
-                            f"{now - _REASON_STATE['t0']:.0f}s）") + "\n")
-        _redraw_prompt()
-        sys.stdout.flush()
-        return
-
-    if not _REASON_STATE["active"]:
-        _REASON_STATE.update({"active": True, "chars": 0, "t0": now, "last_tick": now})
-        _clear_input_line()          # 接管底部输入行（非 tty 下是 no-op）
-        _raw_write("\n" + _dim("💭 思考中" if _REASON_MODE != "full" else "💭 思考：\n"))
-
-    _REASON_STATE["chars"] += len(delta)
-    if _REASON_MODE == "full":
-        _raw_write(_dim(delta))
-    elif now - _REASON_STATE["last_tick"] >= _REASON_TICK_S:
-        _REASON_STATE["last_tick"] = now
-        _raw_write(_dim("·"))
 
 
 def _sanitize_reply(text: str) -> str:
@@ -379,129 +53,56 @@ def _sanitize_reply(text: str) -> str:
     clean, _ = sanitize_assistant_content(text or "", None, [])
     return clean if clean else (text or "").strip()
 
-
-def _orchestrator_header() -> str:
-    return f"{_cyan('🔬')} {_bold(_cyan('Orchestrator'))}"
+_STATUS_SLOW_HINT_S = 1.5
 
 
-def _print_reply(reply: str) -> None:
-    """orchestrator 回复：带 speaker 标签，在提示符上方打印。
+# Frontend output is installed only by the terminal adapter. Platform workers
+# import this module without importing cli or activating terminal IO.
+_terminal_output = None
 
-    若本轮已经流式逐 token 显示过（_STREAM_STATE 说明有活动流）则不重复——
-    调用方（主循环）负责判断 reply 是否已流式呈现。"""
-    _emit_above_prompt(f"\n{_orchestrator_header()}\n{_sanitize_reply(reply)}\n")
+
+def _emit_above_prompt(text: str) -> None:
+    if _terminal_output is not None:
+        _terminal_output._emit_above_prompt(text)
+    else:
+        print(text.rstrip("\n"), flush=True)
+
+
+def _dim(text: str) -> str:
+    return _terminal_output._dim(text) if _terminal_output is not None else text
+
+
+def _amber(text: str) -> str:
+    return _terminal_output._amber(text) if _terminal_output is not None else text
 
 
 def _print_speaker(who: str, text: str) -> None:
-    """其它系统侧发言（子节点 / 中途打断决策等）统一带标签打印。"""
-    _emit_above_prompt(f"\n{_dim('▸')} {_dim(who)}  {_sanitize_reply(text)}\n")
+    if _terminal_output is not None:
+        _terminal_output._print_speaker(who, text)
+    else:
+        _emit_above_prompt(f"{who}: {_sanitize_reply(text)}")
 
 
-# P1-8：turn 进行中每个工具调用打一行 dim 进度，消灭"⏳ 处理中…"黑箱。
-# 子节点（run_node 起的 child run）的工具调用也经过同一个 sink —— 必须清楚标出
-# "这是子节点在干活"（否则用户看到一堆 run_bash / execute_python 不知道是谁在跑）。
-_PROGRESS_ARG_KEYS = ("node_type", "query", "cmd", "artifact_id", "mode",
-                       "artifact_type", "name", "question")
-
-
-def _describe_call(tool_name: str, args: dict) -> str:
-    """从工具名 + 关键参数拼一句人类可读的进度描述。"""
-    for k in _PROGRESS_ARG_KEYS:
-        v = args.get(k)
-        if isinstance(v, str) and v.strip():
-            snippet = v.strip().replace("\n", " ")
-            if len(snippet) > 60:
-                snippet = snippet[:60] + "…"
-            return f"{tool_name}({k}={snippet})"
-    return tool_name
-
-
-def _run_node_targets(tool_name: str, args: dict) -> str:
-    """从 run_node / run_nodes_parallel 参数里拿要起的子节点类型（给 header 用）。"""
-    if tool_name == "run_nodes_parallel":
-        jobs = args.get("jobs")
-        if isinstance(jobs, list):
-            names = [j.get("node_type") for j in jobs if isinstance(j, dict) and j.get("node_type")]
-            if names:
-                return " + ".join(names)
-    nt = args.get("node_type")
-    return nt if isinstance(nt, str) and nt.strip() else "?"
-
-
-def _print_progress(state, tool_name: str, args: dict) -> None:
-    """agent_loop 进度回调：把"谁在干活"标清楚。
-
-    - orchestrator 自身调 run_node/run_nodes_parallel → 醒目「起子节点」header
-    - orchestrator 自身其它工具 → 平齐一行
-    - 子节点（depth≥1）工具调用 → 明确标 `[子节点·<type>]` + 按 depth 缩进，
-      让用户一眼看出这是子节点在跑，不是主对话
-    """
-    node = getattr(state, "node_type", "?") or "?"
-    depth = getattr(state, "depth", 0) or 0
-
-    # 流式回复正在逐 token 打印时，工具调用几乎不会同时发生（一条 LLM 响应要么
-    # 出正文要么出 tool_calls）；万一有，先收束流再打进度，避免串行到同一行。
-    _stream_end()
-
-    if node == "_orchestrator" and depth == 0:
-        if tool_name in ("run_node", "run_nodes_parallel"):
-            tgt = _run_node_targets(tool_name, args)
-            _emit_above_prompt(_dim("   ▸ ") + _cyan(f"起子节点 {tgt}")
-                               + _dim(" …（下面是它的工作）"))
-        else:
-            _emit_above_prompt(_dim(f"   ▸ {_describe_call(tool_name, args)}"))
-        return
-
-    # 子节点工作：缩进 + 明确标签
-    indent = "  " * max(depth, 1)
-    _emit_above_prompt(_dim(f"   {indent}└ [子节点·{node}] {_describe_call(tool_name, args)}"))
-
-
-HELP = """\
-可用命令：
-  /exit / /quit            退出（自动保存对话）
-  /stop                    🛑 停止当前一轮（orchestrator 本轮 + 所有运行中子节点）
-  /status                  一次性 dump 项目状态
-  /reset                   清空对话历史（memory + KB 保留）
-  /undo                    撤销最近一次 artifact 覆盖（覆盖前那版写回为新一版）
-  /attach <path>           把本地文件交进项目工作区 sources/（模型每轮自动看到）
-  /answer <text>           答复正在等输入的后台子节点（后台 run pause 时用）
-  /btw <text>              软注入：作为 system message 插到下一轮 LLM 之前
-  /autonomy <档>           切档位：assisted（需要用户判断时再问）| autonomous（只在高危点停）
-                           | continuous（预授权全部高危类别，不停）。与 UI 三档同一份词表。
-  /continuous on|off       切**自动续轮**（跑完一轮自己接着跑）；on 会把档位一并提到 continuous
-  /skip-dreaming           跳过本次 dreaming pending
-  /help                    显示这段说明
-
-直接输入文字 → 走 orchestrator agent loop。
-多行粘贴：整段粘进来会作为**一条**消息，末尾按一次 Enter 才提交（内部换行保留）。
-child 跑的时候你可以继续输入：
-  - 没主动 pause → orchestrator 决策 inject_into_node 或 cancel_node 给 child
-  - 已主动 pause（看到 [需要人工输入] 或 decision package 提示）→ 输入直接当 pause 答复
-  - /stop → 全部停下
-  - /autonomy /continuous /status /btw /attach /answer /skip-dreaming /help
-    跑轮中也能用（child 连环撞高危确认时切 /autonomy continuous 就不用等）；
-    /reset /undo 会动运行中状态，只能空闲时用
-
-启动 flag：--continuous 等价于 /autonomy continuous + /continuous on —— 档位提到「连续」
-             （⚠️ 预授权全部高危类别，高危命令不再问人）并持续自动续轮，
-             只有明确 complete / 真正 human-only blocked / user /stop 才停。
-"""
+def _print_pause_prompt(event) -> None:
+    if _terminal_output is not None:
+        _terminal_output._print_pause_prompt(event)
+    else:
+        _emit_above_prompt(event.question)
 
 
 # 对话持久化：唯一实现在 core/conversation_store.py（chat.py 与
 # run_e2e_dogfood.py 共用；2026-07-08 之前两边各一份、格式不兼容，dogfood
 # 写 list、这里读 dict，换入口续连直接 AttributeError 崩——不得再自带副本）。
-from datetime import UTC
+from datetime import UTC  # noqa: E402
 
 from core.conversation_store import (  # noqa: E402
-    conversation_path as _orchestrator_state_path,
+    conversation_path as _orchestrator_state_path,  # noqa: F401
 )
-from core.conversation_store import (
+from core.conversation_store import (  # noqa: E402
     load_conversation as _load_conversation,
 )
-from core.conversation_store import (
-    save_conversation as _save_conversation,
+from core.conversation_store import (  # noqa: E402
+    save_conversation as _save_conversation,  # noqa: F401
 )
 
 # ── 会话锁（2026-07-09，R0-c）────────────────────────────────────────────────
@@ -1843,98 +1444,10 @@ async def _queue_continuous_followup(
     return True
 
 
-# 多行粘贴合并 —— **兜底**层（主路径是文件顶部的 enable-bracketed-paste）。
-# input() 一次只读一行，用户粘贴多行文本时每个 \n 都被终端当成一次 accept-line →
-# 第 1 行被当消息（在换行处截断）、其余行逐行排成"新消息/插话"（用户实测 bug）。
-# bracketed paste 开启时 readline 已整段返回，本层是 no-op；只在终端 / readline
-# 不支持 bracketed paste 时启用：读到一行后，若 stdin 里紧跟着还有已缓冲的续行
-# （粘贴一次性灌进 pty、几乎同时到达），在一个很短的窗口内合并成同一条输入。
-# 真人逐行敲不可能在这个窗口内敲完下一整行，不会误合并。
-_PASTE_COALESCE_WINDOW_S = 0.05
-# bracketed-paste 标记：新版 readline(8.1+) 会自己处理并整段返回；老版本 /
-# 某些终端会把这两个转义序列当字面量塞进输入 —— 兜底剥掉。
+# Shared input sanitation also strips bracketed-paste markers.
 _BRACKETED_PASTE_RE = re.compile("\x1b\\[20[01]~")
 
-# 退出命令（listener 和 _handle_slash 共用一份，避免两处不一致）。
-_EXIT_COMMANDS = ("/exit", "/quit")
 
-
-def _stdin_more_buffered(timeout: float = _PASTE_COALESCE_WINDOW_S) -> bool:
-    """stdin 里是否还有紧跟着的、已缓冲的输入（粘贴续行）。
-
-    非 POSIX / stdin 不是可 select 的 fd（管道重定向、Windows）→ 返 False，
-    退化成逐行读（旧行为），不影响正确性只是不合并粘贴。
-    """
-    try:
-        import select
-        r, _, _ = select.select([sys.stdin], [], [], timeout)
-        return bool(r)
-    except Exception:
-        return False
-
-
-def _coalesce_pasted_lines(first_line, read_next, more_available) -> str:
-    """把一次多行粘贴合并成单条输入。纯逻辑，便于单测。
-
-    first_line：已读到的第一行。
-    more_available()：是否还有紧跟着的已缓冲续行（真实现用 select 判 stdin）。
-    read_next()：读下一行（真实现用 input("")）；EOF/读不到 → 停。
-    """
-    lines = [first_line]
-    while more_available():
-        try:
-            nxt = read_next()
-        except EOFError:
-            break
-        if nxt is None:
-            break
-        lines.append(nxt)
-    text = "\n".join(lines)
-    return _BRACKETED_PASTE_RE.sub("", text)
-
-
-def _stdin_listener(loop: asyncio.AbstractEventLoop,
-                     queue: asyncio.Queue[str]) -> None:
-    """Daemon 线程：阻塞读 stdin，通过 call_soon_threadsafe 投递到 asyncio queue。
-
-    为什么是 daemon thread 而不是 asyncio.to_thread(input)：
-      to_thread 把 input() 扔进 default executor 的非 daemon 线程；当主程序
-      要退出时 stdin_task.cancel() 只能在下一次 await 点生效，executor 线程
-      仍阻塞在 input() 系统调用上没法被打断。解释器退出时要等所有非 daemon
-      线程 join → user 必须按一下回车让 input() 返回线程才退出，体感就是
-      "跑完了还得回车"。
-    Daemon 线程在解释器退出时被强制终止，不会等 stdin，直接回 shell。
-
-    提示符**由本线程通过 input(prompt) 显示**（不再由主协程单独 print）——这样
-    readline 知道提示符宽度，退格不会把 `你 ›` 一起抹掉（见 _USER_PROMPT_RL）。
-    多行粘贴由 _coalesce_pasted_lines 合并成单条输入（续行用空提示符读，不重画
-    `你 ›`）。
-    """
-    while True:
-        try:
-            line = input(_USER_PROMPT_RL)
-        except (EOFError, KeyboardInterrupt):
-            loop.call_soon_threadsafe(queue.put_nowait, "/exit")
-            return
-        line = _coalesce_pasted_lines(
-            line,
-            read_next=lambda: input(""),
-            more_available=_stdin_more_buffered,
-        )
-        loop.call_soon_threadsafe(queue.put_nowait, line)
-        # 退出命令：投递后**立刻 return**，不要再进下一次 input()（#141）。
-        # 否则线程会重新阻塞在 readline 里持有 raw TTY，进程退出时被强杀、
-        # 来不及复原终端 —— termios 快照兜底之外再堵上这个源头。
-        if line.strip() in _EXIT_COMMANDS:
-            return
-
-
-# ── orchestrator turn + pause driver 整合 ──────────────────────────────────
-
-# 回复契约兜底（2026-07-09）：对话 turn 的终态必须是"一段面向人的干净文本"。
-# 弱端点实测会出现 final_text 为空（内容全写进思维链 / finish_reason=stop 且
-# content 空）或纯控制标记（被防火墙剥空）。节点视角"空 final_text"没问题（产出
-# 在 artifact 里），但对话视角这是失败态——必须重问，不能把 "(空回复)" 交给用户。
 _EMPTY_REPLY_NUDGE = (
     "⚠️ 你上一轮没有给用户任何可见回复（可能内容全写进了思维链，或只输出了"
     "控制标记 / 复读了系统提示）。现在请**直接用一段中文写给用户的回复**："
@@ -2320,21 +1833,6 @@ async def _ask_pause_via_queue(pe: PauseEvent, chat_state: ChatState) -> str:
         chat_state.paused.clear()
 
 
-def _print_pause_prompt(pe) -> None:
-    """打印 pause question 给 user（不读 stdin —— 答复走 queue）。"""
-    asking = pe.asking_node_type or "?"
-    lines = ["", "=" * 60, f"[需要人工输入]（来自节点：{asking}）",
-             f"问题：{pe.question}"]
-    if pe.context:
-        lines.append(f"\n背景：\n{pe.context}")
-    if pe.options:
-        lines.append("\n选项：")
-        for i, opt in enumerate(pe.options, 1):
-            lines.append(f"  [{i}] {opt}")
-        lines.append("  （或自由输入任意文本）")
-    lines.append("=" * 60)
-    lines.append("（直接输入答复，会路由给暂停的节点）")
-    _emit_above_prompt("\n".join(lines))
 
 
 # ── user 中途打断 → orchestrator 决策 ─────────────────────────────────────
@@ -2836,18 +2334,12 @@ def _cmd_reset(state: State, messages: list[LLMMessage]) -> str:
     return "（对话已重置。memory + KB 保留。下一条消息会重新构造初始 context。）"
 
 
-def _is_slash_command(text: str) -> bool:
-    return text.startswith("/")
 
 
 # mid-turn 可安全执行的 slash 命令（只改进程级开关 / hook_state 队列 / 只读查询，
 # 不碰正在运行的 messages 列表）。/reset、/undo 有真实并发冲突，仍只许 idle 执行。
-_MIDTURN_SAFE_SLASH = ("/autonomy", "/continuous", "/status", "/help",
-                        "/btw", "/attach", "/answer", "/skip-dreaming")
 
 
-def _midturn_slash_allowed(text: str) -> bool:
-    return any(text == c or text.startswith(c + " ") for c in _MIDTURN_SAFE_SLASH)
 
 
 def _cmd_undo(state: State) -> str:
@@ -2916,649 +2408,74 @@ async def _cmd_answer(text: str) -> str:
             "它会在后台继续跑，完成后通知你。）")
 
 
-async def _handle_slash(text: str, state: State, messages: list[LLMMessage]) -> bool:
-    """处理 / 命令。返 True 表示 user 想退出，False 表示已处理。"""
-    if text in _EXIT_COMMANDS:
-        return True
-    if text == "/help":
-        _emit_above_prompt(HELP)
-    elif text == "/status":
-        _emit_above_prompt(await _cmd_status(state))
-    elif text in ("/stop", "/abort"):
-        if _continuous_loop(state):
-            _set_continuous_loop(state, False)
-            _emit_above_prompt("（当前轮次空闲；自动续轮已关闭。自主档位不变。）")
-        else:
-            _emit_above_prompt("（当前没有正在跑的轮次 —— /stop 在 turn 进行中才有作用。）")
-    elif text == "/undo":
-        _emit_above_prompt(_cmd_undo(state))
-    elif text.startswith("/attach "):
-        _emit_above_prompt(_cmd_attach(state, text[len("/attach "):].strip()))
-    elif text.startswith("/answer "):
-        _emit_above_prompt(await _cmd_answer(text[len("/answer "):].strip()))
-    elif text == "/reset":
-        _emit_above_prompt(_cmd_reset(state, messages))
-        _save_conversation(state, messages)
-    elif text.startswith("/btw "):
-        payload = text[5:].strip()
-        if payload:
-            queue = state.hook_state.setdefault("pending_btw_injection", "")
-            state.hook_state["pending_btw_injection"] = (
-                queue + ("\n" if queue else "") + payload
-            )
-            _emit_above_prompt(f"（已登记 /btw 注入：{payload[:80]}… —— 下次 LLM 调用前注入）")
-    elif text == "/skip-dreaming":
-        # Phase F：清当前 project 的 dreaming pending，不让本会话自动跑
-        if state.project_id:
-            try:
-                from core.dreaming_scheduler import clear_pending
-                clear_pending(state.project_id)
-                _emit_above_prompt("（已跳过本次 dreaming pending；下次触发条件满足时再 mark）")
-            except Exception as e:
-                _emit_above_prompt(f"（清 dreaming pending 失败：{e}）")
-        else:
-            _emit_above_prompt("（无 project_id —— 没有 dreaming pending 可跳过）")
-    elif text.startswith("/autonomy"):
-        # /autonomy assisted|autonomous|continuous —— 与 UI 三档同一份词表。
-        #
-        # 这条命令取代了 `/auto_approve` 与 `/bypass`：那两条各自设一个进程全局
-        # 开关，然后各自"顺手"把 continuous 也关掉，理由写在提示语里
-        # （"因为它要求 auto-approve"）。三条命令写三个投影，于是"档位现在是
-        # 什么"要把三个全局读齐了才答得出，而它们能互相矛盾。现在只有一份声明，
-        # 三个开关都是它推导出来的（`session_driver.apply_autonomy`）。
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            _emit_above_prompt(
-                f"（当前档位 = {_autonomy_label(state)}；"
-                "用法：/autonomy assisted|autonomous|continuous）"
-            )
-        else:
-            arg = parts[1].strip().lower()
-            if arg not in AUTONOMY_SCOPES:
-                _emit_above_prompt(
-                    f"（无效档位 {arg!r}；合法取值：{', '.join(AUTONOMY_SCOPES)}）"
-                )
-            else:
-                _set_autonomy_mode(state, arg)
-                _emit_above_prompt(f"（档位 → {_autonomy_label(state)}）")
-    elif text.startswith("/continuous"):
-        # /continuous on|off —— 只管**自动续轮**。档位归 /autonomy。
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            phase = state.hook_state.get("continuous_phase", "stopped")
-            extra = ""
-            if phase == "aborted":
-                extra = (
-                    "；🛑 已被熔断停机："
-                    + str(state.hook_state.get("continuous_abort_reason", ""))
-                )
-            _emit_above_prompt(
-                f"（自动续轮 = {'ON' if _continuous_loop(state) else 'OFF'}"
-                f"，phase={phase}{extra}；档位 = {_autonomy_label(state)}；"
-                "用法：/continuous on|off）"
-            )
-        else:
-            arg = parts[1].strip().lower()
-            if arg in ("on", "true", "1", "yes"):
-                # 在自己终端里说"一路跑到底"，意思是两件事都要 —— 但要说出来，
-                # 不能让一条命令悄悄改掉另一件事。
-                _set_autonomy_mode(state, "continuous")
-                _set_continuous_loop(state, True)
-                state.hook_state["continuous_kick_requested"] = True
-                _emit_above_prompt(
-                    "（continuous ON ♾️ —— 自动续轮开启，档位同时提到「连续」"
-                    "（预授权全部高危类别）。顶层回合会自动续接，直到 "
-                    "complete / human-only blocked / /stop。）"
-                )
-            elif arg in ("off", "false", "0", "no"):
-                _set_continuous_loop(state, False)
-                _emit_above_prompt(
-                    "（continuous OFF —— 自动续轮停止；档位不变，"
-                    f"仍是 {_autonomy_label(state)}。要改档位用 /autonomy。）"
-                )
-            else:
-                _emit_above_prompt(f"（无效参数 {arg!r}；用 on|off）")
-    else:
-        _emit_above_prompt(f"（未知命令：{text}。输入 /help 查看可用命令。）")
-    return False
 
 
 # ── REPL 主循环 ──────────────────────────────────────────────────────────────
 
+
+
+
+def __getattr__(name: str):
+    """Legacy UI imports only. Shared execution never needs these attributes."""
+    import importlib
+
+    modules = {
+        '_ANSI_RE': 'cli.terminal',
+        '_IS_TTY': 'cli.terminal',
+        '_PROGRESS_ARG_KEYS': 'cli.terminal',
+        '_PROMPT_LIVE': 'cli.terminal',
+        '_PromptSafeStderr': 'cli.terminal',
+        '_REASON_MODE': 'cli.terminal',
+        '_REASON_STATE': 'cli.terminal',
+        '_REASON_TICK_S': 'cli.terminal',
+        '_STREAM_STATE': 'cli.terminal',
+        '_USER_PROMPT': 'cli.terminal',
+        '_USER_PROMPT_RL': 'cli.terminal',
+        '_USE_COLOR': 'cli.terminal',
+        '_bold': 'cli.terminal',
+        '_c': 'cli.terminal',
+        '_clear_input_line': 'cli.terminal',
+        '_cyan': 'cli.terminal',
+        '_describe_call': 'cli.terminal',
+        '_green': 'cli.terminal',
+        '_norm_text': 'cli.terminal',
+        '_orchestrator_header': 'cli.terminal',
+        '_print_end_banner': 'cli.terminal',
+        '_print_progress': 'cli.terminal',
+        '_print_reply': 'cli.terminal',
+        '_print_startup_banner': 'cli.terminal',
+        '_raw_write': 'cli.terminal',
+        '_reasoning_display': 'cli.terminal',
+        '_redraw_prompt': 'cli.terminal',
+        '_restore_terminal_state': 'cli.terminal',
+        '_run_node_targets': 'cli.terminal',
+        '_save_terminal_state': 'cli.terminal',
+        '_stream_end': 'cli.terminal',
+        '_stream_write': 'cli.terminal',
+        '_PASTE_COALESCE_WINDOW_S': 'cli.input',
+        '_coalesce_pasted_lines': 'cli.input',
+        '_stdin_listener': 'cli.input',
+        '_stdin_more_buffered': 'cli.input',
+        'HELP': 'cli.commands',
+        '_EXIT_COMMANDS': 'cli.commands',
+        '_MIDTURN_SAFE_SLASH': 'cli.commands',
+        '_handle_slash': 'cli.commands',
+        '_is_slash_command': 'cli.commands',
+        '_midturn_slash_allowed': 'cli.commands',
+    }
+    module = modules.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(importlib.import_module(module), name)
+
+
 async def _main() -> int:
-    # dotenv is a terminal convenience.  The App Server imports this module
-    # with credentials supplied only to its isolated Worker process.
-    from dotenv import load_dotenv
-
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--project", "--project-id", dest="project_id", default=None,
-                        help="项目 id（决定 memory + KB 持久化目录 + 对话续连）。")
-    parser.add_argument("--session", dest="session_id", default=None,
-                        help="会话 id。指定后 CLI 在该项目下开一个自己的 Git "
-                             "worktree（分支 session/<id>），与 UI 正在跑的会话"
-                             "并行且互不抢写道。不指定则直接用项目主工作区。")
-    parser.add_argument("--state-dir", type=Path, default=None,
-                        help="run-local 状态目录。默认 STATE_DIR 环境变量；否则 ~/.harness-framework/runs/。")
-    parser.add_argument("--mcp-config", type=Path, default=Path("mcp_servers.yaml"))
-    parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--autonomy", choices=("assisted", "autonomous", "continuous"),
-                        default=None,
-                        help="启动档位，与 UI 三档同一份词表。assisted=需要用户判断时再问；"
-                             "autonomous=只在高危点停；continuous=⚠️ 预授权全部高危类别、"
-                             "不停。REPL 中可用 /autonomy 切换。"
-                             "不给则沿用这个会话上次的声明。")
-    parser.add_argument("--continuous", action="store_true",
-                        help="♾️ 等价于 --autonomy continuous 再加自动续轮：顶层 turn 结束、"
-                             "空回复、异常或后台节点完成后自动续轮，"
-                             "直到 complete / human-only blocked / /stop。")
-    args = parser.parse_args()
-
-    # 抓终端快照（在任何 input()/readline 动 TTY 之前）+ 注册 atexit 复原：
-    # 保证 /exit / Ctrl-C / 异常退出后终端都能回到 canon+echo（见文件顶部注释）。
-    _saved_term = _save_terminal_state()
-    if _saved_term:
-        atexit.register(_restore_terminal_state, _saved_term)
-
-    load_dotenv()
-
-    # v0.8: 项目嵌套 runs。有 project_id → projects/<id>/runs/；无 → runs_anon/
-    # --state-dir 覆盖仍尊重（fixtures / 单测 / 离线 debug 用）
-    from core.paths import runs_parent
-    if args.state_dir is not None:
-        base_dir = args.state_dir
-    elif os.getenv("STATE_DIR"):
-        # [deprecated] STATE_DIR env var：v0.8 起仅 backward-compat；旧 ./output/
-        # 用 STATE_DIR 重定向走老 flat 布局。新装别用，走 runs_parent 项目嵌套。
-        base_dir = Path(os.getenv("STATE_DIR"))
-    else:
-        base_dir = runs_parent(args.project_id)
-    base_dir.mkdir(parents=True, exist_ok=True)
-
-    # ── Project Git 工作区（v2.1 现行架构）────────────────────────────────
-    # 平台入口一直传这个参数，CLI 入口一直没传 —— 于是全仓 70+ 处
-    # `if state.project_worktree is not None:` 在 CLI 下永远走 else 分支。
-    # 那些 else 是 v1 遗留，而两条路只有一条被维护：实测同一套代码，CLI 项目
-    # 攒下 87 条记忆，平台项目一条都没有（记忆的持久化写在 else 里，if 那边只
-    # "报给 orchestration" 就返回了）。
-    #
-    # 让 CLI 也绑，两件事同时成立：CLI 用上现行架构，那些 else 分支变成可删的
-    # 死代码 —— 而不是永远要给每个断点补一个"平台分支"。
-    project_worktree = None
-    if args.project_id:
-        from core.project_bootstrap import (
-            ProjectBootstrapError, ensure_project_worktree, open_session_worktree,
-        )
-        try:
-            if args.session_id:
-                # 一个入口 = 一个 session。UI 已经是这么工作的（每个 Session
-                # 一个 worktree + session/<id> 分支），CLI 用同一套约定接入，
-                # 于是"同一个项目、两个入口"成立而不互相抢 Git 写道。
-                project_worktree = open_session_worktree(args.project_id, args.session_id)
-            else:
-                project_worktree = ensure_project_worktree(args.project_id)
-        except ProjectBootstrapError as exc:
-            # 建不出工作区不该让人进不去项目 —— 但也绝不能静默降级到旧路径，
-            # 那会变成"看起来在跑，记忆却存不下"。说清楚再继续。
-            print(f"⚠️  无法准备 Project 工作区，本次以旧模式运行：{exc}")
-
-    state = _make_or_load_orchestrator_state(
-        args.project_id, base_dir, project_worktree=project_worktree,
-    )
-
-    # 会话锁：同 project 双开会互相覆盖 conversation.json，直接拒绝第二个实例
-    if not _acquire_session_lock(state):
-        print(f"⛔ 项目 {args.project_id or '(anon)'} 已有一个 chat.py 实例在跑"
-              f"（锁：{state.root / '.chat.lock'}）。\n"
-              "   双开会互相覆盖对话历史。请用那个实例，或先退出它。")
-        return 2
-
-    # ── 日志全部进文件，终端只留对话流（2026-07-08 UX 重整）──────────────
-    # 之前 numexpr/torch/embeddings/子节点 runtime_trace 全刷进聊天终端，
-    # `你 ›` 提示符被日志埋掉、对话没法读。现在：文件收全量（chat.log），
-    # 终端只透 ERROR。--verbose 恢复旧行为（终端全量 + 文件）。
-    log_path = state.root / "chat.log"
-    _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    _fh = logging.FileHandler(log_path, encoding="utf-8")
-    _fh.setFormatter(_fmt)
-    _fh.setLevel(logging.DEBUG if args.verbose else logging.INFO)
-    _ch = logging.StreamHandler()
-    _ch.setFormatter(_fmt)
-    _ch.setLevel(logging.DEBUG if args.verbose else logging.ERROR)
-    _root = logging.getLogger()
-    _root.handlers.clear()
-    _root.addHandler(_fh)
-    _root.addHandler(_ch)
-    _root.setLevel(logging.DEBUG if args.verbose else logging.INFO)
-    for noisy in ("httpcore", "httpx"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
-    if not args.verbose:
-        # torch 等库用 warnings 模块直写 stderr（不走 logging），一并静音
-        import warnings as _warnings
-        _warnings.filterwarnings("ignore", category=FutureWarning)
-
-    bootstrap()
-
-    # P1-8：注册 live 进度回调（turn 进行中每个工具调用打一行 dim 摘要）
-    _agent_loop.set_progress_sink(_print_progress)
-
-    # 档位不在这里施加 —— 声明还在磁盘上（conversation load 之后才在手上），
-    # 而开关是声明的投影，不能先于声明存在。施加点见下面 load 之后那一段。
-    harness = load_harness("_orchestrator")
-    llm = LLMClient()
-
-    # 续连或冷启动
-    existing = _load_conversation(state)
-    is_continue = existing is not None
-    if is_continue:
-        messages = existing
-        # Background/foreground child execution is process-local.  A restored
-        # action_in_progress marker therefore describes interrupted work, not
-        # a live child; make the durable authorization retryable immediately.
-        from shared.tools.run_node import (
-            brief_interrupted_child_runs,
-            recover_interrupted_decision_actions,
-        )
-        recover_interrupted_decision_actions(state)
-        # 同 platform_runtime 恢复路径：被打断子 run 的既成事实机械送达。
-        brief_interrupted_child_runs(state)
-    else:
-        messages = build_messages(harness, state, node_inputs={})
-
-    protocol_repairs = _repair_message_tool_protocol(messages)
-    if protocol_repairs:
-        state.append_transcript(
-            "conversation_protocol_repaired",
-            repairs=protocol_repairs,
-            source="session_start",
-        )
-
-    # conversation load 会恢复 hook_state，所以 continuous 必须在 load 之后重放。
-    # CLI 显式传 flag = 无论上次 phase 是 complete/blocked 都重新启动；仅靠持久化
-    # 恢复时则保留 phase（crash 中断的 running 会自动续，已 complete 不会复活）。
-    # 档位先施加（它是"怎么跑"的真相源；持久化的声明在 load 之后才在手上），
-    # 再决定续轮。--continuous 是用户在自己终端里说的"一路跑到底"，两件事都要。
-    # 没给 flag 就沿用这个会话上次的声明 —— 施加这一步永远要做，因为进程刚起来
-    # 时那三个开关是环境变量的默认值，不是这个会话的档位。
-    from core.session_driver import autonomy_mode as _autonomy_mode
-
-    chosen_mode = (
-        "continuous" if args.continuous
-        else args.autonomy if args.autonomy
-        else _autonomy_mode(state)
-    )
-    _set_autonomy_mode(state, chosen_mode)
-    persisted_loop = _continuous_loop(state)
-    if args.continuous:
-        _set_continuous_loop(state, True, reset_phase=True)
-    elif persisted_loop:
-        _set_continuous_loop(state, True, reset_phase=False)
-
-    if args.continuous:
-        print("♾️  --continuous：自动续轮已开启，档位 = 连续（预授权全部高危类别）。")
-
-    state.append_transcript("chat_session_start", project_id=args.project_id)
-
-    # dreaming 状态摘一行（进 banner 的「记忆」行）
-    dreaming_line: str | None = None
-    try:
-        from core.loop_hooks_builtin import _check_dreaming_due
-        is_due, last_at = _check_dreaming_due(state, max_age_days=7)
-        if is_due:
-            if last_at:
-                dreaming_line = _amber(f"💤 上次整理 {last_at}（>7天）") + _dim(
-                    " · 说 'dream' 可再整理")
-            else:
-                dreaming_line = _amber("💤 从未整理过") + _dim(
-                    " · 说 'dream' 让它扫 KB 找过期/synthesis/opportunity")
-    except Exception:
-        pass
-
-    _print_startup_banner(
-        run_id=state.run_id, project_id=args.project_id,
-        is_continue=is_continue, n_messages=len(messages),
-        model=os.getenv("LLM_MODEL", "?"), dreaming_line=dreaming_line,
-    )
-    if not args.verbose:
-        print(_dim(f"   日志 → {log_path}（终端只显示对话；--verbose 恢复全量日志）") + "\n")
-
-    # curator 退出 post-producing flow 后（wangd 2026-08-19），"上次会话留了 N 条
-    # 待整合 KB"这条提醒随之删除 —— 它提醒的是一个不再存在的欠账：curator 是按需
-    # 调取的后台节点，没跑过它不构成"欠着"。
-
-    # 崩溃遗留 run surfacing（R0-c）：上次进程死在半路的 run 不能静默消失 ——
-    # 提示用户 + 注入给模型（用户问起时模型知道有这回事、能提议重跑/收尾）。
-    orphans = _scan_orphaned_runs(base_dir, state.run_id)
-    if orphans:
-        print(_amber(f"⚠️  发现 {len(orphans)} 个上次会话中断遗留的 run："))
-        for o in orphans[:5]:
-            kind_txt = ("崩溃时正等人工答复" if o["kind"] == "paused_orphan"
-                        else "跑到一半进程退出")
-            print(_dim(f"     - {o['run_id']}（{kind_txt}）"))
-        print(_dim("   跟 orchestrator 说「处理一下遗留的 run」可让它检查/重跑。") + "\n")
-        # 无人值守（continuous）时没人会"问起" —— 指令必须是主动的，否则
-        # 遗留 run 只是被报了一嗓子就永远躺在那儿（E2E-5b 实测：重启留下的
-        # 两个在飞 experiment 孤儿挂了 3+ 小时没人管）。
-        _orphan_list = "; ".join(f"{o['run_id']}({o['kind']})" for o in orphans[:5])
-        if _continuous_running(state):
-            _orphan_instr = (
-                "**你现在就处理它们**（这是本轮的第一优先级）：逐个读 state_dir "
-                "下的 transcript 判断进度 —— 已实质完成的按其产物收尾入账；跑了"
-                "一半的评估要不要重跑（结合它已花的成本）；不值得续的明确放弃并"
-                "说明理由。不要假装它们不存在。")
-        else:
-            _orphan_instr = (
-                "用户若问起或要求处理：读对应 state_dir 下的 summary/transcript "
-                "判断进度，提议重跑或收尾；不要假装它们不存在。")
-        state.hook_state.setdefault("injected_messages", []).append({
-            "content": (f"[启动检查] 发现 {len(orphans)} 个上次会话中断遗留的 "
-                        f"run：{_orphan_list}。{_orphan_instr}"),
-            "source": "startup_orphan_scan",
-        })
-
-    mcp_clients = await load_mcp_servers(args.mcp_config)
-
-    chat_state = ChatState()
-    threading.Thread(
-        target=_stdin_listener,
-        args=(asyncio.get_running_loop(), chat_state.input_queue),
-        daemon=True,
-    ).start()
-    # 续连项目在 continuous=running 时无需等人再敲一句“继续”。冷启动项目尚无
-    # objective，仍等第一条真实 user prompt；那一轮**起了研究**之后才自动续 ——
-    # 第一句话不一定是目标（「你好」），见 `_nothing_to_continue`。
-    if is_continue and _continuous_running(state):
-        boot_prompt, _ = _continuous_followup(
-            state, "CONTINUOUS_STATUS: continue", reason="session_start"
-        )
-        if boot_prompt:
-            chat_state.input_queue.put_nowait(boot_prompt)
-    _PROMPT_LIVE["on"] = True   # 此后底部输入行归线程；输出走 _emit_above_prompt
-    _real_stderr = sys.stderr
-    sys.stderr = _PromptSafeStderr(_real_stderr)   # 接管裸 print(file=sys.stderr)，见类注释
-
-    # R1：后台子节点事件（完成/暂停/失败）即时打印（_print_speaker 会重画提示符）
-    def _on_child_event(ev: dict) -> None:
-        kind = ev.get("kind")
-        nt = ev.get("node_type", "?")
-        rid = ev.get("run_id", "")
-        if kind == "completed":
-            imported = ev.get("imported") or []
-            _print_speaker(f"后台 {nt}",
-                            f"✅ 完成（status={ev.get('status')}, turns={ev.get('turns')}）"
-                            + (f"，产出 {len(imported)} 个 artifact" if imported else ""))
-        elif kind == "paused":
-            _print_speaker(f"后台 {nt}",
-                            f"⏸ [{rid}] 在等你输入：{(ev.get('question') or '')[:200]}\n"
-                            f"   用 /answer <你的答复> 直接回给它。")
-        else:
-            _print_speaker(f"后台 {nt}", f"❌ 失败：{ev.get('error', '?')}")
-
-        # background run 完成后 parent 没有天然新 user turn。continuous 模式在
-        # idle 时机械唤醒；若 parent 正在跑，它自己会消费 child event，不重复排队。
-        if (kind in ("completed", "failed")
-                and _continuous_running(state)
-                and not chat_state.turn_running.is_set()
-                and chat_state.input_queue.empty()):
-            prompt, _ = _continuous_followup(
-                state,
-                "CONTINUOUS_STATUS: continue",
-                reason=f"background_{kind}",
-            )
-            if prompt:
-                chat_state.input_queue.put_nowait(prompt)
-
-    from shared.tools.run_node import set_child_event_sink
-    set_child_event_sink(_on_child_event)
-
-    # R2-b 流式逐 token 显示：只挂在 orchestrator 自己的 llm 实例上，子节点用
-    # 各自新建的 LLMClient() → 不会把子节点 token 刷到用户屏幕。header（🔬
-    # Orchestrator）每个 user-turn 只打一次，由 stream_state 控制。
-    _turn_stream = {"header_shown": False}
-
-    def _stream_display(delta: str | None) -> None:
-        if delta is None:                 # 本次 LLM 响应流结束
-            _stream_end()
-            return
-        header = None
-        if not _turn_stream["header_shown"]:
-            header = f"\n{_orchestrator_header()}"
-            _turn_stream["header_shown"] = True
-        _turn_stream["shown"] += delta
-        _stream_write(delta, header=header)
-
-    llm.stream_display = _stream_display
-    # 推理阶段可见化（issue #166）：思考期间不再全黑。走独立通道，不碰
-    # header_shown —— 思考指示不算"回复已开始"，正文来了照样打 header。
-    llm.stream_reasoning_display = _reasoning_display
-
-    # R2-b：/stop 时流式 LLM 生成 chunk 级中止（不用等一次完整生成）
-    from core.llm import set_stream_abort_check
-    set_stream_abort_check(chat_state.panic.is_set)
-
-    # Phase F: 检测 dreaming pending，启动时自动后台跑（不审批 / 显示进度）
-    dreaming_task: asyncio.Task | None = None
-    if args.project_id:
-        try:
-            from core.dreaming_scheduler import should_run_dreaming
-            should_dream, reasons = should_run_dreaming(args.project_id)
-            if should_dream:
-                _emit_above_prompt(_dim("💤 后台整理记忆中… ")
-                                   + _dim(f"（{', '.join(reasons[:3])}；不阻塞对话）"))
-                dreaming_task = asyncio.create_task(
-                    _run_dreaming_background(state, llm, args.project_id,
-                                              chat_state=chat_state)
-                )
-        except Exception as e:
-            logging.warning("dreaming auto-trigger 失败：%s", e)
-
-    try:
-        while True:
-            # 提示符由 stdin 线程的 input(_USER_PROMPT_RL) 持有并显示（不再主协程
-            # 单独 print）——这样退格受 readline 保护，不会抹掉 `你 ›`。
-            user_text = await chat_state.input_queue.get()
-            user_text = user_text.strip()
-            if not user_text:
-                continue
-
-            is_continuous_turn = _is_continuous_turn(user_text)
-
-            if user_text in ("/exit", "/quit"):
-                break
-            if _is_slash_command(user_text):
-                wants_exit = await _handle_slash(user_text, state, messages)
-                if wants_exit:
-                    break
-                if state.hook_state.pop("continuous_kick_requested", False):
-                    prompt, _ = _continuous_followup(
-                        state,
-                        "CONTINUOUS_STATUS: continue",
-                        reason="manual_enable",
-                    )
-                    if prompt:
-                        chat_state.input_queue.put_nowait(prompt)
-                _save_conversation(state, messages)
-                continue
-
-            # continuous 已完成/blocked 后，新的真实 user 消息代表新目标或明确恢复；
-            # 框架内部续轮不重置 phase。
-            if _continuous_loop(state) and not is_continuous_turn:
-                state.hook_state["continuous_phase"] = "running"
-                state.hook_state["continuous_no_progress_turns"] = 0
-                state.hook_state["continuous_error_turns"] = 0
-
-            # 普通 user message → 起 orchestrator 一轮 task
-            chat_state.turn_running.set()
-            _turn_stream["header_shown"] = False   # 每 user-turn 只打一次 header
-            _turn_stream["shown"] = ""
-            # 忙碌提示（在提示符上方）：一轮可能几分钟且中途打印子节点/后台信息。
-            _emit_above_prompt(_dim("⏳ 处理中…（直接输入=中途插话，/stop 停止本轮）"))
-            turn_task = asyncio.create_task(
-                _run_one_turn(state, harness, messages, llm, user_text, chat_state)
-            )
-
-            # turn 跑的时候同时监听 user 中途打断
-            while not turn_task.done():
-                next_input_task = asyncio.create_task(chat_state.input_queue.get())
-                done, _pending = await asyncio.wait(
-                    [turn_task, next_input_task],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if next_input_task in done:
-                    interrupt = next_input_task.result().strip()
-                    if not interrupt:
-                        continue
-                    # 模式判断：
-                    #   1) child 已 pause（pause_driver 在等答复）→ 路由到 pause_answer_queue
-                    #   2) child 正在跑（active 未 pause）→ 跑 orchestrator interrupt 决策
-                    #   3) /exit 等命令在 turn 跑中暂不支持（提示即可）
-                    if interrupt in ("/exit", "/quit"):
-                        _emit_above_prompt("（请等当前 turn 跑完再退出；先 /stop 可尽快结束本轮；或按 Ctrl-C 强制）")
-                        continue
-                    if interrupt in ("/stop", "/abort"):
-                        # 🛑 panic button：kill orchestrator 本轮 + 全部 active child
-                        _do_panic_stop(state, chat_state)
-                        continue
-                    if _is_slash_command(interrupt):
-                        # 安全子集允许 mid-turn 执行（实测痛点：child 连环撞高危
-                        # 确认时最需要切 /autonomy continuous，却被一刀切拒掉）。这些命令只改
-                        # 进程级开关 / hook_state / 只读查询，不碰正在运行的
-                        # messages。/reset（清 messages）、/undo（agent 可能正在
-                        # 改 artifact）仍禁——真正有并发冲突的只有它们。
-                        if _midturn_slash_allowed(interrupt):
-                            await _handle_slash(interrupt, state, messages)
-                        else:
-                            _emit_above_prompt(
-                                f"（{interrupt}：turn 跑中不支持。可用："
-                                f"{' '.join(_MIDTURN_SAFE_SLASH)}；/stop 停止本轮）")
-                        continue
-                    if chat_state.paused.is_set():
-                        # 路由给 pause driver
-                        await chat_state.pause_answer_queue.put(interrupt)
-                    else:
-                        # interrupt 模式：先给即时回执（决策 LLM 要跑几秒，
-                        # 没回执 user 会以为输入被吞了）
-                        _emit_above_prompt(_dim("（本轮仍在进行——你的输入已转为中途插话，"
-                                                "orchestrator 正在决定如何处理…）"))
-                        try:
-                            await _handle_interrupt(state, harness, llm, interrupt,
-                                                    chat_state=chat_state)
-                        except Exception as e:
-                            _emit_above_prompt(f"[ERROR interrupt 失败] {type(e).__name__}: {e}")
-                            logging.exception("interrupt handling error")
-                else:
-                    # turn_task 完成，撤掉 input 任务
-                    next_input_task.cancel()
-                    try:
-                        await next_input_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
-
-            chat_state.turn_running.clear()
-            chat_state.panic.clear()   # /stop 只作用于刚结束的这一轮
-            _stream_end()              # 收束任何未收尾的流式段
-
-            # 拿结果
-            try:
-                reply = turn_task.result()
-            except Exception as e:
-                _emit_above_prompt(
-                    f"\n[ERROR] orchestrator 跑挂了：{type(e).__name__}: {e}")
-                logging.exception("agent_loop error")
-                err_text = str(e).lower()
-                if ("tool_calls" in err_text and "tool messages" in err_text) or (
-                    "tool_call_id" in err_text and "invalid" in err_text
-                ):
-                    repaired = _repair_message_tool_protocol(messages)
-                    if repaired:
-                        state.append_transcript(
-                            "conversation_protocol_repaired",
-                            repairs=repaired,
-                            source="turn_error",
-                        )
-                        _emit_above_prompt(_amber(
-                            f"♻️ 已修复 {repaired} 条中断遗留的 tool-call 协议，"
-                            "continuous 将自动重试。"
-                        ))
-                await _queue_continuous_followup(
-                    state, chat_state, "", reason="turn_error"
-                )
-                _save_conversation(state, messages)
-                continue
-
-            # ── 空轮：不当"回答"处理 ──────────────────────────────────────
-            # run_loop 已回滚（messages 与轮初逐字节相同）。continuous 下安排
-            # 驻定重放；非 continuous 下正常显示诊断文案（用户在场，自己决定）。
-            void_info = state.hook_state.pop("_void_turn_final", None)
-            if void_info and _continuous_loop(state):
-                _emit_above_prompt(_amber(
-                    f"⚠️ 模型空响应（prompt≈{void_info.get('prompt_tokens')}tk，"
-                    f"loop 内已重试 {void_info.get('retries')} 次）——上下文已回滚，"
-                    "退避后原样重放。"))
-                await _queue_continuous_followup(
-                    state, chat_state, reply, reason="void_turn")
-                _save_conversation(state, messages)
-                continue
-
-            driver_status = _continuous_status(reply)
-            display_reply = _strip_continuous_status(reply)
-            if not display_reply and driver_status:
-                display_reply = f"（持续运行状态：{driver_status}）"
-
-            # 回复已在本轮流式逐 token 显示过 → 不重复打印（避免同一段出现两次）。
-            # 否则（非流式 / nudge 重问 / 诚实兜底产生的新文本）正常打印。
-            shown = _norm_text(_turn_stream["shown"])
-            rep = _norm_text(display_reply)
-            if not (rep and shown and rep in shown):
-                _print_reply(display_reply)
-            else:
-                _emit_above_prompt("")   # 收个尾，提示符归位
-
-            # P0-6：本轮跑中被缓存的插话，现在当新用户消息回灌队列（FIFO），
-            # 下一轮 while 循环从 input_queue 取到、正常处理。
-            while chat_state.deferred_inputs:
-                chat_state.input_queue.put_nowait(chat_state.deferred_inputs.pop(0))
-
-            await _queue_continuous_followup(
-                state, chat_state, reply, reason="turn_finished"
-            )
-            _save_conversation(state, messages)
-
-    finally:
-        # Phase F: 等后台 dreaming task（如果有）完成或 cancel
-        if dreaming_task is not None and not dreaming_task.done():
-            print("💤 等后台 dreaming 跑完（按 Ctrl-C 再次中断）...")
-            try:
-                await asyncio.wait_for(dreaming_task, timeout=120)
-            except (TimeoutError, asyncio.CancelledError):
-                dreaming_task.cancel()
-                try:
-                    await dreaming_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-
-        # stdin 是 daemon thread，进程退出自动终止，不需要显式 cancel —— 但它
-        # 阻塞在 readline 里会把 TTY 留在 raw 态，这里立刻复原（atexit 兜底再来一次）。
-        _restore_terminal_state(_saved_term)
-        sys.stderr = _real_stderr   # 还原，别让包装流泄漏到 REPL 生命周期外
-        await stop_mcp_servers(mcp_clients)
-        _save_conversation(state, messages)
-        state.append_transcript("chat_session_end")
-        print(f"对话已保存到 {_orchestrator_state_path(state)}")
-
-    return 0
+    from cli.chat import _main as run_terminal
+    return await run_terminal()
 
 
 if __name__ == "__main__":
-    try:
-        _rc = asyncio.run(_main())
-    except KeyboardInterrupt:
-        _print_end_banner("interrupted")
-        sys.exit(130)
-    except Exception as _exc:                      # noqa: BLE001
-        logging.exception("chat.py 顶层异常退出")
-        _print_end_banner("crashed", f"{type(_exc).__name__}: {_exc}")
-        sys.exit(1)
-    else:
-        if _rc == 0:                               # 0 = REPL 正常收尾；非 0 是启动期早退，已各自打印过原因
-            _print_end_banner("normal")
-        sys.exit(_rc)
+    # Ensure python chat.py and python -m cli share this same runtime module.
+    sys.modules["chat"] = sys.modules[__name__]
+    from cli.chat import main
+    raise SystemExit(main())

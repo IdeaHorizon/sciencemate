@@ -70,7 +70,7 @@ def test_checked_object_cannot_roll_back_to_an_older_successful_producer(
                 result = runner.run(safe_bash._safe_run_bash(
                     state, cwd=str(cwd), timeout=20,
                     cmd=_command("from pathlib import Path; "
-                                 f"(Path.cwd().parent / 'result.txt').write_text({content!r})"),
+                                 f"(Path.cwd().parent / 'result.txt').write_bytes({content.encode()!r})"),
                 ))
                 assert result.get("returncode") == 0, result
                 assert target.read_text() == content

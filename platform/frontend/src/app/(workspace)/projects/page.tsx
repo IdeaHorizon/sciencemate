@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Plus, X } from "lucide-react";
 import { ProjectsList } from "@/features/projects";
 import { WhereItLives } from "@/features/projects/WhereItLives";
@@ -24,9 +24,11 @@ const INITIAL_FORM = {
   root_folder: null as string | null,
 };
 
-export default function ProjectsPage() {
+function ProjectsContent() {
   const t = useT();
   const router = useRouter();
+  const query = useSearchParams();
+  const shouldCreate = query.get("create") === "1";
   const createProject = useCreateProject();
   const [open, setOpen] = useState(false);
   const [addingHome, setAddingHome] = useState(false);
@@ -34,8 +36,13 @@ export default function ProjectsPage() {
   const [form, setForm] = useState(INITIAL_FORM);
 
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get("create") === "1") setOpen(true);
-  }, []);
+    if (shouldCreate) setOpen(true);
+  }, [shouldCreate]);
+
+  const dismiss = () => {
+    setOpen(false);
+    if (shouldCreate) router.replace("/projects");
+  };
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -89,11 +96,11 @@ export default function ProjectsPage() {
       )}
 
       {open && (
-        <div className="project-create-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
+        <div className="project-create-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) dismiss(); }}>
           <section className="project-create-panel" role="dialog" aria-modal="true" aria-labelledby="new-project-title">
             <header>
               <div><span>{t({ zh: "研究工作区", en: "Research workspace" })}</span><h2 id="new-project-title">{t({ zh: "新建项目", en: "New project" })}</h2><p>{t({ zh: "填好名称就可以创建，研究方向和背景之后也可以在会话里告诉助手。", en: "A name is all you need. You can tell the assistant about the research direction in a session later." })}</p></div>
-              <button type="button" onClick={() => setOpen(false)} aria-label={t({ zh: "关闭", en: "Close" })}><X size={16} /></button>
+              <button type="button" onClick={dismiss} aria-label={t({ zh: "关闭", en: "Close" })}><X size={16} /></button>
             </header>
             <form className="project-create-form" onSubmit={submit}>
               <label><span>{t({ zh: "项目名称", en: "Project name" })}</span><input required autoFocus maxLength={300} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder={t({ zh: "例如：翼型转捩预测", en: "e.g. Robust interatomic potentials" })} /></label>
@@ -112,11 +119,15 @@ export default function ProjectsPage() {
                   <label><span>{t({ zh: "工作模式", en: "Operation mode" })}</span><select value={form.operation_mode} onChange={(e) => setForm({ ...form, operation_mode: e.target.value })}><option value="assisted">{t({ zh: "协作：每一步都先征求你的意见", en: "Assisted: asks you at each step" })}</option><option value="autonomous">{t({ zh: "自主：只在高风险操作前停下来询问", en: "Autonomous: stops only before high-risk actions" })}</option><option value="continuous">{t({ zh: "连续：不再询问，一直执行到完成", en: "Continuous: runs to completion without asking" })}</option></select></label>
                 </div>
               </details>
-              <div className="project-create-actions"><Button type="button" variant="ghost" size="sm" onClick={() => setOpen(false)}>{t({ zh: "取消", en: "Cancel" })}</Button><Button type="submit" variant="primary" size="sm" loading={createProject.isPending}>{t({ zh: "创建并打开", en: "Create and open" })}</Button></div>
+              <div className="project-create-actions"><Button type="button" variant="ghost" size="sm" onClick={dismiss}>{t({ zh: "取消", en: "Cancel" })}</Button><Button type="submit" variant="primary" size="sm" loading={createProject.isPending}>{t({ zh: "创建并打开", en: "Create and open" })}</Button></div>
             </form>
           </section>
         </div>
       )}
     </div>
   );
+}
+
+export default function ProjectsPage() {
+  return <Suspense fallback={null}><ProjectsContent /></Suspense>;
 }

@@ -392,6 +392,7 @@ async def interrupt_session(
 
     只有 Session 的驱动者能插话：这跟发消息是同一类权限，不能让旁观者改方向。
     """
+    from app.services.harness_sessions import HarnessSessionError
     from app.services.sessions import active_owning_run, interject_active_session
 
     project = await require_capability(db, user, project_id, "drive_session")
@@ -414,6 +415,18 @@ async def interrupt_session(
             author_user_id=user.id,
             run_id=str(running.id) if running else None,
         )
+    except HarnessSessionError as exc:
+        if exc.code != "harness_control_timeout":
+            raise
+        raise HTTPException(status_code=504, detail={
+            "code": exc.code, "delivery": "unconfirmed", "safeToResubmit": False,
+            "message": say({
+                "zh": "指令已记录，送达结果尚未确认。研究任务未因此终止；"
+                      "请先核对消息，勿重复发送。",
+                "en": "The instruction was recorded, but delivery is unconfirmed. The research "
+                      "was not terminated by this timeout. Check the messages before resending.",
+            }, lang),
+        }) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=said_of(exc, lang, otherwise={
             "zh": "消息发送失败，请稍后重试。", "en": "Could not send the message. Try again later."})) from exc

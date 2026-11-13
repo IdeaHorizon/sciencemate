@@ -109,7 +109,6 @@ _FALLS_TO_GENERIC: dict[str, str] = {
     "duplicate_request_id": "RPC 重放被拒：后端 bug",
     "already_initialized": "重复 init：后端 bug",
     "not_initialized": "没 init 就发 op：后端 bug",
-    "already_rejoined": "重复接回：后端 bug",
     "control_socket_unavailable": "命令面地址起不来：部署问题，兜底文案 + 日志够查",
     "runtime_error": "worker 兜底：类型与原文在 detail 里，分不出更细的类",
     # ── 对话面：参数不合法（前端拼错了）──
@@ -160,6 +159,16 @@ _COPY: dict[str, _Copy] = {
         recovery={"zh": "请核对原作业或外部系统的记录，再继续。核对前不要重复提交。",
                   "en": "Inspect the original job or external system before continuing. "
                         "Do not resubmit before reconciling it."},
+        retryable=False,
+    ),
+    "harness_control_timeout": _Copy(
+        title={"zh": "指令回执延迟", "en": "Control acknowledgement delayed"},
+        body={"zh": "指令可能已送达，但未及时收到回执；这不代表研究任务已停止。",
+              "en": "The instruction may have arrived, but its acknowledgement was delayed. "
+                    "This does not establish that the research stopped."},
+        recovery={"zh": "先检查原会话的消息与执行记录，核对前不要重复发送同一指令。",
+                  "en": "Inspect the original session's messages and execution records before "
+                        "sending the same instruction again."},
         retryable=False,
     ),
     "harness_transcript_ingest_failed": _Copy(

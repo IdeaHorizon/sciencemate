@@ -778,51 +778,6 @@ body:has(.session-inspector-resizer.is-dragging) { cursor: col-resize; user-sele
 .context-menu > button.is-danger { color: var(--color-danger); }
 .context-menu > button:disabled { color: var(--color-fg-subtle); cursor: not-allowed; }
 
-/* ── 交付物：这个项目冻结了什么，一点就在右栏打开 ─────────────────────────
-   放在输入框正上方 —— 读完汇报正要说下一句时，"论文在这儿"就在手边。
-   放进对话流会被几百条活动记录冲走；放进 ⋯ 菜单等于还是要翻。 */
-.session-deliverables {
-  margin: 0 0 8px;
-  padding: 8px 10px;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  background: var(--color-bg-elevated);
-}
-.session-deliverables h2 {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin: 0 0 6px;
-  color: var(--color-fg-subtle);
-  font-size: var(--font-size-caption);
-  font-weight: 590;
-}
-.session-deliverables ul {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.session-deliverable {
-  padding: 3px 9px;
-  border: 1px solid var(--color-border);
-  border-radius: 999px;
-  background: var(--color-bg);
-  color: var(--color-fg);
-  font: inherit;
-  font-size: var(--font-size-caption);
-  cursor: pointer;
-}
-.session-deliverable:hover { border-color: var(--color-accent, currentColor); }
-/* 打不开的照列，只是点不动 —— 少列一条，用户会以为那份产物不存在。 */
-.session-deliverable.is-static {
-  color: var(--color-fg-subtle);
-  cursor: default;
-  border-style: dashed;
-}
-
 /* 刚附加的文件 → 一键晋升成项目材料（issue #689）。挨着输入框的一行小字，
  * 点掉或存入后消失 —— 它是顺手动作的入口，不是附件管理面板。 */
 

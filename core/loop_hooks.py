@@ -89,14 +89,16 @@ def register_loop_hook(hook: LoopHook) -> None:
 
 
 def get_loop_hook(name: str) -> LoopHook | None:
-    return _HOOKS.get(name)
+    from core.naming import canonical_hook_name
+
+    return _HOOKS.get(canonical_hook_name(name))
 
 
 def list_hooks(names: list[str]) -> list[LoopHook]:
     """按 names 顺序返回 hook 对象。找不到的报警 + 跳过。"""
     out: list[LoopHook] = []
     for name in names:
-        h = _HOOKS.get(name)
+        h = get_loop_hook(name)
         if h is None:
             log.warning("harness 声明的 hook %r 未注册，跳过。", name)
             continue

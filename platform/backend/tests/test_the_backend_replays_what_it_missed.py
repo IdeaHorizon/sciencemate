@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -221,6 +222,118 @@ async def test_no_events_file_is_not_a_failure(execution_db, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_later_live_fact_does_not_hide_an_earlier_gap(execution_db, worker_output):
+    project_id, session_id, events, expected = worker_output
+    service = ExecutionIngestService()
+    last_only = events.parent / "live-tail.jsonl"
+    last_only.write_text("\n".join(events.read_text().splitlines()[-2:]) + "\n")
+    first = await replay_missed_events(
+        execution_db, service=service, context=_context(project_id, session_id),
+        events_path=last_only)
+    assert first.ingested == 1
+    rest = await replay_missed_events(
+        execution_db, service=service, context=_context(project_id, session_id),
+        events_path=events)
+    assert rest.ingested == expected - 1
+    assert rest.already_known == 1
+    assert await _durable_count(execution_db, session_id) == expected
+
+
+@pytest.mark.asyncio
+async def test_two_sqlite_writers_share_dedupe_sequence_and_projection(db_engine, monkeypatch):
+    """Real file/connection race: replay and live delivery of one usage record."""
+    from app.models.execution import Run, SessionProjection
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    service = ExecutionIngestService()
+    context = _context("race-project", "race-session", "race-run")
+    async with factory() as db:
+        await service._ensure_scope(db, context)
+        await db.commit()
+
+    first_at_sequence = asyncio.Event()
+    second_at_sequence = asyncio.Event()
+    release = asyncio.Event()
+    allocate = service._next_sequence
+    arrivals = 0
+
+    async def pause_after_dedupe(db, session):
+        nonlocal arrivals
+        arrivals += 1
+        (first_at_sequence if arrivals == 1 else second_at_sequence).set()
+        await release.wait()
+        return await allocate(db, session)
+
+    monkeypatch.setattr(service, "_next_sequence", pause_after_dedupe)
+    raw = {"event": "llm_response", "at": AT,
+           "usage": {"prompt_tokens": 13, "completion_tokens": 3, "total_tokens": 16}}
+    line = json.dumps(raw).encode()
+
+    async def deliver():
+        async with factory() as db:
+            result = await service.ingest_raw_record(
+                db, context=context, file_identity="same-physical-file", byte_offset=388519,
+                raw_line=line, raw=raw, adapter_state={},
+            )
+            await db.commit()
+            return result.duplicate
+
+    first = asyncio.create_task(deliver())
+    await asyncio.wait_for(first_at_sequence.wait(), 5)
+    second = asyncio.create_task(deliver())
+    try:
+        # The broken SELECT FOR UPDATE path lets both readers pass dedupe.
+        # The fixed write boundary keeps the second reader outside it.
+        await asyncio.wait_for(second_at_sequence.wait(), 0.2)
+    except TimeoutError:
+        pass
+    finally:
+        release.set()
+    assert await asyncio.wait_for(asyncio.gather(first, second), 10) == [False, True]
+    async with factory() as db:
+        assert await db.scalar(select(func.count()).select_from(ExecutionEvent)) == 1
+        run = await db.get(Run, "race-run")
+        assert (run.prompt_tokens, run.completion_tokens, run.total_tokens) == (13, 3, 16)
+        session = await db.get(SessionProjection, "race-session")
+        assert session.next_sequence == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_replay_flush_keeps_the_committed_prefix_and_can_retry(
+    execution_db, worker_output, monkeypatch,
+):
+    from app.services import session_event_replay as replay
+
+    project_id, session_id, events, expected = worker_output
+    original = replay.ingest_transcript_wrapper
+
+    async def fail_second_record(db, **kwargs):
+        if kwargs["event"]["event"]["event"] == "tool_call":
+            values = (await db.execute(select(ExecutionEvent.__table__))).mappings().first()
+            db.expunge_all()
+            db.add(ExecutionEvent(**dict(values)))
+            await db.flush()  # actual IntegrityError leaves the ORM Session inactive
+        return await original(db, **kwargs)
+
+    monkeypatch.setattr(replay, "ingest_transcript_wrapper", fail_second_record)
+    report = await replay.replay_missed_events(
+        execution_db, service=ExecutionIngestService(),
+        context=_context(project_id, session_id), events_path=events,
+    )
+    assert report.failed == 1 and report.ingested == 1
+    assert execution_db.is_active
+    assert await _durable_count(execution_db, session_id) == 1
+
+    monkeypatch.setattr(replay, "ingest_transcript_wrapper", original)
+    retry = await replay.replay_missed_events(
+        execution_db, service=ExecutionIngestService(),
+        context=_context(project_id, session_id), events_path=events,
+    )
+    assert retry.failed == 0 and retry.ingested == expected - 1
+    assert await _durable_count(execution_db, session_id) == expected
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("raw_event", ["interrupt_reply", "user_interrupt_received"])
 async def test_narration_only_records_survive_replay_without_duplicate_or_poisoned_transaction(
     execution_db, worker_output, raw_event
@@ -286,3 +399,104 @@ async def test_narration_only_records_survive_replay_without_duplicate_or_poison
         select(ExecutionEvent).where(ExecutionEvent.kind == "interject.queued")
     )
     assert newest.sequence == original[2] + 1
+
+
+@pytest_asyncio.fixture
+async def busy_engine(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'busy.sqlite3'}", connect_args={"timeout": 0.01})
+    async with engine.begin() as conn:
+        await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=EXECUTION_TABLES))
+    yield engine
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_lock", [True, False])
+async def test_sqlite_busy_retries_only_the_same_uncommitted_fact(
+    busy_engine, worker_output, release_lock,
+):
+    from sqlalchemy import update
+    from sqlalchemy.exc import OperationalError
+
+    from app.models.execution import SessionProjection
+    from app.services.harness_transcript_ingest import (
+        commit_transcript_wrapper,
+        ingest_transcript_wrapper,
+    )
+
+    project, session, events, _ = worker_output
+    event = next(json.loads(line) for line in events.read_text().splitlines()
+                 if json.loads(line).get("type") == "transcript")
+    context = _context(project, session)
+    factory = async_sessionmaker(busy_engine, expire_on_commit=False)
+    service = ExecutionIngestService()
+    async with factory() as seed:
+        await service._ensure_scope(seed, context)
+        await seed.commit()
+    observed_busy = asyncio.Event()
+    attempts = 0
+    states = {}
+
+    async def observe(db, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        try:
+            return await ingest_transcript_wrapper(db, **kwargs)
+        except OperationalError:
+            kwargs["harness_states"]["failed_attempt"] = {"must_not_publish": True}
+            observed_busy.set()
+            raise
+
+    async with factory() as holder, factory() as reader:
+        await holder.execute(update(SessionProjection).values(next_sequence=0))
+        task = asyncio.create_task(commit_transcript_wrapper(
+            reader, ingest=observe, service=service, context=context,
+            event=event, harness_states=states))
+        try:
+            await asyncio.wait_for(observed_busy.wait(), 5)
+            assert states == {}
+            if release_lock:
+                await holder.rollback()
+                native = await asyncio.wait_for(task, 5)
+                assert native == event["event"] and attempts >= 2
+                assert "failed_attempt" not in states
+                count = await _durable_count(reader, session)
+                sequence = await reader.scalar(select(SessionProjection.next_sequence))
+                await commit_transcript_wrapper(reader, service=service, context=context,
+                                                event=event, harness_states=states)
+                assert await _durable_count(reader, session) == count
+                assert await reader.scalar(select(SessionProjection.next_sequence)) == sequence
+            else:
+                with pytest.raises(OperationalError):
+                    await task
+                assert attempts == 4 and states == {} and reader.is_active
+                await holder.rollback()
+                assert await _durable_count(reader, session) == 0
+        finally:
+            await holder.rollback()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_non_busy_ingest_failure_is_not_retried_or_published(execution_db):
+    import sqlite3
+
+    from sqlalchemy.exc import OperationalError
+
+    from app.services.harness_transcript_ingest import commit_transcript_wrapper
+
+    calls = 0
+    states = {"committed": {"identity": "original"}}
+
+    async def broken(db, **kwargs):
+        nonlocal calls
+        calls += 1
+        kwargs["harness_states"]["committed"]["identity"] = "uncommitted"
+        raise OperationalError("statement", {}, sqlite3.OperationalError("no such table: broken"))
+
+    with pytest.raises(OperationalError):
+        await commit_transcript_wrapper(execution_db, ingest=broken, harness_states=states)
+    assert calls == 1 and states == {"committed": {"identity": "original"}}

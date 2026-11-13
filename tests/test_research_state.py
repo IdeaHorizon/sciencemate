@@ -11,7 +11,7 @@ import json
 import pytest
 
 from core.state import State
-from nodes.hypothesis.tools.research_state import (
+from nodes.analysis.tools.research_state import (
     VERDICTS,
     _update_research_state,
     _read_research_state,
@@ -337,7 +337,7 @@ class _Ctx:
 
 @pytest.mark.asyncio
 async def test_finish_gate_blocks_when_frozen_prereg_has_no_new_state(tmp_path):
-    from nodes.hypothesis.hooks import _research_state_before_finish
+    from nodes.analysis.hooks import _research_state_before_finish
 
     state = _state(tmp_path)
     _freeze_prereg(state, ["H1"])
@@ -355,7 +355,7 @@ async def test_finish_gate_blocks_when_frozen_prereg_has_no_new_state(tmp_path):
 @pytest.mark.asyncio
 async def test_finish_gate_silent_before_any_freeze(tmp_path):
     """还没冻结协议 = 还没有科学产出，不该拦。"""
-    from nodes.hypothesis.hooks import _research_state_before_finish
+    from nodes.analysis.hooks import _research_state_before_finish
 
     state = _state(tmp_path)
     assert await _research_state_before_finish(_Ctx(state)) is None
@@ -364,7 +364,7 @@ async def test_finish_gate_silent_before_any_freeze(tmp_path):
 @pytest.mark.asyncio
 async def test_finish_gate_requires_a_NEW_version_this_round(tmp_path):
     """已有 v1 但本轮没更新 → 仍要拦。否则第二轮可以什么都不做就收尾。"""
-    from nodes.hypothesis.hooks import _research_state_before_finish
+    from nodes.analysis.hooks import _research_state_before_finish
 
     state = _state(tmp_path)
     _freeze_prereg(state, ["H1"])
@@ -377,7 +377,7 @@ async def test_finish_gate_requires_a_NEW_version_this_round(tmp_path):
 
 
 def test_round_briefing_says_first_round_then_next_round(tmp_path):
-    from nodes.hypothesis.hooks import _analysis_round_briefing
+    from nodes.analysis.hooks import _analysis_round_briefing
 
     state = _state(tmp_path)
     first = _analysis_round_briefing(_Ctx(state))

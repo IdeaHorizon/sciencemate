@@ -39,6 +39,8 @@ import logging
 import re
 from pathlib import Path
 
+from core.naming import NODE_ALIASES, canonical_node_type
+
 log = logging.getLogger("directives_loader")
 
 #: 个人层里**机器维护**的那半：平台把结构化研究设置（语言、引用风格……）
@@ -115,7 +117,7 @@ _MANAGED_NODE_SECTION_RE = re.compile(
 )
 _PLATFORM_NODE_SCOPE = {
     "literature": "literature",
-    "hypothesis": "experiments",
+    "analysis": "experiments",
     "experiment": "experiments",
     "observation": "observations",
     "derivation": "derivations",
@@ -148,6 +150,7 @@ def _extract_managed_project_directives(project_md: str, node_type: str) -> str 
         raise RuntimeError("PROJECT.md managed node heading is malformed")
     node_body = body[header.end() :]
     selected: str | None = None
+    node_type = canonical_node_type(node_type)
     requested_scope = _PLATFORM_NODE_SCOPE.get(node_type, node_type)
     seen: set[str] = set()
     cursor = 0
@@ -195,10 +198,12 @@ def _extract_node_subsection(node_part: str, node_type: str) -> str | None:
         return None
     # 找所有 ### 开头的子段
     pattern = re.compile(r"^###\s+(\S+)([^\n]*)\n(.*?)(?=^###\s+|\Z)", re.MULTILINE | re.DOTALL)
-    for m in pattern.finditer(node_part):
-        section_name = m.group(1).strip().lower()
-        if section_name == node_type.lower():
-            return m.group(0).rstrip()
+    canonical = canonical_node_type(node_type.lower())
+    sections = list(pattern.finditer(node_part))
+    for wanted in (canonical, *(old for old, new in NODE_ALIASES.items() if new == canonical)):
+        for match in sections:
+            if match.group(1).strip().lower() == wanted:
+                return match.group(0).rstrip()
     return None
 
 

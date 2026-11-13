@@ -17,7 +17,7 @@ from app.auth import credential_fingerprint, get_current_user
 from app.database import get_db
 from app.models.cnki import CnkiDevice, CnkiJob, CnkiJobPaper, CnkiPaper
 from app.models.user import User
-from app.schemas.cnki import BatchIn, HeartbeatIn, IndexIn, JobIn, PairIn, ReportIn
+from app.schemas.cnki import BatchIn, HeartbeatIn, IndexIn, JobIn, PairIn, ReportIn, SessionResetIn
 from app.services import cnki as service
 from app.services.user_interface import Language, language_on_screen, say
 
@@ -82,6 +82,12 @@ async def revoke(device_id: str, user=Depends(get_current_user), db=Depends(get_
 @router.post("/jobs")
 async def create_job(payload: JobIn, page_size: int | None = Query(default=None, ge=1, le=500), user=Depends(get_current_user), db=Depends(get_db)):
     return await service.create_job(db, user, payload, page_size=page_size)
+
+
+@router.post("/session/reset")
+async def reset_session(payload: SessionResetIn, user=Depends(get_current_user), db=Depends(get_db), lang: Language = Depends(language_on_screen)):
+    return await service.request_session_reset(db, user.id, {str(value) for value in payload.job_ids}, lang=lang)
+
 
 @router.post("/jobs/{job_id}/retry")
 async def retry(job_id: str, user=Depends(get_current_user), db=Depends(get_db), lang: Language = Depends(language_on_screen)):

@@ -178,7 +178,9 @@ def _is_visible_to(skill: Skill, node_type: str | None) -> bool:
     if node_type is None:
         return True   # 调试模式或 caller 不在节点上下文：不过滤
     owner = skill.origin.split(":", 1)[1]
-    return owner == node_type
+    from core.naming import same_node
+
+    return same_node(owner, node_type)
 
 
 def render_mode() -> str:

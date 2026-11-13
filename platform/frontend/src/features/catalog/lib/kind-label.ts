@@ -3,9 +3,7 @@ import { say, type Language, type Phrase } from "../../../shared/i18n/language.t
 /**
  * 产物类型 → 给人看的名字。
  *
- * 一张表，三处用：「研究产出」页的每一行、会话里的交付物 chip、右栏拆开
- * 信封时的标题。2026-09-10 之前是两张（SessionDeliverables 一张 7 条、
- * ProjectOutputsView 一张 14 条），同一种产物在两处叫法可能不同，且分叉不报错。
+ * 「研究成果」列表和成果详情共用，确保同一种产物的名字一致。
  *
  * 表里必须覆盖 `shared/lib/artifact_policy.py` 里全部 `retention: permanent`
  * 的类型（kind-label.test.ts 扫那个文件对账）—— 少一个，那一类交付物就会以
@@ -21,6 +19,10 @@ export const ARTIFACT_KIND_LABEL: Record<string, Phrase> = {
   literature_index: { zh: "文献索引", en: "Literature index" },
   literature_evidence_package: { zh: "文献证据包", en: "Literature evidence package" },
   research_plan: { zh: "研究计划", en: "Research plan" },
+  analysis_research_overview: { zh: "研究概览", en: "Research overview" },
+  hypothesis_research_overview: { zh: "研究概览", en: "Research overview" },
+  analysis_output_validation: { zh: "分析自检", en: "Analysis validation" },
+  hypothesis_output_validation: { zh: "分析自检", en: "Analysis validation" },
   research_intent: { zh: "研究意图", en: "Research intent" },
   experiment_log: { zh: "实验记录", en: "Experiment log" },
   raw_results: { zh: "原始结果", en: "Raw results" },

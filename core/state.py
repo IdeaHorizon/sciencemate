@@ -24,14 +24,14 @@ from pathlib import Path
 from typing import Any
 
 from core import artifact_provenance as _provenance
-from core.tool_errors import ToolRejection
-from shared.lib import filelock
-
-
 from core.paths import (
     org_root as _paths_org_root,
+)
+from core.paths import (
     project_dir as _paths_project_dir,
 )
+from core.tool_errors import ToolRejection
+from shared.lib import filelock
 
 
 def _project_root(project_id: str | None) -> Path | None:
@@ -179,6 +179,9 @@ class State:
     parent_run_id: str | None = None       # 父 run_id（用于 transcript 链）
 
     def __post_init__(self) -> None:
+        from core.naming import canonical_node_type
+
+        self.node_type = canonical_node_type(self.node_type)
         # root 必须**生而绝对**（issue #426 nidy 现场，2026-08-13）。
         #
         # 相对的 root 不会在这里报错，而是毒化下游每一处路径计算，且毒发时
@@ -251,6 +254,8 @@ class State:
         个 run**，而不是"又开了一个"（wangd 2026-08-18：「上一个 curator 被
         打断，然后就新开一个 curator，这非常离谱」）。
         """
+        if Path(run_id).name != run_id or run_id in (".", ".."):
+            raise ValueError("Invalid run_id for resume")
         root = base_dir / run_id
         if not root.is_dir():
             raise FileNotFoundError(f"run 目录不存在，无法续跑：{root}")
@@ -367,6 +372,10 @@ class State:
         # arbitrary documents.  Enforce lifecycle-tool ownership at the final
         # persistence boundary so internal callers cannot bypass it.
         from core.artifact_capabilities import validate_artifact_write
+        from core.naming import canonical_artifact_name, canonical_artifact_type
+
+        artifact_type = canonical_artifact_type(artifact_type)
+        name = canonical_artifact_name(artifact_type, name)
 
         validate_artifact_write(
             node_type=self.node_type,
@@ -395,6 +404,8 @@ class State:
         artifact_id = f"{artifact_type}__{_slug(name)}"
         store, directory = self._store_for(artifact_type)
         existing = store.head(artifact_id)
+        if existing is not None:
+            artifact_id = existing.artifact_id
         amendment: dict | None = None
         preserved_provenance: dict | None = None
         if existing is not None and existing.frozen and existing.frozen_version == existing.version:
@@ -589,7 +600,11 @@ class State:
         不滤的话它们会混进"可用的上游 artifact"提示、produced_types、引用完整性
         的新 id 清单。
         """
+        from core.naming import canonical_artifact_type, same_node
         from shared.lib.artifact_policy import is_run_local
+
+        if artifact_type:
+            artifact_type = canonical_artifact_type(artifact_type)
 
         seen: set[str] = set()
         rows: list[tuple[tuple[str, str], dict]] = []
@@ -601,7 +616,7 @@ class State:
                     continue
                 if not artifact_type and is_run_local(head.artifact_type):
                     continue
-                if own_only and head.produced_by_node_type != self.node_type:
+                if own_only and not same_node(head.produced_by_node_type, self.node_type):
                     continue
                 seen.add(head.artifact_id)
                 entry = {
@@ -661,6 +676,7 @@ class State:
         kind ∈ {directive, observation, decision, todo}
         """
         import hashlib
+
         from shared.lib.kb_schema import normalize
 
         if kind not in ("directive", "observation", "decision", "todo"):
@@ -921,11 +937,16 @@ class State:
         `kb.promote` / `kb.adopt`，其余都是 `kb.write`。
         """
         from shared.lib.external_content import (
-            WITNESS_FIELD, merge_witnesses, witness_at_ingest,
+            WITNESS_FIELD,
+            merge_witnesses,
+            witness_at_ingest,
         )
         from shared.lib.kb_schema import (
-            compute_kb_id, fill_defaults, merge_kb_record, validate_record,
+            compute_kb_id,
+            fill_defaults,
+            merge_kb_record,
             smart_default_scope,
+            validate_record,
         )
 
         now = datetime.now(timezone.utc).isoformat()
@@ -1103,10 +1124,12 @@ class State:
         try:
             from core.embeddings import get_default_embedding_client
             from core.kb_embedding_text import (
-                claim_to_embed_text, concept_to_embed_text,
+                claim_to_embed_text,
+                concept_to_embed_text,
             )
             from core.kb_vector_index import (
-                query_across_scopes, rebuild_if_needed,
+                query_across_scopes,
+                rebuild_if_needed,
             )
             client = get_default_embedding_client()
         except Exception as e:
@@ -1241,7 +1264,7 @@ class State:
             # 实测事故（jicq E2E 流体力学，Study3 假设4/5）：hypothesis 冻了
             # prereg v5、带**新的** falsification_criteria_structured 重建 claim，
             # 语义命中上一版 → _semantic_merge_into 只合并 sources，把新判据和新
-            # prereg_chunk_id **整个丢掉**，返回旧记录；validate_hypothesis_outputs
+            # prereg_chunk_id **整个丢掉**，返回旧记录；validate_analysis_outputs
             # 于是照样失败，而改措辞还是命中（同义 cosine 依旧 ≥0.90）——
             # 节点没有任何确定性的修复路径，连着 5 次 incomplete 到 blocked。
             #
@@ -1365,7 +1388,8 @@ class State:
             return
         from core.embeddings import get_default_embedding_client
         from core.kb_embedding_text import (
-            claim_to_embed_text, concept_to_embed_text,
+            claim_to_embed_text,
+            concept_to_embed_text,
         )
         from core.kb_vector_index import append_one, should_rebuild
 
@@ -1567,7 +1591,7 @@ class State:
 
 # ── 文件锁 helper（模块级）──────────────────────────────────────────────────
 
-import contextlib                          # noqa: E402
+import contextlib  # noqa: E402
 
 
 @contextlib.contextmanager

@@ -411,6 +411,92 @@ class LoopResult:
                 f"改 status 请改 _TERMINAL_CAUSES，不要在调用点各写各的。")
 
 
+def _pause_loop(harness, state, messages, llm, call, result, *, turn,
+                all_tool_calls, max_turns):
+    """One pause boundary for both original dispatch and recovered dispatch."""
+    ev_data = result.get("pause_event") or {}
+    # 整份带走，不逐个字段手抄。这里原来是七行命名参数，于是每加一个
+    # pause 字段就要记得回来补一行 —— 忘了不报错，只是流里悄悄少一块：
+    # v0.4.3 漏拷 metadata（auto-approve 无视 reviewer 推荐）、
+    # 2026-08-19 漏拷 option_details/offer_id（选项的身份在第一跳就死）。
+    pause_event = PauseEvent.from_payload(
+        ev_data,
+        pending_tool_call_id=call["id"],
+        default_node_type=state.node_type,
+        default_run_id=state.run_id,
+    )
+    # 注册到 pause registry（chat.py 用 run_id 找 ctx 恢复）
+    ctx_paused = PausedRunContext(
+        run_id=state.run_id,
+        state=state,
+        messages=messages,
+        harness=harness,
+        llm=llm,
+        pending_tool_call_id=pause_event.pending_tool_call_id,
+        pause_event=pause_event,
+        parent_run_id=state.parent_run_id,
+        # parent_tool_call_id 由 run_node 工具在冒泡时填
+        parent_tool_call_id=state.hook_state.get("_parent_tool_call_id"),
+    )
+    register_pause(ctx_paused)
+    state.append_transcript(
+        "loop_pause", turn=turn,
+        question=pause_event.question[:200],
+        pending_tool_call_id=pause_event.pending_tool_call_id,
+    )
+    # v3.1（审计）：pause registry 是进程内存 —— 进程崩溃后等 HITL 的
+    # run 无从发现。落一个 pause_pending.json 标记（resume 时删），
+    # `hf` / driver 崩溃重启后能列出悬空 pause + 用 messages checkpoint 恢复。
+    write_pause_pending(state, pause_event, turn)
+    return LoopResult(
+        max_turns=max_turns,
+        final_text="",
+        turns=turn,
+        tool_calls=all_tool_calls,
+        messages=messages,
+        status="paused",
+        terminal_cause="pause_event",
+        pause_event=pause_event,
+    )
+
+
+async def restore_pause(harness, state, messages, llm):
+    """Re-register a persisted pause using its original complete tool receipt."""
+    path = state.root / "pause_pending.json"
+    if path.exists():
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        # The tool receipt is committed before the pause marker. A process can
+        # die between those writes; the saved question still forbids a model wake.
+        last_tool = next((m for m in reversed(messages) if m.role == "tool"), None)
+        try:
+            result = json.loads(last_tool.content) if last_tool is not None else None
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(result, dict) or result.get("status") != "pause":
+            return None
+        from core.child_dispatch import checkpoint
+        saved = {"pending_tool_call_id": last_tool.tool_call_id,
+                 "paused_at_turn": (checkpoint(state) or {}).get("turn")
+                                   or state.hook_state.get("_current_turn") or 1}
+    call_id = saved["pending_tool_call_id"]
+    call = next((call for message in reversed(messages) for call in message.tool_calls or []
+                 if call.get("id") == call_id), None)
+    message = next((message for message in reversed(messages)
+                    if message.role == "tool" and message.tool_call_id == call_id), None)
+    if call is None or message is None:
+        raise ValueError("Paused run has no original call/response checkpoint")
+    result = json.loads(message.content)
+    if result.get("status") != "pause" or not isinstance(result.get("pause_event"), dict):
+        raise ValueError("Paused run has no complete original question receipt")
+    child_run_id = result.get("child_run_id")
+    if child_run_id:
+        from core import child_dispatch
+        await child_dispatch.restore_paused_child(state, call_id, child_run_id)
+    return _pause_loop(harness, state, messages, llm, call, result,
+                       turn=saved["paused_at_turn"], all_tool_calls=[], max_turns=harness.max_turns)
+
+
 async def run_loop(
     harness: NodeHarness,
     state: State,
@@ -427,7 +513,9 @@ async def run_loop(
 
     with _cancel.bind_run(state):
         try:
-            result = await _run_loop_body(harness, state, messages, llm)
+            result = await restore_pause(harness, state, messages, llm)
+            if result is None:
+                result = await _run_loop_body(harness, state, messages, llm)
         except _cancel.RunCancelled as e:
             state.append_transcript(
                 "loop_cancelled_at_chokepoint",
@@ -437,6 +525,7 @@ async def run_loop(
             _cancel.mark_cancelled(state, e.signal)
             _turn = int(state.hook_state.get("_current_turn") or 0)
             result = LoopResult(
+                max_turns=harness.max_turns,
                 final_text=f"(cancelled: {e.signal.get('reason') or 'run 已取消'})",
                 turns=_turn, tool_calls=[], messages=messages, status="cancelled",
                 terminal_cause="external_kill",
@@ -646,6 +735,10 @@ async def _run_loop_body(
             except (OSError, ValueError):
                 pass
             selected_wait = job_wait.load(state)
+            from core.conversation_store import dispatch_anchors
+            state._tool_dispatches = dispatch_anchors(recovery_checkpoint)
+            from core import child_dispatch
+            await child_dispatch.resume_background(state)
         await job_wait.resume(state, messages, turn=turn)
         if turn == 1:
             from core.conversation_store import (
@@ -660,15 +753,24 @@ async def _run_loop_body(
                 state, messages, checkpoint=recovery_checkpoint, selected_wait=selected_wait,
                 turn=turn,
             )
-            await reconcile_reentrant_calls(state, messages, turn=turn)
+            recovered_pause = await reconcile_reentrant_calls(state, messages, turn=turn)
+            if recovered_pause:
+                return _pause_loop(
+                    harness, state, messages, llm, recovered_pause["call"], recovered_pause["result"],
+                    turn=turn, all_tool_calls=all_tool_calls, max_turns=_max_turns,
+                )
             unresolved = unresolved_tool_calls(messages)
+            unresolved.update(child_dispatch.unconfirmed_background(state))
+            state.hook_state["_unconfirmed_tool_calls"] = unresolved
             if unresolved:
                 state.append_transcript("tool_outcome_unconfirmed", calls=unresolved,
                                         do_not_resubmit=True)
-                raise UnconfirmedToolOutcome(
-                    "Saved tool intent has no confirmed result; reconcile before continuing: "
-                    + json.dumps(unresolved, ensure_ascii=False)
-                )
+                if harness.node_type != "_orchestrator":
+                    raise UnconfirmedToolOutcome("Original child action still needs reconciliation")
+                _inject_notice(state, messages, turn=turn, source="tool_outcome_unconfirmed",
+                    text="以下原动作的结果尚未确认：" + json.dumps(unresolved, ensure_ascii=False)
+                    + "。可以回答用户和调用只读工具核查；执行入口会阻止新的副作用动作，"
+                      "不要重新提交或宣称原动作已经失败。")
             if retired:
                 _persist_messages_checkpoint(state, messages, turn=turn)
 
@@ -909,6 +1011,18 @@ async def _run_loop_body(
             state.append_transcript(
                 "turn_transition", turn=turn, reason="context_overflow_rolled_back")
             continue
+        # Provider IDs are opaque aliases. They cannot close a different,
+        # still-unconfirmed call, including another call in this same response.
+        from core.conversation_store import unresolved_tool_calls
+        from uuid import uuid4
+        occupied_ids = set(unresolved_tool_calls(messages))
+        for call in response.tool_calls or []:
+            original_id = call.get("id")
+            if original_id in occupied_ids:
+                call["id"] = "call_" + uuid4().hex
+                state.append_transcript("tool_call_id_normalized", provider_id=original_id,
+                                        tool_call_id=call["id"], turn=turn)
+            occupied_ids.add(call.get("id"))
         state.append_transcript(
             "llm_response", turn=turn,
             finish_reason=response.finish_reason,
@@ -1179,7 +1293,7 @@ async def _run_loop_body(
 
             # ── 收尾闸（v2.1）─────────────────────────────────────────────
             # 节点声明的强制自检必须**真的跑过**才准收尾。实测（E2E 2026-08-07）：
-            # hypothesis 的 prompt 里"结束前必须 validate_hypothesis_outputs()"
+            # hypothesis 的 prompt 里"结束前必须 validate_analysis_outputs()"
             # 写了三遍（工作流第 11 步 / rules / QC 描述），agent 全程 56 次工具
             # 调用一次没调，最后一轮还在建 claim 就收工了；on_end hook 补跑校验
             # 时 loop 已结束，两项失败无法补救 → 整个 run incomplete，下游
@@ -1351,7 +1465,9 @@ async def _run_loop_body(
         _pre_executed = await _pre_execute_safe_prefix(
             state, harness, response.tool_calls, turn=turn)
         for call in response.tool_calls:
-            tool_name = call["function"]["name"]
+            from core.naming import canonical_tool_name
+
+            tool_name = canonical_tool_name(call["function"]["name"])
             raw_args = call["function"].get("arguments") or "{}"
             try:
                 args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
@@ -1492,49 +1608,9 @@ async def _run_loop_body(
                                     "resume 后如仍需要请重新调用。",
                         }, ensure_ascii=False),
                     ))
-            ev_data = paused_at_call["result"].get("pause_event") or {}
-            # 整份带走，不逐个字段手抄。这里原来是七行命名参数，于是每加一个
-            # pause 字段就要记得回来补一行 —— 忘了不报错，只是流里悄悄少一块：
-            # v0.4.3 漏拷 metadata（auto-approve 无视 reviewer 推荐）、
-            # 2026-08-19 漏拷 option_details/offer_id（选项的身份在第一跳就死）。
-            pause_event = PauseEvent.from_payload(
-                ev_data,
-                pending_tool_call_id=paused_at_call["call"]["id"],
-                default_node_type=state.node_type,
-                default_run_id=state.run_id,
-            )
-            # 注册到 pause registry（chat.py 用 run_id 找 ctx 恢复）
-            ctx_paused = PausedRunContext(
-                run_id=state.run_id,
-                state=state,
-                messages=messages,
-                harness=harness,
-                llm=llm,
-                pending_tool_call_id=pause_event.pending_tool_call_id,
-                pause_event=pause_event,
-                parent_run_id=state.parent_run_id,
-                # parent_tool_call_id 由 run_node 工具在冒泡时填
-                parent_tool_call_id=state.hook_state.get("_parent_tool_call_id"),
-            )
-            register_pause(ctx_paused)
-            state.append_transcript(
-                "loop_pause", turn=turn,
-                question=pause_event.question[:200],
-                pending_tool_call_id=pause_event.pending_tool_call_id,
-            )
-            # v3.1（审计）：pause registry 是进程内存 —— 进程崩溃后等 HITL 的
-            # run 无从发现。落一个 pause_pending.json 标记（resume 时删），
-            # `hf` / driver 崩溃重启后能列出悬空 pause + 用 messages checkpoint 恢复。
-            write_pause_pending(state, pause_event, turn)
-            return LoopResult(
-                max_turns=_max_turns,
-                final_text="",
-                turns=turn,
-                tool_calls=all_tool_calls,
-                messages=messages,
-                status="paused",
-                terminal_cause="pause_event",
-                pause_event=pause_event,
+            return _pause_loop(
+                harness, state, messages, llm, paused_at_call["call"], paused_at_call["result"],
+                turn=turn, all_tool_calls=all_tool_calls, max_turns=_max_turns,
             )
 
         # ── (4.5) 协议失败熔断（issue #184）─────────────────────────────
@@ -1723,22 +1799,37 @@ def _persist_messages_checkpoint(state, messages: list[LLMMessage],
     格式：{turn, written_at, messages: [...]}。
     """
     path = _checkpoint_path(state)
+    from core.conversation_store import state_snapshot, write_snapshot
     payload = {
+        **state_snapshot(state),
         "turn": turn,
         "tool_dispatch": state.hook_state.get("_current_tool_call_id_being_executed"),
         "written_at": datetime.utcnow().isoformat() + "Z",
         "messages": [msg_to_jsonable(m) for m in messages],
     }
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    from core.secrets import redact
-    payload = redact(payload)
-    import os
-
-    with tmp.open("w", encoding="utf-8") as stream:
-        stream.write(json.dumps(payload, ensure_ascii=False))
-        stream.flush()
-        os.fsync(stream.fileno())
-    tmp.replace(path)
+    from core.conversation_store import unresolved_tool_calls
+    pending = unresolved_tool_calls(messages)
+    anchors = {key: at for key, at in getattr(state, "_tool_dispatches", {}).items() if key in pending}
+    if payload["tool_dispatch"] in pending:
+        anchors.setdefault(payload["tool_dispatch"], payload["written_at"])
+    payload["tool_dispatches"] = anchors
+    paused_calls = set()
+    for message in messages:
+        if message.role == "tool" and message.tool_call_id:
+            try:
+                result = json.loads(message.content or "null")
+            except (ValueError, TypeError):
+                continue
+            if isinstance(result, dict) and result.get("status") == "pause":
+                paused_calls.add(message.tool_call_id)
+    payload["child_dispatches"] = {
+        key: record for key, record in getattr(state, "_child_dispatches", {}).items()
+        if record.get("call_id") == payload["tool_dispatch"] or record.get("background")
+        or record.get("call_id") in paused_calls or record.get("call_id") in pending
+    }
+    write_snapshot(path, payload)
+    state._child_dispatches = payload["child_dispatches"]
+    state._tool_dispatches = anchors
 
 
 def load_messages_checkpoint(state) -> tuple[list[LLMMessage], int] | None:
@@ -1754,6 +1845,8 @@ def load_messages_checkpoint(state) -> tuple[list[LLMMessage], int] | None:
     except (json.JSONDecodeError, OSError) as e:
         log.warning("messages checkpoint 读取失败：%s", e)
         return None
+    from core.conversation_store import restore_snapshot
+    restore_snapshot(state, data)
     msgs = restore_messages(
         state, data.get("messages") or [],
         through=data.get("written_at"))

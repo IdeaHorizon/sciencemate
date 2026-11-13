@@ -2178,15 +2178,24 @@ class ExecutionIngestService:
         self, db: AsyncSession, context: IngestContext
     ) -> tuple[SessionProjection, Run]:
         await self._ensure_scope(db, context)
+        # Claim the session's write boundary before checking event identity.
+        # SELECT FOR UPDATE is ignored by SQLite: two readers can both decide
+        # that a source record is new, then race at INSERT. A no-op UPDATE takes
+        # the database write lock on SQLite and a row lock on PostgreSQL, for
+        # the lifetime of this same transaction. Sequence, dedupe and projection
+        # therefore share one owner; no process-local mutex or retry ledger.
         session = await db.scalar(
-            select(SessionProjection)
+            update(SessionProjection)
             .where(
                 SessionProjection.tenant_id == context.tenant_id,
                 SessionProjection.workspace_id == context.workspace_id,
                 SessionProjection.project_id == context.project_id,
                 SessionProjection.session_id == context.session_id,
             )
-            .with_for_update()
+            .values(next_sequence=SessionProjection.next_sequence,
+                    updated_at=SessionProjection.updated_at)
+            .returning(SessionProjection)
+            .execution_options(populate_existing=True)
         )
         if not session:
             raise IngestError("Session scope disappeared during ingest")

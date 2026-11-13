@@ -25,7 +25,7 @@ class _S:
 
 def _worktree(tmp_path) -> Path:
     root = tmp_path / "wt"
-    (root / _DIRS["hypothesis"]).mkdir(parents=True)
+    (root / _DIRS["analysis"]).mkdir(parents=True)
     (root / _DIRS["experiment"]).mkdir(parents=True)
     return root
 
@@ -34,7 +34,7 @@ def _write_state(root: Path, version: int, rows: list[dict]) -> None:
     """按版本原语落一版 research_state：同一身份再 save 一次就是下一版。"""
     write_record(
         root, artifact_type="research_state", name="research_state",
-        content=f"# Research State v{version}", directory=_DIRS["hypothesis"],
+        content=f"# Research State v{version}", directory=_DIRS["analysis"],
         metadata={"version": version, "verdict": "continue", "hypotheses": rows},
         produced_by_node_type="hypothesis", produced_by_run_id="r-hyp",
     )

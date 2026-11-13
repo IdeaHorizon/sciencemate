@@ -21,6 +21,7 @@ import httpx
 import websockets
 
 from app.config import settings, the_data_root
+from shared.lib import process_control
 from shared.lib.private_files import make_private, mkdir_private
 
 HOME_URL = "https://www.cnki.net/"
@@ -489,6 +490,65 @@ class Browser:
             await self.client.aclose()
         self.process = self.client = self.ws = self.user_id = self.tab = self.detail_tab = None
         self.lanes.clear()
+
+    async def reset_session(self, user_id: str, request_id: str):
+        """Back up only this managed profile, after the collector stops its lanes.
+
+        A deterministic backup also makes a persisted request safe to resume if
+        the backend exits between moving the profile and committing its receipt.
+        No ordinary browser data or cookies are imported into the new session.
+        """
+        user_id, request_id = str(UUID(user_id)), str(UUID(request_id))
+        async with self.ensure_lock:
+            await self.close()
+            profile = self.root / user_id
+            backup_root = self.root / "backups" / user_id
+            backup = backup_root / request_id
+            if profile.is_symlink() or any(path.is_symlink() for path in (self.root / "backups", backup_root, backup)):
+                raise CollectionError("browser_profile_backup_failed")
+            # Do not move a profile which the user has opened independently.
+            # On Windows, open profile files are additionally protected by rename.
+            port_file = profile / "DevToolsActivePort"
+            try:
+                port = int(port_file.read_text().splitlines()[0])
+            except (OSError, ValueError, IndexError):
+                port = 0
+            if 0 < port < 65536:
+                try:
+                    async with httpx.AsyncClient(trust_env=False, timeout=1) as client:
+                        response = await client.get(f"http://127.0.0.1:{port}/json/version")
+                    if response.is_success:
+                        raise CollectionError("browser_profile_in_use")
+                except httpx.HTTPError:
+                    pass
+            singleton = profile / "SingletonLock"
+            if sys.platform == "linux" and singleton.is_symlink():
+                try:
+                    pid = int(os.readlink(singleton).rsplit("-", 1)[-1])
+                    if pid > 0 and process_control.alive(pid):
+                        raise CollectionError("browser_profile_in_use")
+                except (ValueError, FileNotFoundError):
+                    pass
+                except PermissionError:
+                    raise CollectionError("browser_profile_in_use") from None
+            try:
+                mkdir_private(backup_root)
+                make_private(backup_root)
+                if not backup.exists():
+                    if profile.exists():
+                        profile.rename(backup)
+                    else:
+                        mkdir_private(backup)
+                make_private(backup)
+                mkdir_private(profile)
+                make_private(profile)
+            except PermissionError:
+                raise CollectionError("browser_profile_in_use") from None
+            except OSError:
+                raise CollectionError("browser_profile_backup_failed") from None
+            self.denied = False
+            self.denied_at = self.last_recovery_at = self.complete_result = None
+            self.next_request_at = 0.0
 
     def lane(self, slot):
         return BrowserLane(self, slot)

@@ -10,6 +10,7 @@ type Dependencies = {
   create: (query:string,limit:number|null,kind?:CnkiDocumentKind)=>Promise<CnkiJob>;
   read: (id:string,cursor?:string)=>Promise<CnkiJob>;
   retry: (id:string)=>Promise<unknown>;
+  resetSession?: (jobIds:string[])=>Promise<unknown>;
   cancelJob?: (id:string)=>Promise<unknown>;
   sleep: ()=>Promise<void>;
 };
@@ -22,6 +23,7 @@ type Snapshot = {
   channels:Record<string,SearchChannel>;
   isPending:boolean;
   cnkiPending:boolean;
+  resettingCnki:boolean;
   hasMore:boolean;
 };
 
@@ -29,12 +31,13 @@ type Snapshot = {
  * A new search, explicit Stop, or end of authentication invalidates old callbacks. */
 export function createAcademicSearchSession(io: Dependencies) {
   const initial:Snapshot = {query:"",data:undefined,error:undefined,progress:undefined,
-    plan:[],channels:{},isPending:false,cnkiPending:false,hasMore:false};
+    plan:[],channels:{},isPending:false,cnkiPending:false,resettingCnki:false,hasMore:false};
   let state = initial;
   let language:Language;
   const t=(phrase:Phrase,fields?:Record<string,string|number>)=>say(phrase,language,fields);
   let cancel:(()=>Promise<void>)|null = null;
   let retry:(()=>Promise<void>)|null = null;
+  let resetChinese:(()=>Promise<void>)|null = null;
   let more:(()=>void)|null = null;
   const listeners = new Set<()=>void>();
   const notify = () => listeners.forEach(listener=>listener());
@@ -52,7 +55,7 @@ export function createAcademicSearchSession(io: Dependencies) {
     void cancel?.().catch(()=>console.warn(t({zh:"上次采集未能停止",en:"Previous collection could not be stopped"})));
     language=input.language;
     const onlyChinese = input.source === "cnki", limit = input.limit ?? null;
-    let active = true, chineseStarted = false;
+    let active = true, chineseStarted = false, resetting = false;
     const transport: {stop?: () => void} = {};
     let searchPlan: LiteratureQueryGroup[] = [], international: LiteratureSearchResponse | undefined;
     let completedInternational: LiteratureSearchResponse | undefined;
@@ -60,15 +63,30 @@ export function createAcademicSearchSession(io: Dependencies) {
     let chinese: LiteratureSearchResponse | undefined;
     const jobIds = new Set<string>();
     retry = async () => {
+      if (!active || resetting) return;
       try { await Promise.all([...jobIds].map(io.retry)); }
       catch (err) { channel("cnki",{state:"error",detail:err instanceof Error ? err.message : String(err)}); }
+    };
+    resetChinese = async () => {
+      if (!active || resetting || !io.resetSession || !jobIds.size) return;
+      resetting = true; patch({resettingCnki:true});
+      try {
+        await io.resetSession([...jobIds]);
+        channel("cnki",{state:"queued",detail:t({zh:"正在备份旧会话并建立新的知网采集会话",en:"Backing up the old CNKI session and starting a fresh one"})});
+        if (active) setCnkiPending(true);
+      } catch (err) {
+        channel("cnki",{state:"error",resettable:true,detail:err instanceof Error ? err.message : String(err)});
+      } finally {
+        resetting = false;
+        if (active) patch({resettingCnki:false});
+      }
     };
     cancel = async () => {
       active = false; transport.stop?.();
       if (io.cancelJob) await Promise.all([...jobIds].map(async id=>{await io.cancelJob!(id);jobIds.delete(id);}));
     };
     more = null;
-    patch({query:input.query,hasMore:false});
+    patch({query:input.query,hasMore:false,resettingCnki:false});
     setPending(true); setCnkiPending(false); setError(undefined); setData(undefined); setPlan([]);
     setChannels(onlyChinese ? {cnki:{state:"planning",detail:t({zh:"正在提取中文检索词",en:"Generating Chinese search terms"})}} : {
       international:{state:"planning",detail:t({zh:"正在提取英文检索词",en:"Generating English search terms"})}, cnki:{state:"planning",detail:t({zh:"等待中英文检索计划",en:"Waiting for a bilingual search plan"})},
@@ -186,9 +204,10 @@ export function createAcademicSearchSession(io: Dependencies) {
     ])));
   };
   const retryChinese = () => {void retry?.();};
+  const resetChineseSession = () => {void resetChinese?.();};
   const loadMore = () => {more?.();};
-  const reset = () => {void cancel?.().catch(()=>console.warn(t({zh:"重置时未能停止采集",en:"Collection could not be stopped during reset"}))); cancel = null; retry = null; more = null; state = initial; notify();};
+  const reset = () => {void cancel?.().catch(()=>console.warn(t({zh:"重置时未能停止采集",en:"Collection could not be stopped during reset"}))); cancel = null; retry = null; resetChinese = null; more = null; state = initial; notify();};
   return {getSnapshot:()=>state, getServerSnapshot:()=>initial,
     subscribe:(listener:()=>void)=>{listeners.add(listener);return ()=>{listeners.delete(listener);};},
-    start,stopWaiting,retryChinese,loadMore,reset,setQuery:(query:string)=>patch({query})};
+    start,stopWaiting,retryChinese,resetChineseSession,loadMore,reset,setQuery:(query:string)=>patch({query})};
 }

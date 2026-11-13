@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from core.naming import canonical_node_type, same_node
 from core.tool_errors import ToolRejection as _ToolRejection
 
 _SAFE_SEGMENT = re.compile(r"[^A-Za-z0-9._-]+")
@@ -64,7 +65,7 @@ _NODE_WORKSPACES = {
     # 目录按「它是研究里的什么」命名，不按节点名（2026-09-12 改名：
     # hypothesis→plan、experiment→experiments、postprocess→figures、writing→paper）。
     # 键仍是节点类型 —— 节点是谁不变，变的只是它的东西在文件夹里叫什么。
-    "hypothesis": "plan",
+    "analysis": "plan",
     "data": "data",
     "experiment": "experiments",
     "observation": "observation",
@@ -169,7 +170,7 @@ def validate_deliverable_projection(project_root, node_type: str, rel_path: str)
         raise ProjectWorkspaceError(
             f"deliverable.path 不能进 .research/（框架状态）：{posix!r}"
         )
-    own = _NODE_WORKSPACES.get(str(node_type))
+    own = _NODE_WORKSPACES.get(canonical_node_type(str(node_type)))
     owner = owning_node_for_path(project_root, _Path(project_root) / rel)
     if owner is not None and own is not None and not posix.startswith(str(own)):
         raise ProjectWorkspaceError(
@@ -242,7 +243,7 @@ def bind_project_workspace(state: Any, project_worktree: Path | str | None) -> N
     top = Path(_git(root, "rev-parse", "--show-toplevel").strip()).resolve()
     if top != root:
         raise ProjectWorkspaceError("Project workspace must be the Git worktree root")
-    owned = _NODE_WORKSPACES.get(str(state.node_type))
+    owned = _NODE_WORKSPACES.get(canonical_node_type(str(state.node_type)))
     if owned is None:
         # Unknown extension nodes get an isolated run directory.  They cannot
         # silently claim one of the six scientific owners' stable roots.
@@ -331,7 +332,7 @@ def tool_relpath(state: Any, path: Path | str) -> str:
         由 `core.paths.display_relpath` 产出、`resolve_display_relpath` 解析。
 
     以前只有两个**解析器**，没有对应的**产出函数**，于是想告诉模型"文件在这儿"
-    的地方只能自己拼一个 —— hypothesis 的 `stage_hypothesis_draft` 就拼出了
+    的地方只能自己拼一个 —— hypothesis 的 `stage_analysis_draft` 就拼出了
     `outputs/hypothesis/drafts/x.md`，而它自己那句"下一步请
     save_artifact(content_from_file=…)"用同一套工具**永远读不到那个路径**
     （2026-08-27 实测：绑 worktree 的 run 上 100% 失败）。工具文案许诺的能力，
@@ -448,7 +449,7 @@ def _relative_candidates(
         out.append((Path(state.root) / "scratch" / path).resolve(strict=False))
     own = _own_node_package(state)
     if (own is not None and len(parts) > 1 and parts[0] == "nodes"
-            and parts[1] == str(getattr(state, "node_type", "") or "")):
+            and same_node(parts[1], str(getattr(state, "node_type", "") or ""))):
         # harness.yaml 用的就是这种仓库相对写法（`nodes/_reviewer/specs/...`）。
         # 它锚在节点工作目录上会永远"找不到文件"，改用绝对路径又撞边界 —— 两条
         # 路都走不通，那份 spec 就 100% 读不到（而测试全绿：测试不绑 Project）。
@@ -485,6 +486,10 @@ def resolve_tool_path(state: Any, value: str, *, write: bool = False) -> Path:
             if path.is_absolute()
             else (working_directory(state) / path).resolve(strict=False)
         )
+        if not write:
+            from core.paths import prefer_existing
+
+            resolved = prefer_existing(state.root, resolved).resolve(strict=False)
         # 注：相对路径锚在 working_directory 上（绑与不绑都一样），产物漏斗
         # `core.paths.node_output_dir` 对本节点也锚在同一处 —— 两者必须重合。
         # 没绑 Project 的 run（CLI / fixture）也要有写边界。读可以到处读（跑

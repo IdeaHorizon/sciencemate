@@ -98,6 +98,7 @@ def test_forward_artifact_ids_missing():
         result = asyncio.run(execute_tool(
             "run_node", state, node_type="literature", user_note="测试派发",
             forward_artifact_ids=["nonexistent__x"],
+            node_inputs={"research_question": "Check the supplied evidence."},
         ))
         assert result["status"] == "error"
         assert "nonexistent" in result["error"]

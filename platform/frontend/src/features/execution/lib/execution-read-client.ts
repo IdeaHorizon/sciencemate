@@ -69,6 +69,7 @@ export type ExecutionReadClient = {
     runId?: string,
     /** 把这条 run 派出去的子节点事件也带上（默认不带）。 */
     includeChildren?: boolean,
+    signal?: AbortSignal,
   ) => Promise<EventPage>;
   listCurrentDecisions: (sessionId: string) => Promise<DecisionListResponse>;
 };
@@ -375,18 +376,19 @@ export function createExecutionReadClient({
 } = {}): ExecutionReadClient {
   const normalizedBase = baseUrl.replace(/\/$/, "");
 
-  async function get(path: string): Promise<unknown> {
+  async function get(path: string, signal?: AbortSignal): Promise<unknown> {
     const response = await fetchImpl(`${normalizedBase}${path}`, {
       method: "GET",
       credentials: "include",
       headers: { Accept: "application/json" },
+      signal,
     });
     await assertOk(response);
     return responseJson(response);
   }
 
   return {
-    async listSessionEvents(sessionId, afterSequence, limit = 200, runId, includeChildren) {
+    async listSessionEvents(sessionId, afterSequence, limit = 200, runId, includeChildren, signal) {
       if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
         throw new ExecutionReadContractError("afterSequence must be a non-negative integer");
       }
@@ -401,6 +403,7 @@ export function createExecutionReadClient({
       if (includeChildren) query.set("includeChildren", "true");
       const payload = await get(
         `/sessions/${encodeURIComponent(sessionId)}/events?${query.toString()}`,
+        signal,
       );
       const page = parseEventPage(payload);
       if (page.afterSequence !== afterSequence) {

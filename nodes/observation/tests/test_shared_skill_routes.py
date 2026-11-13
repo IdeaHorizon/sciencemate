@@ -52,7 +52,9 @@ def test_current_owner_replaces_retired_scientific_authority():
     from pathlib import Path
     root = Path(__file__).resolve().parents[3]
     spec = (root / "nodes/_reviewer/specs/project_synthesis.md").read_text()
-    assert "Analysis（hypothesis）" in spec
+    assert "Analysis" in spec
+    assert "nodes/analysis/harness.yaml" in spec
+    assert "不改写 research_state" in spec
     assert "experiment 节点自判" not in spec
     assert "硬 gate" not in spec
     curator = (root / "nodes/_curator/harness.yaml").read_text()

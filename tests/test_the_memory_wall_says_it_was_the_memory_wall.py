@@ -231,7 +231,9 @@ def test_a_detached_job_does_not_leave_its_slice_behind(fake_systemd, tmp_path: 
     assert started.returncode == 0, started.stderr
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        if any(line.endswith(f"stop {slice_unit}") for line in fake_systemd.log()):
+        # The fake systemctl logs before rm: wait for completion, not its start.
+        if (any(line.endswith(f"stop {slice_unit}") for line in fake_systemd.log())
+                and not (fake_systemd.slices / slice_unit).exists()):
             break
         time.sleep(0.05)
     assert any(line.endswith(f"stop {slice_unit}") for line in fake_systemd.log()), fake_systemd.log()

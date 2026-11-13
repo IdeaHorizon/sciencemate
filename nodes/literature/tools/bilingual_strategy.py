@@ -10,7 +10,7 @@ import time
 
 PROMPT = '''Plan bilingual academic literature retrieval for the user's research question.
 Return ONLY JSON with this schema:
-{"retrieval_mode":"focused","core_concepts":[{"zh":["中文主题"],"en":["English topic"],"role":"subject","background_optional":false}],"exclude_concepts":[],"publication_years":null,"study_requirements":[],"search_groups":[{"label":"主题名称","additional_concepts":[]}]}
+{"retrieval_mode":"focused","core_concepts":[{"zh":["中文主题"],"en":["English topic"],"role":"subject","background_optional":false,"scope":"specific","member_classes":[]}],"exclude_concepts":[],"publication_years":null,"study_requirements":[],"search_groups":[{"label":"主题名称","additional_concepts":[]}]}
 
 1. Choose retrieval_mode from the USER'S intent. Default focused: find studies
 combining the stated subject, population, condition/outcome, method and setting.
@@ -49,6 +49,19 @@ object, not a larger field. NEVER put the subject, its property and its mechanis
 in the same alternatives array: that would retrieve any ONE instead of ALL.
 Check each array as an equivalence claim: could each term replace the others
 without changing the object/condition? If not, use separate core concepts.
+SUBJECT SCOPE: for each core set scope=specific, except an umbrella SUBJECT class
+should use scope=umbrella. For umbrella subjects put 1-3 characteristic, established
+member classes in member_classes=[{"zh":["下位类别"],"en":["member class"]}].
+These are members, not synonymous rephrasings: papers often name the member without
+saying the umbrella label. The compiler ORs them with the canonical umbrella name.
+Generic descriptions such as "new", "advanced" or "emerging" do not by themselves
+make the subject a specific named entity. Include members only when their class
+membership is unambiguous; otherwise leave member_classes empty. Specific named
+objects, methods, populations, study designs and numbers always have empty members.
+Never substitute a parent/sibling for a specified member. Subject expansion does
+NOT change focused into exploratory: a class plus a stated property/method still
+requires BOTH. Do not move that property/method into optional background aspects,
+or add applications/mechanisms the user did not request. Keep exclusions intact.
 Use atomic established terms. Avoid adding a second core that merely repeats a
 qualifier already contained in another core; express relational intent with
 established synonyms of that relationship, while retaining distinct restrictions.
@@ -267,6 +280,25 @@ def compile_plan(raw: str, question: str, *, require_roles=False) -> dict:
                              {"subject", "domain", "population", "outcome", "method", "context", "objective"}
                              or not isinstance(c.get("background_optional"), bool) for c in core):
         raise ValueError("every_core_concept_requires_role_and_background_optional")
+    subject_expansions = []
+    for i, concept in enumerate(core):
+        original = _concept(concept, path=f"core_concepts[{i}]")
+        _check_source_alternatives(original, question, f"core_concepts[{i}]")
+        members = concept.get("member_classes") or []
+        if not isinstance(members, list) or len(members) > 3:
+            raise ValueError("subject_members_require_at_most_three_bilingual_classes")
+        if members:
+            if concept.get("role") != "subject" or concept.get("scope") != "umbrella":
+                raise ValueError("only_umbrella_subjects_can_have_member_classes")
+            members = [_concept(member, path=f"core_concepts[{i}].member_classes[{j}]")
+                       for j, member in enumerate(members)]
+            for lang in ("zh", "en"):
+                # A bounded OR under this subject, never an optional core or
+                # an AND of different members. Retain the canonical class name.
+                concept[lang] = list(dict.fromkeys(
+                    original[lang][:1] + [term for member in members for term in member[lang]]))[:4]
+            subject_expansions.append({"concept": original["zh"][0],
+                "action": "subject_members_as_alternatives", "members": members})
     core = [_concept(c, path=f"core_concepts[{i}]") for i, c in enumerate(core)]
     for i, concept in enumerate(core):
         _check_source_alternatives(concept, question, f"core_concepts[{i}]")
@@ -384,7 +416,8 @@ def compile_plan(raw: str, question: str, *, require_roles=False) -> dict:
             "background_optional_concepts": background_optional, "exclude_concepts": excluded,
             "scope_adjustments": [{"concept": data["core_concepts"][i]["zh"][0],
                                    "action": data["core_concepts"][i]["role"] + "_to_aspect"} for i in moved]
-                                  + [{"concept": c["zh"][0], "action": "required_condition_to_core"} for c in promoted],
+                                  + [{"concept": c["zh"][0], "action": "required_condition_to_core"} for c in promoted]
+                                  + subject_expansions,
             "research_aspects": aspects,
             "bilingual_queries": plan,
             "search_queries": [{"query": p["en"], "label": p["label"], "weight": 1.0,

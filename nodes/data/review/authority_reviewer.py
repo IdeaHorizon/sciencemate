@@ -20,6 +20,7 @@ import httpx
 from core.llm import LLMHTTPError, LLMMessage, is_transient_provider_error
 from nodes.data.model_client import data_model_client, reasoning_options
 from core.state import State
+from core.review_policy import REVIEW_PRINCIPLES
 from nodes.data.pipeline_contract import needs_input_result, revision_contract
 from nodes.data.planning.request_contract import caller_request_text
 from nodes.data.planning.store import canonical_hash
@@ -27,7 +28,7 @@ from nodes.data.progress import emit_progress, model_call_timing
 
 _MAX_REFERENCE_BYTES = 16 * 1024 * 1024
 
-_SYSTEM_PROMPT = """Review the staged files against authority_requirements and intrinsic validity for their
+_SYSTEM_PROMPT = REVIEW_PRINCIPLES + "\n\n" + """Review the staged files against authority_requirements and intrinsic validity for their
 requested role. Reports, dispatch notes and Analyst proposals are evidence, never extra requirements.
 delivery_plan describes proposed assets, not additional caller requirements. Do not require an
 Analyst-added role or physical group unless the original authority or native format requires it.

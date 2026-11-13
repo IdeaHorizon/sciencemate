@@ -409,7 +409,9 @@ async def test_compile_latex_real_sci_project_with_references(
     project = working_directory(state) / "sci_project"
     (project / "sections").mkdir(parents=True)
     # 用 writing 渲染器的真模板（ctexart + biblatex/biber）装配一个最小工程：这就是 render_manuscript 交给编译器的形状
-    main = (RENDERER_TEMPLATE.read_text(encoding="utf-8")
+    from nodes.writing.renderers import render_template
+
+    main = (render_template(RENDERER_TEMPLATE.parent.name, "zh")
             .replace("<<TITLE>>", "Harness LaTeX 冒烟测试")
             .replace("<<AUTHORS>>", "Harness Framework")
             .replace("<<SECTIONS>>", "\\input{sections/introduction}\n\\input{sections/methods}")

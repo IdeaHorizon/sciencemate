@@ -293,6 +293,7 @@ required_output_artifact_types:
 
 completion_criteria:
 
+task_input_fields: [research_question]
 expected_inputs:
   research_question: "要调研的研究问题或主题。"
   mode: |

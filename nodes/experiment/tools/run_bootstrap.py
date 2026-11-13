@@ -496,6 +496,13 @@ def one_page(state: Any, established: dict[str, Any]) -> str:
         or inputs.get("requested_work") or "（调用方没有给任务正文）").strip())
     roots = _writable_roots(state)
     lines = ["# 本 run 的目标与约束（框架从任务输入读出，不需要你确认）", "", "## 目标", goal]
+    if inputs.get("mode") == "revise":
+        lines[2] = "## 原任务（返修依据）"
+        lines += ["", "## 本轮返修范围"]
+        for key, label in (("reviewer_feedback", "评审反馈"), ("human_directive", "本轮指示")):
+            value = inputs.get(key)
+            if isinstance(value, str) and value.strip():
+                lines.append(f"- {label}：{value}")
     if not (established.get("scope") or {}).get("scope"):
         lines += ["", "**scope 未定**：任务输入既没绑定预注册也没点名 operation / scientific。框架不猜。"
                   "按任务要求继续执行和核验；分类未定本身不阻止动作或 success 收尾，不必补分类手续。"
@@ -513,6 +520,14 @@ def one_page(state: Any, established: dict[str, Any]) -> str:
     from .delivery_transaction import MODEL_DELIVERY_CONTRACT
     lines.append("- " + MODEL_DELIVERY_CONTRACT["experiment_v3_delivery"])
     obligations = _obligations.frozen(state)
+    for ob in obligations:
+        if (ob["kind"] == "artifact" and ob.get("required")
+                and str(ob.get("source", "")).startswith("node_inputs.")):
+            from shared.tools.builtin import _producing_output_owners
+            owners = _producing_output_owners().get(ob["artifact_type"], set())
+            if owners and "experiment" not in owners:
+                lines.append(f"- 调用方要求的 `{ob['artifact_type']}` 由 {' / '.join(sorted(owners))} 产出。"
+                             "引用既有产物或请对应节点提供；若这就是整项任务，直接退回父调度器。")
     deliverables = [ob for ob in obligations if ob["kind"] != "artifact"]
     if deliverables:
         for ob in deliverables:

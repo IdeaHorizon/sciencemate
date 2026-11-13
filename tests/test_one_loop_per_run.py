@@ -74,19 +74,18 @@ def test_a_running_child_is_not_offered_for_auto_resume(tmp_path):
     parent = _orchestrator(tmp_path)
     _unfinished_child(parent)
     # 同一份盘面：没人在跑 → 是被打断，续它
-    assert rn._resumable_run_for(parent, "_curator")["run_id"] == "run_sgd_child"
+    assert not rn.run_has_live_executor("run_sgd_child")
 
     _mark_live("run_sgd_child", parent.root.parent)
     # 还有执行者 → 不是被打断，不续、不简报
-    assert rn._resumable_run_for(parent, "_curator") is None
-    assert rn.brief_interrupted_child_runs(parent) == 0
+    assert rn.run_has_live_executor("run_sgd_child")
 
 
 def test_a_child_waiting_on_an_answer_is_not_interrupted_either(tmp_path):
     parent = _orchestrator(tmp_path)
     _unfinished_child(parent)
     claim_driver("run_sgd_child")      # 有人在等它的答复
-    assert rn._resumable_run_for(parent, "_curator") is None
+    assert rn.run_has_live_executor("run_sgd_child")
 
 
 def test_after_the_process_dies_the_same_run_resumes(tmp_path):
@@ -95,7 +94,7 @@ def test_after_the_process_dies_the_same_run_resumes(tmp_path):
     _unfinished_child(parent)
     _mark_live("run_sgd_child", parent.root.parent)
     clear_all()                         # = worker 进程死了
-    assert rn._resumable_run_for(parent, "_curator")["run_id"] == "run_sgd_child"
+    assert not rn.run_has_live_executor("run_sgd_child")
 
 
 @pytest.mark.asyncio

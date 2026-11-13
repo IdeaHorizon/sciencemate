@@ -123,7 +123,7 @@ async def test_answering_proceed_closes_the_flow_instead_of_re_presenting(tmp_pa
 
     state = _state(tmp_path)
     state.hook_state["pending_post_node_flow"] = [{
-        "producing_node": "hypothesis",
+        "producing_node": "analysis",
         "producing_run_id": "r_hyp",
         "artifact_ids": ["pre_registration__t1"],
         "review_state": "done",
@@ -152,7 +152,8 @@ async def test_one_dispatch_returns_review_before_presenting_a_decision(tmp_path
     from shared.tools.run_node import _run_node_tool
 
     state = _state(tmp_path)
-    out = await _run_node_tool(state, "hypothesis", node_inputs={"mode": "fresh"},
+    out = await _run_node_tool(state, "analysis", node_inputs={
+        "mode": "fresh", "research_question": "确定本次研究问题与闭合条件"},
         user_note="先立研究设计：把问题和闭合条件定下来。")
 
     assert "_reviewer" in wired, "运行时没有自己派 reviewer —— 手续又回到调度器手上"
@@ -160,7 +161,7 @@ async def test_one_dispatch_returns_review_before_presenting_a_decision(tmp_path
     assert "pause_event" not in out
     assert out["post_node_review"]["review_critique_artifact_id"] == "review_critique__auto"
     assert "定义明确" in out["post_node_review"]["critique"]["content"]
-    assert out["final_text_preview"] == "hypothesis 交付完成"
+    assert out["final_text_preview"] == "analysis 交付完成"
 
 
 # ── 3. 弹框仍由调度器显式调用 ────────────────────────────────────────────
@@ -171,20 +172,21 @@ async def test_the_orchestrator_can_explain_then_explicitly_present(tmp_path, wi
     from shared.tools.library.decision_package import _present_decision_package
 
     state = _state(tmp_path)
-    out = await _run_node_tool(state, "hypothesis", node_inputs={"mode": "fresh"},
+    out = await _run_node_tool(state, "analysis", node_inputs={
+        "mode": "fresh", "research_question": "确定本次研究问题与闭合条件"},
         user_note="先立研究设计：把问题和闭合条件定下来。")
 
-    assert wired == ["hypothesis", "_reviewer"], f"派发序列不对：{wired}"
+    assert wired == ["analysis", "_reviewer"], f"派发序列不对：{wired}"
     assert out["status"] == "success"
     entry = state.hook_state["pending_post_node_flow"][0]
     assert entry["decision_state"] == "pending"
     presented = await _present_decision_package(
-        state, source_node_type="hypothesis", producing_run_id=out["child_run_id"],
+        state, source_node_type="analysis", producing_run_id=out["child_run_id"],
         human_decision_reason="测试中的研究取舍由用户确认。",
     )
     assert presented["status"] == "pause"
     assert entry["decision_state"] == "awaiting_human"
-    assert "hypothesis 交付完成" in presented["pause_event"]["context"]
+    assert "analysis 交付完成" in presented["pause_event"]["context"]
     assert "pre_registration__t1" in presented["pause_event"]["context"]
 
 
@@ -208,9 +210,10 @@ async def test_review_reaches_the_llm_and_its_explanation_precedes_the_pause(tmp
     explanation = "研究计划已经完成。独立审查认为定义明确、设计可执行，我建议接受并继续，下面请你选择。"
     llm = MagicMock()
     llm.chat = AsyncMock(side_effect=[
-        reply("开始研究设计。", "run_node", {"node_type": "hypothesis", "user_note": "先形成研究计划。"}, "produce"),
+        reply("开始研究设计。", "run_node", {"node_type": "analysis",
+              "node_inputs": {"research_question": "形成可检验的研究计划"}}, "produce"),
         reply(explanation, "present_decision_package", {
-            "source_node_type": "hypothesis", "producing_run_id": "r_hyp",
+            "source_node_type": "analysis", "producing_run_id": "r_hyp",
             "human_decision_reason": "需要用户选择下一阶段的研究方向。",
         }, "decide"),
     ])

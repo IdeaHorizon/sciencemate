@@ -59,15 +59,40 @@ def test_missing_spec_says_so_instead_of_silence():
         assert section and "没有写 `review_spec.md`" in section
 
 
-def test_project_synthesis_scope_is_not_covered():
-    assert _owner_review_spec_section(_reviewer_harness(),
-                                      {"source_node_type": "_project"}) is None
+def test_project_synthesis_scope_receives_its_actual_spec():
+    section = _owner_review_spec_section(_reviewer_harness(), {"source_node_type": "_project"})
+    assert "项目综合审核" in section
+    assert "project_synthesis.md" in section
 
 
 def test_other_nodes_do_not_get_it():
     """只有 reviewer 需要判据 —— 别的节点 context 不该被塞这个。"""
     assert _owner_review_spec_section(load_harness("hypothesis"),
                                       {"source_node_type": "hypothesis"}) is None
+
+
+def test_unreadable_spec_is_not_stamped_as_delivered(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from core.loader import node_dir
+    from core.state import State
+
+    target = Path(node_dir("observation")) / "review_spec.md"
+    read_bytes = Path.read_bytes
+
+    def unreadable(path):
+        if path == target:
+            raise PermissionError("fixture read failure")
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+    state = State.new(node_type="_reviewer", base_dir=tmp_path)
+    section = _owner_review_spec_section(
+        _reviewer_harness(), {"source_node_type": "observation"}, state
+    )
+    assert "未能读取" in section
+    assert state.hook_state["_owner_review_spec_delivery"]["owner_spec_loaded"] is False
+    assert "owner_spec_sha256" not in state.hook_state["_owner_review_spec_delivery"]
 
 
 def test_reviewer_prompt_no_longer_tells_it_to_hunt_for_the_file():
@@ -141,7 +166,7 @@ def test_decision_package_surfaces_unspecced_review():
         review_critique_json={
             "verdict": "approve", "confidence": 0.8,
             "rubric_source": {"owner_spec_loaded": True,
-                              "owner_spec_path": "nodes/hypothesis/review_spec.md"},
+                              "owner_spec_path": "nodes/analysis/review_spec.md"},
             "recommended_action": {"action": "proceed", "feedback_to_next_run": ""},
         },
         review_failed_reason=None, review_unusable=False,

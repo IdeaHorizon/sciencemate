@@ -17,12 +17,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import json
+import logging
+import sqlite3
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import OperationalError
 
 from app.config import DataRootError, data_root
 from app.models.execution import ExecutionEvent
@@ -338,3 +343,38 @@ async def ingest_transcript_wrapper(
         adapter_state=await _adapter_state_for(db, context, harness_states, file_identity),
     )
     return native
+
+
+async def commit_transcript_wrapper(db: AsyncSession, *, harness_states: dict[str, dict],
+                                    ingest=None, **kwargs) -> dict[str, Any]:
+    """Commit one source fact; retry only SQLite busy/locked transactions.
+
+    Adapter state becomes visible only with its committed projection. A retry
+    rolls back the whole failed transaction and re-reads the same source bytes;
+    it never re-executes the research tool or allocates a new dispatch.
+    """
+    ingest = ingest or ingest_transcript_wrapper
+    for attempt in range(4):
+        staged = copy.deepcopy(harness_states)
+        try:
+            native = await ingest(db, harness_states=staged, **kwargs)
+            await db.commit()
+        except BaseException as exc:
+            await db.rollback()
+            original = exc.orig if isinstance(exc, OperationalError) else None
+            code = getattr(original, "sqlite_errorcode", 0) or 0
+            busy = (isinstance(original, sqlite3.OperationalError)
+                    and db.get_bind().dialect.name == "sqlite"
+                    and ((code & 255) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+                         or str(original).lower() in {
+                             "database is locked", "database table is locked",
+                             "database schema is locked"}))
+            if not busy or attempt == 3:
+                raise
+            logging.getLogger(__name__).warning(
+                "SQLite transcript write busy; retrying the same fact (%s/3)", attempt + 1)
+            await asyncio.sleep(0.05 * 2 ** attempt)
+        else:
+            harness_states.clear()
+            harness_states.update(staged)
+            return native

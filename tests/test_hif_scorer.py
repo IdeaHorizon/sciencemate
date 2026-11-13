@@ -15,7 +15,7 @@ import pytest
 
 
 def test_missing_dimension_is_named_with_the_legal_set():
-    from nodes.hypothesis.tools.hif_scorer import _assess_one
+    from nodes.analysis.tools.hif_scorer import _assess_one
 
     with pytest.raises(ValueError) as excinfo:
         _assess_one({"label": "H1", "D": 3, "M": 4, "P": 3, "R": 2})
@@ -26,7 +26,7 @@ def test_missing_dimension_is_named_with_the_legal_set():
 
 
 def test_all_missing_dimensions_reported_at_once():
-    from nodes.hypothesis.tools.hif_scorer import _assess_one
+    from nodes.analysis.tools.hif_scorer import _assess_one
 
     with pytest.raises(ValueError) as excinfo:
         _assess_one({"label": "H1"})
@@ -34,7 +34,7 @@ def test_all_missing_dimensions_reported_at_once():
 
 
 def test_complete_assessment_still_scores():
-    from nodes.hypothesis.tools.hif_scorer import _assess_one
+    from nodes.analysis.tools.hif_scorer import _assess_one
 
     entry = _assess_one({"label": "H1", "G": 4, "D": 3, "M": 4, "P": 3, "R": 2})
     assert entry["label"] == "H1"

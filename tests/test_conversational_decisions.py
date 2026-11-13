@@ -42,7 +42,7 @@ def state_with_review(tmp_path):
         ),
     )["id"]
     entry = {
-        "producing_node": "hypothesis",
+        "producing_node": "analysis",
         "producing_run_id": "producer",
         "review_state": "done",
         "review_critique_artifact_id": cid,
@@ -58,7 +58,7 @@ def state_with_review(tmp_path):
 @pytest.mark.asyncio
 async def test_routine_decision_returns_choices_to_scheduler_without_asking_user(tmp_path):
     state, entry = state_with_review(tmp_path)
-    result = await _present_decision_package(state, "hypothesis", "producer")
+    result = await _present_decision_package(state, "analysis", "producer")
     assert result["status"] == "success" and result["decision_required"] is True
     assert "pause_event" not in result
     assert entry["decision_state"] == "pending"
@@ -73,7 +73,7 @@ async def test_scheduler_can_proceed_within_authority_in_assisted_mode(tmp_path)
     state, entry = state_with_review(tmp_path)
     result = await _present_decision_package(
         state,
-        "hypothesis",
+        "analysis",
         "producer",
         action="proceed",
         reasoning="定义明确，审查通过。",
@@ -82,6 +82,7 @@ async def test_scheduler_can_proceed_within_authority_in_assisted_mode(tmp_path)
     assert state.hook_state["pending_post_node_flow"] == []
     assert entry["decision_history"][-1]["decided_by"] == "orchestrator"
     assert entry["human_note"] == ""
+    assert entry["orchestrator_reasoning"] == "定义明确，审查通过。"
 
 
 @pytest.mark.asyncio
@@ -89,7 +90,7 @@ async def test_real_question_keeps_the_human_boundary(tmp_path):
     state, entry = state_with_review(tmp_path)
     result = await _present_decision_package(
         state,
-        "hypothesis",
+        "analysis",
         "producer",
         human_decision_reason="扩大样本需要增加预算，尚未获得授权。",
     )
@@ -99,7 +100,7 @@ async def test_real_question_keeps_the_human_boundary(tmp_path):
     # Re-presenting after recovery cannot silently erase the missing authorization.
     restored = await _present_decision_package(
         state,
-        "hypothesis",
+        "analysis",
         "producer",
         action="proceed",
     )
@@ -139,12 +140,12 @@ async def test_scheduler_revision_uses_existing_dispatch_and_keeps_actual_result
     monkeypatch.setattr("shared.tools.run_node._run_node_tool", dispatch)
     result = await _present_decision_package(
         state,
-        "hypothesis",
+        "analysis",
         "producer",
         action="revise",
         reasoning="先补足可比性定义。",
     )
-    assert len(calls) == 1 and calls[0][1] == "hypothesis"
+    assert len(calls) == 1 and calls[0][1] == "analysis"
     assert calls[0][2]["node_inputs"]["research_question"] == "比较自我改进速率"
     assert calls[0][2]["node_inputs"]["human_directive"] == ""
     assert "调度器决定" in calls[0][2]["user_note"]

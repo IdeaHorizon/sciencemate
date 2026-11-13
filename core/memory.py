@@ -403,6 +403,14 @@ class ManualEntry:
     defect: bool = False
     section: str = SECTION_PITFALL
 
+    def __post_init__(self) -> None:
+        from core.naming import canonical_node_type, canonical_tool_name
+
+        # Addresses are a runtime view; reading an old MEMORY.md leaves its
+        # bytes and the lesson text unchanged, including during forgetting.
+        self.nodes = tuple(dict.fromkeys(canonical_node_type(node) for node in self.nodes))
+        self.tools = tuple(dict.fromkeys(canonical_tool_name(tool) for tool in self.tools))
+
     def meta_line(self) -> str:
         bits = []
         if self.tools:

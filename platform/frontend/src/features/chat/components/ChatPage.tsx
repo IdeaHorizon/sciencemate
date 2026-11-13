@@ -35,7 +35,6 @@ export function ChatPage({
   placeholder,
   children,
   error,
-  composerAbove,
   composerContext,
   composerDisabled,
   composerDisabledReason,
@@ -57,10 +56,6 @@ export function ChatPage({
   placeholder: string;
   children?: React.ReactNode;
   error?: ChatFailurePresentation | null;
-  /** 输入框**上方**的常驻条（交付物）。与 `composerContext`（输入框内的
-   *  模式/模型那一排）分开：一个说"这次研究产出了什么"，一个说"这一条
-   *  消息会怎么跑"。塞进同一个槽位会把两个问题画成一行。 */
-  composerAbove?: React.ReactNode;
   composerContext?: React.ReactNode;
   composerDisabled?: boolean;
   composerDisabledReason?: string;
@@ -102,7 +97,6 @@ export function ChatPage({
         {children}
       </ChatMessages>
       <div className="composer-wrapper">
-        {composerAbove}
         {error && <ChatFailure failure={error} />}
         <ChatComposer
           draft={draft}

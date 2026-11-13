@@ -18,7 +18,7 @@
  */
 .app-shell {
   display: grid;
-  grid-template-columns: 236px minmax(0, 1fr);
+  grid-template-columns: 260px minmax(0, 1fr);
   height: 100dvh;
   overflow: hidden;
   background: var(--color-bg);
@@ -31,14 +31,13 @@
   flex-direction: column;
   border-right: 1px solid var(--color-border);
   background: var(--color-bg-elevated);
-  /* 侧栏自己装不下时（项目内 11 条导航 + 最近会话 + 底部账号）滚它自己的，
-     不去推别人。min-height: 0 是 flex/grid 子项能收缩的前提。 */
+  /* 项目树独立滚动，底部设置与版本保持可见。 */
   height: 100%;
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
   overscroll-behavior: contain;
-  padding: 14px 10px;
-  gap: 12px;
+  padding: 20px 12px 12px;
+  gap: 16px;
 }
 
 .app-brand {
@@ -340,77 +339,12 @@
   overflow: auto;
 }
 
-@media (max-width: 680px) {
-  .app-shell { grid-template-columns: 58px minmax(0, 1fr); }
-  .app-sidebar { padding: 10px 7px; align-items: stretch; }
-  .app-brand { justify-content: center; padding-inline: 0; }
-  .app-brand > div, .app-workspace-switcher, .app-nav-section, .app-project-identity { display: none; }
-  .app-nav-item { justify-content: center; padding-inline: 0; }
-  .app-nav-item span, .app-nav-item small { display: none; }
-  .app-project-back { justify-content: center; overflow: hidden; width: 34px; height: 30px; padding: 0; color: transparent; }
-  .app-project-back svg { flex: none; color: var(--color-fg-muted); }
-  .app-user-context { grid-template-columns: 1fr; justify-items: center; }
-  .app-user-context > span, .app-user-context button { display: none; }
-}
-
 .platform-empty-line {
   padding: 18px 0;
   border-top: 1px solid var(--color-border);
   border-bottom: 1px solid var(--color-border);
   color: var(--color-fg-subtle);
   font-size: var(--font-size-control);
-}
-
-@media (max-width: 800px) {
-  .app-shell {
-    grid-template-columns: 56px minmax(0, 1fr);
-  }
-
-  .app-sidebar {
-    gap: 10px;
-    padding: 10px 7px;
-    background: var(--color-bg-elevated);
-  }
-
-  .app-brand div,
-  .app-workspace-switcher,
-  .app-nav-item span,
-  .app-nav-item small,
-  .app-nav-section,
-  .app-project-back,
-  .app-project-identity,
-  .app-user-row span {
-    display: none;
-  }
-
-  .app-brand,
-  .app-nav-item,
-  .app-user-row {
-    justify-content: center;
-  }
-
-  .app-brand { min-height: 36px; color: var(--color-fg-muted); }
-  .app-brand > svg { display: none; }
-  .app-brand::after {
-    content: attr(data-mark);
-    display: grid;
-    place-items: center;
-    width: 30px;
-    height: 24px;
-    color: var(--color-fg);
-    border: 1px solid var(--color-border-strong);
-    border-radius: 7px;
-    font-size: var(--font-size-caption);
-    font-weight: 680;
-  }
-  .app-nav-item { min-height: 38px; padding: 0; border-radius: 7px; }
-  .app-nav-item svg { width: 17px; height: 17px; opacity: .82; }
-  .app-nav-item:hover svg,
-  .app-nav-item-active svg { opacity: 1; }
-  .app-nav-item-active { color: var(--color-accent); background: var(--color-accent-bg); }
-  .app-nav-item-active::before { display: none; }
-  .app-sidebar-bottom { padding-top: 8px; }
-  .app-user-context { padding-top: 8px; }
 }
 
 /* Standard page padding inside .app-main */
@@ -436,3 +370,58 @@
   color: var(--color-fg-muted);
   margin-top: var(--space-1);
 }
+
+/* Persistent project → session navigation. */
+.app-sidebar > .app-nav, .app-sidebar-bottom, .app-brand, .app-version { flex-shrink: 0; }
+.project-tree { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.project-tree-section-heading { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 10px; color: var(--color-fg-subtle); font-size: 12px; }
+.project-tree-section-heading > a { color: inherit; text-decoration: none; font-weight: 550; }
+.project-tree-section-heading > span, .project-tree-actions { display: flex; align-items: center; gap: 1px; }
+.project-tree button, .project-tree-section-heading > span > a { display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 5px; background: transparent; color: var(--color-fg-muted); cursor: pointer; }
+.project-tree-section-heading button, .project-tree-section-heading > span > a, .project-tree-actions button { width: 25px; height: 26px; padding: 0; }
+.project-tree button:hover, .project-tree-section-heading > span > a:hover { color: var(--color-fg); background: var(--color-bg-subtle); }
+.project-tree-branch { margin-bottom: 9px; }
+.project-tree-heading { display: flex; align-items: center; min-height: 33px; padding: 0 4px 0 0; gap: 2px; border-radius: 6px; }
+.project-tree-heading:hover, .project-tree-branch.is-active > .project-tree-heading { background: var(--color-bg-subtle); }
+.project-tree-disclosure { flex: none; width: 23px; height: 28px; padding: 0; }
+.project-tree-disclosure svg { transition: transform 120ms ease; }
+.project-tree-disclosure .is-open { transform: rotate(90deg); }
+.project-tree-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; color: var(--color-fg); font-size: 13px; font-weight: 550; line-height: 30px; }
+.project-tree-actions { flex: none; opacity: 0; }
+.project-tree-heading:hover .project-tree-actions, .project-tree-heading:focus-within .project-tree-actions, .project-tree-branch.is-active .project-tree-actions { opacity: 1; }
+.project-tree-sessions { margin-left: 12px; padding: 3px 0 0 11px; border-left: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent); }
+.project-tree-session { display: flex; align-items: center; gap: 9px; min-height: 33px; padding: 6px 9px; margin: 1px 0; border-radius: 5px; color: var(--color-fg-muted); text-decoration: none; font-size: 13px; }
+.project-tree-session > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-tree-session > i { flex: none; width: 5px; height: 5px; margin: 0; }
+.project-tree-session:hover { color: var(--color-fg); background: var(--color-bg-subtle); }
+.project-tree-session.is-selected { color: var(--color-fg); background: var(--color-accent-bg); }
+.project-tree .project-tree-more { display: flex; justify-content: flex-start; width: 100%; padding: 7px 9px; text-decoration: none; color: var(--color-fg-subtle); font-size: 12px; text-align: left; }
+.project-tree-message { margin: 4px 8px; color: var(--color-fg-subtle); font-size: 12px; }
+.project-tree-search { width: calc(100% - 12px); margin: 0 6px 12px; padding: 7px 9px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-bg); color: var(--color-fg); font-size: 12px; }
+.project-tree-archived-label { display: block; margin: 12px 9px 4px; color: var(--color-fg-subtle); font-size: 11px; }
+.workspace-sidebar-toggle, .workspace-sidebar-scrim { display: none; }
+@media (hover: none) { .project-tree-actions { opacity: 1; } }
+@media (max-width: 800px) {
+  .app-shell { grid-template-columns: minmax(0, 1fr); }
+  .app-sidebar { position: fixed; z-index: 81; inset: 0 auto 0 0; width: 260px; transform: translateX(-100%); padding: 54px 12px 12px; transition: transform 160ms ease; }
+  .app-sidebar.is-open { transform: translateX(0); }
+  .app-sidebar .app-brand { justify-content: flex-start; }
+  .app-sidebar .app-brand div, .app-sidebar .app-workspace-switcher, .app-sidebar .app-nav-item span { display: block; }
+  .app-sidebar .app-nav-item { justify-content: flex-start; padding: var(--space-2) var(--space-3); }
+  .app-sidebar-bottom { margin-top: auto; }
+  .workspace-sidebar-toggle { position: fixed; z-index: 82; top: 10px; left: 12px; display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-bg-elevated); color: var(--color-fg); }
+  .workspace-sidebar-scrim { display: block; position: fixed; z-index: 80; inset: 0; border: 0; background: rgb(0 0 0 / 30%); }
+}
+
+.project-tree-no-results { display: none; margin: 10px 8px; color: var(--color-fg-subtle); font-size: 12px; }
+.project-tree-results:not(:has(.project-tree-branch)) > .project-tree-no-results { display: block; }
+@media (max-width: 800px) {
+  .app-sidebar { visibility: hidden; }
+  .app-sidebar.is-open { visibility: visible; }
+}
+
+.project-tree-session > i.state-alive { background: var(--color-accent); }
+.project-tree-session > i[data-waiting="human"], .project-tree-session > i[data-waiting="permission"] { background: var(--color-warning); }
+.project-tree-session > i.state-interrupted, .project-tree-session > i[data-outcome="failed"] { background: var(--color-danger); }
+.project-tree-session > i[data-outcome="ok"] { background: var(--color-success); }
+.project-tree-session > i[data-outcome="ok_with_warning"], .project-tree-session > i[data-outcome="incomplete"] { background: var(--color-warning); }

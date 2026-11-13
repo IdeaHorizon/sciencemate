@@ -21,7 +21,7 @@ from app.main import _expected_alembic_heads, _tables_this_build_reads, readines
 
 
 def test_expected_alembic_heads_resolves_current_repository_head() -> None:
-    assert _expected_alembic_heads() == {"055_merge_cnki_progress_heads"}
+    assert _expected_alembic_heads() == {"056_analysis_node_name"}
 
 
 def test_published_marine_rss_revision_remains_in_migration_graph() -> None:

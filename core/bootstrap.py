@@ -18,6 +18,8 @@ import importlib
 import logging
 from pathlib import Path
 
+from core.naming import canonical_node_type
+
 log = logging.getLogger("bootstrap")
 
 NODES_DIR = Path(__file__).parent.parent / "nodes"
@@ -27,12 +29,12 @@ _bootstrapped = False
 #: bootstrap 期间没 import 起来的节点模块：{node: {module: "错误摘要"}}。
 #:
 #: 为什么要记账而不是只 log.warning（2026-08-21）：
-#: `nodes/hypothesis/tools/artifact_save.py` 里一个 py3.12-only 的 f-string 在
-#: CI 的 py3.11 上是 SyntaxError —— 整个 `nodes.hypothesis.tools` 和
-#: `nodes.hypothesis.hooks` 都没 import 成功，于是 hypothesis 节点**一件工具都没注册**。
+#: `nodes/analysis/tools/artifact_save.py` 里一个 py3.12-only 的 f-string 在
+#: CI 的 py3.11 上是 SyntaxError —— 整个 `nodes.analysis.tools` 和
+#: `nodes.analysis.hooks` 都没 import 成功，于是 hypothesis 节点**一件工具都没注册**。
 #: 而这件事在日志里只是两行 WARNING，节点照常启动、照常跑，模型对着 harness.yaml
 #: 里点名的 11 个工具（audit_* 全套 / get_research_goal / update_research_state /
-#: validate_hypothesis_outputs）一个都调不到 —— 正是"prompt 点名了不存在的工具，
+#: validate_analysis_outputs）一个都调不到 —— 正是"prompt 点名了不存在的工具，
 #: 模型会照着去找、找不到、然后跳过那一步"。
 #:
 #: 失效方向必须翻转：一个节点的代码没加载起来，它就**不是一个能跑的节点**，
@@ -47,12 +49,14 @@ def node_import_failures(node: str | None = None) -> dict[str, dict[str, str]] |
     """
     if node is None:
         return {k: dict(v) for k, v in _node_import_failures.items()}
-    return dict(_node_import_failures.get(node, {}))
+    return dict(_node_import_failures.get(canonical_node_type(node), {}))
 
 
 def _record_node_import_failure(node: str, module: str, exc: BaseException) -> None:
     """记下来，并且照旧 log —— 日志给人看，账本给机制用。"""
-    _node_import_failures.setdefault(node, {})[module] = f"{type(exc).__name__}: {exc}"
+    _node_import_failures.setdefault(canonical_node_type(node), {})[module] = (
+        f"{type(exc).__name__}: {exc}"
+    )
     log.warning("%s import 失败：%s", module, exc)
 
 

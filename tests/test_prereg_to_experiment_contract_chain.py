@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "nodes" / "experime
 from tools.preflight import audit_execution_contract  # noqa: E402
 from tools.run_contract import resolve_run_acceptance  # noqa: E402
 
-NODES = ("literature", "hypothesis", "data", "experiment", "postprocess", "writing")
+NODES = ("literature", "analysis", "data", "experiment", "postprocess", "writing")
 
 PARAMS = {"n_particles": 4000, "timestep": 0.005, "T_start": 2.0}
 
@@ -72,14 +72,14 @@ def _node_state(tmp_path: Path, root: Path, node_type: str, run_id: str) -> Stat
 def _draft_prereg(root: Path) -> None:
     """Analysis 写的草稿：落 `plan/`，账本记出处，尚未冻结。"""
     write_record(root, artifact_type="pre_registration", name="X", content=_STUB_PREREG,
-                 directory=_DIRS["hypothesis"], metadata={},
-                 produced_by_node_type="hypothesis", produced_by_run_id="h0")
+                 directory=_DIRS["analysis"], metadata={},
+                 produced_by_node_type="analysis", produced_by_run_id="h0")
 
 
 async def _freeze(tmp_path: Path, root: Path, **kwargs) -> dict:
     """走 Analysis 的真入口冻结，产物在 plan/，冻结是账本上的一行。"""
     return await _freeze_artifact(
-        state=_node_state(tmp_path, root, "hypothesis", "h1"),
+        state=_node_state(tmp_path, root, "analysis", "h1"),
         artifact_id="pre_registration__X",
         **kwargs,
     )
@@ -163,9 +163,9 @@ def test_a_primary_prereg_without_params_would_have_been_blocked(tmp_path: Path)
     root = _worktree(tmp_path)
     frozen = write_record(
         root, artifact_type="pre_registration", name="X", content=_STUB_PREREG,
-        directory=_DIRS["hypothesis"],
+        directory=_DIRS["analysis"],
         metadata={"run_role": "primary", "analysis_eligible": True},
-        produced_by_node_type="hypothesis", produced_by_run_id="h0", frozen=True)
+        produced_by_node_type="analysis", produced_by_run_id="h0", frozen=True)
 
     state = _node_state(tmp_path, root, "experiment", "e3")
     _accept_bound(state, frozen["id"], frozen)

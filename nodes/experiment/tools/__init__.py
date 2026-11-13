@@ -22,6 +22,7 @@ from . import protocol_epoch  # noqa: F401  v3 纪元标记
 from . import ledger  # noqa: F401  v3 账本（B 的 provenance index）
 from . import capture  # noqa: F401  v3 capture 命名空间与 observation
 from . import obligations  # noqa: F401  v3 required obligations（A）
+from . import result_acceptance  # noqa: F401  finite checks against existing records
 from . import finish  # noqa: F401  v3 唯一收尾入口
 from . import job_settlement  # noqa: F401  v3 作业终态结算（B 的唯一 writer）
 from . import scheduler_adapters  # noqa: F401  v3 调度器 adapter 契约
@@ -45,6 +46,7 @@ from . import preflight  # noqa: F401
 from . import sediment  # noqa: F401
 from . import operation_completion  # noqa: F401
 from . import resource_fetch  # noqa: F401  controlled file/Git acquisition
+from . import literature_service  # noqa: F401
 # safe_bash 必须在框架 builtin 注册之后 import —— 它基于 builtin 工具 def 注册
 # safe_run_bash / safe_write_file / safe_execute_python（v0.11 起不再同名覆盖），
 # 加高危命令事前拦截（提权/递归删除/磁盘覆写/系统控制/进程杀除/git 强推）。

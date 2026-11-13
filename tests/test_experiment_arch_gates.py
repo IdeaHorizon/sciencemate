@@ -89,25 +89,31 @@ def test_red_line_from_critical_concern():
     assert "critical concern" in _red_line_reason(crit)
 
 
-def test_red_line_from_dimension_floor():
-    """execution_completeness=1 被 honesty=5 平均稀释成 overall=3，但维度触底就是红线。"""
-    crit = {"verdict": "approve_with_revisions", "concerns": [],
-            "per_dimension_scores": {"execution_completeness": 1, "honesty": 5,
-                                     "deviation_disclosure": 5, "reproducibility": 2}}
-    reason = _red_line_reason(crit)
-    assert reason is not None
-    assert "execution_completeness" in reason
+def test_descriptive_scores_do_not_invent_a_blocking_finding():
+    crit = {
+        "verdict": "approve_with_revisions",
+        "concerns": [],
+        "per_dimension_scores": {"novelty": 1, "honesty": 5},
+    }
+    assert _red_line_reason(crit) is None
 
 
 def test_no_red_line_when_all_above_floor():
-    crit = {"concerns": [{"severity": "minor", "description": "x"}],
-            "per_dimension_scores": {"a": 3, "b": 4, "c": 2}}
+    crit = {
+        "concerns": [{"severity": "minor", "description": "x"}],
+        "per_dimension_scores": {"a": 3, "b": 4, "c": 2},
+    }
     assert _red_line_reason(crit) is None
 
 
 def test_veto_downgrades_proceed_to_revise():
     """有红线 + reviewer 推荐 proceed → 机械降为 revise（不受平均分影响）。"""
-    crit = {"per_dimension_scores": {"execution_completeness": 1, "honesty": 5}}
+    crit = {
+        "concerns": [
+            {"severity": "critical", "description": "Claimed run has no execution evidence"}
+        ],
+        "per_dimension_scores": {"execution_completeness": 1, "honesty": 5},
+    }
     action, note = _apply_critical_veto(crit, "proceed", None)
     assert action == "revise"
     assert note and "框架否决" in note

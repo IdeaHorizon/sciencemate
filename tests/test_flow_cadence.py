@@ -27,7 +27,7 @@ def _entry(**over):
         "review_critique_artifact_id": "review_critique__x",
         "curator_state": "done",
         "decision_state": "deferred_to_analysis",
-        "deferred_to_node": "hypothesis",
+        "deferred_to_node": "analysis",
     }
     base.update(over)
     return base
@@ -80,12 +80,12 @@ def test_deferred_entry_is_still_unresolved():
 
 def test_only_analysis_is_authorized_while_deferred():
     entry = _entry()
-    assert _authorized_action_target(entry) == "hypothesis"
+    assert _authorized_action_target(entry) == "analysis"
 
 
 def test_next_step_points_at_analysis():
     step = _unresolved_flow_next_step(_entry())
-    assert "hypothesis" in step and "research_state" in step
+    assert "analysis" in step and "research_state" in step
 
 
 def test_deferral_does_not_leak_into_other_decision_states():
@@ -153,7 +153,7 @@ async def test_successful_review_defers_without_pausing(tmp_path):
         review_critique_artifact_id="review_critique__x",
     )
     assert result["status"] == "success"
-    assert result["deferred_to"] == "hypothesis"
+    assert result["deferred_to"] == "analysis"
     entry = state.hook_state["pending_post_node_flow"][0]
     assert entry["decision_state"] == "deferred_to_analysis"
     lines = (state.root / "transcript.jsonl").read_text(encoding="utf-8").splitlines()
@@ -175,13 +175,13 @@ async def test_full_flow_node_returns_the_decision_to_the_scheduler(tmp_path):
         "findings": [],
     }), {"produced_by_node_type": "_reviewer"}, provenance=_review_provenance(state))
     state.hook_state["pending_post_node_flow"] = [{
-        "producing_node": "hypothesis", "producing_run_id": "run-9",
+        "producing_node": "analysis", "producing_run_id": "run-9",
         "review_state": "done", "review_critique_artifact_id": "review_critique__y",
         "curator_state": "done", "decision_state": "pending",
     }]
     result = await dp._present_decision_package(
         state,
-        source_node_type="hypothesis",
+        source_node_type="analysis",
         producing_run_id="run-9",
         producing_summary="ran",
         artifact_ids_produced=["pre_registration__x"],
@@ -204,7 +204,7 @@ def _in_flight_deferred_entry(**over):
     """顺延 → 已起 hypothesis 之后，entry 在盘上的样子。"""
     return _entry(
         decision_state="action_in_progress",
-        action_target_node="hypothesis",
+        action_target_node="analysis",
         action_prior_state="deferred_to_analysis",
         action_attempt_count=1,
         action_started_at="2026-08-17T19:20:05+00:00",
@@ -216,7 +216,7 @@ def test_deferred_action_is_findable_for_closing():
     from shared.tools.run_node import _find_in_progress_entry
 
     flow = [_in_flight_deferred_entry()]
-    assert _find_in_progress_entry(flow, "hypothesis") is flow[0]
+    assert _find_in_progress_entry(flow, "analysis") is flow[0]
     # 别的节点不该匹配上 —— 否则 writing 一跑就把 experiment 的 flow 关了
     assert _find_in_progress_entry(flow, "writing") is None
 
@@ -224,7 +224,7 @@ def test_deferred_action_is_findable_for_closing():
 def test_legacy_entry_without_stamp_still_closes():
     """本次修复之前落盘的 entry（没有 action_target_node）也必须能被认出来。
 
-    这就是 2026-08-17 卡死的那条：deferred_to_node='hypothesis'，
+    这就是 2026-08-17 卡死的那条：deferred_to_node='analysis'，
     authorized_target_node 从来没被写过。
     """
     from shared.tools.run_node import _find_in_progress_entry
@@ -232,14 +232,14 @@ def test_legacy_entry_without_stamp_still_closes():
     legacy = _entry(decision_state="action_in_progress", action_attempt_count=11)
     assert "action_target_node" not in legacy
     assert legacy.get("authorized_target_node") is None
-    assert _find_in_progress_entry([legacy], "hypothesis") is legacy
+    assert _find_in_progress_entry([legacy], "analysis") is legacy
 
 
 def test_blocker_names_the_node_instead_of_none():
     """报错文案里出现 None = 调度器拿不到任何可行动信息。"""
     reason = _unresolved_flow_reason(_in_flight_deferred_entry())
     assert "None" not in reason, reason
-    assert "hypothesis" in reason
+    assert "analysis" in reason
     step = _unresolved_flow_next_step(_in_flight_deferred_entry())
     assert "None" not in step, step
 
@@ -252,11 +252,11 @@ def test_failed_action_falls_back_to_deferred_not_authorized(tmp_path):
     state = State(run_id="r", node_type="_orchestrator", root=tmp_path / "run")
     state.root.mkdir(parents=True, exist_ok=True)
     state.hook_state["pending_post_node_flow"] = [_in_flight_deferred_entry()]
-    _reset_authorized_action(state, "hypothesis", reason="child status='failed'")
+    _reset_authorized_action(state, "analysis", reason="child status='failed'")
     entry = state.hook_state["pending_post_node_flow"][0]
     assert entry["decision_state"] == "deferred_to_analysis"
     # 退回之后 Analysis 可以再起；别的节点照旧拦着
-    assert _authorized_action_target(entry) == "hypothesis"
+    assert _authorized_action_target(entry) == "analysis"
 
 
 def test_restart_recovery_also_restores_deferred(tmp_path):

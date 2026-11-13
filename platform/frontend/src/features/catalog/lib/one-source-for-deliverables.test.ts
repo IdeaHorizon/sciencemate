@@ -4,10 +4,6 @@ import { readFileSync } from "node:fs";
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-function source(path: string) {
-  return readFileSync(new URL(path, import.meta.url), "utf8");
-}
-
 function everySourceFile(root: string): string[] {
   const out: string[] = [];
   for (const name of readdirSync(root)) {
@@ -44,14 +40,4 @@ test("「这个项目交付了什么」只剩一个数据源", () => {
     [],
     "这些文件还在读那条已经退役的交付物路由",
   );
-});
-
-test("交付物条和「研究成果」页读的是同一个目录", () => {
-  const bar = source("../../sessions/components/SessionDeliverables.tsx");
-  const view = source("../components/ProjectOutputsView.tsx");
-  for (const [name, code] of [["交付物条", bar], ["研究成果页", view]] as const) {
-    assert.match(code, /useProjectCatalog\(/, `${name} 应该读目录`);
-  }
-  // 交付物判据只有一处：后端算好的 isDeliverable，前端不自己重算。
-  assert.match(bar, /entry\.isDeliverable/);
 });

@@ -29,6 +29,8 @@ MESSAGES = {
     "virtual_display_unavailable": "后台浏览器需要虚拟桌面组件，请管理员安装 Xvfb 与 xvfb-run。",
     "browser_not_installed": "采集服务器未找到 Chrome 或 Edge，请联系管理员。",
     "browser_start_failed": "知网采集浏览器启动失败，请管理员检查浏览器运行环境。",
+    "browser_profile_in_use": "旧知网采集资料仍被占用或无法移动，请关闭平台打开的采集浏览器后再重建会话；已获取的文献保留。",
+    "browser_profile_backup_failed": "知网采集资料备份未完成，已停止重建会话；请检查本机资料目录的访问权限和可用空间。",
     "browser_activation_failed": "知网检索控件未能正常操作，已保留进度；请检查当前知网页面。",
     "browser_activation_moved": "知网页面变化导致操作未完成，已保留进度，稍后自动重试。",
     "metadata_title_mismatch": "知网返回的题录与标题不一致，已暂停本次补齐。",
@@ -99,11 +101,13 @@ class Collector:
                     return device, job
         return None
 
-    async def report(self, device, task, state="working", detail="", *, metrics=None):
+    async def report(self, device, task, state="working", detail="", *, metrics=None, code=None):
         async with self.sessions.begin() as db:
             await store.lock_user(db, device.user_id)
             job = await store.leased_job(db, device, task["id"], task["lease"])
             job.last_report_at, job.last_report = store.now(), {"state":state, "detail":detail}
+            if code:
+                job.last_report = {**job.last_report, "code": code}
             job.lease_until = store.now()+timedelta(seconds=90) if state=="working" else store.now()
             if metrics:
                 job.checkpoint = {**job.checkpoint, **metrics}
@@ -190,6 +194,11 @@ class Collector:
         if task.get("phase") == "metadata":
             return await self.enrich(device, task)
         started = time.monotonic()
+        # Older checkpoints may already have consumed this request's page
+        # budget. Finish without reopening the browser and replaying those pages.
+        if task["limit"] is not None and (task["page"]-1)*20 >= task["limit"]:
+            await self.finish_index(device, task, time.monotonic()-started)
+            return
         await self.report(device, task, detail="正在连接知网")
         await self.browser.ensure(device.user_id)
         await self.report(device, task, detail="正在向知网提交检索并等待题录")
@@ -206,7 +215,7 @@ class Collector:
         while True:
             if not state["rows"] and not state.get("emptyConfirmed"):
                 raise CollectionError("unrecognized_results_page")
-            remaining = 20 if task["limit"] is None or task.get("document_kind") else max(0, task["limit"]-(task["page"]-1)*20)
+            remaining = 20 if task["limit"] is None else max(0, task["limit"]-(task["page"]-1)*20)
             wanted = state["rows"][:remaining]
             def older(row):
                 date = row.get("pub_date", "")
@@ -215,8 +224,11 @@ class Collector:
             category = {"journal":"中文期刊", "thesis":"学位论文", "conference":"会议文章", "book":"书籍"}.get(task.get("document_kind"))
             if category and within and not any(store.as_literature(row).publication_category == category for row in within):
                 raise CollectionError("result_type_mismatch")
+            # A single search has a bounded recall budget, not a target to fill
+            # after filtering. In particular, CNKI's "other" tab is CROSSDB:
+            # do not traverse its entire mixed catalogue to find 200 survivors.
             finished = (not state["hasNext"] or not wanted or
-                        (not task.get("document_kind") and task["limit"] is not None and task["page"]*20 >= task["limit"]) or
+                        (task["limit"] is not None and task["page"]*20 >= task["limit"]) or
                         (state.get("dateSorted") and bool(state["rows"]) and all(older(r) for r in state["rows"])))
             # Page acknowledgement follows durable index storage, independent
             # of slower metadata exports. Restart resumes at the next page.
@@ -263,6 +275,7 @@ class Collector:
             state = "waiting_for_verification" if waiting else "paused" if code in {"access_denied", "session_paused", "result_type_mismatch"} else "error"
             try:
                 await self.report(device, task, state, MESSAGES.get(code, "知网采集暂时失败，已保留进度，稍后自动重试。"),
+                                  code=code,
                                   metrics={f"{task.get('phase', 'index')}_seconds":round(time.monotonic()-started, 3),
                                            **({"resume_verification": True} if waiting and task.get("phase", "index") == "index" else {})})
             except Exception:
@@ -275,6 +288,62 @@ class Collector:
         finally:
             pulse.cancel()
             await asyncio.gather(pulse, return_exceptions=True)
+
+    async def reset_requested_session(self, active):
+        """One manual reset for all categories, serialized by the worker lock."""
+        owner = next((owner for owner, _ in active.values()), None)
+        async with self.sessions.begin() as db:
+            statement = select(CnkiJob).join(User, User.id == CnkiJob.user_id).where(
+                CnkiJob.enabled.is_(True), User.is_active.is_(True),
+                CnkiJob.checkpoint["reset_session"].as_string().is_not(None),
+            ).order_by(CnkiJob.created_at)
+            if owner is not None:
+                statement = statement.where(CnkiJob.user_id == owner)
+            request = await db.scalar(statement.limit(1))
+            if request is None:
+                return False
+            owner, request_id = request.user_id, request.checkpoint["reset_session"]
+        # Cancellation reports preserve acknowledged pages and stored papers.
+        # A lane must never close the shared browser under its sibling's request.
+        for _, work in active.values():
+            work.cancel()
+        await asyncio.gather(*(work for _, work in active.values()), return_exceptions=True)
+        active.clear()
+        code = None
+        async with self.sessions.begin() as db:
+            await store.lock_user(db, owner)
+            jobs = list((await db.scalars(select(CnkiJob).where(CnkiJob.user_id == owner))).all())
+            selected = [job for job in jobs if (job.checkpoint or {}).get("reset_session") == request_id]
+            needed = any(job.enabled and store.job_state(job) != "completed" for job in selected)
+        if needed:
+            # Browser shutdown can take seconds. Do not hold the database lock
+            # while waiting; new requests join the same persisted reset ID.
+            try:
+                await self.browser.reset_session(owner, request_id)
+            except Exception as exc:
+                code = str(exc) if isinstance(exc, CollectionError) else "browser_profile_backup_failed"
+        async with self.sessions.begin() as db:
+            await store.lock_user(db, owner)
+            jobs = list((await db.scalars(select(CnkiJob).where(CnkiJob.user_id == owner))).all())
+            selected = [job for job in jobs if (job.checkpoint or {}).get("reset_session") == request_id]
+            if needed:
+                moment = store.now()
+                for job in jobs:
+                    if (job.checkpoint or {}).get("executor", "server") != "server":
+                        continue
+                    if not code:
+                        job.checkpoint = {**(job.checkpoint or {}), "resume_verification": False,
+                                          "recover_session": False, "check_session": False}
+                    if job in selected:
+                        job.checkpoint = {**job.checkpoint, "session_reset_at": moment.isoformat()}
+                        job.lease_until, job.lease_hash = moment, None
+                        job.last_report_at = moment
+                        job.last_report = {"state": "paused" if code else "queued", "code": code,
+                            "detail": MESSAGES.get(code, "旧会话已备份，正在使用新会话继续检索；如知网要求验证，请在采集窗口完成。")}
+                logger.info("CNKI session reset user=%s request=%s code=%s", owner, request_id, code or "ok")
+            for job in selected:
+                job.checkpoint = {key: value for key, value in job.checkpoint.items() if key != "reset_session"}
+        return True
 
     async def run(self):
         from app.services.project_repository import _the_file_lock
@@ -292,6 +361,8 @@ class Collector:
                             if work.done():
                                 await asyncio.gather(work, return_exceptions=True)
                                 del active[slot]
+                        if await self.reset_requested_session(active):
+                            continue
                         owner = next((owner for owner, _ in active.values()), None)
                         if len(active) < 2:
                             claimed = await self.claim(owner, server_slots=2)

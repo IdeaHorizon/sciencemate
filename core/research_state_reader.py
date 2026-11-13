@@ -1,6 +1,6 @@
 """research_state 的**唯一**读取实现（一个问题一个真相源）。
 
-research_state 是 Analysis（hypothesis 节点）持有的版本化研究状态：单一身份
+research_state 是 Analysis（analysis 节点）持有的版本化研究状态：单一身份
 `research_state__research_state`，每次更新版本 +1，版本号在 metadata.version（与
 账本 version 一致）。历史版本在账本里（`core/ledger`：每次 save 一行，正文按需
 从 run 内快照或 git 历史取回）。
@@ -14,8 +14,10 @@ import json
 from pathlib import Path
 from typing import Any, Iterator
 
+from core.naming import canonical_node_type
+
 #: Analysis 职责所在的节点类型（v2.1 P3c 并进 hypothesis）。
-ANALYSIS_NODES = ("hypothesis",)
+ANALYSIS_NODES = ("analysis",)
 
 HEAD_STEM = "research_state__research_state"
 
@@ -53,7 +55,8 @@ def iter_located(worktree: Path | str | None) -> Iterator[tuple[dict[str, Any], 
     head = store.head(HEAD_STEM)
     if head is None or head.artifact_type != "research_state":
         return
-    if head.produced_by_node_type and head.produced_by_node_type not in ANALYSIS_NODES:
+    if (head.produced_by_node_type
+            and canonical_node_type(head.produced_by_node_type) not in ANALYSIS_NODES):
         # 别的节点冒名写的 research_state 不是 Analysis 的状态。typed-only 写权
         # （artifact_capabilities）本就只给 hypothesis；这里再核一次
         # 是因为读的一侧不该信任写的一侧永远守规矩。

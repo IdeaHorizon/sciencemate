@@ -25,7 +25,7 @@ function head(overrides: Partial<RecordHead> = {}): RecordHead {
     frozenVersion: 0,
     frozenAt: "",
     createdAt: "2026-09-06T19:36:27+00:00",
-    producedByNodeType: "hypothesis",
+    producedByNodeType: "analysis",
     producedByRunId: "1788723286-9837f2",
     metadata: {
       version: 9,
@@ -46,8 +46,8 @@ function head(overrides: Partial<RecordHead> = {}): RecordHead {
   };
 }
 
-test("head 从账本记录里挑：类型 + 身份，hypothesis 优先于兼容目录 analysis", () => {
-  const legacy = head({ producedByNodeType: "analysis", version: 3 });
+test("head 从账本记录里挑：类型 + 身份，analysis 优先于历史节点 hypothesis", () => {
+  const legacy = head({ producedByNodeType: "hypothesis", version: 3 });
   const current = head();
   assert.equal(researchStateHead([legacy, current]), current);
   assert.equal(researchStateHead([legacy]), legacy);

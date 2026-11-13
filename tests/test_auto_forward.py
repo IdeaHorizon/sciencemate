@@ -235,7 +235,7 @@ def test_run_node_explicit_forward_bypasses_auto(monkeypatch):
     monkeypatch.setattr("core.llm.LLMClient", lambda: MagicMock())
 
     result = asyncio.run(execute("run_node", state, node_type="literature", user_note="测试派发",
-                                    node_inputs={},
+                                    node_inputs={"research_question": "核对显式传入的文献证据"},
                                     forward_artifact_ids=["survey_report__explicit_one"]))
     assert result["status"] == "success"
     fwd_names = [a["name"] for a in captured["upstream_artifacts"]]

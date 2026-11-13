@@ -554,65 +554,10 @@ def test_orchestrator_messages_initial():
         print(f"  ✓ orchestrator initial messages: {len(messages)} 条")
 
 
-class _FakeRealStream:
-    """录制 write() 调用，冒充真实 sys.stderr 给 _PromptSafeStderr 包。"""
-
-    def __init__(self):
-        self.writes: list[str] = []
-
-    def write(self, s: str) -> int:
-        self.writes.append(s)
-        return len(s)
-
-    def flush(self) -> None:
-        pass
-
-    def isatty(self) -> bool:
-        return True
 
 
-def test_prompt_safe_stderr_buffers_until_full_line():
-    """半行不触发清行/重画；凑齐一整行才落地，且落地内容干净无残留。
-
-    复现场景（issue：终端花屏）：node hook 直接 print(msg, file=sys.stderr,
-    flush=True) 会把消息拆成多次 write（内容 + 换行符），如果不按行缓冲，
-    半行也会触发一次清行+重画，视觉上提示符被反复顶出来。
-    """
-    chat_mod._PROMPT_LIVE["on"] = True
-    chat_mod._IS_TTY = True
-    # 清行/重画本身写真实 sys.stdout（跟 _emit_above_prompt 同款协议）——
-    # 测试只关心 _PromptSafeStderr 有没有正确按行缓冲、转发给被包的流，
-    # 不关心提示符重画的具体 ANSI 输出，摘掉避免污染 pytest 自己的输出。
-    saved_clear = chat_mod._clear_input_line
-    saved_redraw = chat_mod._redraw_prompt
-    chat_mod._clear_input_line = lambda: None
-    chat_mod._redraw_prompt = lambda: None
-    try:
-        real = _FakeRealStream()
-        wrapped = chat_mod._PromptSafeStderr(real)
-
-        # print() 典型地拆成两次 write：消息体 + 换行
-        wrapped.write("[experiment 14:46:02] tool_done: safe_execute_python")
-        assert real.writes == [], "半行不该提前落地"
-        wrapped.write("\n")
-        assert real.writes == ["[experiment 14:46:02] tool_done: safe_execute_python\n"]
-
-        wrapped.write("[experiment 14:46:27] llm_tool_calls: safe_execute_python\n")
-        assert real.writes[-1] == "[experiment 14:46:27] llm_tool_calls: safe_execute_python\n"
-        assert len(real.writes) == 2, "两条完整行 → 恰好两次真实落地写"
-    finally:
-        chat_mod._clear_input_line = saved_clear
-        chat_mod._redraw_prompt = saved_redraw
-        chat_mod._PROMPT_LIVE["on"] = False
 
 
-def test_prompt_safe_stderr_passthrough_when_prompt_not_live():
-    """提示符还没接管（启动阶段）/非 tty 时，直接透传，不缓冲。"""
-    chat_mod._PROMPT_LIVE["on"] = False
-    real = _FakeRealStream()
-    wrapped = chat_mod._PromptSafeStderr(real)
-    wrapped.write("early startup log\n")
-    assert real.writes == ["early startup log\n"]
 
 
 if __name__ == "__main__":

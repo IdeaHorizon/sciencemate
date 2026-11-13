@@ -287,7 +287,7 @@ def test_nobody_hand_rolls_the_run_root_anchor() -> None:
 def test_the_model_dialect_round_trips_too(bound: State) -> None:
     """另一种方言也必须成对：交给模型的路径，模型的工具要能解回同一个文件。
 
-    `stage_hypothesis_draft` 曾经把 `outputs/hypothesis/drafts/x.md` 交给模型，
+    `stage_analysis_draft` 曾经把 `outputs/hypothesis/drafts/x.md` 交给模型，
     而它自己那句"下一步 save_artifact(content_from_file=…)"用同一套工具**永远
     读不到**（绑 worktree 的 run 上 100% 失败）—— 因为框架只有解析器
     `resolve_tool_path`，没有配套的产出函数，想告诉模型"文件在这儿"的地方只能
@@ -310,8 +310,8 @@ def test_staged_draft_is_readable_by_the_tool_it_points_at(tmp_path: Path) -> No
     这条锚在**效果**上而不是字符串长相上 —— 断言"返回了 drafts/…"证明不了
     下一步走得通（`feedback_asserting_the_label_asserts_nothing`）。
     """
-    from nodes.hypothesis.tools.artifact_save import resolve_artifact_content
-    from nodes.hypothesis.tools.artifact_staging import stage_draft_content
+    from nodes.analysis.tools.artifact_save import resolve_artifact_content
+    from nodes.analysis.tools.artifact_staging import stage_draft_content
 
     state = _bound_state(tmp_path, node_type="hypothesis")
     rel = stage_draft_content(state, "research_plan", "# plan")
@@ -320,8 +320,8 @@ def test_staged_draft_is_readable_by_the_tool_it_points_at(tmp_path: Path) -> No
 
 def test_hypothesis_recovery_finds_the_staged_draft(tmp_path: Path) -> None:
     """恢复路径读的是同一个落点（原来按 run 根拼，永远返回 None）。"""
-    from nodes.hypothesis.artifact_recovery import _research_plan_body
-    from nodes.hypothesis.tools.artifact_staging import stage_draft_content
+    from nodes.analysis.artifact_recovery import _research_plan_body
+    from nodes.analysis.tools.artifact_staging import stage_draft_content
 
     state = _bound_state(tmp_path, node_type="hypothesis")
     stage_draft_content(state, "research_plan", "# plan")

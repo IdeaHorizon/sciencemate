@@ -358,14 +358,15 @@ def _run_listener_with_scripted_input(lines):
     q = _FakeQueue()
     import builtins
     orig_input = builtins.input
-    orig_more = chat_mod._stdin_more_buffered
+    from cli import input as cli_input
+    orig_more = cli_input._stdin_more_buffered
     builtins.input = fake_input
-    chat_mod._stdin_more_buffered = lambda *a, **k: False   # 不合并，逐行
+    cli_input._stdin_more_buffered = lambda *a, **k: False   # 不合并，逐行
     try:
         chat_mod._stdin_listener(_FakeLoop(), q)           # /exit / EOF → return
     finally:
         builtins.input = orig_input
-        chat_mod._stdin_more_buffered = orig_more
+        cli_input._stdin_more_buffered = orig_more
     return q.items, calls["n"]
 
 

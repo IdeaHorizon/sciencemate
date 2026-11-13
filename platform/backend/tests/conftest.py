@@ -101,7 +101,7 @@ def isolated_project_repositories(tmp_path, monkeypatch, worker_database_url):
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def _no_execution_outlives_its_test():
+async def _no_execution_outlives_its_test(monkeypatch):
     """每条测试结束时收掉它留下的后台执行。
 
     聊天流是**服务器自有**的：SSE 断开不取消它（那是设计，见
@@ -115,9 +115,27 @@ async def _no_execution_outlives_its_test():
     收在这里而不是逐条测试里 —— 逐条写就是名单式护栏，下一条驱动 stream 的
     测试默认又漏。
     """
+    from app.services.feed import scheduler
+    from app.services import literature_harvester
+
+    # Subscription APIs now own persistent workers too. Their Events and Tasks
+    # belong to this test's loop, never the singleton left by a previous loop.
+    monkeypatch.setattr(scheduler, "feed_collector", scheduler.FeedCollector())
+    monkeypatch.setattr(literature_harvester, "literature_index_harvester",
+                        literature_harvester.LiteratureIndexHarvester())
     yield
+    await _stop_test_background_work()
+
+
+async def _stop_test_background_work():
+    from app.services.feed.scheduler import feed_collector
+    from app.services.feed import scholar_migration
+    from app.services.literature_harvester import literature_index_harvester
     from app.services.local_execution import shutdown_detached_executions
 
+    await scholar_migration.stop()
+    await literature_index_harvester.stop()
+    await feed_collector.stop()
     await shutdown_detached_executions()
 
 
@@ -172,7 +190,13 @@ async def db_engine(worker_database_url):
     try:
         yield engine
     finally:
+        # DB-dependent fixtures tear down before the outer autouse fixture.
+        # Drain every owner while its database/session factory still exists.
+        await _stop_test_background_work()
         database._engine, database._session_factory = saved_engine, saved_factory
+        # SQLite cursors cancelled during a query can survive on idle pooled
+        # connections. Close that pool after draining all session owners.
+        await engine.dispose()
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
         await engine.dispose()

@@ -435,6 +435,7 @@ async def _runtime_control(
 register_tool(
     ToolDefinition(
         name="runtime_control",
+        replayable_read=lambda arguments: arguments.get("action") in {"progress", "list_active", "jobs"},
         description=(
             "**控制正在跑 / paused 的 child run 的统一入口**。`action` 决定操作：\n\n"
             "  - `inject`：注入 system message 到 child 的 message 流。child 下轮\n"

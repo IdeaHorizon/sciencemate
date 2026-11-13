@@ -251,7 +251,7 @@ def test_the_judgment_comes_from_the_declaration_not_from_a_list() -> None:
 
     declared = {
         name for name in all_tool_names()
-        if getattr(get_tool(name), "replayable_read", False)
+        if getattr(get_tool(name), "replayable_read", False) is True
     }
     assert declared, "注册表里一个 replayable_read 都没有，说明扫的地方不对"
     assert declared <= tc.cacheable_tools()

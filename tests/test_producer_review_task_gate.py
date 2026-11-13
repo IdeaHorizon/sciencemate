@@ -91,14 +91,14 @@ async def test_reviewer_not_gate_blocked_when_matching_pending_flow():
     with tempfile.TemporaryDirectory() as td:
         state = _orch_state(Path(td))
         state.hook_state["pending_post_node_flow"] = [{
-            "producing_node": "hypothesis", "producing_run_id": "r_ok",
+            "producing_node": "analysis", "producing_run_id": "r_ok",
             "artifact_ids": ["x"], "review_state": "pending",
             "curator_state": "pending", "decision_state": "pending",
         }]
         res = await execute_tool(
             "run_node", state,
             node_type="_reviewer", user_note="测试派发",
-            node_inputs={"artifact_id": "x", "source_node_type": "hypothesis",
+            node_inputs={"artifact_id": "x", "source_node_type": "analysis",
                          "producer_run_id": "r_ok"},
         )
         # 不该是"没有 matching pending flow"这条 gate error
@@ -134,7 +134,7 @@ def _make_started_task(state: State):
 def _lit_harness():
     # v2.0：literature 已服务化（post_run_flow: none），producing 语义的用例
     # 改用 hypothesis —— 它是真 producing 节点，会登记 post-node flow。
-    return NodeHarness(node_type="hypothesis", system_prompt="",
+    return NodeHarness(node_type="analysis", system_prompt="",
                        required_output_artifact_types=["pre_registration"])
 
 
@@ -144,11 +144,11 @@ def test_finish_child_blocks_task_on_incomplete():
         tl, tid = _make_started_task(state)
         cdir = state.root / "child_lit_x"
         cdir.mkdir(parents=True, exist_ok=True)
-        summary = {"run_id": "r_lit_x", "node_type": "hypothesis",
+        summary = {"run_id": "r_lit_x", "node_type": "analysis",
                    "status": "incomplete", "turns": 5,
                    "missing_required_outputs": ["hypothesis_set"],
                    "state_dir": str(cdir), "artifacts": []}
-        out = _finish_child(state, "hypothesis", {}, summary, _lit_harness(),
+        out = _finish_child(state, "analysis", {}, summary, _lit_harness(),
                             None, task_id=tid)
         t = tl.get(tid)
         assert t.status == "blocked"
@@ -164,10 +164,10 @@ def test_finish_child_blocks_task_on_cancelled():
         tl, tid = _make_started_task(state)
         cdir = state.root / "child_c"
         cdir.mkdir(parents=True, exist_ok=True)
-        summary = {"run_id": "r_c", "node_type": "hypothesis",
+        summary = {"run_id": "r_c", "node_type": "analysis",
                    "status": "cancelled", "turns": 2,
                    "state_dir": str(cdir), "artifacts": []}
-        _finish_child(state, "hypothesis", {}, summary, _lit_harness(),
+        _finish_child(state, "analysis", {}, summary, _lit_harness(),
                       None, task_id=tid)
         assert tl.get(tid).status == "blocked"
 
@@ -179,10 +179,10 @@ def test_finish_child_leaves_task_on_completed():
         tl, tid = _make_started_task(state)
         cdir = state.root / "child_ok"
         cdir.mkdir(parents=True, exist_ok=True)
-        summary = {"run_id": "r_ok", "node_type": "hypothesis",
+        summary = {"run_id": "r_ok", "node_type": "analysis",
                    "status": "completed", "turns": 8,
                    "state_dir": str(cdir), "artifacts": []}
-        _finish_child(state, "hypothesis", {}, summary, _lit_harness(),
+        _finish_child(state, "analysis", {}, summary, _lit_harness(),
                       None, task_id=tid)
         assert tl.get(tid).status == "in_progress"   # 保持，不被 block
 
@@ -214,7 +214,7 @@ def _reviewer_harness():
 
 def _eligible_flow_entry(producing_run_id="r_prod_ok"):
     return {
-        "producing_node": "hypothesis", "producing_run_id": producing_run_id,
+        "producing_node": "analysis", "producing_run_id": producing_run_id,
         "artifact_ids": ["pre_registration__revised"],
         "review_state": "pending", "review_critique_artifact_id": None,
         "review_failed_reason": None,
@@ -239,7 +239,7 @@ def test_failed_reviewer_marks_entry_retryable():
         s = _truncated_reviewer_summary()
         s["state_dir"] = str(cdir)
         _finish_child(state, "_reviewer",
-                      {"source_node_type": "hypothesis", "producer_run_id": "r_prod_ok"},
+                      {"source_node_type": "analysis", "producer_run_id": "r_prod_ok"},
                       s, _reviewer_harness(), None)
         e = state.hook_state["pending_post_node_flow"][0]
         assert e["review_state"] == "failed_awaiting_human"   # #155：先等人工授权
@@ -260,7 +260,7 @@ def test_decision_package_keeps_failed_entry_as_retry_credential():
                       "review_failed_reason": "reviewer 截断，无 critique"})
         state.hook_state["pending_post_node_flow"] = [entry]
         _a.run(_present_decision_package(
-            state, source_node_type="hypothesis", producing_run_id="r_prod_ok",
+            state, source_node_type="analysis", producing_run_id="r_prod_ok",
             producing_summary="18 turns", artifact_ids_produced=["pre_registration__revised"],
             curator_summary="+2 claims", review_failed_reason="reviewer 截断，无 critique",
         ))
@@ -288,7 +288,7 @@ async def test_reviewer_retry_allowed_after_failed_review():
         state.hook_state["pending_post_node_flow"] = [entry]
         res = await execute_tool(
             "run_node", state, node_type="_reviewer", user_note="测试派发",
-            node_inputs={"source_node_type": "hypothesis",
+            node_inputs={"source_node_type": "analysis",
                          "producer_run_id": "r_prod_ok",
                          "artifact_id": "pre_registration__revised"},
         )
@@ -317,7 +317,7 @@ def test_reviewer_retry_success_flips_entry_to_done():
              "artifacts": [{"id": "review_critique__c", "type": "review_critique",
                             "name": "c"}]}
         _finish_child(state, "_reviewer",
-                      {"source_node_type": "hypothesis", "producer_run_id": "r_prod_ok"},
+                      {"source_node_type": "analysis", "producer_run_id": "r_prod_ok"},
                       s, _reviewer_harness(), None)
         e = state.hook_state["pending_post_node_flow"][0]
         assert e["review_state"] == "done"
@@ -340,7 +340,7 @@ def test_second_reviewer_failure_stays_retryable_with_history():
         s = _truncated_reviewer_summary("r_rev_trunc2")
         s["state_dir"] = str(cdir)
         _finish_child(state, "_reviewer",
-                      {"source_node_type": "hypothesis", "producer_run_id": "r_prod_ok"},
+                      {"source_node_type": "analysis", "producer_run_id": "r_prod_ok"},
                       s, _reviewer_harness(), None)
         e = state.hook_state["pending_post_node_flow"][0]
         assert e["review_state"] == "failed_awaiting_human"   # 不自动第三次，回等人工
@@ -370,7 +370,7 @@ def test_decision_package_offers_retry_reviewer_and_no_proceed():
     # 选项集只有一处声明；正文是它的投影，不再各自构造（2026-08-19 事故）。
     offer = build_decision_offer(
         decision_id="r_prod_ok:ptest",
-        source_node_type="hypothesis",
+        source_node_type="analysis",
         action_ids=list(_REVIEW_FAILED_ACTIONS),
         recommended_action="retry_reviewer",
     )
@@ -378,7 +378,7 @@ def test_decision_package_offers_retry_reviewer_and_no_proceed():
     assert "proceed" not in offer.choice_ids()
 
     text = _render_decision_package(
-        source_node_type="hypothesis", producing_run_id="r_prod_ok",
+        source_node_type="analysis", producing_run_id="r_prod_ok",
         producing_summary="18 turns", artifact_ids_produced=["pre_registration__x"],
         curator_summary="", review_critique_json=None,
         review_failed_reason="reviewer 截断", review_unusable=True,
@@ -424,7 +424,7 @@ async def test_reviewer_retry_allowed_after_human_authorizes():
             state, {"type": "decision_package", "producing_run_id": "r_prod_ok"}, "1")
         res = await execute_tool(
             "run_node", state, node_type="_reviewer", user_note="测试派发",
-            node_inputs={"source_node_type": "hypothesis",
+            node_inputs={"source_node_type": "analysis",
                          "producer_run_id": "r_prod_ok"})
         if res.get("status") == "error":
             assert "人工还没授权" not in res.get("error", "")
@@ -489,7 +489,7 @@ def test_human_revise_keeps_flow_until_replacement_exists():
         )
         assert out["accepted_action"] == "revise"
         assert out["decision_state"] == "action_authorized"
-        assert out["authorized_target_node"] == "hypothesis"
+        assert out["authorized_target_node"] == "analysis"
         assert len(state.hook_state["pending_post_node_flow"]) == 1
 
 
@@ -542,14 +542,14 @@ def test_interrupted_authorized_action_is_retryable_after_restart():
                 "curator_state": "done",
                 "decision_state": "action_in_progress",
                 "authorized_action": "revise",
-                "authorized_target_node": "hypothesis",
+                "authorized_target_node": "analysis",
                 "action_attempt_count": 2,
             }
         )
         state.hook_state["pending_post_node_flow"] = [entry]
         assert recover_interrupted_decision_actions(state) == 1
         assert entry["decision_state"] == "action_authorized"
-        assert entry["authorized_target_node"] == "hypothesis"
+        assert entry["authorized_target_node"] == "analysis"
         assert entry["action_attempt_count"] == 2
         assert "interrupted" in entry["action_last_failure"]
         # Idempotent on subsequent calls in the same resumed process.
@@ -568,18 +568,18 @@ def test_completed_revision_replaces_old_flow_with_fresh_review_flow():
                 "decision_state": "action_in_progress",
                 "accepted_action": "revise",
                 "authorized_action": "revise",
-                "authorized_target_node": "hypothesis",
+                "authorized_target_node": "analysis",
             }
         )
         state.hook_state["pending_post_node_flow"] = [old]
         child_dir = state.root / "revised_hypothesis"
-        _child_record(child_dir, node_type="hypothesis", run_id="r_revised",
+        _child_record(child_dir, node_type="analysis", run_id="r_revised",
                       artifact_type="pre_registration", name="revised",
                       content="revised preregistration",
                       created_at="2026-07-22T00:00:00Z")
         summary = {
             "run_id": "r_revised",
-            "node_type": "hypothesis",
+            "node_type": "analysis",
             "status": "completed",
             "turns": 2,
             "state_dir": str(child_dir),
@@ -593,11 +593,11 @@ def test_completed_revision_replaces_old_flow_with_fresh_review_flow():
         }
         _finish_child(
             state,
-            "hypothesis",
+            "analysis",
             {},
             summary,
             NodeHarness(
-                node_type="hypothesis",
+                node_type="analysis",
                 required_output_artifact_types=["pre_registration"],
             ),
             None,
@@ -617,13 +617,13 @@ def test_failed_revision_returns_to_authorized_retry_state():
             {
                 "decision_state": "action_in_progress",
                 "authorized_action": "revise",
-                "authorized_target_node": "hypothesis",
+                "authorized_target_node": "analysis",
             }
         )
         state.hook_state["pending_post_node_flow"] = [entry]
         summary = {
             "run_id": "r_failed_revision",
-            "node_type": "hypothesis",
+            "node_type": "analysis",
             "status": "incomplete",
             "turns": 1,
             "state_dir": str(state.root / "missing-child"),
@@ -631,11 +631,11 @@ def test_failed_revision_returns_to_authorized_retry_state():
         }
         _finish_child(
             state,
-            "hypothesis",
+            "analysis",
             {},
             summary,
             NodeHarness(
-                node_type="hypothesis",
+                node_type="analysis",
                 required_output_artifact_types=["pre_registration"],
             ),
             None,
@@ -704,7 +704,7 @@ def test_retry_success_resets_the_decision_chain():
                                   "type": "review_critique", "name": "new"}]}
         from core.harness import NodeHarness
         _finish_child(state, "_reviewer",
-                      {"source_node_type": "hypothesis",
+                      {"source_node_type": "analysis",
                        "producer_run_id": "r_prod_ok"}, summary,
                       NodeHarness(node_type="_reviewer",
                                   required_output_artifact_types=["review_critique"]),
@@ -767,7 +767,7 @@ async def test_services_are_never_blocked_by_the_review_gate():
         state = _orch_state(Path(td))
         state.hook_state["_callable_nodes"] = ["*"]
         state.hook_state["pending_post_node_flow"] = [{
-            "producing_node": "hypothesis", "producing_run_id": "r_block",
+            "producing_node": "analysis", "producing_run_id": "r_block",
             "artifact_ids": ["pre_registration__x"],
             "review_state": "pending", "curator_state": "pending",
             "decision_state": "pending",

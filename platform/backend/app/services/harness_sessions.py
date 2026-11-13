@@ -1019,6 +1019,12 @@ async def _replay_worker_events(db: AsyncSession, *, run: Run, owner_user_id: st
             "%d malformed line(s), %d failed",
             run.id, report.ingested, report.already_known, report.malformed, report.failed,
         )
+    if report.failed:
+        raise HarnessSessionError(
+            "The execution history still contains an uncommitted source record",
+            code="harness_transcript_ingest_failed", error_type="TranscriptIngestError",
+            details={"failed_records": report.failed, "safe_to_resubmit": False},
+        )
 
 
 def terminal_result_on_disk(run: Run) -> tuple[dict | None, str]:
@@ -1369,8 +1375,6 @@ class _ProjectHarnessSession:
         #: 空 = 接回时它闲着。非空 = 有一轮在飞而**本进程没有发起它**：它的事件
         #: 与终止 result 会从 socket 送来，得有人按这个 id 接（`rejoin`）。
         self.inflight_request_id: str = ""
-        #: `rejoin` 只许接一次：第二个接的人会和第一个抢同一份终止事件。
-        self._rejoined_request_ids: set[str] = set()
         self.binding: AppRunBinding | None = None
         #: 放手时 worker 有没有回执（`_WorkerChannel.let_go`）。None = 没放过手，
         #: 或者这条传输没有回执可等（老 stdio）。
@@ -1743,8 +1747,14 @@ class _ProjectHarnessSession:
         try:
             return await asyncio.wait_for(read_terminal(), timeout=timeout_seconds)
         except TimeoutError as exc:
-            await self._kill()
-            raise HarnessSessionStaleError("Harness control operation timed out") from exc
+            # A control acknowledgement owns this waiter, not the scientific
+            # conversation sharing its worker. Initialization/cancellation have
+            # their own process owners; this timeout must not kill unrelated work.
+            raise HarnessSessionError(
+                "Harness control acknowledgement timed out; delivery is unconfirmed",
+                code="harness_control_timeout", error_type="TimeoutError",
+                details={"worker_alive": self.worker.alive, "safe_to_resubmit": False},
+            ) from exc
 
     async def _reconnect_conversation(self, queue: asyncio.Queue) -> bool:
         """Repair this transport without replaying an RPC or replacing its worker.
@@ -1808,16 +1818,11 @@ class _ProjectHarnessSession:
         会实时送来；断连到重连之间那段，调用方在 `before_wait` 里按水位补
         （它在观众登记**之后**跑，于是两段之间没有缝）。
 
-        只许接一次：第二个接的人会和第一个抢同一份终止事件。占用由调用方的
-        `claim()` 持有，与 turn / answer 同一规矩。
+        同时只能有一个观察者，生命周期由调用方的 `claim()` 持有。
+        观察者失败或取消后可以接回同一 RPC，不再维护一份永久的“曾接回”集合。
         """
-        if request_id in self._rejoined_request_ids:
-            raise HarnessSessionError(
-                f"Harness turn {request_id} is already being rejoined", code="already_rejoined"
-            )
         if not self.alive or not getattr(self.channel, "usable", False):
             raise HarnessSessionStaleError("The project Harness process is no longer alive")
-        self._rejoined_request_ids.add(request_id)
         async with self._awaiting(
             request_id, on_progress, on_protocol_event, conversation=True
         ) as queue:
@@ -2619,11 +2624,13 @@ class HarnessSessionManager:
                 raise HarnessSessionStaleError(
                     "The live Harness worker is not bound to this user and Run"
                 )
+        async with session.claim():
+            # Check at the point of use: another collector may have settled
+            # this request while we waited for its operation claim.
             if session.inflight_request_id != request_id:
                 raise HarnessSessionStaleError(
                     f"Harness worker is not running turn {request_id} any more"
                 )
-        async with session.claim():
             return await session.rejoin(
                 request_id=request_id,
                 on_progress=on_progress,
@@ -2653,6 +2660,13 @@ class HarnessSessionManager:
         """
         session = self._sessions.get(self._key(project_id, session_id))
         return bool(session and session.alive)
+
+    def owns_request(self, project_id: str, session_id: str, run_id: str, request_id: str) -> bool:
+        """Positive ownership of this exact RPC, independent of its observer."""
+        session = self._sessions.get(self._key(project_id, session_id))
+        return bool(session and session.alive and session.binding
+                    and session.binding.run_id == run_id
+                    and session.inflight_request_id == request_id)
 
     def paused_binding(self, project_id: str, session_id: str) -> AppRunBinding | None:
         """它**停下来等人**了吗 —— 只服务于"能不能把答案递进去"。"""
@@ -3339,13 +3353,9 @@ async def mark_orphaned_harness_runs(
                         live.binding = AppRunBinding(
                             owner, candidate.session_id, candidate.id, candidate.session_id
                         )
-                # 接上了，还要把**后端不在的那段时间**补回来（P0-3）。
-                #
-                # worker 一直在说话，事件一直在落盘 —— 只是当时没有人在听。
-                # 不补的话，库里这条 run 的时间线在重启处断一截，而它下面的
-                # 研究其实一路做到了现在：UI 停在几小时前，用户看到的是"卡住了"。
-                with suppress(Exception):  # 补不动也不该拦住启动
-                    await _replay_worker_events(db, run=candidate, owner_user_id=owner)
+                # The adoption handler owns replay, after its live observer is
+                # registered. Replaying here as well created a second writer
+                # racing that handler and its socket reader during startup.
     if run_ids is not None:
         query = query.where(Run.id.in_(run_ids))
     runs = list((await db.execute(query)).scalars().all())

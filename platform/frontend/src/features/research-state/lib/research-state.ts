@@ -11,8 +11,8 @@
 import type { RecordHead } from "@/lib/api";
 import { say, type Language, type Phrase } from "../../../shared/i18n/language.ts";
 
-/** Analysis 职责所在的节点类型（与后端 ANALYSIS_NODES 一致，hypothesis 优先）。 */
-const ANALYSIS_NODES = ["hypothesis", "analysis"] as const;
+/** Prefer the canonical producer; legacy records remain readable. */
+const ANALYSIS_NODES = ["analysis", "hypothesis"] as const;
 
 export const RESEARCH_STATE_ID = "research_state__research_state";
 
@@ -138,7 +138,7 @@ export function verdictTone(verdict: string): BadgeTone {
 
 /**
  * verdict / 假设状态是 Analysis 写进账本的枚举值，界面上换成人话。含义取自
- * `nodes/hypothesis/harness.yaml` 的「verdict 决定下一步」那一段。表里没有的照原样显示。
+ * `nodes/analysis/harness.yaml` 的「verdict 决定下一步」那一段。表里没有的照原样显示。
  */
 const VERDICT_LABEL: Record<string, Phrase> = {
   continue: { zh: "按计划继续", en: "Continue" },

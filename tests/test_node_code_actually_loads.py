@@ -2,7 +2,7 @@
 
 ## 为什么（2026-08-21 实测）
 
-`nodes/hypothesis/tools/artifact_save.py` 里有一行
+`nodes/analysis/tools/artifact_save.py` 里有一行
 
     f"... {sorted(t for t in ("research_plan", ...))} ..."
 
@@ -10,10 +10,10 @@ f-string 里嵌同种引号是 PEP 701 —— **Python 3.12+ 才合法**。CI �
 （node:20-bookworm）是 Python 3.11，这行是 SyntaxError。
 
 后果不是"红"，是**静默**：`core.bootstrap` 对节点模块的 import 失败一向是
-`log.warning` 然后继续，于是 `nodes.hypothesis.tools` 和 `nodes.hypothesis.hooks`
+`log.warning` 然后继续，于是 `nodes.analysis.tools` 和 `nodes.analysis.hooks`
 整个没加载 —— hypothesis 节点**一件工具都没注册**，却照常启动、照常开跑。
 harness.yaml 里点名的 11 个工具（`audit_*` 全套 / `get_research_goal` /
-`update_research_state` / `validate_hypothesis_outputs`）模型一个都调不到。
+`update_research_state` / `validate_analysis_outputs`）模型一个都调不到。
 现场看起来是"模型不好好干活"，真相是"代码没加载"。日志里只有两行 WARNING。
 
 这一片管两件事：
@@ -124,16 +124,16 @@ def test_load_harness_refuses_a_node_whose_code_did_not_load(monkeypatch) -> Non
 
     bootstrap_mod.bootstrap()
     monkeypatch.setitem(
-        bootstrap_mod._node_import_failures, "hypothesis",
-        {"nodes.hypothesis.tools": "SyntaxError: injected"},
+        bootstrap_mod._node_import_failures, "analysis",
+        {"nodes.analysis.tools": "SyntaxError: injected"},
     )
 
     with pytest.raises(RuntimeError) as excinfo:
         load_harness("hypothesis")
     message = str(excinfo.value)
-    assert "hypothesis" in message
+    assert "analysis" in message
     # 报错必须把真正的原因带到眼前，而不是只说"启动失败"。
-    assert "nodes.hypothesis.tools" in message and "injected" in message
+    assert "nodes.analysis.tools" in message and "injected" in message
 
     # 别的节点不受影响：一个节点坏了不该拖垮全框架。
     load_harness("literature")

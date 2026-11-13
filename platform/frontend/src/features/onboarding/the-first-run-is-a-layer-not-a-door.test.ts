@@ -183,7 +183,7 @@ test("气泡说的是这块地方替你做什么，不是它叫什么", () => {
   for (const stop of ["根据你订阅的学科", "每项研究对应一个项目", "可供会话使用的"]) {
     assert.ok(STOPS.includes(stop), `工作区那一圈少了一站：${stop}`);
   }
-  for (const stop of ["在这里新建会话", "你添加的资料", "项目的成果都在这里", "这个项目目前的进展"]) {
+  for (const stop of ["展开左侧项目即可切换会话", "你添加的资料", "项目的成果都在这里", "这个项目目前的进展"]) {
     assert.ok(STOPS.includes(stop), `项目那一圈少了一站：${stop}`);
   }
 });
