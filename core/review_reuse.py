@@ -24,15 +24,15 @@ _WINDOWS = os.name == "nt"
 def _windows_fd_path(fd: int) -> str:
     """Query the opened handle, not its potentially replaced input pathname."""
     import ctypes
-    import msvcrt
     from ctypes import wintypes
+    from msvcrt import get_osfhandle
 
     # https://learn.microsoft.com/windows/win32/api/fileapi/
     # nf-fileapi-getfinalpathnamebyhandlew (normalized DOS/UNC path, flags=0).
     query = ctypes.WinDLL("kernel32", use_last_error=True).GetFinalPathNameByHandleW
     query.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
     query.restype = wintypes.DWORD
-    handle = msvcrt.get_osfhandle(fd)
+    handle = get_osfhandle(fd)
     size = 512
     while True:
         buffer = ctypes.create_unicode_buffer(size)
