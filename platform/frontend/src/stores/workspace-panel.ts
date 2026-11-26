@@ -25,6 +25,7 @@ export type PanelFileTab = {
 
 /** 「研究进程」那一栏的固定 id。它由会话页提供内容，别的页面没有它。 */
 export const RESEARCH_TAB_ID = "research";
+export const OUTPUTS_TAB_ID = "outputs";
 
 export function fileTabId(tab: PanelFileTab): string {
   return `file:${tab.projectId}:${tab.sessionId}:${tab.path}`;
@@ -33,6 +34,7 @@ export function fileTabId(tab: PanelFileTab): string {
 type WorkspacePanelStore = {
   open: boolean;
   activeTabId: string;
+  returnTabId: string;
   files: PanelFileTab[];
   /** 打开一个文件并切过去。已经开着的不重复加，只是激活它。 */
   openFile: (tab: PanelFileTab) => void;
@@ -47,6 +49,7 @@ type WorkspacePanelStore = {
 export const useWorkspacePanel = create<WorkspacePanelStore>((set) => ({
   open: false,
   activeTabId: RESEARCH_TAB_ID,
+  returnTabId: RESEARCH_TAB_ID,
   files: [],
 
   openFile: (tab) =>
@@ -66,18 +69,21 @@ export const useWorkspacePanel = create<WorkspacePanelStore>((set) => ({
       if (index < 0) return state;
       const files = state.files.filter((_, at) => at !== index);
       if (state.activeTabId !== id) return { ...state, files };
-      // 关掉当前这个之后落到哪：右边的邻居，没有就左边的，都没有就回研究进程。
+      // 关掉当前这个之后落到哪：右边的邻居，没有就左边的，都没有就回先前的内容页签。
       // 直接回研究进程的话，连着关几个标签会在中间反复跳回去。
       const next = files[index] ?? files[index - 1];
       return {
         ...state,
         files,
-        activeTabId: next ? fileTabId(next) : RESEARCH_TAB_ID,
+        activeTabId: next ? fileTabId(next) : state.returnTabId,
       };
     }),
 
-  activate: (id) => set({ open: true, activeTabId: id }),
-  openResearch: () => set({ open: true, activeTabId: RESEARCH_TAB_ID }),
+  activate: (id) => set((state) => ({
+    open: true, activeTabId: id,
+    returnTabId: id === RESEARCH_TAB_ID || id === OUTPUTS_TAB_ID ? id : state.returnTabId,
+  })),
+  openResearch: () => set({ open: true, activeTabId: RESEARCH_TAB_ID, returnTabId: RESEARCH_TAB_ID }),
   toggle: () => set((state) => ({ open: !state.open })),
   close: () => set({ open: false }),
 }));

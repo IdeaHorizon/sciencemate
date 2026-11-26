@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
 
@@ -30,6 +31,7 @@ class FeedItemOut(FeedModel):
     #: 这条有没有配图。**不给外链**：前端拿到 URL 就会有人直接渲染它，而那
     #: 等于每次打开首页都向出版商广播一次。要图走 /feed/items/{id}/image。
     saved: bool = False
+    saved_folder_id: str | None = None
     viewed: bool = False
     extra: dict = Field(default_factory=dict)
 
@@ -176,8 +178,38 @@ class SubscriptionSearchOut(FeedModel):
     scholars: list[ScholarSubscription] = Field(default_factory=list)
 
 
-class EngagementWrite(FeedModel):
+class SaveLocationWrite(FeedModel):
+    folder_id: UUID | None = None
+
+
+class SaveFolderWrite(FeedModel):
+    name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def trim_name(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class SaveFolderOut(FeedModel):
+    id: str
+    name: str
+    item_count: int = 0
+
+
+class SaveFoldersOut(FeedModel):
+    folders: list[SaveFolderOut] = Field(default_factory=list)
+    default_count: int = 0
+
+
+class EngagementWrite(SaveLocationWrite):
     action: Literal["impression", "open", "save", "dismiss"]
+
+    @model_validator(mode="after")
+    def folder_is_only_for_saves(self):
+        if self.action != "save" and "folder_id" in self.model_fields_set:
+            raise ValueError("A save folder can only be set for the save action")
+        return self
 
 
 class SharedLinkWrite(FeedModel):
@@ -189,7 +221,7 @@ class SharedLinkWrite(FeedModel):
     visibility: Literal["platform", "organization"] = "organization"
 
 
-class SavedPaperWrite(FeedModel):
+class SavedPaperWrite(SaveLocationWrite):
     """文献检索里的一篇，收进「收藏」。
 
     检索结果来自外部检索（OpenAlex、学校馆藏……），没有对应的资讯条目；身份按 DOI /
@@ -227,6 +259,9 @@ class CurationOut(FeedModel):
     inferred_domains: list[str] = Field(default_factory=list)
     inferred_domain_labels: list[str] = Field(default_factory=list)
     inferred_queries: list[str] = Field(default_factory=list)
+    project_status: Literal["current", "no_projects", "unavailable", "pending"] = "pending"
+    local_project_count: int = 0
+    remote_project_count: int = 0
 
 
 class CurationWrite(FeedModel):

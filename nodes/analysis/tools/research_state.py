@@ -73,19 +73,7 @@ def load_versions(state: State) -> list[tuple[int, dict[str, Any]]]:
     """
     from core import research_state_reader as _rs
 
-    worktree = getattr(state, "project_worktree", None)
-    out: dict[int, dict[str, Any]] = {}
-    if worktree:
-        for record in _rs.iter_records(worktree):
-            version = _rs.version_of(record)
-            if version >= 1:
-                out[version] = record
-    else:
-        for record in state.artifact_versions(CANONICAL_ID):
-            version = _rs.version_of(record)
-            if version >= 1:
-                out[version] = record
-    return sorted(out.items(), key=lambda item: item[0])
+    return _rs.versions_for_state(state)
 
 
 def current_state(state: State) -> dict[str, Any] | None:
@@ -404,40 +392,9 @@ async def _update_research_state(
 
 
 async def _read_research_state(state: State, version: int | None = None, **_: Any) -> dict[str, Any]:
-    versions = load_versions(state)
-    if not versions:
-        return {
-            "status": "success",
-            "exists": False,
-            "message": (
-                "本项目还没有 research_state —— 这是第一轮 Analysis。"
-                "走完 prereg 冻结后用 update_research_state 建立 v1。"
-            ),
-        }
-    if version is None:
-        picked_version, record = versions[-1]
-    else:
-        matches = [item for item in versions if item[0] == int(version)]
-        if not matches:
-            return {
-                "status": "error",
-                "error": f"没有 v{version}",
-                "available": [item[0] for item in versions],
-            }
-        picked_version, record = matches[0]
-    meta = _meta(record)
-    return {
-        "status": "success",
-        "exists": True,
-        "version": picked_version,
-        "available_versions": [item[0] for item in versions],
-        "verdict": meta.get("verdict"),
-        "hypotheses": meta.get("hypotheses") or [],
-        "gaps": meta.get("gaps") or [],
-        "next_steps": meta.get("next_steps") or [],
-        "completed_experiments": meta.get("completed_experiments") or [],
-        "content": str(record.get("content") or ""),
-    }
+    from core import research_state_reader
+
+    return research_state_reader.read_for_state(state, version)
 
 
 _HYPOTHESIS_ITEM_SCHEMA = {

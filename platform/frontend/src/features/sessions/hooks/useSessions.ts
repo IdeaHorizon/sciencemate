@@ -25,7 +25,11 @@ import { invalidateSessionAfterTerminal } from "../lib/session-terminal-invalida
 import { clearStaleSessionPublishError } from "../lib/publish-error-policy";
 import type { ChatTerminalState } from "@/features/chat";
 
-export function useProjectSessions(projectId: string | undefined, mode: SessionDataMode = "api") {
+export function useProjectSessions(
+  projectId: string | undefined,
+  mode: SessionDataMode = "api",
+  options: { refetchInterval?: number | false } = {},
+) {
   const { user } = useAuth();
   // 适配时补的几个字（未命名、项目成员）按这一屏的语言写；换语言时
   // InterfaceSettingsProvider 会把所有查询作废重取，不用把语言放进 queryKey。
@@ -33,6 +37,10 @@ export function useProjectSessions(projectId: string | undefined, mode: SessionD
   return useQuery({
     queryKey: projectId ? qk.sessions(projectId, mode) : ["sessions", "none"],
     queryFn: projectId ? () => listProjectSessions(projectId, lang, user, mode) : skipToken,
+    refetchInterval: options.refetchInterval ?? false,
+    refetchIntervalInBackground: false,
+    // A visible sidebar must catch up immediately after background polling stops.
+    refetchOnWindowFocus: options.refetchInterval ? "always" : false,
   });
 }
 

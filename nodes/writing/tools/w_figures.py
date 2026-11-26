@@ -8,14 +8,62 @@ H8 判红、再派一轮。语言、印刷宽度、字号下限、格式、重�
 """
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 from typing import Any
 
+from core.artifact_provenance import hash_file
 from core.tool_registry import ToolDefinition, register_tool
 
-from .w_brief import load_brief
+from .w_brief import load_brief, load_outline
+from .w_common import clip, worktree_root
+from .w_dossier import build_dossier
 
 _RENAME_PAIR = re.compile(r"([A-Za-z0-9_\-]+)\s*(?:→|->|=>|改为|改成|改叫|替换为|重命名为)\s*([^\s,，;；、]+)")
+
+
+def _figure_sources(state: Any, identities: list[str], dossier: dict
+                    ) -> tuple[list[str], list[dict]]:
+    """Dossier aliases are reading locations, not artifact IDs or new evidence."""
+    root = worktree_root(state)
+    docs = {doc["doc_id"]: doc for doc in dossier.get("docs", []) if doc.get("doc_id")}
+    sources, context = [], []
+    records = None
+    hashes = {}
+    for identity in dict.fromkeys(identities):
+        if identity == "user_prompt":
+            context.append({"dossier_id": identity,
+                            "text": (load_brief(state) or {}).get("source_request", "")})
+            continue
+        entry = dossier.get("entries", {}).get(identity) or docs.get(identity)
+        if not entry:
+            sources.append(identity)  # run_node checks real artifact references.
+            continue
+        path = root / entry["path"] if root else None
+        text = entry.get("text")
+        if text is None and path and path.is_file():
+            text = path.read_text(encoding="utf-8", errors="replace")
+        context.append({"dossier_id": identity, "source_path": str(path) if path else entry["path"],
+                        "text": clip(text or "", 30000)})
+        # An imported source may already have a real artifact identity. Preserve
+        # it and its provenance; never mint writing-owned scientific evidence.
+        if records is None:
+            records = [(item["id"], state.read_artifact(item["id"]))
+                       for item in state.list_artifacts()]
+        for artifact_id, record in records:
+            if not record or path is None:
+                continue
+            imported_from = ((record.get("provenance") or {}).get("source_path")
+                             or (record.get("metadata") or {}).get("imported_from"))
+            if imported_from and Path(imported_from).resolve() == path.resolve():
+                # A prior import of a now changed file must not replace the
+                # selected dossier text with stale scientific content.
+                if path not in hashes:
+                    hashes[path] = hash_file(path)[0] if path.is_file() else None
+                if hashes[path] == (record.get("provenance") or {}).get("source_sha256"):
+                    sources.append(artifact_id)
+    return list(dict.fromkeys(sources)), context
 
 
 def _policy_from_brief(brief: dict) -> dict[str, Any]:
@@ -94,8 +142,36 @@ async def _request_figures(state: Any, requests: list[Any], **_: Any) -> dict:
     if problems:
         return {"status": "error", "error": "请求不完整：" + "；".join(problems),
                 "policy_applied": _policy_from_brief(brief)}
+    outline = load_outline(state) or {}
+    planned = {str(figure.get("key")): figure for figure in outline.get("figures") or []}
+    focus = outline.get("editorial_focus") or {}
+    dossier = build_dossier(state)
+    forwarded = []
+    for request in normalized:
+        figure = planned.get(str(request.pop("figure_key", ""))) or {}
+        context = {key: figure[key]
+                   for key in ("claim", "comparison", "reader_takeaway", "evidence")
+                   if figure.get(key)}
+        if isinstance(focus, dict):
+            context.update({key: focus[key]
+                            for key in ("main_question", "main_finding") if focus.get(key)})
+        identities = [*(request.get("source_artifact_ids") or []), *(figure.get("evidence") or [])]
+        sources, evidence = _figure_sources(state, identities, dossier)
+        if sources:
+            request["source_artifact_ids"] = sources
+            forwarded.extend(sources)
+        else:
+            request.pop("source_artifact_ids", None)
+        if evidence:
+            context["source_material"] = evidence
+        if context:
+            request["intent"] += (
+                "\n本稿已选定的主张与比较目标（据此服务读者，不新增研究问题）：\n"
+                + json.dumps(context, ensure_ascii=False))
     from shared.tools.run_node import _run_node_tool
-    result = await _run_node_tool(state, node_type="postprocess", node_inputs={"visual_requests": normalized})
+    result = await _run_node_tool(
+        state, node_type="postprocess", node_inputs={"visual_requests": normalized},
+        forward_artifact_ids=list(dict.fromkeys(forwarded)))
     try:
         state.append_transcript("writing_figures_requested", n=len(normalized),
                                 schematics=sum(1 for r in normalized if r.get("asset_kind") == "schematic"),
@@ -116,7 +192,10 @@ register_tool(
             "把图的需求交给图表服务（postprocess）。你只写每张图要让读者看出什么（intent）、asset_kind"
             "（quantitative / schematic / composite）、数据来源 source_artifact_ids、示意图的 spec（节点与边）；"
             "语言政策、印刷宽度、字号下限、pdf+png、用户的禁用词与重命名映射由框架按简报自动带上，不用你写。"
-            "示意图每种结构一张；多面板 ≤4 且横向。返回图表服务的结果与实际带上的政策。"
+            "figure_key 可对应持久提纲中的图，框架带上该图的主张、比较目标、读者所得信息。"
+            "卷宗证据解析为可读原文和路径，已有artifact身份通过source_artifact_ids转发。"
+            "是否制图由论证需要决定，证明/反例/表格无需逐题配图；多面板 ≤4 且横向。"
+            "返回图表服务的结果与实际带上的政策。"
         ),
         parameters_schema={
             "type": "object",
@@ -127,6 +206,10 @@ register_tool(
                         "type": "object",
                         "properties": {
                             "intent": {"type": "string"},
+                            "figure_key": {
+                                "type": "string",
+                                "description": "对应outline.figures.key的主张/比较/读者目标",
+                            },
                             "asset_kind": {"type": "string", "enum": ["quantitative", "schematic", "composite"]},
                             "source_artifact_ids": {"type": "array", "items": {"type": "string"}},
                             "spec": {"type": ["object", "string"]},

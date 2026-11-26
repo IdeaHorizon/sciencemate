@@ -260,6 +260,9 @@ def _attempt_response(attempt: RunAttempt) -> RunAttemptResponse:
 
 def _event_response(event: ExecutionEvent, lang: str) -> ExecutionEventResponse:
     """一条事件送给这一屏。平台写进事件的话两种语言都存了（`in_either_language`），这里挑一边。"""
+    from app.services.execution_presentation import presentation_event
+
+    kind, payload = presentation_event(event.kind, event.source or {}, event.payload or {})
     return ExecutionEventResponse(
         schema_version=event.schema_version,
         id=event.id,
@@ -272,9 +275,9 @@ def _event_response(event: ExecutionEvent, lang: str) -> ExecutionEventResponse:
         parent_run_id=event.parent_run_id,
         origin=event.origin,
         source=event.source,
-        kind=event.kind,
+        kind=kind,
         visibility=event.visibility,
-        payload={key: spoken(value, lang) for key, value in (event.payload or {}).items()},
+        payload={key: spoken(value, lang) for key, value in payload.items()},
     )
 
 

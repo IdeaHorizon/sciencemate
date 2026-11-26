@@ -1,13 +1,13 @@
 import {say, type Language, type Phrase} from "../../../shared/i18n/language.ts";
 import type {api, LiteratureQueryGroup, LiteratureSearchResponse} from "@/lib/api";
 import type {CnkiCollector, CnkiJob, CnkiDocumentKind} from "../api/cnki";
-import {collectChineseCategories, limitCategories, mergeLiteratureResults, type SearchChannel} from "./bilingual-search.ts";
+import {cnkiNeedsRetry, collectChineseCategories, limitCategories, mergeLiteratureResults, type SearchChannel} from "./bilingual-search.ts";
 
 type Dependencies = {
   stream: typeof api.streamLiteratureSearch;
   plan: (query:string)=>Promise<{search_plan:LiteratureQueryGroup[]}>;
   status: ()=>Promise<{collector:CnkiCollector}>;
-  create: (query:string,limit:number|null,kind?:CnkiDocumentKind)=>Promise<CnkiJob>;
+  create: (query:string,limit:number|null,kind?:CnkiDocumentKind,searchId?:string)=>Promise<CnkiJob>;
   read: (id:string,cursor?:string)=>Promise<CnkiJob>;
   retry: (id:string)=>Promise<unknown>;
   resetSession?: (jobIds:string[])=>Promise<unknown>;
@@ -55,17 +55,36 @@ export function createAcademicSearchSession(io: Dependencies) {
     void cancel?.().catch(()=>console.warn(t({zh:"上次采集未能停止",en:"Previous collection could not be stopped"})));
     language=input.language;
     const onlyChinese = input.source === "cnki", limit = input.limit ?? null;
-    let active = true, chineseStarted = false, resetting = false;
+    let active = true, chineseStarted = false, observation = 0, retrying = false, resetting = false;
+    // getRandomValues also works on the HTTP-hosted web UI (randomUUID does not).
+    const searchId = Array.from(crypto.getRandomValues(new Uint8Array(16)),value=>value.toString(16).padStart(2,"0")).join("");
     const transport: {stop?: () => void} = {};
     let searchPlan: LiteratureQueryGroup[] = [], international: LiteratureSearchResponse | undefined;
     let completedInternational: LiteratureSearchResponse | undefined;
     let nextInternational:Record<string,unknown>|undefined;
     let chinese: LiteratureSearchResponse | undefined;
     const jobIds = new Set<string>();
+    const retryableIds = new Set<string>();
+    // Within this search, reopening observation after a retry reads the
+    // original jobs, including categories which are still running.
+    const existingJobs = new Map<string,Promise<CnkiJob>>();
+    const remember = (job:CnkiJob) => {
+      if (cnkiNeedsRetry(job.state)) retryableIds.add(job.id); else retryableIds.delete(job.id);
+      if (["completed","cancelled"].includes(job.state)) jobIds.delete(job.id); else jobIds.add(job.id);
+      return job;
+    };
     retry = async () => {
-      if (!active || resetting) return;
-      try { await Promise.all([...jobIds].map(io.retry)); }
-      catch (err) { channel("cnki",{state:"error",detail:err instanceof Error ? err.message : String(err)}); }
+      if (!active || resetting || retrying) return;
+      // A rejected profile needs the same recovery path as the automatic retry.
+      if (state.channels.cnki?.resettable && io.resetSession && jobIds.size) {
+        await resetChinese?.(); return;
+      }
+      retrying=true;
+      try {
+        await Promise.all([...retryableIds].map(io.retry));
+        if (active) {chineseStarted=false;beginChinese(searchPlan);}
+      } catch (err) { channel("cnki",{state:"error",detail:err instanceof Error ? err.message : String(err)}); }
+      finally { retrying=false; }
     };
     resetChinese = async () => {
       if (!active || resetting || !io.resetSession || !jobIds.size) return;
@@ -73,7 +92,10 @@ export function createAcademicSearchSession(io: Dependencies) {
       try {
         await io.resetSession([...jobIds]);
         channel("cnki",{state:"queued",detail:t({zh:"正在备份旧会话并建立新的知网采集会话",en:"Backing up the old CNKI session and starting a fresh one"})});
-        if (active) setCnkiPending(true);
+        if (active) {
+          setCnkiPending(true);
+          chineseStarted=false;beginChinese(searchPlan);
+        }
       } catch (err) {
         channel("cnki",{state:"error",resettable:true,detail:err instanceof Error ? err.message : String(err)});
       } finally {
@@ -101,28 +123,36 @@ export function createAcademicSearchSession(io: Dependencies) {
     };
     const beginChinese = (groups: LiteratureQueryGroup[]) => {
       if (!active || chineseStarted || !groups.length) return;
+      const generation=++observation;
+      const observing=()=>active && generation===observation;
+      const observed=(job:CnkiJob)=>observing()?remember(job):job;
       chineseStarted = true; searchPlan = groups; setPlan(groups); setCnkiPending(true);
+      const retainedChinese = chinese;
       void collectChineseCategories(groups, {
         status:()=>io.status(), create:async(query, count, kind)=>{
-          const job=await io.create(query,count,kind);
-          if (!["completed","cancelled"].includes(job.state)) {
-            if (!active && io.cancelJob) await io.cancelJob(job.id);
-            else jobIds.add(job.id);
-          }
-          return job;
+          const key=JSON.stringify([kind,query,count]);
+          const previous=existingJobs.get(key);
+          if (previous) return observed(await io.read((await previous).id));
+          const request=io.create(query,count,kind,searchId);
+          existingJobs.set(key,request);
+          try {
+            const job=await request;
+            if (!active && io.cancelJob && !["completed","cancelled"].includes(job.state)) await io.cancelJob(job.id);
+            return observed(job);
+          } catch (err) {existingJobs.delete(key);throw err;}
         },
-        read:async(id,cursor)=>{
-          const job=await io.read(id,cursor);
-          if (["completed","cancelled"].includes(job.state)) jobIds.delete(id);
-          return job;
-        }, sleep:io.sleep, active:()=>active,
+        read:async(id,cursor)=>observed(await io.read(id,cursor)),
+        sleep:io.sleep, active:observing,
         update:(state, results)=>{
           channel("cnki",state);
           if (active) setCnkiPending(["queued", "searching", "planning"].includes(state.state)
             || Boolean(state.groups?.some(group => ["queued", "working"].includes(group.state))));
-          if (results.length) {chinese = mergeLiteratureResults(input.query, searchPlan, results); publish();}
+          if (results.length) {
+            chinese = mergeLiteratureResults(input.query, searchPlan, [...results,...(retainedChinese?[retainedChinese]:[])]);
+            publish();
+          }
         },
-      }, language).finally(()=>{if (active) setCnkiPending(false);});
+      }, language).finally(()=>{if (observing()) setCnkiPending(false);});
     };
     if (onlyChinese) {
       void io.plan(input.query).then(result=>{

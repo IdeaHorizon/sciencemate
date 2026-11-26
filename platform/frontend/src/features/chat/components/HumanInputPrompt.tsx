@@ -68,7 +68,7 @@ export function HumanInputPrompt({
   useEffect(() => {
     setSelectedId(null);
     setNote("");
-  }, [pause.askingRunId, pause.question]);
+  }, [pause.askingRunId, pause.offerId, pause.question]);
   const selected = useMemo(
     () => pause.options.find((option) => option.id === selectedId),
     [pause.options, selectedId],

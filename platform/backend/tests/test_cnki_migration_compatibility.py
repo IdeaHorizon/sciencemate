@@ -80,6 +80,14 @@ def test_existing_cnki_records_survive_head_merge(tmp_path, monkeypatch, install
     database = tmp_path / "existing.sqlite3"
     metadata = json.dumps({"title": "已采集文献", "abstract": "已缓存摘要"})
     with sqlite3.connect(database) as connection:
+        # Other tables already exist at these historical revisions. Keep their
+        # minimal pre-upgrade shape while exercising CNKI's data preservation.
+        connection.execute("CREATE TABLE projects (id TEXT PRIMARY KEY)")
+        connection.execute("CREATE TABLE model_backend_configs (id TEXT PRIMARY KEY)")
+        connection.execute(
+            "CREATE TABLE feed_engagements (id TEXT PRIMARY KEY, user_id TEXT, "
+            "item_id TEXT, action TEXT, created_at DATETIME)"
+        )
         connection.execute("CREATE TABLE cnki_papers (id TEXT PRIMARY KEY, user_id TEXT, "
                            "metadata_json TEXT, observed_at DATETIME)")
         connection.execute("INSERT INTO cnki_papers VALUES (?, ?, ?, ?)",
@@ -95,6 +103,7 @@ def test_existing_cnki_records_survive_head_merge(tmp_path, monkeypatch, install
     command.upgrade(config, "head")
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT version_num FROM alembic_version").fetchall() == [
-            ("056_analysis_node_name",)]
+            ("059_feed_save_folders",)
+        ]
         assert connection.execute("SELECT metadata_json, updated_at FROM cnki_papers").fetchone() == (
             metadata, "2026-11-09 10:00:00")

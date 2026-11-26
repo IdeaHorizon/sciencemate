@@ -396,3 +396,11 @@ export function rememberProjectSession(projectId: string, sessionId: string) {
 export function recalledProjectSession(projectId: string) {
   return localStorage.getItem(`atrium.project.${projectId}.recent_session_id`);
 }
+
+/** Resume the original completion continuation through the concurrent management channel. */
+export async function resumeSessionCompletion(projectId: string, sessionId: string, runId: string) {
+  return requestJson<{ status: string; runId: string }>(
+    `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(sessionId)}/completions/${encodeURIComponent(runId)}/resume`,
+    { method: "POST" },
+  );
+}

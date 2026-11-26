@@ -97,6 +97,8 @@ BY_TABLE: dict[str, dict[str, str]] = {
         "name": DECISION, "description": DECISION, "research_domain": DECISION,
         "entry_type": DECISION, "status": DECISION, "owner_id": IDENTITY,
         "visibility": DECISION,
+        # Durable user intent, retained for cleanup retry after restart.
+        "deletion_requested_at": DECISION,
     },
     "project_configs": {
         "operation_mode": DECISION, "reporting_level": DECISION,
@@ -137,6 +139,7 @@ BY_TABLE: dict[str, dict[str, str]] = {
         "last_probe_at": PAST, "last_probe_ok": PAST, "last_probe_detail": PAST, "last_vision_ok": PAST, "last_vision_detail": PAST,
         # 这一行替哪个组织、服务器上哪一条记着（组织提供的模型）—— 挂在谁下面，身份。
         "provided_by_connection": IDENTITY, "provided_backend_id": IDENTITY,
+        "inherited_from_desktop": IDENTITY, "inherited_backend_id": IDENTITY,
         "credential_source": DECISION,
         "encrypted_api_key": DECISION,
         "context_window_tokens": DECISION,
@@ -244,6 +247,11 @@ BY_TABLE: dict[str, dict[str, str]] = {
         "visibility": DECISION, "extra": PAST,
         "domains": PAST,
     },
-    "feed_engagements": {"item_id": IDENTITY, "action": PAST},
+    "feed_save_folders": {"name": DECISION},  # The user names a private save location.
+    "feed_engagements": {
+        "item_id": IDENTITY, "action": PAST,
+        # Moving a save is an explicit user choice, not a derived article state.
+        "folder_id": DECISION,
+    },
     "feed_daily_picks": {"pick_date": IDENTITY, "picks": PROJECTION},
 }

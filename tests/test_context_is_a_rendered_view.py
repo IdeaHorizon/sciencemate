@@ -505,9 +505,9 @@ async def test_compression_that_drops_tool_messages_does_not_strand_the_pointer(
             LLMMessage(role="system", content="……历史摘要……")]
 
     monkeypatch.setattr(_sm, "should_compress",
-                        lambda h, m, t, state=None: (True, 1))
+                        lambda h, m, t, state=None, **kwargs: (True, 1))
     monkeypatch.setattr(_sm, "run_summarizer",
-                        lambda h, st, m, llm, t, est: _nuking_strategy(
+                        lambda h, st, m, llm, t, est, **kwargs: _nuking_strategy(
                             type("C", (), {"messages": m})()))
 
     harness = NodeHarness(node_type="literature", max_turns=12, tools=["read_file"],

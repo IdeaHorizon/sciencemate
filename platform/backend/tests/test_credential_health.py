@@ -295,3 +295,24 @@ async def test_an_endpoint_that_demands_a_key_says_so_instead_of_rejecting_one(m
     assert ok is None, "不是 False —— 没有凭据就谈不上被拒"
     assert "requires a credential" in detail
     assert mb.backend_status(_selfhosted(last_probe_ok=ok)) == "missing_credentials"
+
+@pytest.mark.asyncio
+async def test_windows_socket_failure_keeps_safe_cause_and_actionable_hint(monkeypatch):
+    import httpx
+
+    root = OSError(10057, 'secret-key https://user:password@example.com/?signed=secret')
+    error = httpx.ConnectError('secret-key')
+    error.__cause__ = root
+    _patch_http(monkeypatch, raises=error)
+    ok, detail = await mb.probe_backend_credential(_backend())
+    assert ok is None
+    assert 'ConnectError -> OSError(os_error=10057)' in detail
+    assert 'VPN/security network components' in detail
+    assert 'secret' not in detail and 'password' not in detail and 'example.com' not in detail
+
+
+def test_connection_failure_chain_is_bounded_even_with_a_cycle():
+    error = ConnectionRefusedError(111, 'sensitive')
+    error.__cause__ = error
+    assert mb._probe_connection_failure(error, vision=True) == (
+        'vision probe could not reach provider: ConnectionRefusedError(os_error=111)')

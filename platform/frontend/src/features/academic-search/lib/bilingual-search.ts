@@ -3,6 +3,8 @@ import type {LiteraturePaper, LiteratureQueryGroup, LiteratureSearchResponse} fr
 import type {CnkiCollector, CnkiJob, CnkiDocumentKind} from "../api/cnki";
 
 type CollectionProgress = {state: string; phase?: "index" | "metadata" | "mixed"};
+const stoppedJobStates = ["waiting_for_verification", "paused", "error", "browser_closed"];
+export const cnkiNeedsRetry = (state:string) => stoppedJobStates.includes(state);
 export type SearchChannel = CollectionProgress & {detail: string; count?: number; resettable?: boolean;
   groups?: (CollectionProgress & {label: string; count: number; detail: string})[]};
 
@@ -121,7 +123,7 @@ export async function collectChineseCategories(plan:LiteratureQueryGroup[], io:C
   const results=new Map<string,LiteratureSearchResponse>();
   const status=io.status();
   let creation:Promise<unknown>=Promise.resolve();
-  const blockedStates=["error","paused","browser_closed","waiting_for_verification","unavailable"];
+  const blockedStates=[...stoppedJobStates,"unavailable"];
   const channelDetail=(channel?:SearchChannel)=>channel?.groups?.find(group=>blockedStates.includes(group.state))?.detail || channel?.detail || "";
   const publish=()=>{
     if (!io.active()) return;
@@ -192,6 +194,10 @@ export async function collectChinese(plan: LiteratureQueryGroup[], limit: number
       if (!io.active()) return;
       jobs.push(accept(await io.create(query, limit === null ? null : Math.max(1, Math.ceil(limit / queries.length)))));
     }
+    const readFailures = new Map<string, number>();
+    const mayRead = (job:CnkiJob) => Boolean(job.has_more)
+      || ["queued","working"].includes(job.state)
+      || (job.error_code==="collector_status_unavailable" && readFailures.get(job.id)===1);
     while (io.active()) {
       results = jobs.flatMap(j => j.result ? [j.result] : []);
       const count = mergeLiteratureResults("", [], results).total;
@@ -205,9 +211,9 @@ export async function collectChinese(plan: LiteratureQueryGroup[], limit: number
         const cancelled = jobs.length - completed;
         update({state:"completed", detail:t({zh:"已获取 {count} 篇（去重）；{completed}/{total} 组完成，{cancelled} 组已取消",en:"Collected {count} unique papers; {completed}/{total} groups complete, {cancelled} cancelled"},{count,completed,total:jobs.length,cancelled}), count, groups}); return;
       }
-      const stopped = jobs.find(j => ["waiting_for_verification", "paused", "error", "browser_closed"].includes(j.state));
+      const stopped = jobs.find(j => cnkiNeedsRetry(j.state));
       const state = stopped?.state || (jobs.some(j => j.state === "working") ? "searching" : "queued");
-      const blocked = jobs.filter(j => ["waiting_for_verification", "paused", "error", "browser_closed"].includes(j.state)).length;
+      const blocked = jobs.filter(j => cnkiNeedsRetry(j.state)).length;
       const queued = jobs.filter(j => j.state === "queued").length;
       const running = jobs.filter(j => j.state === "working").length;
       const detail = t({zh:"已获取 {count} 篇（去重）；{completed}/{total} 组完成",en:"Collected {count} unique papers; {completed}/{total} groups complete"},{count,completed,total:jobs.length})
@@ -217,10 +223,26 @@ export async function collectChinese(plan: LiteratureQueryGroup[], limit: number
         + (count && blocked ? t({zh:"。已取得的内容可正常查看",en:". Collected results remain available."}) : "");
       update({state, phase:collectionPhase(jobs), detail, count, groups,
         resettable:jobs.some(j=>["access_denied","session_paused","browser_profile_in_use","browser_profile_backup_failed"].includes(j.error_code || ""))});
+      // A blocked worker needs an explicit retry. Only drain result pages
+      // already persisted; a backend recovery in progress reports "queued".
+      if (!jobs.some(mayRead)) return;
       if (!jobs.some(j=>j.has_more)) await io.sleep();
       if (!io.active()) return;
       await Promise.all(jobs.map(async (j, i) => {
-        if (j.has_more || !["completed", "cancelled"].includes(j.state)) jobs[i] = accept(await io.read(j.id,j.next_cursor));
+        if (mayRead(j)) {
+          try {
+            jobs[i] = accept(await io.read(j.id,j.next_cursor));
+            readFailures.delete(j.id);
+          } catch {
+            // One paced retry for a dropped status response; never discard
+            // its cursor or records, and do not poll an offline backend forever.
+            const failures=(readFailures.get(j.id) || 0)+1;
+            readFailures.set(j.id,failures);
+            jobs[i] = {...j,state:"error",has_more:false,error_code:"collector_status_unavailable",
+              detail:failures===1 ? t({zh:"暂时无法读取知网进度，正在重试一次；已有结果保留",en:"Retrying the CNKI status request once; existing results are kept"})
+                : t({zh:"无法读取知网进度；已有结果保留，可点击“重试知网”",en:"CNKI status is unavailable. Existing results are kept; choose Retry CNKI to check again."})};
+          }
+        }
       }));
     }
   } catch (error) {

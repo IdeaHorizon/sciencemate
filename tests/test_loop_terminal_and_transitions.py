@@ -79,7 +79,7 @@ def test_every_cause_maps_to_a_known_kind():
              TERMINAL_SUSPENDED}
     for cause, (kind, status) in _TERMINAL_CAUSES.items():
         assert kind in kinds, cause
-        assert status in {"completed", "cancelled", "failed", "void", "paused"}
+        assert status in {"completed", "cancelled", "failed", "void", "paused", "suspended", "incomplete"}
 
 
 def test_status_is_a_projection_not_a_second_opinion():
@@ -196,3 +196,19 @@ async def test_progress_break_is_failure(tmp_path):
     assert result.status == "failed"
     assert result.terminal_kind == TERMINAL_FAILURE
     assert result.terminal_cause == "progress_circuit_break"
+
+@pytest.mark.asyncio
+async def test_stop_during_the_final_generation_cannot_be_stamped_completed(tmp_path):
+    state = State.new('literature', tmp_path)
+
+    class StoppedFinalGeneration:
+        async def chat(self, *_args, **_kwargs):
+            state.hook_state['kill_signal'] = {'reason': 'user stop', 'requested_by': 'user'}
+            return LLMResponse(content='done', tool_calls=[], finish_reason='stop', usage={})
+
+    result = await run_loop(_harness(), state, [LLMMessage(role='user', content='work')],
+                            StoppedFinalGeneration())
+    assert result.status == 'cancelled'
+    assert result.terminal_kind == TERMINAL_CANCELLED
+    assert result.cancel_meta['reason'] == 'user stop'
+    assert [row['status'] for row in _events(state, 'loop_finished')] == ['cancelled']

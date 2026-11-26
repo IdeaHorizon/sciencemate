@@ -24,7 +24,7 @@ from app.services.user_interface import Language, language_on_screen, readable_s
 from app.auth import get_current_user
 from app.config import settings
 from app.database import get_db
-from app.models.execution import SessionMessage, SessionProjection
+from app.models.execution import Run, RunStatus, SessionMessage, SessionProjection
 from app.models.user import User
 from app.schemas.session import (
     SessionArchiveOut,
@@ -511,6 +511,34 @@ async def stop_session_turn(
     # 如实回执：**已送达 worker**（不再是"已写进一个它待会儿会来看的文件"）。
     # 正在进行的生成被立即切断（≤0.5s），正在跑的那一步会跑完，之后停。
     return {"status": "delivered", "itemId": receipt.get("item_id", "")}
+
+
+@router.post("/{project_id}/sessions/{session_id}/completions/{run_id}/resume", response_model=dict)
+async def resume_completion(
+    project_id: str, session_id: str, run_id: str,
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
+) -> dict:
+    from app.services.harness_sessions import HarnessSessionError, harness_session_manager
+
+    project = await require_capability(db, user, project_id, "drive_session")
+    await get_session(db, user, project_id, session_id)
+    await require_drive_access(db, user=user, project=project, session_id=session_id)
+    run = await db.scalar(select(Run).where(
+        Run.id == run_id, Run.project_id == project_id, Run.session_id == session_id))
+    if run is None:
+        raise HTTPException(status_code=404, detail=say({"zh": "此会话中没有该运行。", "en": "Run not found in this Session."}, lang))
+    receipt = (run.summary or {}).get("completion") or {}
+    if run.status != RunStatus.SUSPENDED.value or not receipt.get("runtimeRunId"):
+        raise HTTPException(status_code=409, detail=say({"zh": "该运行目前没有等待恢复的交付。", "en": "This run has no suspended delivery."}, lang))
+    try:
+        await harness_session_manager.resume_completion(
+            project_id=project_id, session_id=session_id, run_id=receipt["runtimeRunId"])
+    except (ValueError, HarnessSessionError) as exc:
+        raise HTTPException(status_code=409, detail=said_of(exc, lang, otherwise={
+            "zh": "暂时无法继续该运行，请刷新状态或先恢复原运行时。",
+            "en": "Could not continue. Refresh the status or restore the original runtime first."})) from exc
+    return {"status": "accepted", "runId": run_id}
 
 
 @router.post("/{project_id}/sessions/{session_id}/files", response_model=dict, status_code=201)

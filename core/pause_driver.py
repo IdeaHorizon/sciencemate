@@ -568,7 +568,6 @@ async def execute_authorized_action(state, entry: dict | None) -> dict | None:
         "reviewer_feedback": str(feedback)[:4000],
         "human_directive": human_note[:2000],
     }
-    decision_actor = "调度器决定" if entry.get("decided_by") == "orchestrator" else "人工决定"
     inherited = {}
     from core.naming import same_node
 
@@ -583,8 +582,6 @@ async def execute_authorized_action(state, entry: dict | None) -> dict | None:
             state,
             target,
             node_inputs=dispatch_inputs,
-            user_note=(f"{decision_actor} {entry.get('authorized_action')!r} → 由运行时执行："
-                       f"重跑 {target}"),
             **inherited,
         )
     except Exception as exc:                      # noqa: BLE001
@@ -887,8 +884,7 @@ def _present_again(parent: PausedRunContext, pause_event: PauseEvent, *, reason:
     register_pause(parent)
     turn = getattr(parent.state, "turn", None)
     parent.state.append_transcript(
-        "loop_pause", turn=turn, question=relayed.question[:200],
-        pending_tool_call_id=parent.pending_tool_call_id,
+        "loop_pause", turn=turn, **relayed.to_dict(),
         reinstated=True, reason=reason, relayed_from_run_id=pause_event.asking_run_id or None,
     )
     write_pause_pending(parent.state, relayed, turn or 0)
@@ -941,6 +937,16 @@ async def drive_pause_chain(
         if not answer:
             answer = "(user 取消 / 没回答)"
 
+        from core import approvals
+        if (ctx.pause_event.metadata or {}).get("type") in approvals.PERMISSION_TYPES:
+            try:
+                approvals.choice_for(ctx.pause_event.to_dict(), answer)
+            except approvals.ApprovalError as exc:
+                ctx.state.append_transcript("pause_answer_not_offered", error=str(exc),
+                                            offer_id=ctx.pause_event.offer_id)
+                final_text = str(exc)
+                return final_text  # retain the request; never spin on a malformed answer source
+
         # 2.5（#155）：decision package 的答复，在这里**机械记账**人工的真实选择。
         # 这是框架唯一确知"用户选了哪个"的时机 —— present_decision_package 只
         # unwind 出 pause，答复本身是回给 orchestrator LLM 的文本。没有这步，
@@ -952,7 +958,9 @@ async def drive_pause_chain(
         _authoritative: str | None = None
         # 结构化答复（dict）在 decision_package 之外没有任何一层结算它 ——
         # 直接进 resume_loop 就是 `dict[:200]`。见 _resolve_offered_choice。
-        if isinstance(answer, dict) and _meta.get("type") != "decision_package":
+        if isinstance(answer, dict) and _meta.get("type") not in {
+            "decision_package", "highrisk_confirm", "permission", "capability_grant",
+        }:
             _resolved = _resolve_offered_choice(ctx.pause_event, answer)
             if _resolved is None:
                 ctx.state.append_transcript(
@@ -974,74 +982,11 @@ async def drive_pause_chain(
                 # 走到同一个收尾点再呈递一次，人再点一次再丢一次。
                 # 决定没做出来，就该如实停在"等人"上。
                 return final_text
-        elif _meta.get("type") == "capability_grant":
-            # 把人的答复**落成授权**（#1068 第二条补充）。
-            #
-            # 此前 `grant_from_answer` 在生产代码里零调用方：确认卡照常弹、人照常
-            # 点，`is_granted` 仍然为假。模型再取被同一道墙拦住，再申请就再弹一张
-            # 卡 —— 整条通道看起来在工作，实际上一次都没生效过。
-            #
-            # 和 highrisk_confirm 同一个位置、同一个理由：判定必须在**框架同时握有
-            # 原始答复和那张选项表**的这一刻做完；到了 hook 那边只剩一条 JSON 信封。
-            try:
-                from core.capability_grants import (
-                    GPU_CAPABILITY,
-                    gpu_grant,
-                    grant_from_answer,
-                    grant_gpu_from_answer,
-                    read_answer,
-                    record_not_granted,
-                )
-
-                _verdict = read_answer(answer)
-                _answered_by = "auto" if isinstance(answer, AutomaticAnswer) else "person"
-                if _meta.get("capability") == GPU_CAPABILITY:
-                    # GPU 运行时（#893 / #1174）：批了就当场分卡；卡被占满也如实记下来。
-                    _granted = grant_gpu_from_answer(
-                        ctx.state, int(_meta.get("gpus") or 1), answer,
-                        reason=str(_meta.get("reason") or ""))
-                    _grant = gpu_grant(ctx.state)
-                    ctx.state.append_transcript(
-                        "capability_grant_answered",
-                        capability=GPU_CAPABILITY,
-                        granted=bool(_granted),
-                        answer_unreadable=(_verdict is None),
-                        answered_by=_answered_by,
-                        **({"gpu": _grant.as_dict()} if _grant is not None else {}),
-                    )
-                else:
-                    _host = str(_meta.get("host") or "")
-                    _granted = grant_from_answer(
-                        ctx.state, _host, answer, reason=str(_meta.get("reason") or ""))
-                    ctx.state.append_transcript(
-                        "capability_grant_answered",
-                        host=_host,
-                        granted=bool(_granted),
-                        # 「读不出来」和「拒绝」在记账上是两件事：后者是人做了决定，
-                        # 前者是这条链某处坏了，而把它记成拒绝会让那处永远查不到。
-                        answer_unreadable=(_verdict is None),
-                        answered_by=_answered_by,
-                    )
-                if not _granted and _answered_by == "auto":
-                    # 没有人在，所以没批：如实记成这个 run 被挡住的前提（RFC D6）。
-                    record_not_granted(ctx.state, _meta)
-            except Exception as e:      # 记账失败绝不能打断 resume
-                log.warning("grant_from_answer failed: %s", e)
-        elif _meta.get("type") == "highrisk_confirm":
-            # #422：判定必须在**框架同时握有原始答复和选项表**的这一刻做完。
-            # 到了 hook 那边只剩一条 JSON 信封（{"status","response","asked_by"}），
-            # 界面印的 `[1] 批准执行` 已经无从反解 —— 于是人输入的 `1` 被判成
-            # 未批准，通行证不发，模型再也不会重调那个工具。
-            try:
-                from shared.lib.dangerous_commands import record_highrisk_answer
-                record_highrisk_answer(
-                    ctx.state, answer, ctx.pause_event.options or None)
-            except Exception as e:      # 记账失败绝不能打断 resume
-                log.warning("record_highrisk_answer failed: %s", e)
         # pause 类型 writing_gate_override 已随 writing-gate 整套退场（判决拆除第三波）。
 
         # 答复已受理：沿途转发这张卡的祖先先收起「等人」（#1254），再去续跑叶子。
-        _settle_relays(ctx)
+        if (ctx.pause_event.metadata or {}).get("type") not in approvals.PERMISSION_TYPES:
+            _settle_relays(ctx)
 
         # 3. resume 这级
         result = await resume_loop(ctx, answer, recorded_decision=_authoritative)
@@ -1049,6 +994,15 @@ async def drive_pause_chain(
         if result.status == "paused":
             # 同一级又 pause 了（agent 在 resume 之后又调了 request_human_input）
             # ctx 已被 clear，run_loop 内重新注册了新 ctx → 下次循环捡起来。
+            # run_node binds this edge after the child's first pause. A new
+            # question replaces its context, not the suspended parent call.
+            # Without the exact edge the completed child cannot cascade, and
+            # the retained parent relay is mistaken for a fresh human question.
+            renewed = get_paused_run(ctx.run_id)
+            if (renewed is not None and renewed.run_id == ctx.run_id
+                    and renewed.parent_run_id == ctx.parent_run_id
+                    and not renewed.parent_tool_call_id):
+                renewed.parent_tool_call_id = ctx.parent_tool_call_id
             # 祖先刚才已经收起了转发的卡，这张新卡要重新转发上去，人才看得见。
             _relay_again(ctx.run_id)
             continue
@@ -1094,6 +1048,21 @@ async def drive_pause_chain(
                             tool_call_id=ctx.parent_tool_call_id,
                             name=m.name,
                             content=json.dumps(new_payload, ensure_ascii=False),
+                        )
+                        # A restart before the next parent model turn must see
+                        # this completion, never its old pause tool receipt.
+                        parent_ctx.state.append_transcript(
+                            "tool_result", name=m.name,
+                            tool_call_id=ctx.parent_tool_call_id,
+                            content=parent_ctx.messages[i].content,
+                            resumed_from_pause=True,
+                            child_run_id=ctx.run_id,
+                        )
+                        from core.agent_loop import _persist_messages_checkpoint
+
+                        _persist_messages_checkpoint(
+                            parent_ctx.state, parent_ctx.messages,
+                            turn=parent_ctx.state.hook_state.get("_current_turn", 0),
                         )
                         break
                 # 恢复这件事要**记在父 run 自己身上**（#1083 第 1 条）。

@@ -212,6 +212,46 @@ async def test_restart_resumes_saved_subscriptions_but_empty_install_stays_idle(
 
 
 @pytest.mark.asyncio
+async def test_restart_resumes_opted_in_projects_without_any_journal_follow(subscriber, collector, monkeypatch):
+    started = asyncio.Event()
+
+    async def discover():
+        started.set()
+        return {"users": 0, "found": 0, "digests": 0}
+
+    monkeypatch.setattr(collector, "run_discovery_once", discover)
+    monkeypatch.setattr(collector, "_run_project_assets", collector._stop.wait)
+    assert not await collector.resume_saved_subscriptions()
+    assert collector._project_task is None
+    async with get_session_factory()() as db:
+        user = await db.get(User, subscriber)
+        user.preferences = {"feed": {"auto_curation": True}}
+        await db.commit()
+    assert await collector.resume_saved_subscriptions()
+    await asyncio.wait_for(started.wait(), 2)
+    task = collector._project_task
+    assert await collector.resume_saved_subscriptions()
+    assert collector._project_task is task
+    assert collector._translation_task is not None
+    assert collector._project_asset_task is not None
+    assert collector._task is None
+    assert collector._subscription_task is None
+    await collector.stop()
+    assert task.done() and collector._project_task is None
+
+
+@pytest.mark.asyncio
+async def test_project_worker_respects_collection_disabled(subscriber, collector, monkeypatch):
+    async with get_session_factory()() as db:
+        user = await db.get(User, subscriber)
+        user.preferences = {"feed": {"auto_curation": True}}
+        await db.commit()
+    monkeypatch.setattr(settings, "feed_external_fetch_enabled", False)
+    assert not await collector.resume_saved_subscriptions()
+    assert collector._project_task is None
+
+
+@pytest.mark.asyncio
 async def test_slow_assets_do_not_block_a_later_follow(subscriber, collector, monkeypatch):
     assets_started, release_assets, second_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
 

@@ -42,6 +42,11 @@ async def _the_project(db: AsyncSession, user: User, project_id: str) -> Project
         raise HTTPException(status_code=403, detail=say({"zh": "只有项目负责人或组织管理员能归档 / 恢复这个项目",
                         "en": "Only the project lead or an organisation administrator can archive or restore this project"},
                        language_for(user)))
+    if project.deletion_requested_at is not None:
+        raise HTTPException(status_code=409, detail=say({
+            "zh": "项目正在删除，请重试删除以完成清理。",
+            "en": "Project deletion is in progress; retry deletion to finish cleanup."},
+            language_for(user)))
     return project
 
 

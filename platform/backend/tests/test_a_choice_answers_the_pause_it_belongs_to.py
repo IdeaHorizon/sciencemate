@@ -163,7 +163,7 @@ async def test_a_choice_reaches_the_answer_path_even_when_the_session_is_occupie
         return {"reply": "", "run_id": "run_waiting", "status": "completed"}
 
     monkeypatch.setattr(local_execution, "execute_local_turn", _execute)
-    monkeypatch.setattr(local_execution, "retain_detached_execution", lambda task: None)
+    monkeypatch.setattr(local_execution, "retain_detached_execution", lambda task, **_: None)
     monkeypatch.setattr("app.api.v1.chat.LOCAL_SSE_KEEPALIVE_SECONDS", 0.01)
 
     response = await client.post(
@@ -249,3 +249,31 @@ async def test_a_blank_text_is_refused_at_the_door(paused_client, tmp_path) -> N
         headers=await _headers(client, user.email),
     )
     assert response.status_code == 422, response.text[:300]
+
+
+@pytest.mark.asyncio
+async def test_an_upgrade_never_converts_an_old_click_into_new_text_authorization(
+    paused_client, tmp_path, monkeypatch,
+):
+    client, db = paused_client
+    user, project = await _seed_waiting_session(db, tmp_path)
+    from app.services import harness_sessions, local_execution
+    manager = harness_sessions.harness_session_manager
+    monkeypatch.setattr(manager, "paused_worker_is_stale", lambda *_: True)
+    retired = []
+
+    async def retire(*args):
+        retired.append(args)
+        return _fake_binding()
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("A retired card must not become a model turn")
+
+    monkeypatch.setattr(manager, "retire_paused_worker", retire)
+    monkeypatch.setattr(local_execution, "execute_local_turn", forbidden)
+    response = await client.post(f"/api/v1/chat/projects/{project.id}/stream", json={
+        "conversation_id": "s-waiting",
+        "answer": {"kind": "choice", "offer_id": OFFER_ID, "choice_id": "approve", "note": ""},
+    }, headers=await _headers(client, user.email))
+    assert response.status_code == 409 and retired
+    assert response.json()["detail"]["code"] == "offer_superseded"

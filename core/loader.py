@@ -288,6 +288,8 @@ def load_harness(node_type: str, nodes_dir: Path | None = None) -> NodeHarness:
         required_outputs=list(
             raw.get("required_output_artifact_types") or completion.get("required_outputs") or []
         ),
+        completion_provider=completion.get("admission_provider"),
+        completion_reentry_limit=completion.get("same_fact_reentries", 2),
         # quality_checks 层已删除（2026-08-22）：yaml 里残留的块静默忽略。
         expected_inputs=dict(raw.get("expected_inputs") or {}),
         task_input_fields=list(raw.get("task_input_fields") or []),

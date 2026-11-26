@@ -6,7 +6,8 @@ import json
 import time
 from collections import OrderedDict
 from datetime import UTC, datetime
-from weakref import WeakValueDictionary
+from weakref import WeakKeyDictionary, WeakValueDictionary
+from uuid import uuid4
 
 from sqlalchemy import event, func, inspect, select
 from sqlalchemy.orm import Session
@@ -20,8 +21,15 @@ _revision = 0
 _cache = OrderedDict()
 _recent = OrderedDict()
 _locks = WeakValueDictionary()
+_database_ids = WeakKeyDictionary()
 TTL_SECONDS = 30
 MAX_ENTRIES = 128
+
+
+def _database_identity(bind):
+    # Numeric object addresses can be reused after engine disposal. A cached
+    # snapshot must never move into a different database with the same address.
+    return _database_ids.setdefault(bind, uuid4().hex)
 
 
 def clear():
@@ -64,17 +72,21 @@ def _discard_changes(session):
 
 
 async def get_pool(db, user, build, *, allow_stale=False, namespace="recommendations"):
+    from app.services.feed.project_context import remote_revision
+
     # Cheap database markers also notice inserts/project edits by another process.
     items = (await db.execute(select(func.count(FeedItem.id), func.max(FeedItem.created_at)))).one()
     projects = (await db.execute(select(func.count(Project.id), func.max(Project.updated_at)))).one()
-    identity = json.dumps([namespace, id(db.bind), str(user.id), user.institution_id, user.group_id,
-                           user.preferences, list(items), list(projects),
+    remote_projects = remote_revision(user)
+    database = _database_identity(db.bind)
+    identity = json.dumps([namespace, database, str(user.id), user.institution_id, user.group_id,
+                           user.preferences, list(items), list(projects), remote_projects,
                            datetime.now(UTC).date().isoformat(), _revision,
                            assembly.background_collection_enabled(),
                            settings.feed_external_fetch_enabled, settings.feed_collector_enabled],
                           sort_keys=True, default=str)
-    profile_identity = json.dumps([namespace, id(db.bind), str(user.id), user.institution_id, user.group_id,
-                                   user.preferences, list(projects), datetime.now(UTC).date().isoformat(),
+    profile_identity = json.dumps([namespace, database, str(user.id), user.institution_id, user.group_id,
+                                   user.preferences, list(projects), remote_projects, datetime.now(UTC).date().isoformat(),
                                    assembly.background_collection_enabled(), settings.feed_external_fetch_enabled,
                                    settings.feed_collector_enabled], sort_keys=True, default=str)
     profile_key = hashlib.sha256(profile_identity.encode()).hexdigest()

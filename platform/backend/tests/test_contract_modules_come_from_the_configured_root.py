@@ -26,6 +26,22 @@ from app.services.harness_contract import (
 HARNESS_ROOT = Path(__file__).resolve().parents[3]
 
 
+@pytest.fixture(autouse=True)
+def restore_core_modules_after_replacing_the_import_root():
+    # Collection has already bound Core classes in other test modules. Restore
+    # those exact objects; merely deleting the fake modules creates a second
+    # registry when a later function performs a local import.
+    original = {
+        name: module for name, module in sys.modules.items()
+        if name == "core" or name.startswith("core.")
+    }
+    yield
+    for name in list(sys.modules):
+        if name == "core" or name.startswith("core."):
+            del sys.modules[name]
+    sys.modules.update(original)
+
+
 @pytest.fixture
 def real_root(monkeypatch):
     monkeypatch.setattr(settings, "harness_root", str(HARNESS_ROOT))

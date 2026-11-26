@@ -24,6 +24,10 @@ class _H:
 
 class _State:
     def __init__(self):
+        import tempfile
+        from pathlib import Path
+        self._storage = tempfile.TemporaryDirectory()
+        self.root = Path(self._storage.name)
         self.hook_state: dict = {}
         self.tokens_used = 0
         self.transcript: list = []
@@ -51,7 +55,8 @@ def test_no_recompress_until_context_actually_grows() -> None:
     assert should, "前置：超阈值要触发"
 
     # 模拟压缩完成：记录压后 est
-    state.hook_state[sm._LAST_COMPRESS_EST_KEY] = est - 100  # 压缩几乎没省
+    from core.context_lifecycle import projection_signature, target_tokens
+    state.hook_state["_context_projection_signature"] = projection_signature(msgs, target_tokens(_H(), state))
     should2, _ = sm.should_compress(_H(), msgs, 6, state=state)
     assert not should2, "est 没增长，再压必然同样结果 —— 不许压"
 
@@ -65,7 +70,8 @@ def test_growth_gate_applies_even_at_emergency_level() -> None:
     """emergency 无视轮次冷却，但不能无视"压缩已证明无能为力"。"""
     state = _State()
     msgs = _big_msgs(n_turns=20)  # 远超 emergency
-    state.hook_state[sm._LAST_COMPRESS_EST_KEY] = sm.estimate_tokens(msgs)
+    from core.context_lifecycle import projection_signature, target_tokens
+    state.hook_state["_context_projection_signature"] = projection_signature(msgs, target_tokens(_H(), state))
     should, _ = sm.should_compress(_H(), msgs, 5, state=state)
     assert not should
 
@@ -135,7 +141,8 @@ def test_double_failure_falls_back_loudly_not_garbage() -> None:
     # 回退到 drop：不产出坏账本（坏账本会以权威口吻继承到之后每一轮）
     texts = "\n".join(m.content or "" for m in out)
     assert "## 目标" not in texts
-    assert "drop_tool_results" in texts
+    assert "drop_tool_results" not in texts
+    assert sum(m.role == "assistant" for m in out) == 8, "策略失败保持输入，由工作集 owner 决定恢复"
 
 
 def test_all_sections_survive_roundtrip() -> None:

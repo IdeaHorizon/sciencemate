@@ -138,6 +138,37 @@ async def test_replaying_the_same_engagement_is_idempotent_not_a_500(feed_client
 
 
 @pytest.mark.asyncio
+async def test_saved_feed_item_reuses_cached_translations_after_remove_and_resave(feed_client, tmp_path, monkeypatch):
+    from app.services.feed import bridge, literature_projection
+    from nodes.literature.tools.local_index import LocalPaperIndex
+
+    client, db, *_ = feed_client
+    item = await db.get(FeedItem, "aaaaaaaa-0000-4000-8000-000000000001")
+    item.summary = "The paper estimates error bounds."
+    await db.flush()
+    monkeypatch.setattr(literature_projection, "literature_papers_root", lambda: tmp_path)
+    index = LocalPaperIndex(str(tmp_path / "literature_catalog.sqlite3"))
+    index.save_title_translations({item.title: "一篇公开论文"})
+    index.save_abstract_translations({item.summary: "论文估计了误差界。"})
+
+    async def no_model_call(**kwargs):
+        pytest.fail("Listing or saving an already translated item must not call a model")
+
+    monkeypatch.setattr(bridge, "call", no_model_call)
+    endpoint = f"/api/v1/feed/items/{item.id}/engagement"
+    for attempt in range(2):
+        assert (await client.post(endpoint, json={"action": "save"})).status_code == 204
+        response = await client.get("/api/v1/feed/items", params={"saved": True})
+        assert response.status_code == 200
+        [saved] = response.json()
+        assert (saved["id"], saved["title"], saved["summary"]) == (item.id, item.title, item.summary)
+        assert (saved["title_zh"], saved["abstract_zh"]) == ("一篇公开论文", "论文估计了误差界。")
+        if attempt == 0:
+            assert (await client.delete(f"{endpoint}/save")).status_code == 204
+            assert (await client.get("/api/v1/feed/items", params={"saved": True})).json() == []
+
+
+@pytest.mark.asyncio
 async def test_a_paper_from_literature_search_lands_in_the_saved_tab(feed_client) -> None:
     """检索页上的「收藏」以前只是页面里的一个状态：刷新就没了，也进不了「收藏」页签。
 

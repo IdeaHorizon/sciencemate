@@ -16,7 +16,6 @@ from fastapi import HTTPException
 from sqlalchemy import and_, func, or_, select, update
 
 from app.models.cnki import CnkiDevice, CnkiJob, CnkiJobPaper, CnkiPaper
-from app.models.feed import FeedItem
 from app.models.user import User
 from app.schemas.literature import LiteraturePaperOut, LiteratureSearchOut
 
@@ -56,7 +55,7 @@ def device_view(device: CnkiDevice) -> dict:
 
 
 def job_state(job: CnkiJob) -> str:
-    if not job.enabled:
+    if job.recurring or not job.enabled:
         return "cancelled"
     if job.last_completed_at and (job.checkpoint or {}).get("finished"):
         return "completed"
@@ -76,7 +75,7 @@ async def job_view(db, job: CnkiJob, *, papers=False, page_size: int | None = No
         await lock_user(db, job.user_id)
     count = await db.scalar(select(func.count()).select_from(CnkiJobPaper).where(CnkiJobPaper.job_id == job.id))
     result = {"id": job.id, "query": job.query, "category": job.category, "recurring": job.recurring,
-              "enabled": job.enabled, "state": job_state(job), "count": count,
+              "enabled": job.enabled and not job.recurring, "state": job_state(job), "count": count,
               "phase": (job.checkpoint or {}).get("phase", "index"),
               "page": (job.checkpoint or {}).get("page", 1), "total": (job.checkpoint or {}).get("total", 0),
               "detail": (job.last_report or {}).get("detail", ""), "last_completed_at": job.last_completed_at,
@@ -89,7 +88,7 @@ async def job_view(db, job: CnkiJob, *, papers=False, page_size: int | None = No
             and result["executor"] == "server" and "HTTP 403" in result["detail"]):
         result["error_code"] = "access_denied"
     if (job.checkpoint or {}).get("reset_session"):
-        result.update(detail="正在备份旧会话并建立新的知网采集会话", error_code=None)
+        result.update(detail="正在恢复知网采集会话，完成后继续本次检索并更新结果", error_code=None)
     if papers:
         statement = select(CnkiPaper).join(CnkiJobPaper, CnkiJobPaper.paper_id == CnkiPaper.id).where(
             CnkiJobPaper.job_id == job.id, CnkiPaper.user_id == job.user_id)
@@ -160,14 +159,17 @@ def as_literature(p: dict) -> LiteraturePaperOut:
     )
 
 
-async def claim_job(db, device: CnkiDevice, *, executor="local", server_slots=1) -> dict | None:
+async def claim_job(db, device: CnkiDevice, *, executor="local", server_slots=1, job_ids=None) -> dict | None:
     moment = now()
     active = list((await db.scalars(select(CnkiJob).where(CnkiJob.user_id == device.user_id,
-            CnkiJob.enabled.is_(True), CnkiJob.lease_until > moment))).all())
+            CnkiJob.enabled.is_(True), CnkiJob.recurring.is_(False), CnkiJob.lease_until > moment))).all())
     if active and (executor != "server" or len(active) >= min(server_slots, 2)
                    or any(j.lease_device_id != device.id or (j.checkpoint or {}).get("executor", "server") != "server" for j in active)):
         return None
-    statement = select(CnkiJob).where(CnkiJob.user_id == device.user_id, CnkiJob.enabled.is_(True)).order_by(CnkiJob.recurring, CnkiJob.created_at)
+    statement = select(CnkiJob).where(CnkiJob.user_id == device.user_id, CnkiJob.enabled.is_(True),
+                                     CnkiJob.recurring.is_(False), CnkiJob.last_completed_at.is_(None)).order_by(CnkiJob.created_at)
+    if job_ids is not None:
+        statement = statement.where(CnkiJob.id.in_(job_ids))
     if db.get_bind().dialect.name == "postgresql":
         statement = statement.with_for_update(skip_locked=True)
     jobs = list((await db.scalars(statement)).all())
@@ -185,25 +187,14 @@ async def claim_job(db, device: CnkiDevice, *, executor="local", server_slots=1)
     for job in jobs:
         if (job.checkpoint or {}).get("executor", "server") != executor:
             continue
-        if executor == "server":
-            state = (job.last_report or {}).get("state")
-            if state == "paused":
-                continue
-            delay = 30 if state == "waiting_for_verification" else 300 if state == "error" else 0
-            if delay and job.last_report_at and moment-job.last_report_at < timedelta(seconds=delay):
-                continue
-        if job.lease_until and job.lease_until > moment:
-            continue
-        if job.last_completed_at and (not job.recurring or moment-job.last_completed_at < timedelta(hours=24)):
+        # Blocked searches keep their papers, but time passing is not a retry request.
+        if job_state(job) != "queued":
             continue
         checkpoint = dict(job.checkpoint or {})
         if checkpoint.get("finished"):
-            checkpoint = {"executor": executor}
-        since = (moment-timedelta(days=365)).date().isoformat() if job.recurring else ""
-        if job.recurring and job.last_completed_at:
-            since = max(since, (job.last_completed_at-timedelta(days=31)).date().isoformat())
+            continue
         checkpoint.setdefault("page", 1)
-        checkpoint.setdefault("since", since)
+        checkpoint.setdefault("since", "")
         checkpoint.setdefault("accepted", [])
         job.checkpoint = checkpoint
         lease = secrets.token_urlsafe(32)
@@ -222,10 +213,14 @@ async def claim_job(db, device: CnkiDevice, *, executor="local", server_slots=1)
     return None
 
 
-async def request_session_reset(db, user_id, job_ids, *, lang="zh"):
-    """Explicit user action only; polls, retries and recurring jobs never call it."""
+async def request_session_reset(db, user_id, job_ids, *, lang="zh", automatic=False):
+    """Queue one shared recovery; automatic recovery is bounded by search ID.
+
+    Only a live interactive search reporting 403 can spend its recovery attempt.
+    Status polling, old paused searches and subscriptions cannot trigger resets.
+    """
     await lock_user(db, user_id)
-    jobs = list((await db.scalars(select(CnkiJob).where(CnkiJob.user_id == user_id))).all())
+    jobs = list((await db.scalars(select(CnkiJob).where(CnkiJob.user_id == user_id, CnkiJob.recurring.is_(False)))).all())
     selected = [job for job in jobs if job.id in job_ids and job.enabled]
     if len(selected) != len(job_ids):
         raise HTTPException(404, say({"zh": "采集任务不存在", "en": "Collection task not found."}, lang))
@@ -233,23 +228,70 @@ async def request_session_reset(db, user_id, job_ids, *, lang="zh"):
         raise HTTPException(422, say({"zh": "此操作仅适用于平台管理的知网浏览器", "en": "Only the managed CNKI browser can be reset."}, lang))
     selected = [job for job in selected if job_state(job) != "completed"]
     if not selected:
+        if automatic:
+            return None
         raise HTTPException(409, say({"zh": "这些检索已经完成，无需重建会话", "en": "These searches are complete; a session reset is unnecessary."}, lang))
+    if automatic:
+        trigger = selected[0]
+        search_id = (trigger.checkpoint or {}).get("search_id")
+        if (not search_id or trigger.recurring or (trigger.checkpoint or {}).get("auto_recovery_used")
+                or (trigger.last_report or {}).get("code") not in {"access_denied", "session_paused"}):
+            return None
+        # Never replace a session which is waiting for a person to verify it.
+        if any(job.enabled and job_state(job) == "waiting_for_verification" for job in jobs):
+            return None
+        selected = [job for job in jobs if job.enabled and not job.recurring
+                    and (job.checkpoint or {}).get("executor", "server") == "server"
+                    and (job.checkpoint or {}).get("search_id") == search_id
+                    and job_state(job) != "completed"]
+        if any((job.checkpoint or {}).get("auto_recovery_used") for job in selected):
+            return None
     request_id = next(((job.checkpoint or {}).get("reset_session") for job in jobs
                        if job.enabled and (job.checkpoint or {}).get("reset_session")), None)
     if not request_id:
         moment = now()
         attempts = [(job.checkpoint or {}).get("session_reset_at") for job in jobs]
         if any(stamp and moment-datetime.fromisoformat(stamp) < timedelta(seconds=60) for stamp in attempts):
+            if automatic:
+                return None
             raise HTTPException(429, say({"zh": "刚刚已重建过知网会话，请先检查新窗口，至少一分钟后再试", "en": "The CNKI session was just reset. Check the new window and wait at least one minute before retrying."}, lang))
         request_id = str(uuid4())
     for job in selected:
-        job.checkpoint = {**(job.checkpoint or {}), "reset_session": request_id}
+        job.checkpoint = {**(job.checkpoint or {}), "reset_session": request_id,
+                          "automatic_reset": automatic,
+                          **({"auto_recovery_used": request_id} if (job.checkpoint or {}).get("search_id") else {})}
     return {"state": "queued", "request_id": request_id}
+
+
+async def bind_interactive_search(db, job, search_id):
+    """Late-created categories inherit the search's attempt, including after restart."""
+    if not search_id or job.recurring or (job.checkpoint or {}).get("executor", "server") != "server":
+        return
+    search_id = str(search_id)
+    if (job.checkpoint or {}).get("search_id") == search_id:
+        return
+    if job_state(job) == "working" or (job.checkpoint or {}).get("reset_session"):
+        return  # Do not change another running search's recovery ownership.
+    siblings = (await db.scalars(select(CnkiJob).where(
+        CnkiJob.user_id == job.user_id,
+        CnkiJob.checkpoint["search_id"].as_string() == search_id,
+    ))).all()
+    checkpoint = {key: value for key, value in (job.checkpoint or {}).items()
+                  if key not in {"auto_recovery_used", "automatic_reset"}}
+    checkpoint["search_id"] = search_id
+    for sibling in siblings:
+        previous = sibling.checkpoint or {}
+        if previous.get("auto_recovery_used"):
+            checkpoint["auto_recovery_used"] = previous["auto_recovery_used"]
+        if sibling.enabled and previous.get("reset_session"):
+            checkpoint.update({key: previous[key] for key in
+                               ("reset_session", "automatic_reset") if key in previous})
+    job.checkpoint = checkpoint
 
 
 async def leased_job(db, device: CnkiDevice, job_id: str, lease: str, *, lang: str = "zh") -> CnkiJob:
     job = await db.scalar(select(CnkiJob).where(CnkiJob.id==job_id, CnkiJob.user_id==device.user_id).with_for_update())
-    if (not job or not job.enabled or job.lease_device_id != device.id or not job.lease_hash
+    if (not job or job.recurring or not job.enabled or job.lease_device_id != device.id or not job.lease_hash
             or not secrets.compare_digest(job.lease_hash, digest(lease))
             or not job.lease_until or job.lease_until < now()):
         raise HTTPException(409, say({"zh": "任务已暂停或已由新的采集会话接续", "en": "This task is paused or has been taken over by another collection session."}, lang))
@@ -277,7 +319,7 @@ async def receive_batch(db, device, job, batch, *, lang: str = "zh"):
         key = identity(incoming)
         paper_id = str(uuid5(NAMESPACE_URL, device.user_id+"/cnki/"+key))
         link = await db.get(CnkiJobPaper, (job.id, paper_id))
-        if kind and job.result_limit is not None and not link and count >= job.result_limit:
+        if job.result_limit is not None and not link and count >= job.result_limit:
             continue
         paper = await db.get(CnkiPaper, paper_id)
         if paper is None:
@@ -305,8 +347,6 @@ async def receive_batch(db, device, job, batch, *, lang: str = "zh"):
         await db.flush()
         if merged.get("metadata_attempted"):
             accepted.add(incoming["title"])
-        if job.recurring:
-            await sync_feed_paper(db, paper)
     checkpoint.update(total=batch.total, accepted=sorted(accepted))
     if batch.page_complete:
         checkpoint.update(page=batch.page+1, accepted=[])
@@ -323,63 +363,33 @@ async def receive_batch(db, device, job, batch, *, lang: str = "zh"):
     return {"accepted":True, "page":checkpoint["page"], "count":count}
 
 
-async def sync_feed_paper(db, paper: CnkiPaper):
-    from app.services.feed.literature_projection import publication_datetime
-    from app.services.feed.pool_cache import clear
-    from app.services.feed.ranking import is_journal_notice
-    jobs = (await db.scalars(select(CnkiJob).join(CnkiJobPaper, CnkiJobPaper.job_id==CnkiJob.id).where(
-        CnkiJobPaper.paper_id==paper.id, CnkiJob.user_id==paper.user_id, CnkiJob.enabled.is_(True), CnkiJob.recurring.is_(True)))).all()
-    key = "cnki-user:"+paper.id
-    item = await db.scalar(select(FeedItem).where(FeedItem.canonical_key==key))
-    p = paper.metadata_json
-    if not item:
-        item = FeedItem(id=paper.id, canonical_key=key, kind="paper", title=p["title"], authors=[], domains=[], extra={})
-        db.add(item)
-    item.title, item.url = p["title"], p["url"]
-    item.summary, item.authors, item.venue = p.get("abstract", ""), p.get("authors", []), str(p.get("venue", ""))[:200]
-    item.author_user_id = paper.user_id
-    item.published_at = publication_datetime(p.get("pub_date"), p.get("year"))
-    item.extra = {"cnki_local":True, "cnki_categories":sorted({j.category for j in jobs}),
-                  "cnki_queries":[j.query for j in jobs], "doi":p.get("doi", ""),
-                  "feed_acquisition_routes":["web"], "index_only":True,
-                  "title_zh":p["title"], "abstract_zh":p.get("abstract", ""),
-                  "literature_preparation":"ready" if p.get("metadata_attempted") else "pending",
-                  "abstract_lookup_completed":bool(p.get("metadata_attempted"))}
-    item.visibility = "private" if jobs and p.get("metadata_attempted") and not is_journal_notice(item) else "withdrawn"
-    clear()
-
-
 async def create_job(db, user, payload, *, page_size: int | None = None) -> dict:
     """Shared job reuse/retry policy for the UI and authenticated E2E source access."""
     await lock_user(db, user.id)
-    if not payload.recurring:
-        previous = await db.scalar(select(CnkiJob).where(CnkiJob.user_id==user.id, CnkiJob.query==payload.query,
-            CnkiJob.recurring.is_(False), CnkiJob.enabled.is_(True), CnkiJob.category==payload.category,
-            CnkiJob.result_limit==payload.limit,
-            (CnkiJob.checkpoint["document_kind"].as_string()==payload.document_kind
-             if payload.document_kind else CnkiJob.checkpoint["document_kind"].as_string().is_(None)),
-            ).order_by(CnkiJob.created_at.desc()).limit(1))
-        if previous and (previous.checkpoint or {}).get("executor", "server") == payload.executor and (not previous.last_completed_at or now()-previous.last_completed_at < timedelta(hours=24)):
-            # An explicit new search is a retry request, unlike background polling.
-            # Preserve accumulated papers/checkpoints and any active lease.
-            if job_state(previous) in {"paused", "error", "browser_closed"}:
-                previous.checkpoint = {**(previous.checkpoint or {}), "check_session": payload.executor == "server"}
-                if job_state(previous) == "paused":
-                    previous.checkpoint = {**(previous.checkpoint or {}), "recover_session": True}
-                previous.last_report = {"state": "queued"}
-                previous.last_report_at = now()
-            return await job_view(db,previous,papers=True,page_size=page_size)
-    else:
-        previous = await db.scalar(select(CnkiJob).where(CnkiJob.user_id==user.id, CnkiJob.query==payload.query,
-            CnkiJob.recurring.is_(True), CnkiJob.enabled.is_(True), CnkiJob.category==payload.category).limit(1))
-        if previous and (previous.checkpoint or {}).get("executor", "server") == payload.executor:
-            return await job_view(db,previous,papers=True,page_size=page_size)
+    previous = await db.scalar(select(CnkiJob).where(CnkiJob.user_id==user.id, CnkiJob.query==payload.query,
+        CnkiJob.recurring.is_(False), CnkiJob.enabled.is_(True), CnkiJob.category==payload.category,
+        CnkiJob.result_limit==payload.limit,
+        (CnkiJob.checkpoint["document_kind"].as_string()==payload.document_kind
+         if payload.document_kind else CnkiJob.checkpoint["document_kind"].as_string().is_(None)),
+        ).order_by(CnkiJob.created_at.desc()).limit(1))
+    if previous and (previous.checkpoint or {}).get("executor", "server") == payload.executor and (not previous.last_completed_at or now()-previous.last_completed_at < timedelta(hours=24)):
+        await bind_interactive_search(db, previous, payload.search_id)
+        # An explicit new search is a retry request, unlike background polling.
+        # Preserve accumulated papers/checkpoints and any active lease.
+        if job_state(previous) in {"paused", "error", "browser_closed", "waiting_for_verification"}:
+            previous.checkpoint = {**(previous.checkpoint or {}), "check_session": payload.executor == "server"}
+            if job_state(previous) == "paused":
+                previous.checkpoint = {**(previous.checkpoint or {}), "recover_session": True}
+            previous.last_report = {"state": "queued"}
+            previous.last_report_at = now()
+        return await job_view(db,previous,papers=True,page_size=page_size)
     job = CnkiJob(user_id=user.id, query=payload.query, category=payload.category,
                   field={"journal":"LY","scholar":"AU"}.get(payload.category,"SU"),
-                  recurring=payload.recurring, result_limit=None if payload.recurring else payload.limit,
+                  recurring=False, result_limit=payload.limit,
                   created_at=now(), checkpoint={"executor":payload.executor,
-                                               **({"check_session":True} if payload.executor == "server" and not payload.recurring else {}),
+                                               **({"check_session":True} if payload.executor == "server" else {}),
                                                **({"document_kind":payload.document_kind} if payload.document_kind else {})})
     db.add(job)
     await db.flush()
+    await bind_interactive_search(db, job, payload.search_id)
     return await job_view(db,job,papers=True,page_size=page_size)

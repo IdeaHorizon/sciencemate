@@ -139,6 +139,8 @@ export const qk = {
   // Research feed
   feedToday: () => ["feed", "today"] as const,
   feedItems: (filters?: Record<string, unknown>) => ["feed", "items", filters ?? {}] as const,
+  feedFolders: () => ["feed", "folders"] as const,
+  feedSavedIndex: () => ["feed", "saved-index"] as const,
   literatureSearch: (query: string) => ["literature", "search", query] as const,
   feedInterests: () => ["feed", "interests"] as const,
   feedSubscriptions: () => ["feed", "subscriptions"] as const,

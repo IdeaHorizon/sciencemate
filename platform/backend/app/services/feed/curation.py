@@ -34,9 +34,9 @@ from sqlalchemy import bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.feed import FeedEngagement, FeedEngagementAction, FeedItem
-from app.models.project import Project, ProjectStatus
+from app.models.project import Project
 from app.models.user import User
-from app.services.feed import bridge, domains as domain_service
+from app.services.feed import bridge, domains as domain_service, project_context
 from app.services.feed.profile import extract_terms
 from app.services.feed.bridge import BridgeUnavailable
 from app.services.harness_contract import HarnessContractUnavailable
@@ -131,12 +131,14 @@ def effective_domains(user: User) -> tuple[str, ...]:
 def project_fingerprint(projects: list[Project], saved_examples: list[str] | None = None) -> str:
     """课题文本的指纹 —— 用来判断"有没有实质变化，值不值得重算"。
 
-    只算进真正会影响推断的三个字段。改标题里的一个错别字确实会让指纹变，
-    这是可接受的：它便宜，而反过来（漏掉一次真变化）会让推荐一直停在旧课题上。
+    身份、来源、名称/方向/描述和近期用户输入都参与。远程项目撤销或研究问题
+    改变后，旧检索词不能继续作为当前课题的推荐依据。
     """
     digest = hashlib.sha256()
-    for project in sorted(projects, key=lambda p: p.id):
-        for part in (project.name, project.research_domain, project.description):
+    for project in sorted(projects, key=lambda p: str(p.id)):
+        for part in (str(project.id), getattr(project, "home", ""),
+                     project.name, project.research_domain, project.description,
+                     *getattr(project, "user_inputs", ())):
             digest.update((part or "").encode("utf-8"))
             digest.update(b"\x1f")
     for title in sorted(saved_examples or []):
@@ -151,7 +153,7 @@ def needs_refresh(user: User, fingerprint: str) -> bool:
     return stored(user).get("curated_fingerprint") != fingerprint
 
 
-async def user_projects(db: AsyncSession, user: User) -> list[Project]:
+async def user_projects(db: AsyncSession, user: User) -> list[project_context.ProjectContext]:
     """用户在推进中的课题 —— **只看 ACTIVE**。
 
     暂停（PAUSED）、完成（COMPLETED）、归档（ARCHIVED）的课题一律不参与
@@ -159,13 +161,10 @@ async def user_projects(db: AsyncSession, user: User) -> list[Project]:
     推内容。否则一个已经放下的旧课题会一直压着新课题 —— 这正是「用户改了
     订阅方向，却还看到旧课题内容」的根源：课题的生命周期此前根本没接进这条
     管线（`where owner_id` 只按人过滤，不管课题还做不做）。
+
+    本地项目现查，远程上下文由后台采集刷新；页面读取不等待 SSH。
     """
-    rows = await db.execute(
-        select(Project)
-        .where(Project.owner_id == user.id, Project.status == ProjectStatus.ACTIVE)
-        .order_by(Project.updated_at.desc())
-    )
-    return list(rows.scalars().all())
+    return await project_context.user_projects(db, user)
 
 
 async def project_user_inputs(db: AsyncSession, project_id: str, *, limit: int = 40) -> list[str]:
@@ -294,10 +293,15 @@ async def curate(
     if not is_enabled(user) and not allow_disabled:
         return None
 
+    await project_context.refresh_remote_projects(user)
+    # A partial/offline catalogue must not overwrite the last complete
+    # analysis, including explicit refreshes or changes to local projects.
+    if project_context.collection_status(user) != "current":
+        return None
     projects = await user_projects(db, user)
     if not projects:
-        # 一个课题都没有时没什么可推断的。这不是失败，别记成失败。
-        _remember(user, queries=[], news_queries=[])
+        _remember(user, fingerprint=project_fingerprint([]), domains=[],
+                  queries=[], news_queries=[], model="")
         await db.flush()
         return None
 
@@ -305,6 +309,9 @@ async def curate(
     # 合并时决定「谁先被补齐」。不用 projects.updated_at（改标题也会 bump）。
     project_ids = [p.id for p in projects]
     last_active_map = await projects_last_active(db, project_ids)
+    for project in projects:
+        if isinstance(project, project_context.ProjectContext):
+            last_active_map[project.id] = project.last_active
 
     saved_examples = await saved_project_examples(db, user, projects)
     fingerprint = project_fingerprint(projects, saved_examples)
@@ -338,7 +345,9 @@ async def curate(
                 "name": project.name,
                 "research_domain": project.research_domain,
                 "description": project.description,
-                "user_inputs": await project_user_inputs(db, project.id),
+                "user_inputs": (list(project.user_inputs)
+                                if isinstance(project, project_context.ProjectContext)
+                                else await project_user_inputs(db, project.id)),
                 "last_active": active_at.isoformat() if active_at else None,
             }
         )

@@ -5046,6 +5046,8 @@ def _ensure_external_job_task(state: Any, submission: dict[str, Any], key: str) 
             f"scheduler_cluster={submission.get('scheduler_cluster') or ''}",
             f"resource_uid={submission.get('resource_uid') or ''}",
             f"submission_nonce={submission.get('submission_nonce') or ''}",
+            f"process_group_id={submission.get('process_group_id') or ''}",
+            f"process_start_ticks={submission.get('process_start_ticks') or ''}",
             f"container_runtime_id={submission.get('container_runtime_id') or ''}",
             f"launch_host={submission.get('launch_host') or ''}",
             f"remote_hosts={json.dumps(submission.get('remote_hosts') or [], ensure_ascii=False)}",
@@ -5083,6 +5085,14 @@ def persist_external_job_workflow(state: Any, submission: dict[str, Any]) -> str
     """
     if (submission.get("status") != "success" or submission.get("dry_run")
             or not submission.get("scheduler") or not submission.get("job_id")):
+        return None
+    try:
+        from .tools import ledger as job_ledger
+    except ImportError:  # standalone node bootstrap
+        from tools import ledger as job_ledger
+    if job_ledger.bootstrap_phase(state) in {"ready", "initializing"}:
+        # v3 owns recovery in B; its harness has no legacy finalize tool or
+        # handoff hook. Creating that old task would leave unpayable project debt.
         return None
     scheduler = str(submission["scheduler"]).lower()
     job_id = str(submission["job_id"])
@@ -5144,6 +5154,91 @@ def persist_external_job_workflow(state: Any, submission: dict[str, Any]) -> str
     except Exception:
         pass
     return task_id
+
+
+def reconcile_v3_legacy_job_task(state: Any, submission: dict[str, Any]) -> dict[str, Any]:
+    """Retire only a same-run v2 task whose exact v3 job is durably terminal.
+
+    Compatibility for local tasks created by the former submit bridge. No new
+    task or workflow artifact is made; TaskList remains the sole task-state writer.
+    Physical failure closes this lifecycle reminder, not the software task or
+    its scientific outcome. Old remote tasks do not contain a proved execution
+    target and remain open for handoff; empty target fields are not identity.
+    """
+    completed: list[str] = []
+    try:
+        try:
+            from .tools import ledger as job_ledger
+        except ImportError:
+            from tools import ledger as job_ledger
+        project = getattr(state, "project_root", None)
+        if job_ledger.bootstrap_phase(state) != "ready" or not project:
+            return {"status": "not_applicable", "completed_task_ids": []}
+        tasks_dir = Path(project) / "tasks"
+        if not tasks_dir.exists():
+            return {"status": "success", "completed_task_ids": []}
+        run_id = str(state.run_id)
+        origin = str(submission.get("submitted_by_run_id")
+                     or submission.get("_receipt_produced_by_run_id") or run_id)
+        nonce = str(submission.get("submission_nonce") or "")
+        scheduler = str(submission.get("scheduler") or "").lower()
+        job_id = str(submission.get("job_id") or "")
+        runtime = str(submission.get("container_runtime_id") or "")
+        if scheduler != "local":
+            return {"status": "not_applicable", "reason": "legacy_remote_target_identity_unverified",
+                    "completed_task_ids": []}
+        if (origin != run_id or not nonce or not job_id
+                or not re.fullmatch(r"[0-9a-f]{64}", runtime)):
+            return {"status": "identity_incomplete", "completed_task_ids": []}
+        rows = job_ledger.open_ledger(state).records()
+        intents = [row for row in rows if row.get("kind") == "intent" and row.get("nonce") == nonce]
+        bindings = [row for row in rows if row.get("kind") == "job_bound" and row.get("nonce") == nonce]
+        terminals = [row for row in rows if row.get("kind") == "job_terminal" and row.get("nonce") == nonce]
+        job = job_ledger.project_jobs(rows).get(nonce) or {}
+        if (len(intents) != 1 or not bindings or len(terminals) != 1 or job.get("state") != "terminal"
+                or job.get("runtime_identity_conflict")
+                or str(intents[0].get("scheduler") or "").lower() != scheduler
+                or not job.get("external_id") or str(job.get("external_id")) not in {job_id, runtime}
+                or str(terminals[0].get("scheduler") or "").lower() != scheduler
+                or str(terminals[0].get("external_id") or "") != job_id
+                or (runtime and job.get("container_runtime_id") != runtime)
+                or any(str(terminals[0].get(field) or intents[0].get(field) or "")
+                       != str(submission.get(field) or "")
+                       for field in ("slurm_target", "remote_user", "resource_id"))):
+            return {"status": "terminal_identity_unverified", "completed_task_ids": []}
+        from core.tasks import TaskList
+        tasks = TaskList(tasks_dir)
+        key = _external_job_key(state, submission)
+        fields_to_match = ("scheduler", "job_id", "namespace", "launch_host", "scheduler_cluster",
+                           "resource_uid", "submission_nonce", "container_runtime_id",
+                           "slurm_target", "remote_user", "resource_id")
+        for task in tasks.list_all():
+            if (task.status == "completed" or task.owner_node != "experiment"
+                    or task.created_by_run_id != run_id):
+                continue
+            fields = dict(line.split("=", 1) for line in task.description.splitlines() if "=" in line)
+            if (fields.get("external_job_key") != key or fields.get("submitted_by_run_id") != run_id
+                    or any(str(fields.get(field) or "") != str(submission.get(field) or "")
+                           for field in fields_to_match)
+                    or any(fields.get(field) and str(fields[field]) != str(submission.get(field) or "")
+                           for field in ("process_group_id", "process_start_ticks"))):
+                continue
+            # Local immutable runtime + nonce is the existing lifecycle identity.
+            # Old tasks never saved OS birth ticks; they need not repeat that
+            # alternative identity, but an explicitly recorded conflict is kept.
+            # Use immutable task UUID, never a potentially duplicated Txx alias.
+            if not task.task_instance_uuid:
+                continue
+            terminal = terminals[0]
+            tasks.complete(task.task_instance_uuid, notes=(
+                f"v3 job_terminal seq={terminal.get('seq')} nonce={nonce}: "
+                f"{terminal.get('derived_state')} exit_code={terminal.get('exit_code')}; "
+                "retired external-job lifecycle reminder closed; task acceptance remains with finish."))
+            completed.append(task.id)
+        return {"status": "success", "completed_task_ids": completed}
+    except Exception as exc:
+        return {"status": "error", "reason": "legacy_task_reconciliation_failed",
+                "error": f"{type(exc).__name__}: {exc}", "completed_task_ids": completed}
 
 
 def _identity_recovery_key(state: Any, submission: dict[str, Any]) -> str:
@@ -5755,6 +5850,19 @@ external_job_handoff = LoopHook(
     emits=("external_job_handoff", "external_job_closure_gate"),
 )
 register_loop_hook(external_job_handoff)
+
+
+# Completion admission is an explicit harness contract, never an on_end hook.
+try:
+    from .completion_admission import experiment_completion_admission
+except ImportError:  # standalone node bootstrap
+    from completion_admission import experiment_completion_admission
+
+register_loop_hook(LoopHook(
+    name="experiment_delivery_completion",
+    description="Read-only sealed-delivery admission; Core owns reentry and suspension.",
+    on_completion_admission=experiment_completion_admission,
+))
 
 
 # ─────────────────────────────────────────────

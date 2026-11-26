@@ -14,11 +14,11 @@ from core.state import State
 @pytest.mark.parametrize(
     "answer,expected",
     [
-        ("批准执行", "批准执行"),
-        ("1", "批准执行"),
-        ("[1]", "批准执行"),
-        ("拒绝", "拒绝"),
-        ("2", "拒绝"),
+        ("批准执行", "approve"),
+        ("1", "approve"),
+        ("[1]", "approve"),
+        ("拒绝", "deny"),
+        ("2", "deny"),
         ("3", None),
         ("能否解释为什么需要批准", None),
         ("尚未批准执行", None),
@@ -31,7 +31,11 @@ def test_legacy_card_consumes_only_its_presented_choices(tmp_path, answer, expec
         asking_run_id="child",
         metadata={"type": "highrisk_confirm"},
     )
-    assert exact_pause_answer(pause, answer) == expected
+    selection = exact_pause_answer(pause, answer)
+    if expected is None:
+        assert selection is None
+    else:
+        assert selection == {"offer_id": pause.offer_id, "choice_id": expected, "note": ""}
     state = State.new("_orchestrator", tmp_path)
     state.hook_state["_pause_dialogue"] = {"pause": pause, "text": answer}
     result = answer_from_dialogue(
@@ -39,7 +43,7 @@ def test_legacy_card_consumes_only_its_presented_choices(tmp_path, answer, expec
     )
     assert result["status"] == "error"
     result = answer_from_dialogue(
-        state, child_run_id="child", offer_id="", choice_id="", content=answer
+        state, child_run_id="child", offer_id=pause.offer_id, choice_id=expected or "", content=answer
     )
     assert result["status"] == ("success" if expected else "error")
 

@@ -1,4 +1,5 @@
 import type { ExecutionEvent } from "./execution-event.ts";
+import { canonicalDispatchEvent } from "./dispatch-presentation.ts";
 import { ContractViolation } from "../../../shared/contract-violation.ts";
 
 export type ConnectionPhase =
@@ -91,7 +92,8 @@ export class LiveEventReconciler {
 
   accept(events: readonly ExecutionEvent[]) {
     try {
-      for (const event of [...events].sort((a, b) => a.sequence - b.sequence)) {
+      for (const delivered of [...events].sort((a, b) => a.sequence - b.sequence)) {
+        const event = canonicalDispatchEvent(delivered);
         const signature = eventIdentitySignature(event);
         const priorSignature = this.eventSignatures.get(event.id);
         if (priorSignature && priorSignature !== signature) {

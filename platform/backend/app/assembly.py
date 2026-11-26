@@ -260,6 +260,11 @@ def can_choose_project_folders() -> bool:
     return settings.profile == "personal"
 
 
+def owns_personal_model_settings() -> bool:
+    """This installation belongs to one person and may share their defaults."""
+    return settings.profile == "personal"
+
+
 def weak_resource_walls_are_acceptable() -> bool:
     """跑飞的时候没有自动刹车 —— 这台机器上能不能接受。
 

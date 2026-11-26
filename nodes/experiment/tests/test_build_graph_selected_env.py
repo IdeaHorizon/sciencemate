@@ -1,18 +1,15 @@
-"""Build graph probes select only their State's existing environment.
-
-Core's launcher is stubbed here to test the call boundary and shell semantics;
-native filesystem isolation is covered by the probe-boundary integration tests.
-"""
+"""Build probes retain selected environments through Core's managed launcher."""
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from core.state import State
-from nodes.experiment.tools import build_graph as bg, env_provision as ep
+from nodes.experiment.tools import build_graph as bg
+from nodes.experiment.tools import env_provision as ep
 
 
 @pytest.fixture
@@ -20,12 +17,14 @@ def core_launch(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(bg, "sandbox_mount_roots", lambda state: ([tmp_path], []))
 
-    def prepare(argv, **kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(argv=argv, env=dict(os.environ),
-                               terminate=lambda: None, cleanup=lambda: None)
+    from shared.lib import cancellable_subprocess
+    original = cancellable_subprocess.spawn_and_wait
 
-    monkeypatch.setattr("core.sandbox.prepare_attempt_command", prepare)
+    async def launch(*argv, **kwargs):
+        calls.append(kwargs)
+        return await original(*argv, **kwargs)
+
+    monkeypatch.setattr(cancellable_subprocess, "spawn_and_wait", launch)
     return calls
 
 
@@ -44,7 +43,7 @@ def test_unselected_environment_ignores_another_runs_global_selector(tmp_path, m
     monkeypatch.setenv("EXPERIMENT_ACTIVE_BUILD_ENV", str(ep.env_path_for_state(foreign)))
     monkeypatch.setenv("HF_BUILD_GRAPH_SELECTED", "inherited")
 
-    code, output = bg._run('printf "%s" "$HF_BUILD_GRAPH_SELECTED"', state=own, cwd=str(tmp_path))
+    code, output = asyncio.run(bg._run('printf "%s" "$HF_BUILD_GRAPH_SELECTED"', state=own, cwd=str(tmp_path)))
 
     assert (code, output) == (0, "inherited")
     assert not ep.env_path_for_state(own).exists()
@@ -57,8 +56,8 @@ def test_each_run_uses_its_own_existing_script_despite_a_foreign_selector(tmp_pa
     second = _state(tmp_path, "second")
     monkeypatch.setenv("EXPERIMENT_ACTIVE_BUILD_ENV", str(ep.env_path_for_state(first)))
 
-    first_result = bg._run('printf "%s" "$HF_BUILD_GRAPH_SELECTED"', state=first, cwd=str(tmp_path))
-    second_result = bg._run('printf "%s" "$HF_BUILD_GRAPH_SELECTED"', state=second, cwd=str(tmp_path))
+    first_result = asyncio.run(bg._run('printf "%s" "$HF_BUILD_GRAPH_SELECTED"', state=first, cwd=str(tmp_path)))
+    second_result = asyncio.run(bg._run('printf "%s" "$HF_BUILD_GRAPH_SELECTED"', state=second, cwd=str(tmp_path)))
 
     assert first_result == (0, "first")
     assert second_result == (0, "second")
@@ -74,7 +73,7 @@ def test_selected_environment_preparation_failure_never_starts_a_host_probe(tmp_
         raise PermissionError("selected environment denied")
 
     monkeypatch.setattr(ep, "existing_env_script" if failure == "read" else "wrap_command", fail)
-    code, output = bg._run("printf HOST", state=state, cwd=str(tmp_path))
+    code, output = asyncio.run(bg._run("printf HOST", state=state, cwd=str(tmp_path)))
 
     assert code is None
     assert "PermissionError" in output and "selected environment denied" in output
@@ -85,7 +84,7 @@ def test_selected_setup_failure_does_not_run_the_probe_command(tmp_path, core_la
     state = _state(tmp_path, "selected")
     ep.env_path_for_state(state).write_text("return 17\n", encoding="utf-8", newline="\n")
 
-    code, output = bg._run("printf MUST_NOT_RUN", state=state, cwd=str(tmp_path))
+    code, output = asyncio.run(bg._run("printf MUST_NOT_RUN", state=state, cwd=str(tmp_path)))
 
     assert code == 17
     assert "MUST_NOT_RUN" not in output

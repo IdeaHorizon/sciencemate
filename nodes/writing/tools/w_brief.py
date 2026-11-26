@@ -6,12 +6,19 @@ from typing import Any
 
 from core.tool_registry import ToolDefinition, register_tool
 
+from .w_argument import argument_guidance, focus_problems
 from .w_common import (
-    figure_text_sample, genre_brief_summary, list_genres, load_genre, manuscript_dir, paper_dir, read_yaml,
-    worktree_root, write_yaml,
+    figure_text_sample,
+    genre_brief_summary,
+    list_genres,
+    load_genre,
+    manuscript_dir,
+    paper_dir,
+    read_yaml,
+    worktree_root,
+    write_yaml,
 )
 from .w_dossier import build_dossier
-
 
 RULE_GRAMMAR = (
     "机械规则只认三种子句，用 ; 连接多条：refs>=N（被引用的参考文献数）；forbid=<正则>（作者正文里不许出现）；"
@@ -62,7 +69,7 @@ async def _write_brief(state: Any, genre: str, title: str, must_haves: list | No
                        language_body: str = "zh", language_figures: str = "en",
                        authors: list | None = None, venue: str | None = None,
                        structure_variant: str | None = None, keywords: list | None = None,
-                       notes: str = "", **_: Any) -> dict:
+                       notes: str = "", required_questions: list | None = None, **_: Any) -> dict:
     try:
         g = load_genre(genre)
     except ValueError as exc:
@@ -108,12 +115,24 @@ async def _write_brief(state: Any, genre: str, title: str, must_haves: list | No
                 "candidates": numbered[:12], "grammar": RULE_GRAMMAR}
     language_body = _lang_code(language_body, "zh")
     language_figures = _lang_code(language_figures, "en")
+    questions = []
+    for index, question in enumerate(required_questions or [], 1):
+        item = {"id": f"Q{index}", "text": question} if isinstance(question, str) else question
+        if (not isinstance(item, dict) or not str(item.get("id") or "").strip()
+                or not str(item.get("text") or "").strip()):
+            return {"status": "error", "error": (
+                "required_questions 每项保留用户原问题的 id/text，不从已有成果自动立题")}
+        questions.append({"id": str(item["id"]), "text": str(item["text"])})
+    if len({question["id"] for question in questions}) != len(questions):
+        return {"status": "error", "error": "required_questions 的 id 不能重复"}
+    document_kind = str(g["structure"].get("document_kind") or "research_article")
     brief = {
         "genre": genre, "structure_variant": structure_variant, "title": title.strip(),
         "language": {"body": language_body, "figures": language_figures},
         "authors": [a for a in (authors or []) if a] or None,
         "venue": venue or None, "keywords": [k for k in (keywords or []) if k] or None,
         "must_haves": mh, "notes": notes or "",
+        "source_request": task, "required_questions": questions, "document_kind": document_kind,
     }
     write_yaml(paper_dir(state) / "brief.yaml", brief)
     state.append_transcript("writing_brief_written", genre=genre, variant=structure_variant,
@@ -130,9 +149,11 @@ async def _write_brief(state: Any, genre: str, title: str, must_haves: list | No
         "brief": brief,
         "genre_summary": genre_brief_summary(g, structure_variant),
         "reader": g["reader"],
+        "editorial_guidance": argument_guidance(document_kind),
         "dossier_docs": [d for d in dossier.get("docs", []) if d.get("doc_id")],
         "pdf_toolchain": pdf_toolchain.describe(pdf),
-        "next": "读 read_dossier(part='index')，然后 write_outline。",
+        "next": ("读 read_dossier(part='index')，然后 write_outline："
+                 "记录本文主张、必要子问和证据取舍；明确多问写 question_coverage。"),
     }
     if not pdf.get("works"):
         result["next"] = (
@@ -151,7 +172,9 @@ register_tool(
             "（must_haves，每条 {id,text,check:'mechanical'|'referee',rule}；机械可验的写 rule，语法只有三种子句、"
             "用 ; 连接：'refs>=40'、'forbid=case[1-6]'、'require=拓扑1,拓扑2'；语言政策与格式交审读官，check='referee'）、"
             "作者（没有就不填，不写占位）、语言用代码：zh / en、"
-            "刊物、骨架变体。返回体裁摘要与读者画像。"
+            "刊物、骨架变体。required_questions 只逐条保留用户明确要求的多问（id/text），"
+            "不由模板生成问题。"
+            "研究论文可单主问或必要相依多问；项目逐项回顾用 project_summary。返回体裁摘要与读者画像。"
         ),
         parameters_schema={
             "type": "object",
@@ -166,6 +189,10 @@ register_tool(
                 "structure_variant": {"type": "string"},
                 "keywords": {"type": "array", "items": {"type": "string"}},
                 "notes": {"type": "string"},
+                "required_questions": {
+                    "type": "array", "items": {"type": ["object", "string"]},
+                    "description": "仅用户明确要求逐项回答的问题；对象含id/text，保留原要求，不重规划研究",
+                },
             },
             "required": ["genre", "title"],
         },
@@ -193,6 +220,7 @@ async def _write_outline(state: Any, outline: dict, **_: Any) -> dict:
     issues: list[str] = []
     if not isinstance(outline, dict):
         return {"status": "error", "error": "outline 必须是对象"}
+    issues.extend(focus_problems(brief, outline, known_ids))
     parts = outline.get("parts")
     if not isinstance(parts, list) or not parts:
         return {"status": "error", "error": "outline.parts 必须是非空列表"}
@@ -253,6 +281,7 @@ async def _write_outline(state: Any, outline: dict, **_: Any) -> dict:
     state.append_transcript("writing_outline_written", parts=seen, claims=n_claims, issues=len(issues))
     return {"status": "success" if not issues else "success_with_issues", "parts": seen,
             "claims": n_claims, "figures": len(outline.get("figures") or []), "issues": issues,
+            "editorial_focus": outline.get("editorial_focus"),
             "next": "issues 清零后逐节 draft_section；abstract 最后写。"}
 
 
@@ -261,9 +290,17 @@ register_tool(
         name="write_outline",
         description=(
             "写论证提纲（机械闸：主张的 evidence 必须是卷宗 id；部件必须是体裁部件；图必须有 message）。"
-            "结构：{title, parts:[{id, subsections:[{title, claims:[{text, evidence:[dossier ids]}], "
+            "结构：{title, parts:[{id, subsections:[{title, "
+            "claims:[{text, evidence:[dossier ids]}], "
             "figures:[fig keys], tables:[tab keys]}]}], figures:[{key:'fig:xxx', source:'IMG3'|'planned', "
-            "message, caption}], tables:[{key:'tab:xxx', source:'D1.T2', caption}], must_haves_map:{R1:'怎么兑现'}}。"
+            "message, claim, comparison, reader_takeaway, evidence:[dossier ids], caption}], "
+            "tables:[{key:'tab:xxx', source:'D1.T2', caption}], must_haves_map:{R1:'怎么兑现'}}。"
+            "可补editorial_focus:{main_question,main_finding,dependent_questions,"
+            "evidence_selection:[{evidence:[ids],placement:'body|appendix|project_only|future',reason}]}；"
+            "这里只选择现有成果的稿件去向，不删原材料、不替Analysis立题。"
+            "brief有required_questions时用question_coverage:"
+            "{Q1:{placement:'body|appendix',part:'results|appendix',reason}}逐项指向真实部件；"
+            "不按题数配章节或图。"
         ),
         parameters_schema={
             "type": "object",

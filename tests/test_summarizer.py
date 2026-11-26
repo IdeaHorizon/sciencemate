@@ -33,7 +33,8 @@ class FakeLLM:
     async def chat(self, messages, **kw):
         self.calls.append(messages)
         return LLMResponse(
-            content="（这是 fake LLM 生成的压缩摘要：agent 跑了 X，得到了 Y。）",
+            content=("## 目标\n解决 X。\n## 已完成\nagent 跑了 X，得到了 Y（tool result）。\n"
+                     "## 未决与下一步\n继续检查。\n## 决策与理由\n保持原约束。"),
             tool_calls=[],
             finish_reason="stop",
             usage={"total_tokens": 100},
@@ -366,10 +367,11 @@ async def test_run_summarizer_writes_transcript_event(tmp_path):
     compress_evs = [e for e in events if e.get("event") == "summarizer_compress"]
     assert compress_evs, "应有 summarizer_compress 事件"
     e = compress_evs[0]
-    assert e["tokens_before"] == 8500
+    assert e["tokens_before"] == estimate_tokens(msgs)
     assert "tokens_after" in e
     assert "compression_ratio" in e
-    assert e["strategy"] == "truncate"
+    assert e["configured_strategy"] == "truncate"
+    assert e["status"] in {"ready", "irreducible"}
 
 
 @pytest.mark.asyncio
@@ -400,8 +402,10 @@ async def test_run_summarizer_secondary_protection(tmp_path):
     lines = state.transcript_path.read_text(encoding="utf-8").splitlines()
     events = [json.loads(l) for l in lines if l.strip()]
     secondary = [e for e in events if e.get("event") == "summarizer_compress_secondary"]
-    # max_context=100, after >> 90 → 应触发二次保护
-    assert secondary, "二次保护应触发"
+    assert not secondary, "相同的工具截短不能充当第二次恢复"
+    outcome = next(e for e in events if e.get("event") == "context_compaction")
+    assert outcome["status"] == "irreducible"
+    assert not outcome["target_met"]
 
 
 # ── scratchpad hook 改进测试 ─────────────────────────────────────────────
@@ -533,7 +537,7 @@ def test_should_compress_calibration_triggers_earlier(tmp_path, monkeypatch):
     E = estimate_tokens(msgs)
     window = int(E * 2.3)   # threshold=window*0.5=E*1.15，落在 E 与 E*1.3 之间
     harness = NodeHarness(
-        node_type="test", max_context_tokens=window,
+        node_type="test", max_context_tokens=window, max_output_tokens=0,
         summarizer=SummarizerConfig(enabled=True, trigger_threshold=0.5, strategy="truncate"),
     )
     monkeypatch.setattr(sm, "_CONTEXT_CALIBRATION", 1.0)

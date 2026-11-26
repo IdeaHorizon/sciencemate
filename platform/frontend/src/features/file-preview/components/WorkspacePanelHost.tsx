@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { FileText, Route, X } from "lucide-react";
+import { FileText, Package, Route, X } from "lucide-react";
 
 import {
   clampInspectorWidth,
@@ -15,6 +15,7 @@ import {
   fileTabId,
   fileTabsForProject,
   RESEARCH_TAB_ID,
+  OUTPUTS_TAB_ID,
   useWorkspacePanel,
 } from "@/stores/workspace-panel";
 
@@ -43,6 +44,7 @@ export type WorkspacePanelHostProps = {
   projectId: string;
   /** 会话页提供；文件页没有这一栏。 */
   researchTab?: { render: () => ReactNode };
+  outputsTab?: { render: (active: boolean) => ReactNode };
   /**
    * 关掉整栏（demo/fixture 模式）。给 false 时连分栏容器都不建，
    * 行为与这栏出现之前完全一致。
@@ -56,6 +58,7 @@ export type WorkspacePanelHostProps = {
 export function WorkspacePanelHost({
   projectId,
   researchTab,
+  outputsTab,
   enabled = true,
   mainClassName = "",
   children,
@@ -67,6 +70,11 @@ export function WorkspacePanelHost({
   const activate = useWorkspacePanel((state) => state.activate);
   const closeTab = useWorkspacePanel((state) => state.closeTab);
   const closePanel = useWorkspacePanel((state) => state.close);
+  const [outputsVisited, setOutputsVisited] = useState(false);
+  const hasOutputs = Boolean(outputsTab);
+  useEffect(() => {
+    if (open && activeTabId === OUTPUTS_TAB_ID && hasOutputs) setOutputsVisited(true);
+  }, [open, activeTabId, hasOutputs]);
 
   const projectFiles = fileTabsForProject(files, projectId);
 
@@ -137,10 +145,11 @@ export function WorkspacePanelHost({
   // 「研究进程」不在场时（文件页），落到第一个文件标签；一个都没有就空着。
   const resolvedTabId = resolveActiveTab(activeTabId, {
     hasResearch: Boolean(researchTab),
+    hasOutputs: Boolean(outputsTab),
     fileIds: projectFiles.map(fileTabId),
   });
   const activeFile = projectFiles.find((file) => fileTabId(file) === resolvedTabId);
-  const showPanel = open && (Boolean(researchTab) || projectFiles.length > 0);
+  const showPanel = open && (Boolean(researchTab) || Boolean(outputsTab) || projectFiles.length > 0);
 
   return (
     <div
@@ -187,6 +196,11 @@ export function WorkspacePanelHost({
           >
             <header className="workspace-panel-tabbar">
               <div className="workspace-panel-tabs" role="tablist">
+                {outputsTab && <button type="button" role="tab" aria-selected={resolvedTabId === OUTPUTS_TAB_ID}
+                  className={resolvedTabId === OUTPUTS_TAB_ID ? "is-active" : ""}
+                  onClick={() => activate(OUTPUTS_TAB_ID)}>
+                  <Package size={12} />{t({ zh: "产物", en: "Outputs" })}
+                </button>}
                 {researchTab && (
                   <button
                     type="button"
@@ -238,6 +252,11 @@ export function WorkspacePanelHost({
               </button>
             </header>
             <div className="workspace-panel-body">
+              {outputsTab && (outputsVisited || resolvedTabId === OUTPUTS_TAB_ID) && (
+                <div className="workspace-panel-outputs" hidden={resolvedTabId !== OUTPUTS_TAB_ID}>
+                  {outputsTab.render(resolvedTabId === OUTPUTS_TAB_ID)}
+                </div>
+              )}
               {activeFile
                 ? (
                   <FilePreview
@@ -249,7 +268,7 @@ export function WorkspacePanelHost({
                     path={activeFile.path}
                   />
                 )
-                : researchTab?.render()}
+                : resolvedTabId !== OUTPUTS_TAB_ID ? researchTab?.render() : null}
             </div>
           </aside>
         </>

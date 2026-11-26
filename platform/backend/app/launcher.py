@@ -660,7 +660,11 @@ def main(argv: list[str] | None = None) -> int:
 
     import uvicorn
 
-    uvicorn.run("app.main:app", host=args.host, port=port, log_level="warning")
+    uvicorn.run(
+        "app.main:app", host=args.host, port=port, log_level="warning",
+        **({"loop": "shared.lib.event_loop:new_event_loop"}
+           if sys.platform == "win32" and harness is not None else {}),
+    )
     return 0
 
 

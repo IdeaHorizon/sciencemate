@@ -3,6 +3,7 @@
 import { RefreshCw } from "lucide-react";
 
 import { DeveloperSourcePanel } from "@/features/update/DeveloperSourcePanel";
+import { UpdateConnectionPanel } from "@/features/update/UpdateConnectionPanel";
 import { sayWhatTheCheckFound } from "@/features/update/say-what-the-check-found";
 import { UpdateProgress } from "@/features/update/UpdateProgress";
 import { useUpdate } from "@/features/update/useUpdate";
@@ -127,6 +128,8 @@ export function AboutPanel() {
       </section>
 
       {/* 开发者模式和更新用同一个 restart：一条路，「即将重启」那句话也只写一次。 */}
+      {status?.connection_editable && <UpdateConnectionPanel
+        mode={status.connection_mode ?? "system"} busy={busy} check={check} />}
       <DeveloperSourcePanel phase={phase} restart={restart} />
     </div>
   );

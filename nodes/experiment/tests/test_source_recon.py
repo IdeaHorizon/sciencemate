@@ -1,6 +1,7 @@
 """Generic source reconnaissance tests."""
 from __future__ import annotations
 
+import asyncio
 import json
 
 from core.state import State
@@ -54,18 +55,18 @@ def test_autogen_recon_scans_source_and_passes_separate_build_root(
         lambda *_args, **_kwargs: "source-build-pair",
     )
 
-    def capture_graph(_state, source_path, build_root=None):
+    async def capture_graph(_state, source_path, build_root=None):
         captured["source_path"] = source_path
         captured["build_root"] = build_root
         return {"status": "unknown"}
 
     monkeypatch.setattr(safe_bash, "_autogen_build_graph", capture_graph)
 
-    status = safe_bash._autogen_recon(
+    status = asyncio.run(safe_bash._autogen_recon(
         state,
         str(source),
         build_root=str(build),
-    )
+    ))
 
     assert status == "generated"
     recon_summary = state.list_artifacts("source_recon")

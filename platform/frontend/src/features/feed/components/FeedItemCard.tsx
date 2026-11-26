@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Bookmark, BookmarkCheck, ExternalLink, X } from "lucide-react";
+import { ExternalLink, X } from "lucide-react";
 import { Badge } from "@/shared/ui";
 import type { FeedItem } from "@/lib/api";
 import { say, useLanguage } from "@/shared/i18n";
@@ -18,6 +18,7 @@ import {
 import { useFeedEngagement, useFeedImpression } from "../hooks/useFeed";
 import { useFeedImageAsset } from "../hooks/useFeedImage";
 import { HandoffAction } from "./HandoffAction";
+import { FeedSaveAction } from "./FeedSaveAction";
 
 /**
  * 一张资讯卡。
@@ -54,7 +55,7 @@ export function FeedItemCard({
   /** 点整张卡打开详情。不传就是不可点（收藏页那种简单列表）。 */
   onOpenDetail?: () => void;
 }) {
-  const { record, undo } = useFeedEngagement();
+  const { record } = useFeedEngagement();
   const { mutate: recordImpression } = useFeedImpression();
   const cardRef = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -202,20 +203,7 @@ export function FeedItemCard({
       <div className="feed-card-foot">
         <span className="feed-card-attribution">{attribution(item, lang)}</span>
         <div className="feed-card-actions">
-          <button
-            type="button"
-            className="feed-action"
-            aria-pressed={item.saved}
-            title={item.saved ? fc("action.unsave", lang) : fc("action.save", lang)}
-            onClick={() =>
-              item.saved
-                ? undo.mutate({ itemId: item.id, action: "save" })
-                : record.mutate({ itemId: item.id, action: "save" })
-            }
-          >
-            {item.saved ? <BookmarkCheck size={15} /> : <Bookmark size={15} />}
-            <span>{item.saved ? fc("action.saved", lang) : fc("action.save", lang)}</span>
-          </button>
+          <FeedSaveAction item={item} />
           {/* 从一条资讯直通一个研究 —— 别家的资讯产品到链接为止，这里能接
               到执行：带着这条内容开一个会话问"它对我的假设有什么影响"。 */}
           <HandoffAction item={item} onOpened={() => record.mutate({ itemId: item.id, action: "open" })} />

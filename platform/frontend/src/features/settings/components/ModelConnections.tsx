@@ -53,6 +53,9 @@ const EMPTY_FORM: BackendForm = {
 
 // 纯函数收 t，不自己够 hook —— 见 shared/i18n/useT.ts 的「纯函数不许用它」。
 function managementLabel(backend: ModelBackend, lang: Language) {
+  if (backend.inherited_from_desktop) {
+    return say({ zh: "沿用 App 的模型设置", en: "Using app model settings" }, lang);
+  }
   if (backend.provided_by) {
     return say({ zh: "来源：{name}", en: "From {name}" }, lang).replace("{name}", backend.provided_by.organisation_name);
   }

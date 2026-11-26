@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -45,6 +46,7 @@ from app.services.harness_runtime import harness_bridge_supported
 from app.services.harness_sessions import (
     AppRunBinding,
     HarnessSessionStaleError,
+    current_pause_result,
     harness_session_manager,
     reasoning_backend,
 )
@@ -63,6 +65,7 @@ from app.services.harness_transcript_ingest import (  # noqa: F401
     _session_runtime_root,
     ingest_transcript_wrapper,
     commit_transcript_wrapper,
+    TranscriptWritePendingError,
 )
 from app.services.instructions import publish_research_settings
 from app.services.model_backends import effective_backend, resolve_role_bindings
@@ -333,9 +336,11 @@ class RejoinTarget:
     before_wait: Callable[[], Awaitable[None]] | None = None
 
 
-def retain_detached_execution(task: asyncio.Task[None], *, kind: str = EXECUTION_KIND) -> None:
+def retain_detached_execution(task: asyncio.Task[None], *, kind: str = EXECUTION_KIND,
+                              project_id: str | None = None) -> None:
     """Keep a server-owned execution alive after its HTTP observer disconnects."""
     _DETACHED_EXECUTION_TASKS[task] = kind
+    task.harness_project_id = str(project_id) if project_id is not None else None
 
     def release(completed: asyncio.Task[None]) -> None:
         _DETACHED_EXECUTION_TASKS.pop(completed, None)
@@ -351,6 +356,16 @@ def retain_detached_execution(task: asyncio.Task[None], *, kind: str = EXECUTION
 async def shutdown_detached_executions() -> None:
     """Stop server-owned tasks during application shutdown, never on SSE close."""
     tasks = list(_DETACHED_EXECUTION_TASKS)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def stop_project_executions(project_id: str) -> None:
+    """Drain this project's retained writers before deleting their database rows."""
+    tasks = [task for task in _DETACHED_EXECUTION_TASKS
+             if getattr(task, "harness_project_id", None) == str(project_id)]
     for task in tasks:
         task.cancel()
     if tasks:
@@ -645,7 +660,7 @@ def answer_pending_decisions_with_recommendation(project_id: str) -> int:
     scheduled = 0
     for binding in harness_session_manager.paused_bindings_for_project(project_id):
         task = asyncio.create_task(_answer_with_recommendation(binding))
-        retain_detached_execution(task)
+        retain_detached_execution(task, project_id=project_id)
         scheduled += 1
     return scheduled
 
@@ -722,7 +737,7 @@ def rejoin_adopted_session(session: "_ProjectHarnessSession") -> None:
     分离执行表里：SSE 断开不杀，关机时撤销（worker 不受影响，下一个后端再接）。
     """
     task = asyncio.create_task(_rejoin_worker_session(session))
-    retain_detached_execution(task, kind=REJOIN_KIND)
+    retain_detached_execution(task, kind=REJOIN_KIND, project_id=session.project_id)
 
 
 async def _rejoin_worker_session(session: "_ProjectHarnessSession") -> None:
@@ -888,7 +903,7 @@ def terminal_state_for(exc: BaseException) -> tuple[str, str | None]:
         return RunStatus.STALE_UNKNOWN.value, "app_server_shutdown"
     if isinstance(exc, HarnessSessionStaleError):
         return RunStatus.STALE_UNKNOWN.value, "harness_process_lost"
-    if getattr(exc, "code", None) == "pause_pending":
+    if getattr(exc, "code", None) in {"pause_pending", "pause_conflict"}:
         # 第四类：**根本不是失败**。run 正停在一个决策点上等人，守卫拦下了一次
         # 重入 —— 拦截成功是防线在工作，不是事故。
         #
@@ -1358,6 +1373,26 @@ async def execute_local_turn(
     # 两者共用一条事务边界，回滚就必然误伤。所以摄取在**自己的事务**里跑完、
     # 自己提交；`db` 从此只有 turn 协程一个写者。
     _fact_writer = asyncio.Lock()
+    # The authoritative queue is the worker's events.jsonl. These are only
+    # source references awaiting a writer, not copies of the research result or
+    # a second durable cursor. Reconciliation derives committed positions from
+    # ExecutionEvent after backend shutdown, exactly as for a disconnected reader.
+    pending_facts: deque[dict] = deque()
+
+    async def _flush_pending_facts(fact_db: AsyncSession, *, wait: bool) -> bool:
+        while pending_facts:
+            try:
+                await _ingest_one_fact(fact_db, pending_facts[0])
+            except TranscriptWritePendingError:
+                if not wait:
+                    return False
+                # The worker may already have replied completed. Wait only for
+                # recording its existing source facts; never issue another RPC.
+                # Cancellation on backend shutdown leaves the disk source intact.
+                await asyncio.sleep(0.25)
+            else:
+                pending_facts.popleft()
+        return True
 
     if rejoin is not None and rejoin.before_wait is not None:
         replay_gap = rejoin.before_wait
@@ -1377,8 +1412,10 @@ async def execute_local_turn(
         必须在**事实全部落库之后**开始，否则它读到的是半截。锁本身就是屏障：
         拿得到 = 没有摄取在飞。
         """
-        async with _fact_writer:
-            pass
+        from app.database import get_session_factory
+
+        async with _fact_writer, get_session_factory()() as fact_db:
+            await _flush_pending_facts(fact_db, wait=True)
         # 摄取在另一个 session 里提交；这一轮手上的 ORM 对象是提交**之前**的
         # 副本（`expire_on_commit=False`，见 app/database.py）。只刷新事实写者
         # 真正会碰的那两行。
@@ -1417,7 +1454,19 @@ async def execute_local_turn(
         from app.database import get_session_factory
 
         async with _fact_writer, get_session_factory()() as fact_db:
-            await _ingest_one_fact(fact_db, event)
+            pending_facts.append({key: event[key] for key in (
+                "type", "transcript_path", "byte_start", "byte_end",
+            ) if key in event})
+            recorded = await _flush_pending_facts(fact_db, wait=False)
+        if not recorded:
+            await on_progress({
+                "event": "execution.record_pending",
+                "detail": say({
+                    "zh": "执行记录正在等待数据库写入；正在接收原任务，不会重复运行。",
+                    "en": ("The execution record is waiting for the database writer; "
+                           "the original task will not be rerun."),
+                }, language),
+            })
         await notify_execution_observers()
 
     async def _ingest_one_fact(fact_db: AsyncSession, event: dict) -> None:
@@ -2150,6 +2199,60 @@ async def execute_local_turn(
                 # 没有 `view`：这条路径上库里的事务未必还能查。缺席是诚实的
                 # ——客户端据此重新查一次会话，而不是拿一份编出来的局面往下走。
             }
+        current = (current_pause_result(getattr(exc, "details", None))
+                   if getattr(exc, "code", "") == "pause_conflict" else None)
+        live_binding = harness_session_manager.paused_binding(project_id, session_id)
+        if (is_answer and current is not None and live_binding is not None
+                and live_binding.run_id == run_id and live_binding.user_id == actor_user_id):
+            # The old answer was rejected before consumption. Project the
+            # runtime's current question, preserving the same run/attempt;
+            # choosing an answer for it remains a separate user action.
+            pause = current["pause_event"]
+            reason = _pause_status(pause)
+            metadata = pause.get("metadata") if isinstance(pause.get("metadata"), dict) else {}
+            await ingest({
+                # Carry the runtime snapshot intact, including metadata and
+                # future option fields. Routing belongs to this observer:
+                # a snapshot cannot replace its event type or waiting state.
+                **pause,
+                "event": "run_paused", "reason": reason,
+                "pause_kind": metadata.get("type") or "human_input", "resumable": True,
+            })
+            row = await db.get(Run, run_id)
+            if row is not None:
+                row.summary = {**(row.summary or {}), "pause": pause}
+            message = say({
+                "zh": "待回答的问题已更新；本次旧答复未应用，请查看当前问题后重新选择。",
+                "en": ("The pending question changed. Your previous answer was not applied; "
+                       "review the current question before choosing."),
+            }, language)
+            reply = message + "\n\n" + str(pause["question"])
+            if command_id is not None:
+                await service.complete_command(
+                    db, tenant_id=settings.runtime_tenant_id, command_id=command_id,
+                    error={"code": "pause_conflict", "message": message},
+                )
+            await append_session_message(
+                db, session_id=session_id, role="assistant", content=reply,
+                actor_user_id=None, command_id=command_id, run_id=run_id,
+                offer_id=_offer_id(pause),
+            )
+            await db.commit()
+            await notify_execution_observers()
+            # Rollback expires the turn's ORM instances; hydrate explicitly
+            # before building the same canonical view used by a normal pause.
+            await db.refresh(user)
+            await db.refresh(conversation)
+            if project is not None:
+                await db.refresh(project)
+            from app.services.sessions import session_execution_view
+
+            _, _, view = await session_execution_view(
+                db, user=user, project=project, session=conversation,
+            )
+            return {"reply": reply, "command_id": command_id, "run_id": run_id,
+                    "session_id": session_id, "conversation_id": session_id,
+                    "model_backend_id": backend_id, "status": reason, "view": view}
         owns_rejoined_request = rejoin is not None and (
             rejoin.disk_result is not None or harness_session_manager.owns_request(
                 project_id, session_id, run_id, rejoin.request_id)

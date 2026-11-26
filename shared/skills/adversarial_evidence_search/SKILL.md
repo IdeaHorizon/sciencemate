@@ -22,7 +22,7 @@ Literature 使用自己的 `search_papers` / `arxiv_search`。Observation 等无
 若有 `run_node` 且获准调用 Literature，使用：
 
 ```python
-run_node(node_type="literature", user_note="正在委派反向检索，随后检查反证与边界条件。",
+run_node(node_type="literature",
          node_inputs={"research_question": "<待检验主张、反向 queries、范围与已知边界>",
                       "mode": "contradiction_check"})
 ```

@@ -26,10 +26,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from . import context_view as _ctx_view
 from . import loop_hooks, tool_registry
 from . import summarizer as _summarizer
-from . import context_view as _ctx_view
 from . import tool_call_cache as _tool_cache
+from .conversation_store import msg_to_jsonable, render_context_change, restore_messages
 
 #: 工作集（工具结果活副本）最多占 context window 的多少。
 #:
@@ -44,7 +45,6 @@ from .llm import (
     LLMMessage,
     context_overflow_numbers,
     framework_notice,
-    is_framework_notice,
 )
 from .pause import (
     PausedRunContext,
@@ -53,7 +53,6 @@ from .pause import (
     register_pause,
 )
 from .state import State
-from .conversation_store import msg_to_jsonable, render_context_change, restore_messages
 
 log = logging.getLogger("agent_loop")
 
@@ -111,7 +110,7 @@ def _emit_progress(state: State, tool_name: str, args: dict) -> None:
 # `org_orientation` 同理（2026-09-24）：它自己按节点判给谁（立问题 / 定方向的那几个），
 # 却要靠各节点的 harness.yaml 挂上 —— 结果只有 `_orchestrator` 挂了，hypothesis 名单上有、
 # 一次都没收到过「本组已知」。送达是框架的事，不是节点自己选的。
-_ALWAYS_ON_HOOKS = ["memory_delta", "kb_delta", "highrisk_confirm",
+_ALWAYS_ON_HOOKS = ["memory_delta", "kb_delta",
                     "turn_budget", "memory_onboarding", "law_review_gate",
                     "org_orientation"]
 
@@ -168,7 +167,7 @@ async def _void_backoff_sleep(state, delay_s: float) -> None:
 
 # ── 请求可重建性（issue #734，抄 DSH「模型看到的一切都在日志里」）─────────
 #
-# 不变量（对无压缩、无驱逐的 run 机械可验，测试守护）：**每一轮请求的
+# 不变量（投影替换与驱逐也记录 context_rendered）：**每一轮请求的
 # messages 都能仅凭 transcript 逐字节重建**。为此：
 #   - loop_seed 记初始 messages 全文（含 system prompt —— probe 事故的教训：
 #     "system 在不在场"必须能从日志直接回答）
@@ -177,7 +176,7 @@ async def _void_backoff_sleep(state, delay_s: float) -> None:
 #   - llm_response 记 tool_calls_full + reasoning_content；tool_result 记
 #     appended 的精确 content 与 tool_call_id
 #   - llm_request 带 request_digest/request_bytes —— 重建结果与它对账
-# 压缩 / 工作集驱逐会替换历史，跨过它们的重建还不成立（#734 余下部分）。
+# 压缩、驱逐和传输规范化统一提交可回放的投影变更，不再绕过请求日志。
 
 _DIGEST_FIELDS = ("role", "content", "tool_calls", "tool_call_id",
                   "name", "reasoning_content")
@@ -364,6 +363,8 @@ _TERMINAL_CAUSES: dict[str, tuple[str, str]] = {
     "hook_terminal_failed":    (TERMINAL_FAILURE, "failed"),
     "provider_void":           (TERMINAL_FAILURE, "void"),
     "pause_event":             (TERMINAL_SUSPENDED, "paused"),
+    "completion_suspended":    (TERMINAL_SUSPENDED, "suspended"),
+    "unconfirmed_cancellation": (TERMINAL_FAILURE, "incomplete"),
 }
 
 
@@ -398,12 +399,16 @@ class LoopResult:
     #: 外部手搓的 LoopResult 上，loop_finished 事件会把它原样亮出来）。
     terminal_cause: str = ""
     terminal_kind: str = ""
+    completion_admission: dict | None = None
 
     def __post_init__(self) -> None:
         if not self.terminal_cause:
             return
         kind, status = _TERMINAL_CAUSES[self.terminal_cause]   # 未登记 → KeyError
         self.terminal_kind = kind
+        if self.completion_admission and self.completion_admission.get("disposition") == "allow":
+            from core.task_outcome import status_floor
+            status = status_floor(self.completion_admission.get("task_outcome"), status)
         if self.status != status:
             raise ValueError(
                 f"terminal_cause={self.terminal_cause!r} 按表投影 status 应为 "
@@ -465,6 +470,19 @@ async def restore_pause(harness, state, messages, llm):
     path = state.root / "pause_pending.json"
     if path.exists():
         saved = json.loads(path.read_text(encoding="utf-8"))
+        from core.child_dispatch import checkpoint
+        from core.conversation_store import unresolved_tool_calls
+        cursor = checkpoint(state) or {}
+        current = cursor.get("tool_dispatch")
+        # Older versions could leave a pause marker after its call had already
+        # resumed. The later in-flight dispatch must be reconciled, not answered
+        # again. Neither the old question nor its cached pass can authorize it.
+        if (current and current != saved.get("pending_tool_call_id")
+                and current in unresolved_tool_calls(messages)):
+            path.unlink()
+            state.append_transcript("stale_pause_retired", pending_tool_call_id=saved.get("pending_tool_call_id"),
+                                    current_tool_call_id=current)
+            return None
     else:
         # The tool receipt is committed before the pause marker. A process can
         # die between those writes; the saved question still forbids a model wake.
@@ -487,12 +505,59 @@ async def restore_pause(harness, state, messages, llm):
     if call is None or message is None:
         raise ValueError("Paused run has no original call/response checkpoint")
     result = json.loads(message.content)
+    if result.get("status") != "pause":
+        # The answer/result checkpoint committed before the marker was removed.
+        # A stale marker cannot turn a confirmed receipt back into a question.
+        path.unlink(missing_ok=True)
+        return None
+    from core import approvals
+    record = (None if result.get("child_run_id")
+              else approvals.load(state, result.get("pause_event") or {}))
+    if record:
+        already_accepted = record["phase"] in {"approved", "executing"}
+        if already_accepted:
+            path.unlink(missing_ok=True)
+            state.append_transcript("loop_resume", pending_tool_call_id=call_id, recovered_approval=True)
+        if record["phase"] == "approved":
+            try:
+                result = await approvals.run_approved(state, record["operation_id"])
+            except approvals.ApprovalExpired:
+                result = approvals.renew_expired(state, record["operation_id"])
+        elif record["phase"] == "executing":
+            result = await approvals.run_approved(state, record["operation_id"])
+        elif record["phase"] == "pending":
+            result = approvals.renew_expired(state, record["operation_id"])
+        else:
+            result = approvals.payload_result(record)
+        index = next(i for i, item in enumerate(messages) if item is message)
+        messages[index] = LLMMessage(role="tool", name=message.name, tool_call_id=call_id,
+                                     content=json.dumps(result, ensure_ascii=False))
+        if result.get("status") != "pause":
+            await _finish_approved_tool_turn(harness, state, messages, call, result,
+                                              turn=saved["paused_at_turn"], execution_id=record["operation_id"])
+        _persist_messages_checkpoint(state, messages, turn=saved["paused_at_turn"])
+        if result.get("status") != "pause":
+            path.unlink(missing_ok=True)
+            if not already_accepted:
+                state.append_transcript("loop_resume", pending_tool_call_id=call_id,
+                                        recovered_approval=True)
+            return await run_loop(harness, state, messages, llm)
     if result.get("status") != "pause" or not isinstance(result.get("pause_event"), dict):
         raise ValueError("Paused run has no complete original question receipt")
     child_run_id = result.get("child_run_id")
     if child_run_id:
         from core import child_dispatch
-        await child_dispatch.restore_paused_child(state, call_id, child_run_id)
+        recovered = await child_dispatch.restore_paused_child(state, call_id, child_run_id)
+        if isinstance(recovered, dict) and isinstance(recovered.get("result"), dict):
+            result = recovered["result"]
+            index = next(i for i, item in enumerate(messages)
+                         if item.role == "tool" and item.tool_call_id == call_id)
+            messages[index] = LLMMessage(role="tool", name=message.name, tool_call_id=call_id,
+                                         content=json.dumps(result, ensure_ascii=False))
+            _persist_messages_checkpoint(state, messages, turn=saved["paused_at_turn"])
+            if result.get("status") != "pause":
+                path.unlink(missing_ok=True)
+                return await run_loop(harness, state, messages, llm)
     return _pause_loop(harness, state, messages, llm, call, result,
                        turn=saved["paused_at_turn"], all_tool_calls=[], max_turns=harness.max_turns)
 
@@ -513,9 +578,18 @@ async def run_loop(
 
     with _cancel.bind_run(state):
         try:
-            result = await restore_pause(harness, state, messages, llm)
-            if result is None:
-                result = await _run_loop_body(harness, state, messages, llm)
+            from core.completion_driver import drive
+
+            async def candidate_loop():
+                result = await restore_pause(harness, state, messages, llm)
+                return result if result is not None else await _run_loop_body(harness, state, messages, llm)
+
+            result = await drive(harness, state, messages, llm, candidate_loop)
+            # A stop may arrive during the last generation/tool/hook, after
+            # the turn-start check. Admit the result before publishing any
+            # loop_finished event, including direct callers without executor.
+            if result.status != "cancelled":
+                _cancel.check("run_loop.result")
         except _cancel.RunCancelled as e:
             state.append_transcript(
                 "loop_cancelled_at_chokepoint",
@@ -534,10 +608,10 @@ async def run_loop(
             )
         # 终局盖章（#735）：每一次 run_loop 返回（含 pause 挂起）在此留一条
         # 统一记录 —— 取证从此问一个事件，不用按九个终止路径各翻各的。
-        state.append_transcript(
-            "loop_finished", turns=result.turns, status=result.status,
-            terminal_kind=result.terminal_kind,
-            terminal_cause=result.terminal_cause)
+        from core.completion import configured
+        from core.completion_driver import owned, publish_finished
+        if not configured(harness) or (not owned(state) and result.status != "suspended"):
+            publish_finished(state, result)
         return result
 
 
@@ -588,12 +662,9 @@ async def _run_loop_body(
     # v3.4 context 真校准（其一）：tool schemas 每轮全量随请求发送但不在 messages
     # 里 —— 此前 summarizer 估算完全没数它（orchestrator 几十个工具是 E2E#2 本地
     # 132k vs 服务端 245.8k 差距的一大来源）。算一次落 hook_state 给 should_compress。
-    if tool_schemas and "_tool_schema_tokens" not in state.hook_state:
-        try:
-            state.hook_state["_tool_schema_tokens"] = _summarizer.estimate_text_tokens(
-                json.dumps(tool_schemas, ensure_ascii=False))
-        except Exception:
-            state.hook_state["_tool_schema_tokens"] = 0
+    _summarizer.bind_context_model(state, llm)
+    state.hook_state["_tool_schema_tokens"] = _summarizer.estimate_text_tokens(
+        json.dumps(tool_schemas, ensure_ascii=False)) if tool_schemas else 0
 
     all_tool_calls: list[dict] = []
     # issue #184：provider tool-call 协议故障的两个 per-run 簿记器。
@@ -653,7 +724,15 @@ async def _run_loop_body(
         seed_bytes=_seed_bytes, seed_digest=_seed_digest,
         messages=[msg_to_jsonable(m) for m in messages])
 
-    for turn in range(1, _max_turns + 1):
+    from core.completion_driver import turn_offset
+
+    for turn in range(turn_offset(state) + 1, _max_turns + 1):
+        # Resuming an approved tool finishes its owner hooks before the next
+        # model turn. Honor a terminal owner result through this same exit.
+        final_result = _hook_terminal_result(
+            harness, state, messages, state.hook_state.get("_current_turn", turn), all_tool_calls)
+        if final_result is not None:
+            break
         # 咽喉拦截（#284）发生在**轮中**（工具派发/模型请求那一刻），它拿不到
         # 这里的 turn 变量 —— 记一份，好让 cancel_meta 照旧带上 cancelled_at_turn
         # （run_node 的现场打印在读它）。
@@ -742,7 +821,9 @@ async def _run_loop_body(
         await job_wait.resume(state, messages, turn=turn)
         if turn == 1:
             from core.conversation_store import (
-                UnconfirmedToolOutcome, reconcile_reentrant_calls, restore_recorded_tool_results,
+                UnconfirmedToolOutcome,
+                reconcile_reentrant_calls,
+                restore_recorded_tool_results,
                 retire_undispatched_calls,
                 unresolved_tool_calls,
             )
@@ -833,47 +914,12 @@ async def _run_loop_body(
                 tokens_used=state.tokens_used, tokens_limit=_tl,
             )
 
-        # ── (0) summarizer：context 超阈值则压缩 ───────────────────────
-        should_compress, est_tokens = _summarizer.should_compress(
-            harness, messages, turn, state=state,
-        )
-        _local_prompt_est = est_tokens          # v3.4：本轮请求的本地估算（供观测比）
-        if should_compress:
-            before_n = len(messages)
-            new_messages = await _summarizer.run_summarizer(
-                harness, state, messages, llm, turn, est_tokens,
-            )
-            if new_messages is not messages:
-                # 替换内容（保持 list 对象身份，messages 在外面被引用）
-                messages[:] = new_messages
-            after_est = _summarizer.estimate_tokens(messages)
-            _local_prompt_est = after_est
-            # v3.1：回报压缩效果 —— 节省 <5% 触发 5-turn 冷却（防 thrash）
-            _summarizer.note_compress_result(
-                state, turn=turn,
-                tokens_before=est_tokens, tokens_after=after_est,
-            )
-            # 压缩会整段替换 messages（LLM 策略把中间段换成一条摘要）。被换掉的
-            # tool 消息必须从工作集账上销号 —— 否则 is_live 会说"答案就在眼前"，
-            # 而模型往上翻根本找不到它，只能再问、再拿到同一个指针。
-            #
-            # 销号**不在这里做**：`ContextView.enforce_budget` 每轮都会先与现场
-            # 对账（adopt + sync），而它就在下面几行、在 LLM 调用之前。在这里再
-            # 对一次是同一个问题的第二个答案 —— 冗余本身不致命，但它让"对账断了"
-            # 这件事无法被任何变异测出来（拿掉任一处，另一处都替它兜住）。
-            state.append_transcript(
-                "summarize", turn=turn,
-                strategy=harness.summarizer.strategy,
-                messages_before=before_n, messages_after=len(messages),
-                tokens_before=est_tokens, tokens_after=after_est,
-            )
-
         # ── 轮事务边界（E2E-5a 空响应发散循环的根因修复）────────────────────
         # 不变量：**失败的转移不许提交状态**。一轮什么也没产出（无工具调用、
         # 无正文），messages 必须逐字节回到本轮开始前 —— 否则重试不是"相同的
         # 一次尝试"而是"更难的一次"（hook 重灌 + 空 assistant 追加，实测每轮
         # +2118 token 单调发散，症状是上下文太大、重试却把上下文做得更大）。
-        # 快照点在 summarizer 之后：压缩是朝解走的状态改进，回滚要保留它。
+        # 先保留轮初视图；若后续整理提交了投影，再将回滚点更新到该投影。
         _turn_rollback_messages = list(messages)
         _turn_rollback_len = len(messages)
 
@@ -887,7 +933,8 @@ async def _run_loop_body(
             _dropped = _wv.enforce_budget(messages, max_bytes=_ws_budget,
                                           protect_turn_ge=turn - 1)
             if _dropped:
-                messages[:] = _wv.apply(messages)
+                render_context_change(state, messages, _wv.apply(messages),
+                                      turn=turn, source="working_set_eviction")
                 state.append_transcript(
                     "working_set_evicted", turn=turn, count=_dropped,
                     budget_bytes=_ws_budget, **_wv.stats(),
@@ -908,6 +955,21 @@ async def _run_loop_body(
             )
         # Snapshot hooks replace previous rendered values, including with an
         # empty view. Measure the request that will actually be sent.
+        from .llm import normalize_request_messages
+        render_context_change(state, messages, normalize_request_messages(messages),
+                              turn=turn, source="provider_message_normalization")
+        # Context is measured and compacted after all hooks have rendered the
+        # request. No hook may silently re-inflate a previously checked view.
+        should_compress, est_tokens = _summarizer.should_compress(
+            harness, messages, turn, state=state, output_tokens=_output_budget)
+        if should_compress:
+            new_messages = await _summarizer.run_summarizer(
+                harness, state, messages, llm, turn, est_tokens, output_tokens=_output_budget)
+            render_context_change(state, messages, new_messages, turn=turn, source="context_compaction")
+            _turn_rollback_messages = list(messages)
+            _turn_rollback_len = len(messages)
+        render_context_change(state, messages, normalize_request_messages(messages),
+                              turn=turn, source="provider_message_normalization")
         _local_prompt_est = _summarizer.estimate_tokens(messages)
 
         # ── (1.5) 发送前不变量：这份请求必须装得下 ──────────────────────
@@ -926,7 +988,8 @@ async def _run_loop_body(
                 _dropped2 = _wv.enforce_budget(messages, max_bytes=_budget2,
                                                protect_turn_ge=turn - 1)
                 if _dropped2:
-                    messages[:] = _wv.apply(messages)
+                    render_context_change(state, messages, _wv.apply(messages),
+                                      turn=turn, source="working_set_eviction")
             _eff, _window, _over, _cap_known = _summarizer.presend_overflow(
                 harness, state, messages, output_tokens=_send_output_budget)
             if _over > 0 and _send_output_budget - _over >= _MIN_OUTPUT_TOKENS:
@@ -949,8 +1012,8 @@ async def _run_loop_body(
                 _msg = (
                     f"⛔ context 装不下：有效 prompt ≈{_eff} tokens ≥ 窗口 {_window}"
                     f"（输出预算已收缩到下限仍差 {_over} tokens）。"
-                    "非工具消息独自超出了上下文窗口 —— 这是框架侧上下文管理缺陷"
-                    "或窗口配置远小于实际需要，不是节点或请求的问题。"
+                    "必须保留的指令、当前状态或未确认动作仍超过输入预算。"
+                    "原始历史已保留；请调整模型窗口、输出预留或输入，框架不会丢弃这些约束。"
                 )
                 log.error("%s", _msg)
                 final_result = LoopResult(
@@ -960,6 +1023,10 @@ async def _run_loop_body(
                 )
                 break
 
+        from .context_lifecycle import RequestContext
+        _request_context = RequestContext.measure(harness, state, messages,
+                                                  output_tokens=_send_output_budget)
+        _local_prompt_est = _request_context.message_tokens
         # ── (2) LLM 调用 ────────────────────────────────────────────
         _req_bytes, _req_digest = digest_messages(messages)
         state.append_transcript(
@@ -1013,8 +1080,9 @@ async def _run_loop_body(
             continue
         # Provider IDs are opaque aliases. They cannot close a different,
         # still-unconfirmed call, including another call in this same response.
-        from core.conversation_store import unresolved_tool_calls
         from uuid import uuid4
+
+        from core.conversation_store import unresolved_tool_calls
         occupied_ids = set(unresolved_tool_calls(messages))
         for call in response.tool_calls or []:
             original_id = call.get("id")
@@ -1081,7 +1149,7 @@ async def _run_loop_body(
                 pass
             # v3.4 context 真校准（其二）：用服务端权威 prompt_tokens 校准本地估算。
             # 本地估 = should_compress 的 est(压缩后取 after_est) + hook 注入 +
-            # tool schema tokens；观测比只升不降，喂给 effective_calibration。
+            # tool schema tokens；近期观测喂给同模型作用域的双向校准。
             _summarizer.note_observed_prompt_tokens(
                 state,
                 local_estimate=_local_prompt_est
@@ -1109,9 +1177,10 @@ async def _run_loop_body(
         # 旁路观测：报告算不出来只记 warning，不能让一轮因为一条展示事件死掉。
         try:
             state.append_transcript(
-                "context_window", turn=turn,
+                "context_window", turn=turn, request_digest=_req_digest,
                 **_summarizer.context_window_report(
                     harness, state, messages,
+                    request=_request_context,
                     server_prompt_tokens=(
                         response.usage.get("prompt_tokens")
                         if isinstance(response.usage, dict) else None
@@ -1166,7 +1235,8 @@ async def _run_loop_body(
             # progress_breaker 里的实测分布）：复读的尾部压缩比 ≤0.05，正常
             # 收尾的 ≥0.17。
             from core.progress_breaker import (
-                is_degenerate_repetition, should_not_raise_budget,
+                is_degenerate_repetition,
+                should_not_raise_budget,
                 tail_repetition_ratio,
             )
             _tail_ratio = tail_repetition_ratio(response.content)
@@ -1386,8 +1456,19 @@ async def _run_loop_body(
                     _removed = len(messages) - _turn_rollback_len
                     render_context_change(state, messages, _turn_rollback_messages,
                                           turn=turn, source="void_turn_rollback")
-                    _will_compress, _ = _summarizer.should_compress(
-                        harness, messages, turn + 1, state=state)
+                    _will_compress, _retry_est = _summarizer.should_compress(
+                        harness, messages, turn + 1, state=state,
+                        output_tokens=_output_budget)
+                    if _will_compress:
+                        # A trigger is only a request to compact. Protected
+                        # inputs may make reduction impossible; retrying that
+                        # identical request immediately would bypass backoff.
+                        _retry_messages = await _summarizer.run_summarizer(
+                            harness, state, messages, llm, turn, _retry_est,
+                            output_tokens=_output_budget)
+                        render_context_change(state, messages, _retry_messages,
+                                              turn=turn, source="void_turn_compaction")
+                        _will_compress = _summarizer.estimate_tokens(messages) < _retry_est
                     state.append_transcript(
                         "void_turn_rolled_back", turn=turn,
                         attempt=_void_retries, max_attempts=len(_VOID_RETRY_DELAYS),
@@ -1550,7 +1631,8 @@ async def _run_loop_body(
                 "tool_result", turn=turn, name=tool_name, result_preview=_brief(result),
                 tool_call_id=call["id"], content=_tool_content,
             )
-            record = {"name": tool_name, "args": args, "result": result}
+            record = {"name": tool_name, "args": args, "result": result,
+                      "execution_id": f"{call['id']}:{getattr(state, '_tool_dispatches', {}).get(call['id'], '')}"}
             all_tool_calls.append(record)
             ctx.tool_call_records.append(record)
             messages.append(LLMMessage(
@@ -1657,33 +1739,8 @@ async def _run_loop_body(
         # the outcome. Close only after every tool-result message is appended,
         # preserving protocol validity and normal on_end/QC behavior. This is
         # not external cancellation: absent required outputs become incomplete.
-        _terminal = state.hook_state.pop("_loop_terminal", None)
-        if isinstance(_terminal, dict):
-            _terminal_text = str(
-                _terminal.get("final_text")
-                or "The node reached a deterministic terminal condition."
-            )
-            _terminal_status = str(_terminal.get("status") or "completed")
-            if _terminal_status not in {"completed", "failed"}:
-                _terminal_status = "completed"
-            state.append_transcript(
-                "loop_terminal_requested_by_hook",
-                turn=turn,
-                requested_by=_terminal.get("requested_by"),
-                status=_terminal_status,
-                reason=str(_terminal.get("reason") or "")[:500],
-            )
-            final_result = LoopResult(
-                max_turns=_max_turns,
-                final_text=_terminal_text,
-                turns=turn,
-                tool_calls=all_tool_calls,
-                messages=messages,
-                status=_terminal_status,
-                terminal_cause=("hook_terminal_completed"
-                                if _terminal_status == "completed"
-                                else "hook_terminal_failed"),
-            )
+        final_result = _hook_terminal_result(harness, state, messages, turn, all_tool_calls)
+        if final_result is not None:
             break
 
         # ── (5a) 进展熔断（2026-08-13）────────────────────────────────────
@@ -1766,7 +1823,9 @@ async def _run_loop_body(
     end_ctx = loop_hooks.HookContext(
         harness=harness, state=state, messages=messages, turn=final_result.turns,
     )
-    await loop_hooks.run_on_end(hooks, end_ctx, final_result)
+    from core.completion import configured
+    if not configured(harness):
+        await loop_hooks.run_on_end(hooks, end_ctx, final_result)
 
     return final_result
 
@@ -2021,6 +2080,39 @@ def reinstate_pause(ctx: PausedRunContext, pause_event: PauseEvent, *, reason: s
     write_pause_pending(ctx.state, pause_event, getattr(ctx.state, "turn", 0) or 0)
 
 
+def _hook_terminal_result(harness, state, messages, turn, tool_calls):
+    terminal = state.hook_state.pop("_loop_terminal", None)
+    if not isinstance(terminal, dict):
+        return None
+    status = str(terminal.get("status") or "completed")
+    if status not in {"completed", "failed"}:
+        status = "completed"
+    state.append_transcript("loop_terminal_requested_by_hook", turn=turn,
+                            requested_by=terminal.get("requested_by"), status=status,
+                            reason=str(terminal.get("reason") or "")[:500])
+    return LoopResult(max_turns=harness.max_turns,
+                      final_text=str(terminal.get("final_text") or "The node reached a deterministic terminal condition."),
+                      turns=turn, tool_calls=tool_calls, messages=messages, status=status,
+                      terminal_cause=f"hook_terminal_{status}")
+
+
+async def _finish_approved_tool_turn(harness, state, messages, call, result, *, turn, execution_id):
+    """Finish the suspended tool turn through the same owner hooks as a new call."""
+    raw = call["function"].get("arguments") or "{}"
+    arguments = json.loads(raw) if isinstance(raw, str) else raw
+    row = {"name": call["function"]["name"], "args": arguments, "result": result,
+           "execution_id": f"approval:{execution_id}"}
+    context = loop_hooks.HookContext(harness=harness, state=state, messages=messages,
+                                    turn=turn, tool_call_records=[row])
+    post = await loop_hooks.run_on_turn_end(
+        loop_hooks.list_hooks(resolve_enabled_hook_names(harness)), context)
+    messages.extend(post)
+    if post:
+        state.append_transcript("hook_injection", turn=turn, phase="on_turn_end",
+                                messages=[msg_to_jsonable(message) for message in post],
+                                approval_resumed=True)
+
+
 async def resume_loop(ctx: PausedRunContext, response_text: str,
                       *, recorded_decision: str | None = None) -> LoopResult:
     """用 user 回答 resume 一个 paused 节点 run。
@@ -2043,6 +2135,38 @@ async def resume_loop(ctx: PausedRunContext, response_text: str,
     tool_result 后，run_loop 内不会重新写这条（它检查 messages[-1].role != 'tool'
     才进下一轮 LLM），所以 LLM 下一轮会自然看到完整的工具结果序列。
     """
+    from core import approvals
+    if (ctx.pause_event.metadata or {}).get("type") in approvals.PERMISSION_TYPES:
+        result = await approvals.resume(ctx, response_text)
+        name = None
+        for index in range(len(ctx.messages) - 1, -1, -1):
+            message = ctx.messages[index]
+            if message.role == "tool" and message.tool_call_id == ctx.pending_tool_call_id:
+                name = message.name
+                ctx.messages[index] = LLMMessage(role="tool", name=name,
+                    tool_call_id=ctx.pending_tool_call_id, content=json.dumps(result, ensure_ascii=False))
+                break
+        else:
+            raise approvals.ApprovalError("Original approval tool receipt is missing")
+        ctx.state.append_transcript("tool_result", turn=ctx.state.hook_state.get("_current_turn", 0),
+            name=name, tool_call_id=ctx.pending_tool_call_id, content=json.dumps(result, ensure_ascii=False),
+            approval_resumed=True)
+        if result.get("status") != "pause":
+            call = next(c for m in reversed(ctx.messages) for c in m.tool_calls or []
+                        if c.get("id") == ctx.pending_tool_call_id)
+            await _finish_approved_tool_turn(ctx.harness, ctx.state, ctx.messages, call, result,
+                turn=ctx.state.hook_state.get("_current_turn", 0),
+                execution_id=ctx.pause_event.metadata["approval_operation_id"])
+        _persist_messages_checkpoint(ctx.state, ctx.messages,
+                                     turn=ctx.state.hook_state.get("_current_turn", 0))
+        end_pause(ctx, response_preview="Operation approval accepted")
+        if result.get("status") == "pause":
+            call = next(c for m in reversed(ctx.messages) for c in m.tool_calls or []
+                        if c.get("id") == ctx.pending_tool_call_id)
+            return _pause_loop(ctx.harness, ctx.state, ctx.messages, ctx.llm, call, result,
+                turn=1, all_tool_calls=[], max_turns=ctx.harness.max_turns)
+        return await run_loop(ctx.harness, ctx.state, ctx.messages, ctx.llm)
+
     # 1. 找到 pending tool_result 并替换 content
     target_id = ctx.pending_tool_call_id
     from core.pause_driver import AutomaticAnswer
@@ -2077,6 +2201,7 @@ async def resume_loop(ctx: PausedRunContext, response_text: str,
                 tool_call_id=target_id,
                 name=m.name,
                 content=json.dumps(new_payload, ensure_ascii=False),
+                origin="caller" if answered_by == "person" else "tool",
             )
             found = True
             break

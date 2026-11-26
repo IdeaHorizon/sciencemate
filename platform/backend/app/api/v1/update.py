@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -54,7 +55,25 @@ async def get_installed_version() -> dict:
 @router.get("/update")
 async def get_update_status(lang: Language = Depends(language_on_screen)) -> dict:
     status, _manifest, _source, _assets = await asyncio.to_thread(_check, lang)
-    return status.as_dict()
+    return {**status.as_dict(), "connection_mode": release_feed.connection_mode(),
+            "connection_editable": assembly.profile_name() == "personal"
+            and not settings.remote_runtime_token and settings.update_connection_mode is None}
+
+
+class UpdateConnectionWrite(BaseModel):
+    mode: Literal["system", "direct"]
+
+
+@router.put("/update/connection")
+async def set_update_connection(body: UpdateConnectionWrite, user=Depends(get_current_user),
+                                lang: Language = Depends(language_on_screen)) -> dict:
+    if (assembly.profile_name() != "personal" or settings.remote_runtime_token
+            or settings.update_connection_mode is not None):
+        raise HTTPException(403, detail=say({
+            "zh": "此处的更新连接方式由部署配置管理。",
+            "en": "The deployment configuration manages update connections here."}, lang))
+    await asyncio.to_thread(release_feed.write_connection_mode, body.mode)
+    return {"mode": release_feed.connection_mode()}
 
 
 @router.post("/update/install")

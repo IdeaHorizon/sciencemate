@@ -1136,30 +1136,23 @@ def _name_status(raw: str) -> dict[str, str]:
 
 
 def _cut_section(section: list[str], allowance: int) -> tuple[str, bool]:
-    """按额度截一个文件的 diff：保头去尾。
+    """Bound a file section including its header and truncation marker.
 
-    文件头（`diff --git` / `new file mode` / `---` / `+++`）永远留着 —— UI 靠它
-    才知道"这个文件也变了"；砍掉头等于让一个文件从证据里消失。截断标记写成
-    context 行（前导空格），解析器和渲染器都不必为它加分支。
+    Complete file identities remain in ``paths`` even when their headers no
+    longer fit. Headers are not exempt from the total UTF-8 byte budget.
     """
     text = "\n".join(section)
-    if len(text.encode("utf-8", "replace")) <= max(allowance, 0):
+    encoded = text.encode("utf-8", "replace")
+    allowance = max(allowance, 0)
+    if len(encoded) <= allowance:
         return text, False
-    header: list[str] = []
-    for line in section:
-        header.append(line)
-        if line.startswith("+++ ") or line.startswith("Binary files "):
-            break
-    kept = list(header)
-    used = len("\n".join(kept).encode("utf-8", "replace"))
-    for line in section[len(header):]:
-        size = len(line.encode("utf-8", "replace")) + 1
-        if used + size > allowance:
-            break
-        kept.append(line)
-        used += size
-    kept.append(" … 这个文件的 diff 过长，已截断（完整内容在 Project Git 里）")
-    return "\n".join(kept), True
+    marker = "\n … 这个文件的 diff 过长，已截断（完整内容在 Project Git 里）".encode("utf-8")
+    if allowance <= len(marker):
+        return marker[:allowance].decode("utf-8", "ignore"), True
+    prefix = encoded[:allowance - len(marker)].decode("utf-8", "ignore")
+    if "\n" in prefix:
+        prefix = prefix.rsplit("\n", 1)[0]
+    return prefix + marker.decode("utf-8"), True
 
 
 def _bounded_patch(patch: str) -> tuple[str, bool]:
@@ -1183,10 +1176,14 @@ def _bounded_patch(patch: str) -> tuple[str, bool]:
     truncated = False
     budget = _MAX_PATCH_BYTES
     for section in sections:
-        text, cut = _cut_section(section, min(_MAX_FILE_PATCH_BYTES, budget))
+        separator = 1 if kept else 0
+        if budget <= separator:
+            truncated = True
+            break
+        text, cut = _cut_section(section, min(_MAX_FILE_PATCH_BYTES, budget - separator))
         truncated = truncated or cut
         kept.append(text)
-        budget -= len(text.encode("utf-8", "replace"))
+        budget -= len(text.encode("utf-8", "replace")) + separator
     return "\n".join(kept), truncated
 
 

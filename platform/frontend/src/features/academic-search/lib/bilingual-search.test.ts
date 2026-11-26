@@ -116,12 +116,21 @@ test('incremental metadata updates replace the same CNKI paper without duplicate
  assert.equal(final?.total,1);assert.equal(final?.papers[0].abstract,'补齐摘要');
 });
 
-test('partial data and captcha state survive until completion; keywords are used',async()=>{
- const states:string[]=[],counts:number[]=[],created:string[]=[];
- await collectChinese(plan,200,{status:async()=>({collector}),create:async q=>{created.push(q);return job('waiting_for_verification',[paper('一','cnki')]);},
- read:async()=>job('completed',[paper('一','cnki'),paper('二','cnki')]),sleep:async()=>{},active:()=>true,
+test('a blocked job drains only its saved pages and then waits for an explicit retry',async()=>{
+ const states:string[]=[],counts:number[]=[],reads:string[]=[];
+ await collectChinese(plan,200,{status:async()=>({collector}),
+ create:async q=>({...job('waiting_for_verification',[paper('一','cnki')]),query:q,paper_ids:['1'],has_more:true,next_cursor:'page2'}),
+ read:async(_id,cursor)=>{reads.push(cursor!);return {...job('waiting_for_verification',[paper('二','cnki')]),paper_ids:['2'],has_more:false};},
+ sleep:async()=>{throw Error('must not poll for verification');},active:()=>true,
  update:(s,r)=>{states.push(s.state);counts.push(r[0].total);}}, "zh");
- assert.deepEqual(created,['中文检索词']);assert.deepEqual(states,['waiting_for_verification','completed']);assert.deepEqual(counts,[1,2]);
+ assert.deepEqual(reads,['page2']);assert.deepEqual(states,['waiting_for_verification','waiting_for_verification']);assert.deepEqual(counts,[1,2]);
+});
+
+test('a repeatedly unreachable status endpoint gets only one additional paced attempt',async()=>{
+ let reads=0,sleeps=0;let final:SearchChannel|undefined;
+ await collectChinese(plan,200,{status:async()=>({collector}),create:async()=>job('working',[paper('已有','cnki')]),
+ read:async()=>{reads++;throw Error('offline');},sleep:async()=>{sleeps++;},active:()=>sleeps<=3,update:s=>{final=s;}},'zh');
+ assert.equal(reads,2);assert.equal(sleeps,2);assert.equal(final?.count,1);assert.match(final?.groups?.[0].detail || '',/点击“重试知网”/);
 });
 
 test('new search/unmount during an await cannot create more old jobs or publish old results',async()=>{

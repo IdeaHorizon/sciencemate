@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
+from shared.lib.process_control import background_spawn_kwargs
+
 from . import CommandSpec, Invariant, IsolationContractError
 from ._native import NativeLaunch
 
@@ -57,7 +59,7 @@ def list_distros(timeout: float = 30.0) -> list[str]:
         return []
     try:
         out = subprocess.run([wsl_exe(), "-l", "-q"], capture_output=True, timeout=timeout,
-                             check=False)
+                             check=False, **background_spawn_kwargs())
     except (OSError, subprocess.TimeoutExpired):
         return []
     if out.returncode != 0:
@@ -93,7 +95,7 @@ class WslBackend:
     def _exec(self, args: list[str], *, timeout: float) -> subprocess.CompletedProcess:
         return subprocess.run([wsl_exe(), "-d", self.distro, "--cd", "/", "--exec", *args],
                               capture_output=True, timeout=timeout, check=False,
-                              stdin=subprocess.DEVNULL)
+                              stdin=subprocess.DEVNULL, **background_spawn_kwargs())
 
     def _probe(self) -> None:
         if self._probed:

@@ -350,6 +350,7 @@ def _response(config: ModelBackendConfig, user: User, effective_id: str | None) 
         "editable": can_edit_backend(user, config),
         # 这一条是哪个组织提供的（空 = 这台机器自己的）。界面据此写「来源：某某组织」。
         "provided_by": where_it_comes_from(config),
+        "inherited_from_desktop": bool(config.inherited_from_desktop),
         # 下面四个是**观测本身**，不是由它派生的那个 status。
         #
         # 从前只投影 status，于是 UI 上一句 "Ready" 背后是"上一次写操作那天
@@ -431,6 +432,8 @@ async def make_model_backend_role_default(
     # 设默认是全场最高风险的一次声明，先重探再判 —— 不吃可能过期的旧观测。
     await record_backend_probe(db, config)
     await set_effective_default(db, user, config, role=role)
+    if config.inherited_from_desktop:
+        config.inherited_from_desktop = config.inherited_backend_id = None
     # 挑的是别处提供的那一条（组织的模型）：那一处也要知道 —— 专业版在钩子里告诉服务器。
     await tell_the_provider_about_the_choice(config, role)
     return {"status": "updated", "backend_id": config.id, "role": role}
@@ -605,6 +608,8 @@ async def update_model_backend(
         # 赋值也在 savepoint 里：撞键之后回滚要把这条连接原样退回去，别在
         # session 里留一份改了一半的它。
         async with db.begin_nested():
+            if config.inherited_from_desktop:
+                config.inherited_from_desktop = config.inherited_backend_id = None
             for field in ("display_name", "model", "base_url", "is_enabled",
                           "context_window_tokens"):
                 value = getattr(data, field)
@@ -647,6 +652,8 @@ async def make_model_backend_default(
     # 一进来就 401。所以这里**先重探再判 ready**，不吃可能过期的旧观测。
     await record_backend_probe(db, config)
     await set_effective_default(db, user, config)
+    if config.inherited_from_desktop:
+        config.inherited_from_desktop = config.inherited_backend_id = None
     return {"status": "updated", "backend_id": config.id}
 
 

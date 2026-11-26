@@ -139,7 +139,7 @@ async def has_project_capability(
     # 归档 = 冻结：只能看。开会话、发指令、发布、裁决、改设置、管成员一律不行 —— 规则在这一处，
     # 每个按能力把门的端点和界面上的能力清单（`effective_capabilities`）跟着一起变。恢复不走能力
     # （`project_lifecycle.restore` 按负责人 / 本组织管理员判）：否则冻住的项目就解不开了。
-    if project.status == ProjectStatus.ARCHIVED and capability != "view_session":
+    if (project.status == ProjectStatus.ARCHIVED or project.deletion_requested_at is not None) and capability != "view_session":
         return False
     membership = await active_project_membership(db, user, project)
     if membership and capability in PROJECT_ROLE_CAPABILITIES.get(

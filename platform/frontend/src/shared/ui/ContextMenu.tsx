@@ -15,6 +15,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 export type ContextMenuItem = {
   label: string;
@@ -69,7 +70,7 @@ export function ContextMenu({ at, onClose, items }: {
   if (!at) return null;
   const width = 210;
   const height = 12 + items.length * 30;
-  return (
+  return createPortal(
     <div
       ref={ref}
       className="context-menu"
@@ -97,6 +98,6 @@ export function ContextMenu({ at, onClose, items }: {
           {item.label}
         </button>
       ))}
-    </div>
+    </div>, document.body,
   );
 }

@@ -98,15 +98,27 @@ def test_agent_loop_records_the_recovery_and_flags_provider_fault():
     assert "_provider_void_response" in source
 
 
-def test_executor_attributes_a_void_response_to_the_provider():
-    """归 infra 账才可机械重派 —— 记成节点卡死会把它锁进重复失败熔断。"""
+def test_executor_attributes_a_void_response_to_the_provider(tmp_path):
+    """Finalize the recorded provider fact; it must remain eligible for infrastructure retry."""
+    import asyncio
     from core import executor, run_history
+    from core.agent_loop import LoopResult
+    from core.harness import NodeHarness
+    from core.state import State
+    from core.task_outcome import record_task_outcome
     from shared.tools import run_node
 
-    assert "_provider_void_response" in inspect.getsource(executor.finalize_run)
-    # 主类别必须已经在两张表里：一张管"算不算节点的账"，一张管"值不值得重派"
-    assert executor.FAILURE_CATEGORY_PROTOCOL in run_history.EXTERNAL_FAILURE_CATEGORIES
-    assert executor.FAILURE_CATEGORY_PROTOCOL in run_node._INFRA_FAILURE_CATEGORIES
+    state = State.new("data", tmp_path)
+    state.hook_state["_provider_void_response"] = True
+    record_task_outcome(state, "failed", detail="Provider produced no response")
+    result = LoopResult("Provider produced no response", 1, status="void",
+                        terminal_cause="provider_void")
+    summary = asyncio.run(executor.finalize_run(state, NodeHarness(node_type="data"), result, None))
+    assert summary["status"] == "incomplete"
+    assert summary["failure_category"] == executor.FAILURE_CATEGORY_PROTOCOL
+    assert summary["failure_subcategory"] == "provider_void_response"
+    assert summary["failure_category"] in run_history.EXTERNAL_FAILURE_CATEGORIES
+    assert summary["failure_category"] in run_node._INFRA_FAILURE_CATEGORIES
 
 
 # ── 5. 功能层：回退真的收到了那份 deadline ──────────────────────────────────

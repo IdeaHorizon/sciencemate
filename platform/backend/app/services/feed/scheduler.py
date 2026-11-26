@@ -55,6 +55,7 @@ class FeedCollector:
 
     def __init__(self) -> None:
         self._task: asyncio.Task[None] | None = None
+        self._project_task: asyncio.Task[None] | None = None
         self._subscription_task: asyncio.Task[None] | None = None
         self._subscription_asset_task: asyncio.Task[None] | None = None
         self._school_task: asyncio.Task[None] | None = None
@@ -64,6 +65,7 @@ class FeedCollector:
         self._journal_browser_task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._subscription_wakeup = asyncio.Event()
+        self._project_wakeup = asyncio.Event()
         self._subscription_assets_wakeup = asyncio.Event()
         #: 当前这一轮的 HTTP client（补图那一步要用，见 run_once）。
         self._client: httpx.AsyncClient | None = None
@@ -78,15 +80,13 @@ class FeedCollector:
         self._stop.clear()
         self._task = asyncio.create_task(self._run(), name="feed-collector")
         self.start_subscriptions()
+        self.request_project_refresh()
         if self._translation_task is None or self._translation_task.done():
             self._translation_task = asyncio.create_task(
                 self._run_translations(), name="feed-translation-worker"
             )
         self._school_task = asyncio.create_task(
             self._run_school(), name="feed-school-library-collector"
-        )
-        self._project_asset_task = asyncio.create_task(
-            self._run_project_assets(), name="feed-project-asset-collector"
         )
         from app.services.feed.journal_cover_inventory import run_forever
         self._journal_cover_task = asyncio.create_task(
@@ -120,20 +120,39 @@ class FeedCollector:
         self._subscription_wakeup.set()
         return True
 
+    def request_project_refresh(self) -> bool:
+        """Resume opted-in project work without starting general public crawls."""
+        if not settings.feed_collector_enabled or not settings.feed_external_fetch_enabled:
+            return False
+        self._stop.clear()
+        for attribute, run, name in (
+            ("_project_task", self._run_projects, "feed-project-collector"),
+            ("_project_asset_task", self._run_project_assets, "feed-project-asset-collector"),
+            ("_translation_task", self._run_translations, "feed-translation-worker"),
+        ):
+            task = getattr(self, attribute)
+            if task is None or task.done():
+                setattr(self, attribute, asyncio.create_task(run(), name=name))
+        self._project_wakeup.set()
+        return True
+
     async def resume_saved_subscriptions(self) -> bool:
         """On desktop restart, resume only work the user has explicitly requested."""
         async with get_session_factory()() as db:
             preferences = (await db.execute(
                 select(User.preferences).where(User.is_active.is_(True))
             )).scalars().all()
+        resumed = False
         for prefs in preferences:
             feed = (prefs or {}).get("feed") or {}
             subscriptions = feed.get("subscriptions") or {}
             # Field-only users also have archived papers waiting for assets and
             # translation. A journal/author follow must not be required to show them.
             if feed.get("domains") or subscriptions.get("journals") or subscriptions.get("scholars"):
-                return self.request_subscription_refresh()
-        return False
+                resumed = self.request_subscription_refresh() or resumed
+            if feed.get("auto_curation"):
+                resumed = self.request_project_refresh() or resumed
+        return resumed
 
     async def stop(self) -> None:
         """停掉循环并等它真的退出。
@@ -144,6 +163,7 @@ class FeedCollector:
         """
         self._stop.set()
         self._subscription_wakeup.set()
+        self._project_wakeup.set()
         self._subscription_assets_wakeup.set()
         subscriptions, self._subscription_task = self._subscription_task, None
         subscription_assets, self._subscription_asset_task = self._subscription_asset_task, None
@@ -153,9 +173,10 @@ class FeedCollector:
         journal_covers, self._journal_cover_task = self._journal_cover_task, None
         journal_browser, self._journal_browser_task = self._journal_browser_task, None
         task, self._task = self._task, None
+        project_task, self._project_task = self._project_task, None
         workers = [worker for worker in (
             subscriptions, subscription_assets, school, project_assets,
-            translations, journal_covers, journal_browser, task,
+            translations, journal_covers, journal_browser, task, project_task,
         ) if worker is not None]
         if workers:
             _, pending = await asyncio.wait(workers, timeout=SHUTDOWN_GRACE_SECONDS)
@@ -175,14 +196,6 @@ class FeedCollector:
                 # 一个静默重试的循环等于没有循环。
                 logger.exception("Feed collection round failed")
             try:
-                await self.run_discovery_once()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # 挖掘失败**绝不能**影响全局采集：它花的是某个用户的预算，
-                # 而采集是全平台共享的内容供给。所以它有自己的 try。
-                logger.exception("Feed discovery round failed")
-            try:
                 await self.run_literature_once()
             except asyncio.CancelledError:
                 raise
@@ -190,6 +203,20 @@ class FeedCollector:
                 logger.exception("Local literature feed round failed")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=TICK_SECONDS)
+            except TimeoutError:
+                continue
+
+    async def _run_projects(self) -> None:
+        while not self._stop.is_set():
+            self._project_wakeup.clear()
+            try:
+                await self.run_discovery_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Feed project discovery round failed")
+            try:
+                await asyncio.wait_for(self._project_wakeup.wait(), timeout=TICK_SECONDS)
             except TimeoutError:
                 continue
 

@@ -130,7 +130,7 @@ def test_unsupported_local_gpu_needs_a_change_before_retry_and_has_no_effects(
 
     for name in ("_script_for", "_persist_submission_intent", "_submit_sync"):
         monkeypatch.setattr(rm, name, forbidden_effect)
-    for name in ("is_confirmed", "consume_confirmation", "build_pause_payload"):
+    for name in ("is_confirmed", "build_pause_payload"):
         monkeypatch.setattr(danger, name, forbidden_effect)
     state = State.new("experiment", tmp_path)
 

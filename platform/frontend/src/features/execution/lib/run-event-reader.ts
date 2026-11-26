@@ -1,5 +1,6 @@
 import type { ExecutionEvent } from "./execution-event.ts";
 import { belongsToRun } from "./run-scope.ts";
+import { canonicalDispatchEvent } from "./dispatch-presentation.ts";
 import {
   ExecutionReadContractError,
   type ExecutionReadClient,
@@ -81,7 +82,8 @@ export function mergeCanonicalRunEvents(
   const bySequence = new Map<number, ExecutionEvent>();
   const byId = new Map<string, ExecutionEvent>();
 
-  for (const event of [...current, ...incoming]) {
+  for (const delivered of [...current, ...incoming]) {
+    const event = canonicalDispatchEvent(delivered);
     // 与读取端同一条边界：要子代时，"属于"扩到「它自己或它的直接子节点」，
     // 但仍然是**边界** —— 别人的 run 混进来照样要吵。
     if (event.sessionId !== sessionId || !belongsToRun(event, runId)) {

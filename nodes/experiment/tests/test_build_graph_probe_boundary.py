@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import sys
 from pathlib import Path
@@ -24,7 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from core.state import State  # noqa: E402
 from nodes.experiment.tools.path_roles import (  # noqa: E402
-    PathRoleContractError, sandbox_mount_roots,
+    PathRoleContractError,
+    sandbox_mount_roots,
 )
 
 
@@ -81,8 +83,8 @@ def test_mount_roots_refuse_an_invalid_contract(tmp_path):
 
 def test_build_probe_child_does_not_inherit_harness_secrets(tmp_path, monkeypatch):
     """探针会求值外部源码；它的子进程不得拿到 harness 的凭据。"""
-    from core.sandbox import SandboxLimits, prepare_attempt_command
     from core import isolation
+    from core.sandbox import SandboxLimits, prepare_attempt_command
 
     try:
         isolation.select_backend()
@@ -110,39 +112,13 @@ def test_build_probe_child_does_not_inherit_harness_secrets(tmp_path, monkeypatc
         "the build probe child inherited a harness credential")
 
 
-def test_build_graph_run_passes_the_launch_env(tmp_path, monkeypatch):
-    """钉住调用点本身 —— 光是 launch.env 脱敏没用，_run 得真的传它。"""
+def test_build_graph_run_uses_the_managed_launchers_credential_filter(tmp_path, monkeypatch):
+    """Exercise the complete probe, including the launch that actually runs."""
     from nodes.experiment.tools import build_graph
-
-    captured: dict = {}
-
-    class _Launch:
-        argv = ["/bin/sh", "-c", "true"]
-        env = {"SENTINEL": "1"}
-
-        def terminate(self):
-            pass
-
-        def cleanup(self):
-            pass
-
     monkeypatch.setattr(build_graph, "sandbox_mount_roots",
                         lambda state: ([tmp_path], []))
-    monkeypatch.setattr("core.sandbox.prepare_attempt_command",
-                        lambda *a, **k: _Launch())
-
-    real_run = subprocess.run
-
-    def _spy(argv, **kwargs):
-        captured.update(kwargs)
-        return real_run(["/bin/true"], capture_output=True, text=True)
-
-    monkeypatch.setattr(build_graph.subprocess, "run", _spy)
-
-    class _S:
-        pass
-
-    build_graph._run("true", state=_S(), cwd=str(tmp_path))
-
-    assert captured.get("env") == {"SENTINEL": "1"}, (
-        f"_run must forward launch.env; got {captured.get('env')!r}")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-never-reach-the-probe")
+    state = State.new("experiment", tmp_path / "runs")
+    code, output = asyncio.run(build_graph._run(
+        'printf "KEY=%s" "$ANTHROPIC_API_KEY"', state=state, cwd=str(tmp_path)))
+    assert (code, output) == (0, "KEY="), output

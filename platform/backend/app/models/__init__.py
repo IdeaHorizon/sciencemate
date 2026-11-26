@@ -20,6 +20,7 @@ from app.models.invitation import Invitation
 from app.models.feed import (
     FeedDailyPick,
     FeedEngagement,
+    FeedSaveFolder,
     FeedEngagementAction,
     FeedItem,
     FeedItemKind,
@@ -68,6 +69,7 @@ __all__ = [
     "FeedItemKind",
     "FeedVisibility",
     "FeedEngagement",
+    "FeedSaveFolder",
     "FeedEngagementAction",
     "FeedDailyPick",
 ]

@@ -44,7 +44,7 @@ test("检索页的「收藏」接到资讯的收藏，「点赞」没有了", ()
   assert.doesNotMatch(screen, /setLiked|setSaved|AC\.like/, "点赞 / 收藏又退回成了页面里的一个状态");
   assert.match(screen, /usePaperSaves\(\)/);
   const hook = readFileSync("src/features/academic-search/hooks/usePaperSaves.ts", "utf8");
-  assert.match(hook, /api\.savePaperToFeed\(/);
+  assert.match(hook, /api\.savePaperToFeedFolder\(/);
   assert.match(hook, /api\.undoFeedEngagement\(itemId, "save"\)/);
   const client = readFileSync("src/lib/api.ts", "utf8");
   assert.match(client, /"\/feed\/saved-papers"/);

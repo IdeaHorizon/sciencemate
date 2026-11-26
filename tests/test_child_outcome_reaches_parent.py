@@ -35,3 +35,23 @@ async def test_structured_outcome_survives_the_complete_return_chain(tmp_path):
     assert result["node_task_outcome"] == outcome
     compact = json.loads(_compact_run_node_result(json.dumps(result)).split("\n", 1)[1])
     assert compact["node_task_outcome"] == outcome
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('returned_status', ['cancelled', 'completed'])
+async def test_resumed_cancelled_child_is_persisted_and_returned_as_cancelled(tmp_path, returned_status):
+    parent = State.new('_orchestrator', tmp_path)
+    child = State.new('literature', tmp_path)
+    harness = NodeHarness(node_type='literature')
+    child.hook_state['kill_signal'] = {'reason': 'user stop', 'requested_by': 'user'}
+    result = LoopResult(final_text='stopped', turns=2, messages=[], status=returned_status,
+                        terminal_cause='external_kill' if returned_status == 'cancelled' else 'model_finished',
+                        cancel_meta={'reason': 'user stop', 'requested_by': 'user'})
+    summary = await finalize_run(child, harness, result, None)
+    assert summary['status'] == 'cancelled'
+    assert json.loads((child.root / 'summary.json').read_text())['status'] == 'cancelled'
+    rows = [json.loads(line) for line in child.transcript_path.read_text().splitlines()]
+    assert [row['status'] for row in rows if row.get('event') == 'run_end'] == ['cancelled']
+    out = _finish_child(parent, 'literature', {}, summary, harness, None)
+    assert out['status'] == out['child_status'] == 'cancelled'
+    compact = json.loads(_compact_run_node_result(json.dumps(out)).split('\n', 1)[1])
+    assert compact['status'] == 'cancelled'

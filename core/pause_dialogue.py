@@ -7,12 +7,19 @@ from core.decision_offer import Answer, Offer, OfferContractError, resolve_answe
 
 def exact_pause_answer(pause, text: str):
     """Keep literal choices fast; other text belongs to the conversation."""
+    if (pause.metadata or {}).get("type") in {"highrisk_confirm", "permission", "capability_grant"}:
+        from core.approvals import ApprovalError, choice_for
+        try:
+            choice = choice_for(pause.to_dict(), text)
+            return {"offer_id": pause.offer_id, "choice_id": choice, "note": ""}
+        except (ApprovalError, OfferContractError):
+            return None
     try:
-        from shared.lib.dangerous_commands import _BARE_INDEX
+        import re
 
         offer = Offer.from_pause_payload(pause.to_dict())
         literal = text.strip().casefold()
-        if _BARE_INDEX.fullmatch(text.strip()) or any(
+        if re.fullmatch(r"(?:选\s*)?[\[(（]?\s*\d+\s*[\])）]?\s*[.。、)]?", text.strip()) or any(
             literal in {choice.id.casefold(), choice.label.strip().casefold()}
             for choice in offer.choices
         ):
@@ -25,17 +32,6 @@ def exact_pause_answer(pause, text: str):
                 }
     except OfferContractError:
         pass
-    if (pause.metadata or {}).get("type") in {"highrisk_confirm", "permission", "capability_grant"}:
-        from core.capability_grants import _NO, _YES
-        from shared.lib.dangerous_commands import _APPROVE_WORDS, _option_choice
-
-        # Legacy cards have no Offer. Resolve only this card's exact labels or
-        # in-range indices, then pass the label to the existing authorization hook.
-        choice = _option_choice(text.strip(), pause.options) if pause.options else None
-        if choice is not None:
-            return choice
-        if text.strip().casefold() in _YES | _NO or _APPROVE_WORDS.fullmatch(text.strip()):
-            return text.strip()
     return None
 
 

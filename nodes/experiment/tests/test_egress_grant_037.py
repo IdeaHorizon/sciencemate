@@ -171,9 +171,31 @@ def _pause_registry():
 def _drive(state, llm, answer: str) -> int:
     from core.agent_loop import resume_loop, run_loop
 
+    async def settle_probe(awaitable):
+        from core.completion_driver import suspended_runs
+
+        task = asyncio.ensure_future(awaitable)
+        try:
+            async with asyncio.timeout(5):
+                while not task.done():
+                    waiting = next((item for item in suspended_runs()
+                                    if item["run_id"] == state.run_id), None)
+                    if waiting is not None:
+                        # This network-approval probe never seals a delivery.
+                        # The official harness must now park instead of claiming
+                        # completion; stop the probe through its real Core owner.
+                        assert waiting["decision"]["code"] == "closure_manifest_missing", waiting
+                        state.hook_state["kill_signal"] = {"reason": "network probe inspected", "requested_by": "test"}
+                    await asyncio.sleep(0.01)
+                return task.result()
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def drive() -> int:
-        result = await run_loop(load_harness("experiment"), state,
-                                [LLMMessage(role="user", content="取数据")], llm)
+        result = await settle_probe(run_loop(load_harness("experiment"), state,
+                                [LLMMessage(role="user", content="取数据")], llm))
         cards = 0
         while result.status == "paused" and cards < 4:
             cards += 1
@@ -183,7 +205,7 @@ def _drive(state, llm, answer: str) -> int:
                 # 自主/连续档与孤儿 pause 收尾用的同一个 Core 自动作答
                 from core.pause_driver import auto_approve_answer
                 text = auto_approve_answer(ctx.pause_event)
-            result = await resume_loop(ctx, text)
+            result = await settle_probe(resume_loop(ctx, text))
         return cards
 
     return asyncio.run(drive())

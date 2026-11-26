@@ -197,14 +197,10 @@ async def test_an_old_harness_without_file_stats_still_yields_paths(
     assert "patch" not in outcome.event.payload
 
 
-async def test_a_dispatch_announcement_becomes_a_conversation_event(
+async def test_a_legacy_dispatch_becomes_a_fact_without_copying_its_note(
     execution_db,  # noqa: F811
 ) -> None:
-    """调度器派发前说的那句话必须落成**独立 kind**，不能混进 agent.message。
-
-    混进去的后果实测过：调度器 8 句话和子节点 51 句内部独白同样式渲染，用户
-    在对话里根本分不出哪句是说给他听的（2026-08-17「完全是混乱的」）。
-    """
+    """An old worker's internal brief must never be upgraded to speech."""
     service = ExecutionIngestService()
     outcome = await _ingest(
         service,
@@ -220,7 +216,6 @@ async def test_a_dispatch_announcement_becomes_a_conversation_event(
         offset=30,
     )
     assert outcome.event is not None
-    assert outcome.event.kind == "orchestrator.said", "必须与 agent.message 分开"
-    assert outcome.event.payload["aboutNodeType"] == "literature"
-    assert "文献调研" in outcome.event.payload["text"]
+    assert outcome.event.kind == "node.dispatched"
+    assert outcome.event.payload == {"nodeType": "literature", "background": False}
     assert outcome.event.visibility == "summary", "这是对话，不该藏在 trace 档里"

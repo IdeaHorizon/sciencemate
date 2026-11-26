@@ -37,10 +37,9 @@ import html
 import unicodedata
 from dataclasses import dataclass, field
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.project import Project, ProjectStatus
+from app.models.project import Project
 from app.models.user import User
 
 #: 词面匹配里没有区分度的词。只列**技术写作里高频且不携带主题**的那些 ——
@@ -274,26 +273,18 @@ async def build_profile(
 ) -> Profile:
     """现算一个画像。
 
-    **不缓存、不落库**：画像是从"此刻有哪些 Project、偏好里写着什么"推出来
-    的视图。存一份就要回答"什么时候刷新"，而它的每个输入都会变 —— 那是一个
-    从不更新的字段的经典长法。
+    本地项目和偏好现查，远程部分读采集循环维护的上下文快照。
+    画像本身不落库，也不在卡片请求中等待远程网络。
     """
-    projects = (
-        (
-            await db.execute(
-                select(Project)
-                .where(Project.owner_id == user.id, Project.status == ProjectStatus.ACTIVE)
-                .order_by(Project.updated_at.desc())
-            )
-        )
-        .scalars()
-        .all()
-    )
+    from app.services.feed.curation import user_projects
+
+    projects = await user_projects(db, user)
     signals = tuple(
         ProjectSignal(
             project_id=project.id,
             name=project.name,
-            terms=extract_terms(project.name, project.research_domain, project.description),
+            terms=extract_terms(project.name, project.research_domain, project.description,
+                                *getattr(project, "user_inputs", ())),
         )
         for project in projects
     )

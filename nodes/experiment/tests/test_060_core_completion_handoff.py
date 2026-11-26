@@ -1,12 +1,4 @@
-"""Executable Core handoff for Experiment v3 completion admission.
-
-The three strict xfails describe a known cross-owner gap: the node's read-only
-delivery audit rejects the state, while Core ``finalize_run`` currently reports
-``completed``.  They assert the desired Core behavior rather than blessing the
-false-positive status.  A fixed Core will turn each marker into XPASS(strict),
-forcing the owner to remove the marker and keep the regression as an ordinary
-passing test.
-"""
+"""Experiment v3 completion admission through the actual Core finalizer."""
 from __future__ import annotations
 
 import asyncio
@@ -23,10 +15,6 @@ from core.state import State
 from nodes.experiment.tools import contract_audit
 from nodes.experiment.tools import delivery_transaction as tx
 from nodes.experiment.tools import ledger
-
-
-class _KnownCoreCompletionGap(AssertionError):
-    """Only the expected false ``completed`` result may satisfy an xfail."""
 
 
 def _state(
@@ -64,7 +52,8 @@ def _manifest(state: State, *, outcome: str = "success") -> dict:
         "limitations": [],
         "external_job_refs": [],
         "next_step": None,
-        "blocker": None,
+        "blocker": {"blocker_id": "missing-input", "summary": "upstream unavailable"}
+        if outcome == "blocked" else None,
     }
     names = tx.deterministic_names(state)
     raw_id = tx.artifact_id("raw_results", names["raw_results"])
@@ -96,17 +85,19 @@ def _finalize(state: State) -> dict:
         status="completed",
         terminal_cause="model_finished",
     )
+    from core.bootstrap import bootstrap
+    bootstrap()
     return asyncio.run(
         finalize_run(state, load_harness("experiment"), result, llm=None),
     )
 
 
-def _assert_core_did_not_complete(summary: dict) -> None:
-    if summary["status"] == "completed":
-        raise _KnownCoreCompletionGap(
-            "delivery audit failed but Core finalize_run reported completed",
-        )
-    assert summary["status"] != "completed"
+def _assert_core_did_not_complete(state: State, summary: dict, code: str) -> None:
+    assert summary["status"] == "suspended", summary
+    assert summary["completion_admission"]["code"] == code
+    assert not (state.root / "summary.json").exists()
+    records = [json.loads(line) for line in state.transcript_path.read_text().splitlines()]
+    assert not any(row["event"] == "run_end" for row in records)
 
 
 def test_exact_sealed_success_is_a_positive_completion_control(tmp_path: Path) -> None:
@@ -121,11 +112,6 @@ def test_exact_sealed_success_is_a_positive_completion_control(tmp_path: Path) -
     assert summary["status"] == "completed", summary
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=_KnownCoreCompletionGap,
-    reason="Core has no v3 delivery admission: frozen trio without finish is false-completed",
-)
 def test_frozen_trio_without_finish_commit_must_not_complete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -156,14 +142,9 @@ def test_frozen_trio_without_finish_commit_must_not_complete(
         for item in state.list_artifacts()
     )
 
-    _assert_core_did_not_complete(_finalize(state))
+    _assert_core_did_not_complete(state, _finalize(state), audit["error_code"])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=_KnownCoreCompletionGap,
-    reason="Core checks artifact types, not the exact sealed delivery heads",
-)
 def test_drifted_frozen_delivery_head_must_not_complete(tmp_path: Path) -> None:
     state, led = _state(tmp_path)
     sealed = tx.settle_delivery(
@@ -184,14 +165,9 @@ def test_drifted_frozen_delivery_head_must_not_complete(tmp_path: Path) -> None:
     assert audit["error_code"] == "closure_head_mismatch"
     assert audit["facts"]["artifact_type"] == "raw_results"
 
-    _assert_core_did_not_complete(_finalize(state))
+    _assert_core_did_not_complete(state, _finalize(state), audit["error_code"])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=_KnownCoreCompletionGap,
-    reason="project-workspace completion bypasses required outputs and has no delivery admission",
-)
 def test_project_workspace_change_without_delivery_must_not_complete(
     tmp_path: Path,
 ) -> None:
@@ -211,4 +187,16 @@ def test_project_workspace_change_without_delivery_must_not_complete(
     summary = _finalize(state)
     assert summary["missing_required_outputs"] == []
     assert summary["delivery_empty"] is False
-    _assert_core_did_not_complete(summary)
+    _assert_core_did_not_complete(state, summary, audit["error_code"])
+
+
+@pytest.mark.parametrize("outcome", ["failed", "partial", "blocked", "cancelled"])
+def test_complete_delivery_does_not_claim_the_task_succeeded(tmp_path: Path, outcome: str) -> None:
+    state, led = _state(tmp_path)
+    tx.settle_delivery(state, led, _manifest(state, outcome=outcome))
+    audit = contract_audit.audit_experiment_delivery(state)
+    assert audit["passed"], audit
+    summary = _finalize(state)
+    assert summary["status"] == ("blocked" if outcome == "blocked" else "incomplete")
+    assert summary["node_task_outcome"]["outcome"] == outcome
+    assert summary["completion_admission"]["disposition"] == "allow"

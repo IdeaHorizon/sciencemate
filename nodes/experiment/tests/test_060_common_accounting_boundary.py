@@ -401,3 +401,16 @@ def test_a_failed_intent_closure_is_disclosed_not_silent(tmp_path, monkeypatch):
     assert result["intent_closure"]["status"] == "ledger_write_failed" and result["intent_closure"]["intent_left_open"] is True
     rows = ledger.open_ledger(state).records()
     assert ledger.open_jobs(rows) and ledger.open_jobs(rows)[0]["state"] == "intent"
+
+
+def test_recovering_an_approved_receipt_does_not_count_a_second_effect(tmp_path):
+    state = _state(tmp_path)
+    row = {"name": "safe_run_bash", "args": {"cmd": "printf original"},
+           "result": {"status": "success", "returncode": 0},
+           "execution_id": "approval:original-operation"}
+    ledger_hooks.record_turn_effects(_Ctx(state, [row], turn=1))
+    reopened = State(run_id=state.run_id, node_type=state.node_type, root=state.root,
+                     project_id=state.project_id, session_id=state.session_id)
+    ledger_hooks.record_turn_effects(_Ctx(reopened, [row], turn=1))
+    effects = [r for r in ledger.open_ledger(reopened).records() if r["kind"] == "effect"]
+    assert len(effects) == 1 and effects[0]["result"]["returncode"] == 0

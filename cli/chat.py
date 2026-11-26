@@ -13,6 +13,7 @@ from pathlib import Path
 
 import chat as runtime
 from core.naming import canonical_node_type
+from shared.lib.event_loop import run as run_async
 from shared.tools.mcp_loader import load_mcp_servers, stop_mcp_servers
 
 from . import commands, terminal
@@ -620,7 +621,7 @@ async def _main() -> int:
 
 def main() -> int:
     try:
-        code = asyncio.run(_main())
+        code = run_async(_main())
     except KeyboardInterrupt:
         terminal._print_end_banner("interrupted")
         return 130

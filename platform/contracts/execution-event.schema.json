@@ -182,6 +182,7 @@
         "run.queued",
         "run.started",
         "run.paused",
+        "run.suspended",
         "run.resumed",
         "run.injected",
         "run.cancelled",

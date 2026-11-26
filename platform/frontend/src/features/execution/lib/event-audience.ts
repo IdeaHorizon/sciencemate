@@ -38,6 +38,7 @@ const AUDIENCE: Record<ExecutionEventKind, EventAudience> = {
   "session.completed": "conversation",
   // 调度器对用户说的话：派发前那句、待命轮的答复。
   "orchestrator.said": "conversation",
+  "node.dispatched": "conversation",
   // 插话送达回执 —— 用户刚说了话，回执必须出现在对话里。
   "interrupt.acknowledged": "conversation",
   // 需要人做的事 —— 永远不能被降级成"过程"。
@@ -81,6 +82,7 @@ const AUDIENCE: Record<ExecutionEventKind, EventAudience> = {
   "run.resumed": "process",
   "run.retrying": "process",
   "run.paused": "process",
+  "run.suspended": "process",
   "run.completed": "process",
   "run.incomplete": "process",
   "run.failed": "process",

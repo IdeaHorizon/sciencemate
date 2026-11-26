@@ -9,12 +9,12 @@ missing-module/library symptoms to promote an observed dependency edge.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import re
 import shlex
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -30,10 +30,10 @@ def _q(path: str | Path) -> str:
     return shlex.quote(str(path))
 
 
-def _run(cmd: str, *, state: Any, cwd: str, timeout: int = 20) -> tuple[int | None, str]:
-    from core.sandbox import SandboxLimits, prepare_attempt_command
+async def _run(cmd: str, *, state: Any, cwd: str, timeout: int = 20) -> tuple[int | None, str]:
+    from core.sandbox import SandboxLimits
+    from shared.lib.cancellable_subprocess import spawn_and_wait
 
-    launch = None
     try:
         try:
             from .env_provision import existing_env_script, wrap_command
@@ -48,13 +48,16 @@ def _run(cmd: str, *, state: Any, cwd: str, timeout: int = 20) -> tuple[int | No
             readonly = [*readonly, command_cwd]
         from shared.lib.shell import bash_shell
 
-        launch = prepare_attempt_command(
-            [bash_shell(), "-o", "pipefail", "-c", cmd],
+        if (signal := getattr(state, "kill_event", None)) is not None and signal.is_set():
+            raise asyncio.CancelledError
+        status, code, stdout, stderr = await spawn_and_wait(
+            bash_shell(), "-o", "pipefail", "-c", cmd,
             state=state,
             cwd=command_cwd,
             writable_roots=writable,
             readonly_roots=readonly,
-            limits=SandboxLimits(
+            timeout=timeout,
+            sandbox_limits=SandboxLimits(
                 memory_bytes=2 * 1024**3,
                 cpus=1,
                 pids=64,
@@ -63,31 +66,14 @@ def _run(cmd: str, *, state: Any, cwd: str, timeout: int = 20) -> tuple[int | No
                 output_bytes=8 * 1024**2,
             ),
         )
-        # env=launch.env 不是可选项：这里跑的是 `make -pn` / `cmake --graphviz`，
-        # 它们会真的求值项目自带的 Makefile 与 CMakeLists（`$(shell ...)`、
-        # execute_process），也就是**外部源码**。后端交出的 launch.env 是宿主环境
-        # 减去凭据（core.isolation._native.payload_environment，与 core.secrets
-        # 同源判据）；不传它，子进程拿到的就是 harness 的原始环境。
-        # 2026-09-08 实测：不传 env 时 payload 打印出 ANTHROPIC_API_KEY 的真值。
-        # cwd 不必传 —— core.sandbox._native_launch 已把 `cd` 编进 argv。
-        r = subprocess.run(
-            launch.argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout + 5,
-            stdin=subprocess.DEVNULL,
-            env=getattr(launch, "env", None),
-        )
-        return r.returncode, (r.stdout or "") + (r.stderr or "")
-    except subprocess.TimeoutExpired:
-        if launch is not None:
-            launch.terminate()
-        return None, "timeout"
+        # Core owns credential filtering, cancellation, process-tree teardown
+        # and isolation accounting for the same command that actually runs.
+        if status == "cancelled":
+            raise asyncio.CancelledError
+        output = (stdout + stderr).decode("utf-8", errors="replace")
+        return (code, output) if status == "done" else (None, f"{status}: {output}")
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
-    finally:
-        if launch is not None:
-            launch.cleanup()
 
 
 def _clean_node(name: str) -> str:
@@ -216,7 +202,7 @@ def _actionability(nodes: dict[str, dict[str, Any]],
     return False, f"unsupported graph source for hard gating: {source}"
 
 
-def _extract_make_graph(source_root: str, *, state: Any,
+async def _extract_make_graph(source_root: str, *, state: Any,
                         build_root: str | None = None) -> dict[str, Any]:
     src, bld = _detect_paths(source_root, build_root)
     candidates = [bld / "Makefile", bld / "makefile", bld / "GNUmakefile",
@@ -233,7 +219,7 @@ def _extract_make_graph(source_root: str, *, state: Any,
         source_files.append(str(mf))
         nodes.update(_parse_makefile_text(text, mf.parent))
     if not nodes and any(p.is_file() for p in candidates):
-        rc, out = _run("make -pn", state=state, cwd=str(bld), timeout=30)
+        rc, out = await _run("make -pn", state=state, cwd=str(bld), timeout=30)
         if rc == 0 and out:
             nodes.update(_parse_makefile_text(out, bld))
             source_files.append("make -pn")
@@ -263,7 +249,7 @@ def _parse_cmake_dot(dot_text: str) -> dict[str, dict[str, Any]]:
     return nodes
 
 
-def _extract_cmake_graph(source_root: str, *, state: Any,
+async def _extract_cmake_graph(source_root: str, *, state: Any,
                          build_root: str | None = None) -> dict[str, Any]:
     src, bld = _detect_paths(source_root, build_root)
     if not (bld / "CMakeCache.txt").is_file():
@@ -272,7 +258,7 @@ def _extract_cmake_graph(source_root: str, *, state: Any,
     dot_dir.mkdir(parents=True, exist_ok=True)
     dot = dot_dir / "targets.dot"
     dot.unlink(missing_ok=True)
-    rc, out = _run(
+    rc, out = await _run(
         f"cmake --graphviz={_q(dot)} .", state=state, cwd=str(bld), timeout=30)
     if rc != 0 or not dot.is_file():
         return _empty("partial", str(src), f"cmake graphviz failed: {out[:300]}")
@@ -422,7 +408,7 @@ def _graph_from_nodes(nodes: dict[str, dict[str, Any]], source_root: str,
     return payload
 
 
-def extract_build_dag(source_root: str, *, state: Any,
+async def extract_build_dag(source_root: str, *, state: Any,
                       build_root: str | None = None,
                       source_recon: dict[str, Any] | None = None) -> dict[str, Any]:
     src = Path(os.path.expanduser(source_root)).resolve()
@@ -430,8 +416,8 @@ def extract_build_dag(source_root: str, *, state: Any,
         return _empty("unknown", source_root, "source_root does not exist")
     graphs: list[dict[str, Any]] = []
     if (src / "CMakeLists.txt").is_file() or (build_root and (Path(build_root) / "CMakeCache.txt").is_file()):
-        graphs.append(_extract_cmake_graph(str(src), state=state, build_root=build_root))
-    graphs.append(_extract_make_graph(str(src), state=state, build_root=build_root))
+        graphs.append(await _extract_cmake_graph(str(src), state=state, build_root=build_root))
+    graphs.append(await _extract_make_graph(str(src), state=state, build_root=build_root))
 
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []

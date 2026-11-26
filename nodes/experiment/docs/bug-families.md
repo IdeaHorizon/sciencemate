@@ -50,9 +50,9 @@
 - **典型历史缺陷**：`EXP-REG-021`～`EXP-REG-024`：cancel 只在 turn boundary 生效；晚取 PGID/只杀 shell/无界 drain；zombie 被测试当 live；同一慢目标换命令反复超时且丢 partial progress。
 - **系统不变量**：sticky cancellation 能抢占当前等待；timeout/cancel 后整组终止且有界返回；zombie 是 terminated；partial output 与目标身份必须保留，同目标的重复同步尝试应被熔断并给出受管出口。
 - **容易出现的代码模式**：`wait_for(proc.communicate())` 不监听 cancel；kill 时才 `getpgid`；只 `proc.kill()`；kill 后无界 await；`os.kill(pid, 0)` 直接当业务 liveness；timeout 返回裸 `{status}`；ledger key 使用完整命令字符串。
-- **当前测试覆盖**：`nodes/experiment/tests/test_timeout_escalation.py`、`test_build_resource_guard.py`、`tests/test_subprocess_kill.py`。当前工作树另覆盖全部 safe Python 必经 cgroup supervisor、动态 Popen 命中 PID 限制、Python 终态标签和常见数值库线程预算为 4。仍没有在活的 `safe_run_bash`/`safe_execute_python` 中设置 `kill_event` 的完整取消链路测试。
+- **当前测试覆盖**：`nodes/experiment/tests/test_timeout_escalation.py`、`test_build_resource_guard.py` 保留领域计划和超时契约；`tests/test_experiment_has_one_resource_owner.py` 防止节点重新引入独立监督器；`tests/test_subprocess_kill.py`、`test_cancelled_spawn_settles.py`、`test_native_stop_action_settlement.py` 和 `test_build_graph_managed_lifecycle.py` 覆盖 Core 进程树回收、显式 stop、外层 task 取消及 action 结算。旧节点 cgroup supervisor 已退役，不能再以它的测试推断当前执行器能力。
 - **是否适合静态检查**：可检查 `start_new_session`、group killer 和 bounded wait 是否配对，并禁止测试用裸 `kill(0)` 充当 liveness；真实进程树与竞态仍需运行测试。
-- **剩余风险**：live bash/python cancellation 缺直接 regression；`safe_run_bash` 正常成功路径中“后代继承 pipe”没有直接测试；safe Python 虽已复用同一执行/资源 supervisor，尚无真实 cgroup OOM/PID 硬事件、Swap 压力事件与 kill-event 组合竞态测试。
+- **剩余风险**：原现场的真实 cgroup OOM/PID 硬事件、Swap 压力事件与 kill-event 组合竞态仍须由对应执行器环境验证；不能把跨平台确定性停止测试外推为全部压力组合验收。
 
 ## BF-06 — 命令语义
 

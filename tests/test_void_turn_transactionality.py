@@ -294,8 +294,10 @@ def test_capacity_void_retries_without_waiting(_no_real_sleep):
     h.summarizer.trigger_threshold = 0.7
 
     state = _state()
-    messages = [LLMMessage(role="system", content="sys")] + [
-        LLMMessage(role="user", content=("研究记录 %d：结果如下。" % i) * 40)
+    messages = _msgs() + [
+        # Completed observations can be archived. Caller instructions are
+        # protected and cannot serve as compressible history in this test.
+        LLMMessage(role="assistant", content=("研究记录 %d：结果如下。" % i) * 40)
         for i in range(60)]
     # 空响应的 prompt_tokens 由实测 est 反推：学到的上限恰好使压缩翻真 ——
     # 模拟现场"请求就死在略高于压缩救得回来的位置"。

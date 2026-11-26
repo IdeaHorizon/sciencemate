@@ -339,13 +339,6 @@ def test_dispatch_payload_preserves_exact_external_acquisition_reference(tmp_pat
         reference["expected_filename"]]
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "data 的 normalize_preprocessing_request 目前把 acquisition_reference 整块丢掉："
-    "归一化后的资产只剩 asset_id/filename/format/purpose/content_constraints/dependencies。"
-    "URL、revision、sha256、licence 因此只活在给人看的 Markdown 里，对面要靠正则去捞 —— "
-    "跟 1197482e 修掉的「权威身份埋在散文里」是同一类缺口，只是换了个字段。"
-    "归一化器在 nodes/data/planning/request_contract.py，不归 experiment 改；"
-    "data 侧开始携带这个块的当天，这条会以 XPASS 变红，提醒把它收紧成硬断言。"))
 def test_external_acquisition_reference_should_reach_data_structurally(tmp_path: Path):
     """采集依据是证据，不该只以散文形态跨节点。"""
     state = State.new("experiment", tmp_path)

@@ -108,7 +108,7 @@ class ExecutionWaitingOnOut(ApiModel):
     """在等**哪一类**东西。呈递的身份不在这儿 —— 它随卡片一起长在
     `AnswerAffordanceOut.pause` 里（卡片和卡片的身份是同一个东西）。"""
 
-    kind: Literal["human", "permission", "compute"]
+    kind: Literal["human", "permission", "compute", "completion"]
 
 
 class AnswerAffordanceOut(ApiModel):
@@ -145,6 +145,7 @@ class ExecutionViewOut(ApiModel):
     outcome: Literal["ok", "ok_with_warning", "incomplete", "failed", "cancelled"] | None = None
     error: dict[str, Any] | None = None
     can_stop: bool
+    completions: list[dict[str, Any]] = Field(default_factory=list)
     label: str
     run_id: str | None = None
     since: str | None = None

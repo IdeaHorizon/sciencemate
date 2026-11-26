@@ -102,26 +102,6 @@ class ChatRequest(BaseModel):
     conversation_id: str | None = None
 
 
-async def _choice_as_words(db: AsyncSession, run_id: str, answer: "ChoiceAnswer") -> str:
-    """人点的那一项，翻成一句给新 worker 的话：选项的 label（呈递方自己写的字）+ 附言。"""
-    from app.models.execution import Decision, DecisionStatus
-
-    decision = await db.scalar(
-        select(Decision)
-        .where(Decision.run_id == run_id, Decision.status == DecisionStatus.PENDING)
-        .order_by(Decision.created_at.desc())
-    )
-    label = next(
-        (
-            str(item.get("label") or "").strip()
-            for item in ((decision.choices if decision is not None else None) or [])
-            if isinstance(item, dict) and item.get("choiceId") == answer.choice_id
-        ),
-        "",
-    ) or answer.choice_id
-    return " ".join(part for part in (label, answer.note.strip()) if part)
-
-
 def turn_input_for(answer: ChoiceAnswer | TextAnswer) -> tuple[str, dict[str, Any] | None]:
     """把一次提交翻成执行层的 `(message, choice)` —— **整个后端只在这里翻一次**。
 
@@ -366,7 +346,7 @@ def _local_execution_stream(
     async def event_gen():
         nonlocal observer_attached
         task = asyncio.create_task(run_worker())
-        retain_detached_execution(task)
+        retain_detached_execution(task, project_id=str(project.id))
         try:
             while True:
                 try:
@@ -438,23 +418,22 @@ async def project_chat_stream(
     #
     # 判别在入口解析时已经完成（`data.answer.kind`）。下面每个分支只处理一种
     # 提交；穷举由 `assert_never` 保证 —— 加第三种提交而漏了分支是类型错误。
-    # 停在这张卡上的 worker 若是部署前起的旧一代，答复不能再送给它：送了它就带着
-    # 旧代码继续跑、下一张卡照样按旧规矩停。换代与开新一轮同一条路（respawn +
-    # pause 标成可恢复），人的这一下点击化成一句话交给新 worker：它的流程账本仍
-    # 记着这个决定点，会重新呈递；连续档下当场自动放行。
+    # An old worker must not keep executing old authorization code. Its CAS
+    # token also must not become plain text for a new model turn. Retire it and
+    # require the recovered worker's current card before accepting a choice.
     if isinstance(data.answer, ChoiceAnswer) and conversation is not None and (
         _hsm.paused_worker_is_stale(str(project.id), str(conversation.session_id))
     ):
         retired = await _hsm.retire_paused_worker(str(project.id), str(conversation.session_id))
         if retired is not None:
-            data = data.model_copy(
-                update={
-                    "answer": TextAnswer(
-                        kind="text",
-                        text=await _choice_as_words(db, retired.run_id, data.answer),
-                    )
-                }
-            )
+            raise HTTPException(status_code=409, detail={
+                **run_failures.copy_for("offer_superseded", lang),
+                "message": _say({
+                    "zh": "会话执行器已升级。请恢复会话，核对重新呈递的操作后再批准。",
+                    "en": "The session worker was upgraded. Resume the session and inspect its current operation before approving.",
+                }, lang),
+                "sessionId": data.conversation_id,
+            })
     match data.answer:
         case ChoiceAnswer():
             # 点选项 = 回答**停着等人的那个 pause**。它只能投给一个活着且停着
@@ -578,9 +557,11 @@ async def project_chat_stream(
     # 占用分流只对**一句话**成立（开新轮还是插话）。点选项的提交在上面已经
     # 按命令类型分派走了 answer 路 —— 它不受占用影响：worker 在飞时答复排队
     # （会话锁由 `claim()` 持有），不是被翻译成另一种东西。
-    if isinstance(data.answer, TextAnswer) and _hsm.is_occupied(
+    if (isinstance(data.answer, TextAnswer)
+        and _hsm.paused_binding(str(project.id), str(conversation.session_id)) is None
+        and _hsm.is_occupied(
         str(project.id), str(conversation.session_id)
-    ):
+    )):
         # ── 单一入口，机械分流（2026-08-17）─────────────────────────────────
         #
         # 会话正忙时，这句话是**插话**，不是新一轮：落 user 消息行 + 投收件箱，

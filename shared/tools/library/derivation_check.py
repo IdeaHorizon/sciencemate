@@ -52,6 +52,7 @@ from core.tool_registry import (
     register_tool,
 )
 from shared.lib import derivation_ledger as _ledger
+from shared.lib.derivation_worker import bounded_cas
 from shared.lib.verifier_registry import register_verifier
 
 
@@ -477,6 +478,7 @@ def _numeric_probe(
             "checked": checked}
 
 
+@bounded_cas
 async def _check_step(
     state: Any,
     lhs: str,
@@ -616,6 +618,7 @@ async def _check_step(
     return result
 
 
+@bounded_cas
 async def _find_counterexample(
     state: Any,
     claim_lhs: str,
@@ -676,6 +679,7 @@ async def _find_counterexample(
     }
 
 
+@bounded_cas
 async def _dimensional_check(
     state: Any,
     expression: str,
@@ -810,6 +814,7 @@ async def _dimensional_check(
     return result
 
 
+@bounded_cas
 async def _limit_check(
     state: Any,
     expression: str,
@@ -1036,6 +1041,7 @@ def _flint():
         return None
 
 
+@bounded_cas
 async def _interval_check(
     state: Any,
     lhs: str,

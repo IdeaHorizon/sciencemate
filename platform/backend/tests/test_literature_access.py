@@ -13,6 +13,7 @@ from app.models.cnki import CnkiDevice, CnkiJob, CnkiPaper, CnkiJobPaper
 from app.models.feed import FeedSource, FeedItem
 from app.schemas.cnki import JobIn
 from app.services import cnki, literature_access as access
+from app.services.cnki_worker import cnki_collector
 
 
 @pytest.fixture
@@ -28,10 +29,14 @@ async def rig(tmp_path, monkeypatch):
                   display_name=f"Test {i}", is_active=True, institution_id=f"school-{i}") for i in range(2)]
     async with sessions.begin() as db:
         db.add_all(users)
+    # Exercise real broker authorization and SQLite persistence, but do not
+    # launch a browser (or accidentally point a worker at the default DB).
+    wakeups = []
+    monkeypatch.setattr(cnki_collector, "start", wakeups.append)
     broker = access.LiteratureAccess()
     monkeypatch.setattr(broker, "directory", lambda: tmp_path / "access")
     configs = [json.loads(Path((await broker.environment(u))["HARNESS_LITERATURE_ACCESS_FILE"]).read_text()) for u in users]
-    yield SimpleNamespace(broker=broker, sessions=sessions, users=users, configs=configs, directory=tmp_path / "access")
+    yield SimpleNamespace(broker=broker, sessions=sessions, users=users, configs=configs, wakeups=wakeups, directory=tmp_path / "access")
     await broker.stop()
     await engine.dispose()
 
@@ -49,6 +54,26 @@ async def test_cnki_job_matches_ui_and_other_user_cannot_read_it(rig, limit):
     with pytest.raises(PermissionError):
         await rig.broker.dispatch({"token": rig.configs[1]["token"], "op": "cnki_status",
                                   "payload": {"job_id": ui_job["id"]}})
+
+
+@pytest.mark.asyncio
+async def test_explicit_submit_wakes_collector_but_cached_reads_do_not(rig):
+    submit = {"token": rig.configs[0]["token"], "op": "cnki_submit",
+              "payload": {"query": "检索缓存验证", "limit": 20}}
+    started = await rig.broker.dispatch(submit)
+    assert rig.wakeups == [started["id"]]
+    # A worker in its own transaction can see the job returned by the broker.
+    async with rig.sessions.begin() as db:
+        job = await db.get(CnkiJob, started["id"])
+        job.last_completed_at = cnki.now()
+        job.checkpoint = {**job.checkpoint, "finished": True}
+
+    status = await rig.broker.dispatch({"token": submit["token"], "op": "cnki_status",
+                                        "payload": {"job_id": started["id"]}})
+    reused = await rig.broker.dispatch(submit)
+    assert status["state"] == reused["state"] == "completed"
+    assert reused["id"] == started["id"]
+    assert rig.wakeups == [started["id"]]
 
 
 @pytest.mark.asyncio

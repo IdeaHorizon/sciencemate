@@ -72,7 +72,7 @@ def finished(state, dispatch_id: str, result: dict | None = None):
     return record.get("finished")
 
 
-async def restore_paused_child(state, call_id: str, run_id: str) -> None:
+async def restore_paused_child(state, call_id: str, run_id: str) -> dict | None:
     from core import tool_registry
 
     saved = checkpoint(state)
@@ -81,11 +81,28 @@ async def restore_paused_child(state, call_id: str, run_id: str) -> None:
         for record in (saved or {}).get("child_dispatches", {}).values()
         if record.get("call_id") == call_id and record.get("child_run_id") == run_id
     ]
+    imported = None
+    if not matches and saved and not saved.get("child_dispatches"):
+        # Bounded pre-handle migration: the existing owner proves its exact
+        # call/dispatch/child edge. Never infer a child from node type or age.
+        call = next((call for message in saved.get("messages", [])
+                     for call in message.get("tool_calls") or [] if call.get("id") == call_id), None)
+        if call:
+            owner = tool_registry.get_tool(call["function"]["name"])
+            if owner and callable(owner.interrupted_recovery):
+                raw = call["function"].get("arguments") or "{}"
+                arguments = json.loads(raw) if isinstance(raw, str) else raw
+                imported = await owner.interrupted_recovery(arguments, state=state, tool_call_id=call_id)
+                saved = checkpoint(state)
+                matches = [record for record in (saved or {}).get("child_dispatches", {}).values()
+                           if record.get("call_id") == call_id and record.get("child_run_id") == run_id]
     if len(matches) != 1:
         raise ValueError("Paused child has no exact saved execution handle")
+    if imported is not None:
+        return imported
     record = matches[0]
     owner = tool_registry.get_tool(record.get("owner_tool", "run_node"))
-    await owner.interrupted_recovery(
+    return await owner.interrupted_recovery(
         {"_resume_dispatch_id": record["dispatch_id"]}, state=state, tool_call_id=call_id
     )
 

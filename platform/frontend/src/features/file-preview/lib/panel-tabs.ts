@@ -1,4 +1,4 @@
-import { RESEARCH_TAB_ID } from "../../../stores/workspace-panel.ts";
+import { OUTPUTS_TAB_ID, RESEARCH_TAB_ID } from "../../../stores/workspace-panel.ts";
 
 /**
  * 当前该显示哪个 Tab。
@@ -9,14 +9,13 @@ import { RESEARCH_TAB_ID } from "../../../stores/workspace-panel.ts";
  */
 export function resolveActiveTab(
   activeTabId: string,
-  { hasResearch, fileIds }: { hasResearch: boolean; fileIds: readonly string[] },
+  { hasResearch, hasOutputs = false, fileIds }: { hasResearch: boolean; hasOutputs?: boolean; fileIds: readonly string[] },
 ): string {
-  if (activeTabId === RESEARCH_TAB_ID) {
-    // 研究进程不在场（文件页）时落到第一个文件，而不是显示一个空面板。
-    return hasResearch ? RESEARCH_TAB_ID : (fileIds[0] ?? RESEARCH_TAB_ID);
-  }
+  if (activeTabId === OUTPUTS_TAB_ID && hasOutputs) return OUTPUTS_TAB_ID;
+  if (activeTabId === RESEARCH_TAB_ID && hasResearch) return RESEARCH_TAB_ID;
   if (fileIds.includes(activeTabId)) return activeTabId;
   // 记着的标签属于别的项目、或者已经被关掉了。
   if (hasResearch) return RESEARCH_TAB_ID;
+  if (hasOutputs) return OUTPUTS_TAB_ID;
   return fileIds[0] ?? RESEARCH_TAB_ID;
 }

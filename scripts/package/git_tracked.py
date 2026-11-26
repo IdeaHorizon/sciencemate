@@ -32,7 +32,10 @@ from pathlib import Path, PurePosixPath
 NOT_SHIPPED = frozenset({"tests"})
 
 # These are runtime inputs even though their canonical copy lives under docs/.
-HARNESS_RUNTIME_FILES = ("docs/xiaohongshu_journal_map.tsv",)
+HARNESS_RUNTIME_FILES = (
+    "docs/xiaohongshu_journal_map.tsv",
+    "nodes/literature/data/reference/journal_metrics.sqlite3",
+)
 
 
 def _git(repo: Path, *args: str) -> str:

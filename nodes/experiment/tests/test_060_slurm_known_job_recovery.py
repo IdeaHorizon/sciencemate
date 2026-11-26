@@ -59,7 +59,11 @@ def test_known_cpu_or_single_gpu_job_without_durable_binding_remains_queryable(
     assert result["requested_resources"]["gpus"] == gpus
     assert result["do_not_resubmit"] is True
     assert result["submission_persistence"]["status"] == "recovered"
-    assert result["external_workflow_task_id"]
+    # v3 recovery remains backed by the intent and owed receipt, without
+    # creating a retired v2 task that no longer has a finalize consumer.
+    assert result["external_workflow_task_id"] is None
+    assert not state.list_artifacts("external_job_workflow")
+    assert "external_job_waiting" not in state.hook_state
     receipts = rm.read_owed_submission_receipts(state)
     assert len(receipts) == 1
     assert receipts[0]["status"] == "submitted_needs_recovery"

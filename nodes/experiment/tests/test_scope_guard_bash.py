@@ -21,10 +21,7 @@ from pathlib import Path
 import pytest
 
 from core.state import State
-from core.harness import NodeHarness
-from core.llm import LLMMessage
-from core.loop_hooks import HookContext
-from core.loop_hooks_builtin import _highrisk_confirm_on_turn_start
+from tests._approval_support import resume_result
 from nodes.experiment.tools import safe_bash as sb
 from nodes.experiment.tools.path_roles import collect_path_roles
 from nodes.experiment.tools.execution_route import _declare_execution_route
@@ -757,19 +754,6 @@ def test_project_run_rejects_declared_home_dependency_root():
 
 # ── 人工批准桥接：scope_guard 不再把可授权的环境路径变成永久 error ────────
 
-def _approve_scope_pause(
-    st: State, command: str, *, tool: str = "safe_run_bash",
-) -> None:
-    """模拟 pause_driver resume 后的 always-on highrisk_confirm hook。"""
-    ctx = HookContext(
-        harness=NodeHarness(node_type="experiment", system_prompt="test"),
-        state=st, turn=2,
-        messages=[
-            LLMMessage(role="tool", tool_call_id="scope-1",
-                       name=tool, content="批准执行一次"),
-        ],
-    )
-    _highrisk_confirm_on_turn_start(ctx)
 
 
 def test_full_safe_run_bash_consumes_scope_and_highrisk_grants_once(monkeypatch):
@@ -804,8 +788,7 @@ def test_full_safe_run_bash_consumes_scope_and_highrisk_grants_once(monkeypatch)
     first = asyncio.run(sb._safe_run_bash(st, command))
     assert first["status"] == "pause" and not calls
 
-    _approve_scope_pause(st, command)
-    second = asyncio.run(sb._safe_run_bash(st, command))
+    second = asyncio.run(resume_result(st, first, sb._safe_run_bash, {"cmd": command}))
     assert second["status"] == "success" and calls == [command]
     assert dangerous_commands.is_confirmed(st, command) is False
 
@@ -848,8 +831,7 @@ def test_safe_write_file_uses_same_path_authorization(monkeypatch):
     first = asyncio.run(sb._safe_write_file(st, target, "x"))
     assert first["status"] == "pause"
 
-    _approve_scope_pause(st, f"write_file(path={target!r})")
-    second = asyncio.run(sb._safe_write_file(st, target, "x"))
+    second = asyncio.run(resume_result(st, first, sb._safe_write_file, {"path": target, "content": "x"}))
     assert second["status"] == "success"
     assert asyncio.run(sb._safe_write_file(st, target, "x"))["status"] == "pause"
 
@@ -958,10 +940,7 @@ def test_external_cwd_capability_is_obtainable_through_public_hitl(
     )
     assert calls == []
 
-    _approve_scope_pause(state, "pwd")
-    second = asyncio.run(sb._safe_run_bash(
-        state, "pwd", cwd=str(external), timeout=10,
-    ))
+    second = asyncio.run(resume_result(state, first, sb._safe_run_bash, {"cmd": "pwd", "cwd": str(external), "timeout": 10}))
     assert second["status"] == "success", second
     assert calls == ["pwd"]
     assert str(external.resolve()) in state.hook_state[
@@ -1024,10 +1003,7 @@ def test_external_python_cwd_capability_is_obtainable_through_public_hitl(
     assert "工具：safe_execute_python" in first["pause_event"]["context"]
     assert calls == []
 
-    _approve_scope_pause(state, code, tool="safe_execute_python")
-    second = asyncio.run(sb._safe_execute_python(
-        state, code, cwd=str(external), timeout=10,
-    ))
+    second = asyncio.run(resume_result(state, first, sb._safe_execute_python, {"code": code, "cwd": str(external), "timeout": 10}))
 
     assert second["status"] == "success", second
     assert len(calls) == 1
@@ -1061,8 +1037,11 @@ def test_python_source_pause_names_the_registered_public_tool(
     assert first["pause_event"]["metadata"]["tool"] == "safe_execute_python"
     assert "工具：safe_execute_python" in first["pause_event"]["context"]
 
-    _approve_scope_pause(state, code, tool="safe_execute_python")
-    assert sb._scope_guard_python(state, code) is None
+    async def check(state, code):
+        return sb._scope_guard_python(state, code) or {"status": "success"}
+    result = asyncio.run(resume_result(state, first, check, {"code": code}))
+    assert result["status"] == "success"
+    assert sb._scope_guard_python(state, code) is not None
 
 
 @pytest.mark.parametrize(
@@ -1087,7 +1066,6 @@ def test_public_bash_blocks_embedded_process_launchers_before_spawn(
         raise AssertionError("内嵌启动器必须在任何执行入口前拒绝")
 
     monkeypatch.setattr(sb, "_exec_and_log", forbidden)
-    monkeypatch.setattr(sb, "_orig_run_bash", forbidden)
 
     result = asyncio.run(sb._safe_run_bash(state, command, timeout=10))
 

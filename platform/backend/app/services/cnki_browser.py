@@ -491,6 +491,18 @@ class Browser:
         self.process = self.client = self.ws = self.user_id = self.tab = self.detail_tab = None
         self.lanes.clear()
 
+    async def check_recovery_verification(self, user_id):
+        """Keep any active challenge available instead of resetting it away."""
+        if self.user_id != user_id or not self.process or self.process.returncode is not None:
+            return
+        try:
+            live = {tab['id'] for tab in (await self.client.get('/json/list')).json()}
+        except httpx.HTTPError:
+            return  # The managed browser is already disconnected.
+        for tab in (self.tab, self.detail_tab, *self.lanes.values()):
+            if tab and tab['id'] in live and (await self.execute("state", tab=tab)).get("captcha"):
+                raise CollectionError("waiting_for_verification")
+
     async def reset_session(self, user_id: str, request_id: str):
         """Back up only this managed profile, after the collector stops its lanes.
 

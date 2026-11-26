@@ -83,6 +83,12 @@ export function CurationSwitch({ onChange }: { onChange?: () => void } = {}) {
         {status.text}
       </p>
 
+      {state.enabled && state.local_project_count !== undefined && (
+        <p className="feed-curation-note">{fc("curation.project_counts", lang, {
+          local: state.local_project_count, remote: state.remote_project_count ?? 0,
+        })}</p>
+      )}
+
       {/* 模型只显示、不在这里选 —— 见上面的 docstring。 */}
       <p className="feed-curation-model">
         {fc("curation.model_line", lang)}

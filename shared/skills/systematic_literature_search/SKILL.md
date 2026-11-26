@@ -24,7 +24,7 @@ relevant_concepts: []
 - **Literature** 有直接检索工具，执行下列检索和服务交付步骤。
 - **Observation 等消费方** 有 `run_node` 且获准调用 Literature 时，把检索交给服务：
   ```python
-  run_node(node_type="literature", user_note="正在委派文献检索，随后核对覆盖与筛选。",
+  run_node(node_type="literature",
            node_inputs={"research_question": "<问题、检索式、来源、时间范围与排除标准>",
                         "mode": "landscape"})
   ```

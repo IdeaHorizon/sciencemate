@@ -39,11 +39,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 #: 墓碑前缀 —— 机械可辨，别用来做语义判断以外的事。
 TOMBSTONE_PREFIX = "[工具结果已从上下文移出]"
+_MAX_RECORD_BYTES = 64 * 1024 * 1024
 
 
 def canonical_key(tool_name: str, args: dict | None) -> str:
@@ -135,6 +137,19 @@ class ContextView:
         self._log_path: Path | None = None
         #: Exact record identities, lazily rebuilt from the existing append-only log.
         self._logged_reference_cache: dict[tuple[str, str, str], str] | None = None
+        self._history_index_cache: tuple | None = None
+        self._history_receipt_cache: tuple[str, str] | None = None
+
+    def fork(self) -> ContextView:
+        """Prepare eviction on an isolated index; rendering commits the real index."""
+        planned = ContextView(self.state)
+        planned.live = dict(self.live)
+        planned.entries = deepcopy(self.entries)
+        planned._log_path = self._log_path
+        planned._logged_reference_cache = (
+            dict(self._logged_reference_cache) if self._logged_reference_cache is not None else None
+        )
+        return planned
 
     # ── 磁盘：全保真 run log ────────────────────────────────────────────
 
@@ -158,11 +173,86 @@ class ContextView:
         except OSError:
             return None
 
-    def _reference(self, offset: int, raw: bytes) -> str:
-        scope = hashlib.sha256(str(self._log().resolve()).encode()).hexdigest()[:24]
-        return f"v1:{scope}:{offset}:{len(raw)}:{hashlib.sha256(raw).hexdigest()}"
+    def _scope(self, version: str) -> str:
+        if version == "v1":
+            identity = str(self._log().resolve())
+        elif version == "v2" and getattr(self.state, "run_id", None):
+            identity = json.dumps(
+                {key: str(getattr(self.state, key, None) or "")
+                 for key in ("tenant_id", "project_id", "session_id", "run_id")},
+                sort_keys=True,
+            )
+        else:
+            raise ValueError("Unsupported tool result reference scope")
+        return hashlib.sha256(identity.encode()).hexdigest()[:24]
 
-    def _append_log(self, *, key: str, tool_call_id: str, turn: int, content: str) -> str | None:
+    def _reference_version(self) -> str:
+        # Reader-first rollout: existing releases understand v1 only. Keep
+        # writes rollback-safe until the minimum supported reader accepts v2.
+        return "v1"
+
+    def _reference(self, offset: int, raw: bytes) -> str:
+        version = self._reference_version()
+        return f"{version}:{self._scope(version)}:{offset}:{len(raw)}:{hashlib.sha256(raw).hexdigest()}"
+
+    def history_index_ref(self) -> str | None:
+        """An immutable ordinary receipt, readable by pre-upgrade releases too."""
+        try:
+            content = self._history_index()
+        except OSError:
+            # The direct history receipt is already durable; a derived
+            # catalogue must not invalidate that successful archive.
+            return None
+        if self._history_receipt_cache and self._history_receipt_cache[0] == content:
+            return self._history_receipt_cache[1]
+        reference = self._append_log(key="context_history_index|{}",
+                                     tool_call_id="history-index", turn=0,
+                                     content=content, durable=True)
+        if reference:
+            self._history_receipt_cache = (content, reference)
+        return reference
+
+    def _history_index(self) -> str:
+        records = []
+        catalogue = None
+        path = self._log()
+        if path is not None and path.exists():
+            signature = self._log_signature()
+            if self._history_index_cache and self._history_index_cache[0] == signature:
+                return self._history_index_cache[1]
+            with path.open("rb") as stream:
+                offset = 0
+                for raw in stream:
+                    try:
+                        if not raw.endswith(b"\n") or len(raw) > _MAX_RECORD_BYTES:
+                            continue
+                        record = json.loads(raw)
+                        if (record.get("key") == "context_history|{}"
+                                and isinstance(record.get("content"), str)):
+                            records.append({"turn": record.get("turn"),
+                                            "result_ref": self._reference(offset, raw),
+                                            "total_chars": len(record["content"])})
+                        elif (record.get("key") == "context_history_index|{}"
+                              and isinstance(record.get("content"), str)):
+                            catalogue = (record["content"], self._reference(offset, raw))
+                    except (ValueError, AttributeError):
+                        pass  # An interrupted append is never a historical receipt.
+                    finally:
+                        offset += len(raw)
+            content = json.dumps(records, ensure_ascii=False)
+            if catalogue and catalogue[0] == content:
+                self._history_receipt_cache = catalogue
+            self._history_index_cache = (signature, content)
+            return content
+        return "[]"
+
+    def _log_signature(self) -> tuple:
+        stat = self._log().stat()
+        return (stat.st_dev, stat.st_ino, stat.st_size,
+                stat.st_mtime_ns, stat.st_ctime_ns)
+
+    def _append_log(self, *, key: str, tool_call_id: str, turn: int, content: str,
+                    durable: bool = False) -> str | None:
         """原文落盘。**永不编辑**，只 append —— 它是取回的唯一权威。
 
         返回当前 run 内绑定字节位置及摘要的引用；写失败返回 None（见
@@ -176,12 +266,44 @@ class ContextView:
                     {"key": key, "tool_call_id": tool_call_id,
                      "turn": turn, "content": content},
                     ensure_ascii=False) + "\n").encode("utf-8")
-            with p.open("ab") as fh:
+            if len(raw) > _MAX_RECORD_BYTES:
+                return None
+            with p.open("a+b") as fh:
+                fh.seek(0, 2)
                 offset = fh.tell()
+                if offset:
+                    fh.seek(offset - 1)
+                    if fh.read(1) != b"\n":
+                        # An interrupted previous append is not a record. End
+                        # that fragment before writing a new independently
+                        # addressable record; never edit the earlier bytes.
+                        fh.write(b"\n")
+                    offset = fh.tell()
                 fh.write(raw)
+                if durable:
+                    import os
+                    fh.flush()
+                    os.fsync(fh.fileno())
             return self._reference(offset, raw)
         except OSError:
             return None
+
+    def archive_history(self, messages: list, *, turn: int) -> str | None:
+        """Commit exact history before removing any exchange from the model view.
+
+        Use the existing scoped, hash-checked historical receipt reader. A failed
+        durable write leaves the working set untouched; recovery never invokes
+        the original effectful tools.
+        """
+        from .conversation_store import msg_to_jsonable
+
+        content = json.dumps([msg_to_jsonable(m) for m in messages], ensure_ascii=False)
+        # read_result rejects records larger than this bound; do not create an
+        # archive that the advertised recovery interface cannot read.
+        if len(content.encode('utf-8')) > 60 * 1024 * 1024:
+            return None
+        return self._append_log(key='context_history|{}', tool_call_id=f'history-{turn}',
+                                turn=turn, content=content, durable=True)
 
     def _logged_references(self) -> dict[tuple[str, str, str], str]:
         """原文身份 → 字节引用（惰性建一次，之后由 note_result 增量维护）。
@@ -201,6 +323,9 @@ class ContextView:
                     offset = 0
                     for line in fh:
                         try:
+                            if not line.endswith(b"\n") or len(line) > _MAX_RECORD_BYTES:
+                                offset += len(line)
+                                continue
                             rec = json.loads(line)
                         except (json.JSONDecodeError, UnicodeDecodeError):
                             offset += len(line)
@@ -224,15 +349,31 @@ class ContextView:
         if p is None:
             raise ValueError("No tool result log in this run")
         try:
+            if offset < 0 or not 1 <= limit <= 16000:
+                raise ValueError("Invalid tool result page")
+            if result_ref.startswith("history:"):
+                _, version, scope = result_ref.split(":")
+                if scope != self._scope(version):
+                    raise ValueError("Invalid history catalogue scope")
+                content = self._history_index()
+                end = min(offset + limit, len(content))
+                return dict(status="success", historical=True, result_ref=result_ref,
+                            tool_name="context_history_index", content=content[offset:end],
+                            offset=offset, total_chars=len(content), truncated=end < len(content),
+                            next_offset=end if end < len(content) else None)
             version, scope, start, length, digest = result_ref.split(":")
             start, length = int(start), int(length)
-            expected_scope = hashlib.sha256(str(p.resolve()).encode()).hexdigest()[:24]
-            if (version != "v1" or scope != expected_scope or start < 0 or length <= 0
-                    or length > 64 * 1024 * 1024 or len(digest) != 64
+            expected_scope = self._scope(version)
+            if (scope != expected_scope or start < 0 or length <= 0
+                    or length > _MAX_RECORD_BYTES or len(digest) != 64
                     or offset < 0 or not 1 <= limit <= 16000):
                 raise ValueError("Invalid tool result reference or page")
+            signature = self._log_signature()
+            # A same-size rewrite can retain all observed stat fields. Read
+            # and hash the durable record on every page; metadata alone cannot
+            # prove that the original receipt is still recoverable.
             with p.open("rb") as fh:
-                if start + length > p.stat().st_size:
+                if start + length > signature[2]:
                     raise ValueError("Tool result reference is outside the log")
                 if start:
                     fh.seek(start - 1)
@@ -336,11 +477,11 @@ class ContextView:
         tool 消息的配对是 API 硬约束，渲染不许碰它。（这也是为什么驱逐用墓碑
         而不是删消息：删一条就得改上一条 assistant，那才是真的在编辑历史。）
         """
-        from core.llm import LLMMessage
+        from core.llm import LLMMessage, is_primary_input
 
         out: list = []
         for m in messages:
-            if getattr(m, "role", None) != "tool":
+            if getattr(m, "role", None) != "tool" or is_primary_input(m):
                 out.append(m); continue
             tcid = getattr(m, "tool_call_id", None)
             e = self.entries.get(tcid or "")
@@ -452,15 +593,19 @@ class ContextView:
         （少通知一处 = 一个死循环，且不报错）。判据从现场算，不可能漏。
         """
         present = {
-            getattr(m, "tool_call_id", None)
+            getattr(m, "tool_call_id", None): hashlib.sha256(
+                (getattr(m, "content", "") or "").encode("utf-8")).hexdigest()
             for m in messages
             if getattr(m, "role", None) == "tool"
             and not (getattr(m, "content", "") or "").startswith(TOMBSTONE_PREFIX)
         }
+        from .llm import is_primary_input
+        primary = {m.tool_call_id for m in messages if m.role == "tool" and is_primary_input(m)}
         n = 0
         for tcid in list(self.entries):
             e = self.entries[tcid]
-            if not e.get("evicted") and tcid not in present:
+            e["primary_input"] = tcid in primary
+            if not e.get("evicted") and present.get(tcid) != e.get("content_sha256"):
                 self._evict(tcid)
                 n += 1
         return n
@@ -506,6 +651,8 @@ class ContextView:
         # （失败正文是自纠依据，LRU 天然保住最近一条；老失败在 log 里没有丢），
         # 同类内按 turn 旧的先走。
         def _eligible(e: dict) -> bool:
+            if e.get("primary_input"):
+                return False
             if protect_turn_ge is not None and e.get("turn", 0) >= protect_turn_ge:
                 return False
             if not e.get("ok", True):

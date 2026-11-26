@@ -388,19 +388,25 @@
 .project-tree-disclosure .is-open { transform: rotate(90deg); }
 .project-tree-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-decoration: none; color: var(--color-fg); font-size: 13px; font-weight: 550; line-height: 30px; }
 .project-tree-actions { flex: none; opacity: 0; }
-.project-tree-heading:hover .project-tree-actions, .project-tree-heading:focus-within .project-tree-actions, .project-tree-branch.is-active .project-tree-actions { opacity: 1; }
+.project-tree-heading:hover .project-tree-actions, .project-tree-heading:has(:focus-visible) .project-tree-actions, .project-tree-heading[data-menu-open] .project-tree-actions { opacity: 1; }
 .project-tree-sessions { margin-left: 12px; padding: 3px 0 0 11px; border-left: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent); }
-.project-tree-session { display: flex; align-items: center; gap: 9px; min-height: 33px; padding: 6px 9px; margin: 1px 0; border-radius: 5px; color: var(--color-fg-muted); text-decoration: none; font-size: 13px; }
+.project-tree-session-row { display: flex; align-items: center; margin: 1px 0; border-radius: 5px; }
+.project-tree-session-rename { flex: 1; min-width: 0; padding: 3px 6px; }
+.project-tree-session-rename input { width: 100%; min-width: 0; padding: 4px; border: 1px solid var(--color-border-strong); border-radius: 4px; background: var(--color-bg); color: var(--color-fg); font: inherit; font-size: 13px; }
+.project-tree-session { display: flex; flex: 1; min-width: 0; align-items: center; gap: 9px; min-height: 33px; padding: 6px 9px; color: var(--color-fg-muted); text-decoration: none; font-size: 13px; }
+.project-tree .project-tree-session-menu { flex: none; width: 25px; height: 26px; padding: 0; margin-right: 4px; opacity: 0; }
+.project-tree-session-row:hover .project-tree-session-menu, .project-tree-session-row:has(:focus-visible) .project-tree-session-menu, .project-tree-session-row[data-menu-open] .project-tree-session-menu { opacity: 1; }
 .project-tree-session > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-tree-session > i { flex: none; width: 5px; height: 5px; margin: 0; }
-.project-tree-session:hover { color: var(--color-fg); background: var(--color-bg-subtle); }
-.project-tree-session.is-selected { color: var(--color-fg); background: var(--color-accent-bg); }
+.project-tree-session-row:hover { background: var(--color-bg-subtle); }
+.project-tree-session-row.is-selected { background: var(--color-accent-bg); }
+.project-tree-session-row:hover .project-tree-session, .project-tree-session-row.is-selected .project-tree-session { color: var(--color-fg); }
 .project-tree .project-tree-more { display: flex; justify-content: flex-start; width: 100%; padding: 7px 9px; text-decoration: none; color: var(--color-fg-subtle); font-size: 12px; text-align: left; }
 .project-tree-message { margin: 4px 8px; color: var(--color-fg-subtle); font-size: 12px; }
 .project-tree-search { width: calc(100% - 12px); margin: 0 6px 12px; padding: 7px 9px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-bg); color: var(--color-fg); font-size: 12px; }
 .project-tree-archived-label { display: block; margin: 12px 9px 4px; color: var(--color-fg-subtle); font-size: 11px; }
 .workspace-sidebar-toggle, .workspace-sidebar-scrim { display: none; }
-@media (hover: none) { .project-tree-actions { opacity: 1; } }
+@media (hover: none) { .project-tree-actions, .project-tree .project-tree-session-menu { opacity: 1; } }
 @media (max-width: 800px) {
   .app-shell { grid-template-columns: minmax(0, 1fr); }
   .app-sidebar { position: fixed; z-index: 81; inset: 0 auto 0 0; width: 260px; transform: translateX(-100%); padding: 54px 12px 12px; transition: transform 160ms ease; }

@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     # Web framework
     "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.30.0",
+    "uvicorn[standard]>=0.36.0",
     "python-multipart>=0.0.9",
     # Database —— 个人档只要 SQLite（aiosqlite）。Postgres 驱动在 [org] extra 里。
     "sqlalchemy[asyncio]>=2.0.30",

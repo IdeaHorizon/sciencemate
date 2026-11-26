@@ -1,10 +1,11 @@
 "use client";
 
 import { FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUpDown, Bookmark, CalendarRange, ChartBar, ChevronDown, ExternalLink, Gauge, Search, Share2, X } from "lucide-react";
+import { ArrowUpDown, CalendarRange, ChartBar, ChevronDown, ExternalLink, Gauge, Search, Share2, X } from "lucide-react";
 import { AcademicSearchLanding } from "./AcademicSearchLanding";
 import { useAcademicSearch } from "../hooks/useAcademicSearch";
 import { usePaperSaves } from "../hooks/usePaperSaves";
+import { SaveFolderAction } from "@/features/feed/components/SaveFolderAction";
 import { AC, SORT_OPTIONS, SORT_PHRASES } from "../lib/copy";
 import {sourceNotices} from "../lib/source-warning";
 import {cnkiProgressLabel} from "../lib/bilingual-search";
@@ -495,7 +496,7 @@ export function AcademicSearch() {
           aria-label={t(AC.searchInputAria)}
         />
         <div className="academic-discovery-form-actions">
-          <span>{t({ zh: "自然语言提问 · 中英文文献检索 · 每类最多 200 篇", en: "Natural-language questions · Chinese and English literature · Up to 200 per category" })}</span>
+          <span>{t({ zh: "自然语言提问 · 中英文文献检索", en: "Natural-language questions · Chinese and English literature" })}</span>
         <Button type="submit" variant="primary" loading={search.isPending} iconLeft={<Search size={16} />}>
           {t(AC.searchButton)}
         </Button>
@@ -738,7 +739,8 @@ export function AcademicSearch() {
                     </div>
                   </CardBody>
                   <CardFooter className="academic-paper-actions">
-                    <button type="button" aria-pressed={isSaved} className={isSaved ? "is-active" : ""} disabled={saves.busy} onClick={(event) => { event.stopPropagation(); saves.toggle(originalPaper); }}><Bookmark size={16} />{isSaved ? t(AC.saved) : t(AC.save)}</button>
+                    <SaveFolderAction saved={isSaved} folderId={saves.savedFolderId(originalPaper)} pending={saves.busy}
+                      onSave={(folderId) => saves.saveToFolder(originalPaper, folderId)} onUnsave={() => saves.remove(originalPaper)} />
                     <button type="button" className={shared.has(key) || copied.has(key) ? "is-active" : ""} disabled={!link} onClick={(event) => { event.stopPropagation(); void sharePaper(paper); }}><Share2 size={16} />{shared.has(key) ? t(AC.shared) : copied.has(key) ? t(AC.linkCopied) : t(AC.share)}</button>
                   </CardFooter>
                 </Card>

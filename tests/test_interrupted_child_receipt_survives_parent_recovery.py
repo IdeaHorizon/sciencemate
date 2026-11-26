@@ -81,3 +81,22 @@ async def test_import_never_guesses_a_child(child_pair, boundary):
         other = State.new("_reviewer", parent.root.parent, session_id="s")
         start(parent, other)
     assert await owner._recover_run_node(args, state=parent, tool_call_id="original-child-call") is None
+
+
+@pytest.mark.asyncio
+async def test_a_pre_handle_paused_parent_uses_the_same_exact_importer(child_pair, monkeypatch):
+    from core import child_dispatch
+    import shared.tools.run_node as owner
+    parent, child, _ = child_pair
+    start(parent, child)
+    calls = []
+
+    async def same_path(state, node_type, inputs, harness, autoresolved, execution, task_id,
+                        dispatch_id, deviations, *, summary=None, run_post_flow=True):
+        calls.append(execution["resume_run_id"])
+        return {"status": "success", "child_run_id": child.run_id}
+    monkeypatch.setattr(owner, "_run_child_dispatch", same_path)
+    result = await child_dispatch.restore_paused_child(parent, "original-child-call", child.run_id)
+    assert result["result"]["child_run_id"] == child.run_id and calls == [child.run_id]
+    saved = child_dispatch.checkpoint(parent)
+    assert len(saved["child_dispatches"]) == 1

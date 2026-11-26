@@ -114,9 +114,9 @@ def test_error_results_are_preserved() -> None:
     """失败是自我修正的信号，不清（重复失败熔断也依赖它）。"""
     msgs = _msgs(big_tool="t_read")
     err = json.dumps({"status": "error", "error": "boom " + "e" * 50_000})
-    msgs[4] = LLMMessage(role="tool", name="t_read", tool_call_id="c1", content=err)
+    msgs[5] = LLMMessage(role="tool", name="t_read", tool_call_id="c1", content=err)
     out = _run(msgs)
-    assert out[4].content == err
+    assert out[5].content == err
 
 
 def test_giant_result_is_not_shielded_by_recency() -> None:
@@ -194,6 +194,7 @@ def test_clearing_runs_even_when_harness_pins_a_lossy_strategy(tmp_path) -> None
 
     msgs = _msgs(big_tool="t_read", n_turns=6, big_chars=120_000)
     state = _State()
+    state.root = tmp_path
     out = asyncio.run(sm.run_summarizer(
         _Hpinned(), state, msgs, llm=None, turn=7,
         estimated_tokens=sm.estimate_tokens(msgs)))
@@ -201,5 +202,6 @@ def test_clearing_runs_even_when_harness_pins_a_lossy_strategy(tmp_path) -> None
     assert any((m.content or "").startswith(sm._CLEARED_MARKER) for m in out), \
         "strategy=llm 也必须先走无损清除"
     # 清够了就不该进有损层（llm=None，真进去会走 fallback 而不是 clear_sufficed）
-    assert "summarizer_clear_sufficed" in state.events
+    assert state.hook_state["_context_compaction"]["strategy"] == "clear_tool_results"
+    assert state.hook_state["_context_compaction"]["target_met"]
     assert sm.estimate_tokens(out) < sm.estimate_tokens(msgs) / 3

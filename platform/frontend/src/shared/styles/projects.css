@@ -10,8 +10,9 @@
 .project-list-loading { display: grid; gap: 4px; border-top: 0; }
 .project-list-row { display: grid; grid-template-columns: 7px minmax(210px, 1.5fr) minmax(140px, .75fr) minmax(140px, .75fr) 15px; align-items: center; gap: 13px; min-height: 70px; padding: 8px 6px; color: var(--color-fg-muted); border-bottom: 1px solid var(--color-border); text-decoration: none; }
 .project-list-row:hover { color: var(--color-fg); background: var(--color-bg-elevated); }
-.project-list-row > i { width: 6px; height: 6px; border-radius: 50%; background: var(--color-success); }
-.project-list-row > i.project-status-archived { background: var(--color-fg-subtle); }
+.project-list-row > i { width: 6px; height: 6px; border-radius: 50%; background: var(--color-fg-subtle); }
+.project-list-row > i.project-activity-running { background: var(--color-accent); }
+.project-list-row > i.project-activity-waiting { background: var(--color-warning); }
 .project-list-main, .project-list-context { display: grid; min-width: 0; gap: 4px; }
 .project-list-row strong, .project-list-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-list-main strong { color: var(--color-fg); font-size: var(--font-size-control); font-weight: 560; }

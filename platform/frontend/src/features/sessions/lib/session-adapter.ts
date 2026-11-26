@@ -131,13 +131,20 @@ export function adaptExecutionView(raw: unknown): SessionExecutionView {
   return {
     phase: value.phase === "ended" || value.phase === "interrupted" ? value.phase : "alive",
     waitingOn:
-      waitingKind === "human" || waitingKind === "permission" || waitingKind === "compute"
+      waitingKind === "human" || waitingKind === "permission" || waitingKind === "compute" || waitingKind === "completion"
         ? { kind: waitingKind }
         : null,
     outcome: (value.outcome ?? null) as SessionExecutionView["outcome"],
     error: (value.error && typeof value.error === "object")
       ? value.error as Record<string, unknown>
       : null,
+    completions: Array.isArray(value.completions) ? value.completions.flatMap((raw) => {
+      if (!raw || typeof raw !== "object") return [];
+      const item = raw as Record<string, unknown>;
+      if (typeof item.runId !== "string") return [];
+      return [{ runId: item.runId, notice: typeof item.notice === "string" ? item.notice : null,
+        canResume: item.canResume === true, recoverable: item.recoverable === true }];
+    }) : [],
     canStop: value.canStop === true,
     answer: adaptAnswerAffordance(value.answer),
     label: typeof value.label === "string" ? value.label : "",

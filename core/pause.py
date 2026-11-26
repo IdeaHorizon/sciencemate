@@ -63,6 +63,26 @@ class PauseEvent:
     #: 手抄"）。这里补上：新字段默认活着，想丢它得特意去丢。
     payload: dict = field(default_factory=dict)
 
+    def __post_init__(self):
+        # Single read migration for pre-Offer permission cards. New producers
+        # carry their own canonical Offer; legacy text is never a new authority.
+        if (self.metadata.get("type") in {"highrisk_confirm", "permission", "capability_grant"}
+                and not self.payload.get("option_details")
+                and not self.payload.get("offer") and len(self.options) == 2):
+            import hashlib
+            import json
+            from core.decision_offer import Choice, Offer, PAUSE_OFFER_KEY
+            identity = [self.asking_run_id, self.pending_tool_call_id,
+                        self.question, self.context, self.options, self.metadata]
+            offered = Offer(decision_id="legacy-permission:" + hashlib.sha256(
+                json.dumps(identity, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
+                kind=self.metadata["type"], question=self.question, context=self.context,
+                choices=(Choice(id="approve", label=self.options[0]),
+                         Choice(id="deny", label=self.options[1])),
+                recommended_id="deny" if self.metadata["type"] == "capability_grant" else None,
+            ).to_pause_payload()
+            self.payload = {**self.payload, **offered, PAUSE_OFFER_KEY: offered}
+
     def to_dict(self) -> dict:
         # payload 打底、命名字段覆盖：命名字段是被规范化过的（asking_* 有回退、
         # options 保证是 list），payload 提供工具给出的其余一切。
@@ -87,6 +107,12 @@ class PauseEvent:
         而不是"忘了在构造函数里写一行"。
         """
         data = dict(data or {})
+        # One read adapter for old flat offers; all transports carry the same
+        # canonical object. New producers no longer need consumer-specific shapes.
+        from core.decision_offer import Offer, PAUSE_OFFER_KEY
+        if ((data.get("metadata") or {}).get("type") in {"highrisk_confirm", "permission", "capability_grant"}
+                and not data.get(PAUSE_OFFER_KEY) and data.get("option_details")):
+            data[PAUSE_OFFER_KEY] = Offer.from_pause_payload(data).to_pause_payload()
         return cls(
             question=str(data.get("question") or ""),
             context=str(data.get("context") or ""),
@@ -261,6 +287,7 @@ class ActiveRunInfo:
     parent_run_id: str | None = None
     sub_run_id: str | None = None
     started_at: str = ""
+    completion: Any = None
 
 
 _ACTIVE_RUNS: dict[str, ActiveRunInfo] = {}

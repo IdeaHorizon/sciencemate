@@ -47,24 +47,17 @@ def test_match_high_risk_python_negative():
 
 # ── 确认标记 一次性语义 ──────────────────────────────────────────────────────
 
-def test_confirmation_is_one_shot(tmp_path):
-    state = State.new(node_type="t", base_dir=tmp_path)
-    cmd = "rm -rf /tmp/scratch"
-    assert not dc.is_confirmed(state, cmd)
-    dc.mark_confirmed(state, cmd)
-    assert dc.is_confirmed(state, cmd)
-    dc.consume_confirmation(state, cmd)
-    assert not dc.is_confirmed(state, cmd)   # 用掉就没了，同命令再来要重新问
 
 
-def test_looks_like_approval():
-    assert dc.looks_like_approval("批准执行")
-    assert dc.looks_like_approval("同意，去吧")
-    assert dc.looks_like_approval("approve")
-    assert dc.looks_like_approval("yes")
-    assert not dc.looks_like_approval("不要")
-    assert not dc.looks_like_approval("拒绝")
-    assert not dc.looks_like_approval("")
+def test_only_explicit_choices_authorize(tmp_path):
+    from core import approvals
+    state = State.new("experiment", tmp_path)
+    payload = dc.build_pause_payload(state, tool="run_bash", text="bounded-test", category="test", preview="test")["pause_event"]
+    assert approvals.choice_for(payload, "批准执行") == "approve"
+    assert approvals.choice_for(payload, "拒绝") == "deny"
+    for text in ("同意，去吧", "不要批准", "do not approve", ""):
+        with pytest.raises(approvals.ApprovalError):
+            approvals.choice_for(payload, text)
 
 
 # ── run_bash 集成：普通模式 pause / bypass 直跑 / 安全命令不误伤 ─────────────
@@ -112,9 +105,9 @@ async def test_run_bash_confirmed_command_runs_once_then_reblocks(tmp_path):
     # 未确认 → pause
     res1 = await _run_bash(state, cmd=cmd)
     assert res1.get("status") == "pause"
-    # 人批准后（模拟 hook 已 mark_confirmed）→ 这次放行
-    dc.mark_confirmed(state, cmd)
-    res2 = await _run_bash(state, cmd=cmd)
+    # 用户批准冻结的原调用，由 Core 续执行
+    from tests._approval_support import resume_result
+    res2 = await resume_result(state, res1, _run_bash, {"cmd": cmd})
     assert res2.get("status") == "success"
     # 一次性：同一命令再跑一次又要重新问
     res3 = await _run_bash(state, cmd=cmd)
@@ -152,67 +145,14 @@ async def test_execute_python_safe_code_unaffected(tmp_path):
     assert res.get("status") == "success"
 
 
-# ── highrisk_confirm hook：读人回答 → 批准/拒绝 ──────────────────────────────
-
-def test_highrisk_confirm_hook_marks_confirmed_on_approval(tmp_path):
-    from core.loop_hooks_builtin import _highrisk_confirm_on_turn_start
-    from core.loop_hooks import HookContext
-    from core.llm import LLMMessage
-    from core.harness import NodeHarness
-
-    state = State.new(node_type="t", base_dir=tmp_path)
-    cmd = "rm -rf /tmp/hooktest"
-    dc.register_pending_ask(state, tool="run_bash", text=cmd, category="test")
-    ctx = HookContext(
-        harness=NodeHarness(node_type="t", system_prompt="s"),
-        state=state, turn=2,
-        messages=[
-            LLMMessage(role="system", content="s"),
-            LLMMessage(role="tool", tool_call_id="c1", name="run_bash", content="批准执行"),
-        ],
-    )
-    _highrisk_confirm_on_turn_start(ctx)
-    assert dc.is_confirmed(state, cmd)
+# ── Strict current-offer choices ───────────────────────────────────────────
 
 
-def test_highrisk_confirm_hook_denial_does_not_confirm(tmp_path):
-    from core.loop_hooks_builtin import _highrisk_confirm_on_turn_start
-    from core.loop_hooks import HookContext
-    from core.llm import LLMMessage
-    from core.harness import NodeHarness
-
-    state = State.new(node_type="t", base_dir=tmp_path)
-    cmd = "rm -rf /tmp/hooktest2"
-    dc.register_pending_ask(state, tool="run_bash", text=cmd, category="test")
-    ctx = HookContext(
-        harness=NodeHarness(node_type="t", system_prompt="s"),
-        state=state, turn=2,
-        messages=[
-            LLMMessage(role="system", content="s"),
-            LLMMessage(role="tool", tool_call_id="c1", name="run_bash", content="不要，太危险了"),
-        ],
-    )
-    _highrisk_confirm_on_turn_start(ctx)
-    assert not dc.is_confirmed(state, cmd)
 
 
-def test_highrisk_confirm_hook_noop_when_nothing_pending(tmp_path):
-    """正向配套：没有 pending ask 时 hook 什么都不做，不报错。"""
-    from core.loop_hooks_builtin import _highrisk_confirm_on_turn_start
-    from core.loop_hooks import HookContext
-    from core.harness import NodeHarness
-
-    state = State.new(node_type="t", base_dir=tmp_path)
-    ctx = HookContext(
-        harness=NodeHarness(node_type="t", system_prompt="s"),
-        state=state, turn=1, messages=[],
-    )
-    assert _highrisk_confirm_on_turn_start(ctx) is None
 
 
-def test_highrisk_confirm_is_always_on_hook():
-    from core.agent_loop import _ALWAYS_ON_HOOKS
-    assert "highrisk_confirm" in _ALWAYS_ON_HOOKS
+
 
 
 # ── request_human_input：bypass 语义（issue #111）───────────────────────────

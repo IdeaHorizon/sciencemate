@@ -132,8 +132,10 @@ def test_in_tree_build_reaches_the_real_backend_after_consuming_permission_witho
         kind="bash", cmd=cmd, cwd=str(cwd), target=str(cwd),
         scope="source_worktree_modification", op="make",
     )
-    danger.mark_confirmed(state, approval)
-    result = _run(safe_bash._safe_run_bash(state, cmd=cmd, cwd=str(cwd), timeout=30))
+    from tests._approval_support import resume_result
+    first = _run(safe_bash._safe_run_bash(state, cmd=cmd, cwd=str(cwd), timeout=30))
+    result = _run(resume_result(state, first, safe_bash._safe_run_bash,
+        {"cmd": cmd, "cwd": str(cwd), "timeout": 30}))
     assert not danger.is_confirmed(state, approval)
     if "GIT_UNWRITABLE cannot be enforced" in result.get("error", ""):
         # Landlock cannot rebind a complete Git worktree while denying .git.

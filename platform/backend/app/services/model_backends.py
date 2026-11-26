@@ -411,6 +411,31 @@ def _looks_like_api_response(response) -> bool:
         return False
 
 
+def _probe_connection_failure(exc: Exception, *, vision: bool = False) -> str:
+    # Exception messages can contain URLs, authorization material or signed
+    # query strings. Keep only class names and OS error numbers from the chain.
+    parts: list[str] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    socket_provider_failure = False
+    while current is not None and id(current) not in seen and len(parts) < 8:
+        seen.add(id(current))
+        code = getattr(current, "winerror", None)
+        if not isinstance(code, int):
+            code = getattr(current, "errno", None)
+        label = type(current).__name__
+        if isinstance(code, int):
+            label += f"(os_error={code})"
+            socket_provider_failure |= code == 10057
+        parts.append(label)
+        current = current.__cause__ or current.__context__
+    prefix = "vision probe" if vision else "probe"
+    detail = f"{prefix} could not reach provider: " + " -> ".join(parts)
+    if socket_provider_failure:
+        detail += "; Windows socket setup failed; check installed VPN/security network components"
+    return detail
+
+
 async def probe_backend_credential(config: ModelBackendConfig) -> tuple[bool | None, str]:
     """拿真 key 问 provider 一句，返回 (ok, detail)。
 
@@ -434,7 +459,7 @@ async def probe_backend_credential(config: ModelBackendConfig) -> tuple[bool | N
         async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT_SECONDS) as client:
             response = await client.get(url, headers=_auth_headers(key))
     except Exception as exc:  # 网络层面的失败 = 不知道
-        return None, f"probe could not reach provider: {type(exc).__name__}"
+        return None, _probe_connection_failure(exc)
 
     if response.status_code in (401, 403):
         # 只有**确实是 provider 在拒绝**才算数。强制门户 / 公司代理也会回
@@ -536,7 +561,7 @@ async def probe_vision_capability(config: ModelBackendConfig) -> tuple[bool | No
                 json=payload,
             )
     except Exception as exc:
-        return None, f"vision probe could not reach provider: {type(exc).__name__}"
+        return None, _probe_connection_failure(exc, vision=True)
 
     if response.is_success:
         return True, "provider accepted an image message"

@@ -1312,6 +1312,12 @@ async def session_execution_view(
     observed = await _liveness.observed_status_map(db, [current_run] if current_run else [])
     pending_approval = await _pending_approval(db, run=current_run)
     drive_access = await drive_access_for(db, user=user, project=project, session=session)
+    completion_runs = list((await db.scalars(select(Run).where(
+        Run.session_id == session.session_id,
+        Run.project_id == session.project_id,
+        Run.status == RunStatus.SUSPENDED.value,
+        (Run.parent_run_id == current_run.id) | (Run.id == current_run.id),
+    ))).all()) if current_run else []
     view = _view.build_session_view(
         current_run,
         lang=_language_for(user),
@@ -1323,6 +1329,7 @@ async def session_execution_view(
         # 说得一致 —— 而它们确实不一致过 6 小时（见 execution_view 模块头）。
         # 现在卡片装在 `answer` 里：说了走卡片就一定带着卡片。
         pause=pending_approval,
+        completion_runs=completion_runs,
         failure=(current_run.summary or {}).get("failure")
         if current_run and isinstance(current_run.summary, dict)
         else None,

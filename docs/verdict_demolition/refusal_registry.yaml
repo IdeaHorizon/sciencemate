@@ -28,6 +28,39 @@
 #       probe_toolchain / resource_fetch / run_contract / hooks   共 +7
 #
 entries:
+  - file: nodes/_reviewer/tools/critique_builder.py
+    class: B
+    why: >-
+      record_question 只在当前问题、完整证据依赖、用途及适用审查标准均绑定后记录
+      verified/carried_forward；缺失、改变或错误来源不能冒充沿用的核查凭据，仍可记录
+      unverified/reopened 与局限，不拦整体研究交付或以机器代作科学充分性判断。
+  - file: core/research_state_reader.py
+    class: B
+    why: 请求的 research_state 历史版本不存在时返回可用版本列表，不能用当前版本冒充所请求的历史证据；从 Analysis 读取工具移至共享读取 owner。
+  - file: nodes/experiment/hooks.py
+    class: collector
+    why: 旧作业提醒结清失败时报告实际任务持久化异常，保留已落盘的 B 终态及原任务；下次结算可幂等重试，不将任务视图错误改写为物理作业失败。
+  - file: nodes/experiment/tools/job_settlement.py
+    class: collector
+    why: 旧任务兼容入口加载或调用失败时保留实际异常与既有物理终态，不回滚作业账本、不伪记任务已结清；恢复入口后可重试同一终态结算。
+  - file: shared/lib/derivation_worker.py
+    class: C
+    why: CAS 受管进程超时、取消或启动失败时没有计算结论；返回 inconclusive，允许拆小表达式或采用有界数值核验，不伪造证明。
+  - file: shared/lib/derivation_worker.py
+    class: B
+    why: 子进程没有交回完整且有界的计算回执时不登记验证成功，保留原表达式并允许重试真实核验。
+  - file: shared/tools/library/latex.py
+    class: C
+    why: 已有 TeX 引擎但选定引擎或文献程序无法启动时准确列出缺少的程序，安装同发行版依赖后重编，不要求改写稿件或文献后端。
+  - file: shared/tools/run_node.py
+    class: B
+    why: 合同指定目标与实际承办节点不符时在派发副作用之前返回身份冲突；可使用合同目标或追加有原摘要 lineage 的纠正版本，保留已有运行与证据。
+  - file: core/approvals.py
+    class: A
+    why: >-
+      人批准能力后仍须确认实际取得该能力；网络授权未生效或 GPU lease 不可得时，
+      原调用不执行并返回 capability_not_enforceable。批准不是资源已分配的证据，
+      不因这张卡已被点击就允许无能力执行；资源或能力恢复后可重新请求。
   - file: shared/tools/run_node.py
     class: C
     why: >-
@@ -1014,6 +1047,12 @@ entries:
     class: B
     why: >-
       用户原话里有编号要求而 must_haves 为空（iter10 实测）—— 简报是唯一登记用户要求的记录，空了 H6 整轮无牙。
+  - file: nodes/writing/tools/w_brief.py
+    class: C
+    why: required_questions 的每项须有非空 id/text；只核调用形状，不评判问题数量或科学充分性，旧简报可以不填。
+  - file: nodes/writing/tools/w_brief.py
+    class: C
+    why: required_questions 的 id 重复会让 question_coverage 无法指向唯一问题；核引用身份，不限制多问。
   - file: nodes/writing/tools/w_brief.py
     class: B
     why: write_outline 前必须先 write_brief —— 提纲要对着简报的体裁与部件表检查。

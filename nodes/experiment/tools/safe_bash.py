@@ -27,7 +27,7 @@
   2. `state.hook_state["highrisk_bash_allowlist"]`（list[str] 子串）—— fixture/编排层
      对特定命令的**事前**精确预授权，
      非 agent 来源，防自我授权
-  3. pause 后人工批准 → 一次性消费放行（highrisk_confirm always-on hook 回流）
+  3. pause 后人工批准 → Core 领取并续执行被冻结的原调用
   4. 都没有 → pause 问人（真实 HITL，与框架 builtin 行为一致）
   旧 `EXPERIMENT_ALLOW_HIGHRISK_BASH` 整 run 粒度 env 授权已删除（会抢在框架门
   之前放行，粒度也差；同类需求用框架 bypass 模式）。
@@ -61,11 +61,9 @@ from core.tool_registry import register_tool, _REGISTRY
 from shared.lib.platform_env import WINDOWS_SYSTEM_ENV as _WINDOWS_SYSTEM_ENV
 from shared.lib.platform_env import system_env_passthrough as _system_env_passthrough
 from shared.lib.cancellable_subprocess import (
-    group_killer,
     spawn_and_wait,
     the_interpreter_for_model_code,
 )
-from shared.tools.builtin import _run_bash as _orig_run_bash
 from shared.tools.builtin import _write_file as _orig_write_file
 from shared.tools.library.python_exec import (
     _missing_glyph_summary,
@@ -78,14 +76,7 @@ try:
         bash_execution_target, is_bash_absolute, normalize_bash_path,
         shell_path_resolution, uses_wsl_paths,
     )
-    from .build_resource_guard import (
-        build_resource_plan_block, classify_resource_health,
-        derive_build_limits, filesystem_free_bytes,
-        host_memory_admission_block,
-        kill_guarded_tree, parse_build_resource_event,
-        wait_for_cgroup_quiescence, wrap_with_cgroup,
-        _cgroup_event_deltas, _cgroup_files_snapshot, _host_memory_snapshot,
-    )
+    from .build_resource_guard import build_resource_plan_block
     from .preflight import EXECUTION_STAGES
     from .run_contract import record_actual_run_params as _record_actual_run_params
     from .path_roles import (
@@ -105,14 +96,7 @@ except ImportError:  # loaded as top-level ``tools.safe_bash`` by node runtime
         bash_execution_target, is_bash_absolute, normalize_bash_path,
         shell_path_resolution, uses_wsl_paths,
     )
-    from tools.build_resource_guard import (
-        build_resource_plan_block, classify_resource_health,
-        derive_build_limits, filesystem_free_bytes,
-        host_memory_admission_block,
-        kill_guarded_tree, parse_build_resource_event,
-        wait_for_cgroup_quiescence, wrap_with_cgroup,
-        _cgroup_event_deltas, _cgroup_files_snapshot, _host_memory_snapshot,
-    )
+    from tools.build_resource_guard import build_resource_plan_block
     from tools.preflight import EXECUTION_STAGES
     from tools.run_contract import record_actual_run_params as _record_actual_run_params
     from tools.path_roles import (
@@ -421,747 +405,6 @@ def _attach_diagnosis(result: dict, *, stdout: str, stderr: str) -> None:
         return
     if guidance:
         result["diagnosis"] = guidance
-
-
-async def _bounded_process_wait(
-    proc: asyncio.subprocess.Process,
-    *,
-    state: Any,
-    cmd: str,
-    timeout: int,
-    limits: Any,
-    unit: str | None,
-    strong_guard: bool,
-    workdir: str | None = None,
-    workdir_authority: str = "inherited",
-) -> dict[str, Any]:
-    """有界流式保存输出并监督整棵进程树。
-
-    所有调用只在内存中保留固定大小的 stdout/stderr tail；非只读普通动作
-    安装进程组超时/取消和磁盘余量监督，构建/主要运行再用 ``strong_guard``
-    叠加 cgroup PID/内存监督。两层共用一个执行器，避免安全语义分叉。
-    """
-    if strong_guard and not unit:
-        raise ValueError("strong_guard 需要 cgroup unit")
-    fallback_kill = group_killer(proc)
-    stop_event = asyncio.Event()
-    stop_reason: dict[str, Any] = {}
-    warned: set[str] = set()
-    active_warnings: set[str] = set()
-    resource_health: dict[str, Any] = {
-        "resource_health": "healthy",
-        "decision": "continue",
-        "decision_reasons": [],
-        "active_warnings": [],
-        "hard_stop": None,
-    }
-    probe_failures = {
-        "cgroup": 0, "disk": 0, "host_memory": 0,
-    }
-    tails = {"stdout": bytearray(), "stderr": bytearray()}
-    tail_caps = {"stdout": _STDOUT_TAIL * 4, "stderr": _STDERR_TAIL * 4}
-    output_lock = asyncio.Lock()
-    written = 0
-    log_path: Path | None = None
-    log_file = None
-    digest = hashlib.sha256()
-    started = time.monotonic()
-    last_evidence: dict[str, Any] = {
-        "elapsed_seconds": 0,
-        "pids": 0,
-        "memory_bytes": 0,
-        "memory_growth_per_second": 0.0,
-        "swap_bytes": 0,
-        "host_swap_free_bytes": None,
-        "host_swap_total_bytes": None,
-        "cgroup_memory_psi": None,
-        "host_memory_psi": None,
-        "cgroup_events": {},
-        "cgroup_event_deltas": {},
-        "log_bytes": 0,
-        "average_log_bytes_per_second": 0,
-        "pid_growth_per_second": 0.0,
-        "disk_free_bytes": None,
-        "host_memory_available_bytes": None,
-    }
-    previous_probe_at = started
-    previous_pids = 0
-    previous_memory: int | None = None
-    previous_cgroup_events: dict[str, int] = {}
-
-    try:
-        if getattr(state, "root", None) is not None:
-            seq = state.hook_state.get("_bash_seq", 0) + 1
-            state.hook_state["_bash_seq"] = seq
-            command_sha8 = hashlib.sha256(cmd.encode("utf-8")).hexdigest()[:8]
-            logdir = experiment_output_dir(state, "runtime/logs", create=True)
-            log_path = logdir / f"{seq:04d}_{command_sha8}.log"
-            log_file = log_path.open("wb")
-            header = (
-                f"# cmd: {cmd}\n"
-                f"# workdir: {workdir or ''}\n"
-                f"# workdir_authority: {workdir_authority}\n"
-                "# execution_supervisor: bounded_stream_process_group\n"
-                + (
-                    "# resource_guard: cgroup_v2 + disk_pressure_monitor\n"
-                    if strong_guard else
-                    "# resource_guard: disk_pressure_monitor\n"
-                )
-            ).encode("utf-8", errors="replace")
-            log_file.write(header)
-            digest.update(header)
-            written = len(header)
-    except Exception:
-        if log_file is not None:
-            log_file.close()
-        log_file = None
-        log_path = None
-
-    if getattr(state, "root", None) is not None and log_file is None:
-        if strong_guard:
-            await asyncio.to_thread(
-                kill_guarded_tree, unit, fallback_kill
-            )
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except Exception:
-                pass
-            return {
-                "status": "error",
-                "reason": "build_log_unavailable",
-                "error": "构建日志无法创建，已终止整个 cgroup，未降级为无日志执行。",
-                "blocker": {"kind": "build_log_unavailable"},
-                "resource_guard": {**limits.public(), "unit": unit},
-                "execution_supervisor": "bounded_stream_process_group",
-            }
-        try:
-            state.append_transcript(
-                "execution_log_unavailable",
-                cmd_preview=cmd[:200],
-                action="continue_with_bounded_tails",
-            )
-        except Exception:
-            pass
-
-    def _apply_resource_health(health: dict[str, Any]) -> bool:
-        nonlocal active_warnings, resource_health
-        current = set(health.get("active_warnings") or [])
-        added = current - active_warnings
-        recovered = active_warnings - current
-        warned.update(added)
-        for name in sorted(added):
-            try:
-                state.append_transcript(
-                    "build_resource_pressure_warning",
-                    resource=name,
-                    resource_health=health.get("resource_health"),
-                    decision=health.get("decision"),
-                    decision_reasons=health.get("decision_reasons") or [],
-                    action="continue_with_fast_sampling",
-                    unit=unit,
-                    cmd_preview=cmd[:200],
-                    behavior_evidence=dict(last_evidence),
-                )
-            except Exception:
-                pass
-        for name in sorted(recovered):
-            try:
-                state.append_transcript(
-                    "build_resource_pressure_recovered",
-                    resource=name,
-                    resource_health=health.get("resource_health"),
-                    action="normal_sampling",
-                    unit=unit,
-                    cmd_preview=cmd[:200],
-                    behavior_evidence=dict(last_evidence),
-                )
-            except Exception:
-                pass
-        active_warnings = current
-        resource_health = health
-        hard_stop = health.get("hard_stop")
-        if (
-            isinstance(hard_stop, dict)
-            and hard_stop
-            and not stop_event.is_set()
-        ):
-            stop_reason.update(hard_stop)
-            stop_event.set()
-        return health.get("decision") != "continue"
-
-    def _warn_disk(current: int) -> None:
-        if "disk_free_bytes" in warned:
-            return
-        warned.add("disk_free_bytes")
-        try:
-            state.append_transcript(
-                ("build_resource_pressure_warning" if strong_guard
-                 else "execution_disk_pressure_warning"),
-                resource="disk_free_bytes", current=current,
-                warning=limits.disk_warning_free_bytes,
-                emergency_stop=limits.disk_stop_free_bytes,
-                action=("analyze_build_behavior" if strong_guard
-                        else "analyze_execution_behavior"), unit=unit,
-                cmd_preview=cmd[:200],
-                behavior_evidence=dict(last_evidence))
-        except Exception:
-            pass
-
-    def _request_disk_stop(current: int) -> None:
-        if stop_event.is_set():
-            return
-        stop_reason.update(
-            reason=("build_disk_reserve_exhausted" if strong_guard
-                    else "execution_disk_reserve_exhausted"),
-            resource="disk_free_bytes", current=current,
-            maximum=limits.disk_stop_free_bytes)
-        stop_event.set()
-
-    if log_path is not None:
-        initial_disk_free = filesystem_free_bytes(log_path.parent)
-        if initial_disk_free is None:
-            if strong_guard:
-                await asyncio.to_thread(kill_guarded_tree, unit, fallback_kill)
-            else:
-                fallback_kill()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except Exception:
-                pass
-            if log_file is not None:
-                log_file.close()
-            return {
-                "status": "error",
-                "reason": ("build_disk_probe_unavailable" if strong_guard
-                           else "execution_disk_probe_unavailable"),
-                "error": "无法读取执行日志文件系统剩余空间，已终止整棵进程树。",
-                "blocker": {
-                    "kind": ("build_disk_probe_unavailable" if strong_guard
-                             else "execution_disk_probe_unavailable")},
-                **({"resource_guard": {**limits.public(), "unit": unit}}
-                   if strong_guard else {}),
-                "execution_supervisor": "bounded_stream_process_group",
-            }
-        last_evidence["disk_free_bytes"] = initial_disk_free
-        if strong_guard:
-            _apply_resource_health(classify_resource_health(
-                limits, usage={}, disk_free_bytes=initial_disk_free,
-                host_snapshot=None, probe_failures=probe_failures,
-            ))
-        elif initial_disk_free <= limits.disk_warning_free_bytes:
-            _warn_disk(initial_disk_free)
-        if initial_disk_free <= limits.disk_stop_free_bytes:
-            _request_disk_stop(initial_disk_free)
-
-    async def _read_stream(stream: Any, label: str) -> None:
-        nonlocal written
-        while True:
-            chunk = await stream.read(64 * 1024)
-            if not chunk:
-                return
-            tail = tails[label]
-            tail.extend(chunk)
-            if len(tail) > tail_caps[label]:
-                del tail[:-tail_caps[label]]
-            if strong_guard and label == "stderr" and not stop_event.is_set():
-                event = parse_build_resource_event(
-                    bytes(tail).decode("utf-8", errors="replace"))
-                if event is not None:
-                    stop_reason.update(event)
-                    stop_event.set()
-            async with output_lock:
-                if log_file is not None:
-                    try:
-                        log_file.write(chunk)
-                        log_file.flush()
-                        digest.update(chunk)
-                        written += len(chunk)
-                    except OSError as exc:
-                        if not stop_event.is_set():
-                            stop_reason.update(
-                                reason=("build_log_write_failed" if strong_guard
-                                        else "execution_log_write_failed"),
-                                resource="disk_free_bytes",
-                                detail=f"{type(exc).__name__}: {exc}")
-                            stop_event.set()
-                        return
-
-    async def _monitor_cgroup() -> None:
-        """共享分类器只凭实测资源证据预警；权威耗尽事实才终止。"""
-        nonlocal previous_probe_at, previous_pids, previous_memory
-        nonlocal previous_cgroup_events
-        while proc.returncode is None and not stop_event.is_set():
-            values: dict[str, Any] = {}
-            try:
-                probe = await asyncio.create_subprocess_exec(
-                    "systemctl", "--user", "show", unit,
-                    "-p", "MemoryCurrent", "-p", "TasksCurrent",
-                    "-p", "ControlGroup",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                raw, _ = await _communicate_bounded_probe(
-                    probe, timeout=2
-                )
-                for line in raw.decode(errors="replace").splitlines():
-                    key, separator, value = line.partition("=")
-                    if not separator:
-                        continue
-                    if key in {"MemoryCurrent", "TasksCurrent"}:
-                        if value.isdigit():
-                            values[key] = int(value)
-                    elif key == "ControlGroup" and value:
-                        values[key] = value
-                control_group = str(values.get("ControlGroup") or "")
-                if control_group:
-                    values.update(await asyncio.to_thread(
-                        _cgroup_files_snapshot, control_group
-                    ))
-            except Exception:
-                # 内核硬限制仍在；瞬时遥测失败累计后只降级健康度，不抢杀。
-                pass
-
-            cgroup_ok = any(
-                isinstance(values.get(key), int)
-                for key in ("MemoryCurrent", "TasksCurrent")
-            )
-            probe_failures["cgroup"] = (
-                0 if cgroup_ok
-                else probe_failures["cgroup"] + 1
-            )
-            host_probe_enabled = (
-                limits.host_memory_warning_free_bytes > 0
-                or limits.host_memory_stop_free_bytes > 0
-            )
-            host_snapshot = (
-                await asyncio.to_thread(_host_memory_snapshot)
-                if host_probe_enabled
-                else None
-            )
-            probe_failures["host_memory"] = (
-                0
-                if not host_probe_enabled or host_snapshot is not None
-                else probe_failures["host_memory"] + 1
-            )
-            disk_free = (
-                filesystem_free_bytes(log_path.parent)
-                if log_path is not None
-                else None
-            )
-            probe_failures["disk"] = (
-                0
-                if log_path is None or disk_free is not None
-                else probe_failures["disk"] + 1
-            )
-
-            now = time.monotonic()
-            elapsed = max(0.001, now - started)
-            current_pids = values.get("TasksCurrent")
-            current_memory = values.get("MemoryCurrent")
-            current_cgroup_events = values.get("CgroupEvents")
-            cgroup_event_deltas = (
-                _cgroup_event_deltas(
-                    previous_cgroup_events, current_cgroup_events,
-                )
-                if isinstance(current_cgroup_events, dict)
-                else None
-            )
-            if cgroup_event_deltas is not None:
-                values["CgroupEventDeltas"] = cgroup_event_deltas
-            probe_interval = max(0.001, now - previous_probe_at)
-            pid_growth = (
-                (current_pids - previous_pids) / probe_interval
-                if isinstance(current_pids, int)
-                else 0.0
-            )
-            memory_growth = (
-                (current_memory - previous_memory) / probe_interval
-                if isinstance(current_memory, int)
-                and isinstance(previous_memory, int)
-                else 0.0
-            )
-            last_evidence.update(
-                elapsed_seconds=round(elapsed, 3),
-                pids=(
-                    current_pids
-                    if isinstance(current_pids, int)
-                    else last_evidence["pids"]
-                ),
-                memory_bytes=(
-                    current_memory
-                    if isinstance(current_memory, int)
-                    else last_evidence["memory_bytes"]
-                ),
-                memory_growth_per_second=round(memory_growth, 3),
-                swap_bytes=values.get("MemorySwapCurrent", 0),
-                log_bytes=written,
-                average_log_bytes_per_second=int(written / elapsed),
-                pid_growth_per_second=round(pid_growth, 3),
-                disk_free_bytes=disk_free,
-                cgroup_memory_psi=values.get("MemoryPSI"),
-                cgroup_events=values.get("CgroupEvents") or {},
-                cgroup_event_deltas=cgroup_event_deltas or {},
-            )
-            if host_snapshot is not None:
-                last_evidence.update(
-                    host_memory_available_bytes=host_snapshot.get(
-                        "available_bytes"),
-                    host_swap_free_bytes=host_snapshot.get(
-                        "swap_free_bytes"),
-                    host_swap_total_bytes=host_snapshot.get(
-                        "swap_total_bytes"),
-                    host_memory_psi=host_snapshot.get("memory_psi"),
-                )
-
-            health = classify_resource_health(
-                limits,
-                usage=values,
-                disk_free_bytes=disk_free,
-                host_snapshot=host_snapshot,
-                probe_failures=probe_failures,
-                memory_growth_per_second=memory_growth,
-            )
-            high_pressure = _apply_resource_health(health)
-            previous_probe_at = now
-            if isinstance(current_pids, int):
-                previous_pids = current_pids
-            if isinstance(current_memory, int):
-                previous_memory = current_memory
-            if isinstance(current_cgroup_events, dict):
-                previous_cgroup_events = dict(current_cgroup_events)
-            try:
-                # 压力/临界/遥测退化时加密到 4 Hz；恢复后自动回到 1 Hz。
-                await asyncio.wait_for(
-                    stop_event.wait(),
-                    timeout=0.25 if high_pressure else 1.0,
-                )
-            except TimeoutError:
-                pass
-
-    async def _monitor_disk() -> None:
-        """轻量动作只做文件系统余量监督，不启动 systemctl 采样。"""
-        while proc.returncode is None and not stop_event.is_set():
-            if log_path is not None:
-                disk_free = filesystem_free_bytes(log_path.parent)
-                if disk_free is None:
-                    stop_reason.update(
-                        reason="execution_disk_probe_unavailable",
-                        resource="disk_free_bytes",
-                    )
-                    stop_event.set()
-                    return
-                if disk_free <= limits.disk_warning_free_bytes:
-                    _warn_disk(disk_free)
-                if disk_free <= limits.disk_stop_free_bytes:
-                    _request_disk_stop(disk_free)
-                    return
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=1.0)
-            except asyncio.TimeoutError:
-                pass
-
-    readers = [
-        asyncio.create_task(_read_stream(proc.stdout, "stdout")),
-        asyncio.create_task(_read_stream(proc.stderr, "stderr")),
-    ]
-    wait_task = asyncio.create_task(proc.wait())
-    monitor_task = asyncio.create_task(
-        _monitor_cgroup() if strong_guard else _monitor_disk())
-    pressure_task = asyncio.create_task(stop_event.wait())
-    kill_event = getattr(state, "kill_event", None)
-    cancel_task = asyncio.create_task(kill_event.wait()) if kill_event is not None else None
-    waiters = [wait_task, pressure_task] + ([cancel_task] if cancel_task else [])
-    async def _cleanup_after_external_cancel() -> None:
-        """外层 Task.cancel 也必须先回收 payload 整树，再把取消传播给路线层。"""
-        stop_event.set()
-        cleanup_errors: list[str] = []
-        for auxiliary in (monitor_task, pressure_task, cancel_task):
-            if auxiliary is not None and not auxiliary.done():
-                auxiliary.cancel()
-        try:
-            if strong_guard:
-                await asyncio.to_thread(
-                    kill_guarded_tree, unit, fallback_kill
-                )
-            else:
-                fallback_kill()
-        except Exception as exc:
-            cleanup_errors.append(
-                f"kill:{type(exc).__name__}:{exc}"
-            )
-            try:
-                fallback_kill()
-            except Exception as fallback_exc:
-                cleanup_errors.append(
-                    f"fallback_kill:{type(fallback_exc).__name__}:"
-                    f"{fallback_exc}"
-                )
-        try:
-            await asyncio.wait_for(
-                asyncio.shield(wait_task), timeout=5
-            )
-        except Exception as exc:
-            cleanup_errors.append(
-                f"wait:{type(exc).__name__}:{exc}"
-            )
-            if not wait_task.done():
-                wait_task.cancel()
-
-        _, pending_readers = await asyncio.wait(readers, timeout=5)
-        for reader in pending_readers:
-            reader.cancel()
-        await asyncio.gather(*readers, return_exceptions=True)
-        await asyncio.gather(
-            *[
-                task for task in (monitor_task, pressure_task, cancel_task)
-                if task is not None
-            ],
-            return_exceptions=True,
-        )
-
-        quiescence = None
-        if strong_guard and unit:
-            try:
-                quiescence = await asyncio.to_thread(
-                    wait_for_cgroup_quiescence,
-                    str(unit),
-                    grace_s=limits.cgroup_quiescence_grace_s,
-                )
-                if quiescence.get("status") != "quiet":
-                    await asyncio.to_thread(
-                        kill_guarded_tree, unit, fallback_kill
-                    )
-                    quiescence = await asyncio.to_thread(
-                        wait_for_cgroup_quiescence,
-                        str(unit),
-                        grace_s=limits.cgroup_quiescence_grace_s,
-                    )
-                last_evidence["cgroup_quiescence"] = quiescence
-            except Exception as exc:
-                cleanup_errors.append(
-                    f"quiescence:{type(exc).__name__}:{exc}"
-                )
-
-        if log_file is not None:
-            try:
-                log_file.flush()
-            except OSError as exc:
-                cleanup_errors.append(
-                    f"log_flush:{type(exc).__name__}:{exc}"
-                )
-            log_file.close()
-        try:
-            state.append_transcript(
-                "execution_cancel_cleanup",
-                command=cmd[:200],
-                process_returncode=proc.returncode,
-                cgroup_quiescence=quiescence,
-                cleanup_errors=cleanup_errors,
-            )
-        except Exception:
-            pass
-
-    async def _await_with_external_cancel(awaitable: Any) -> Any:
-        try:
-            return await awaitable
-        except asyncio.CancelledError as cancel_exc:
-            # shield 只保护清理 task 不被同一次取消连带取消；若又收到取消，
-            # 继续等同一个有界清理，最终仍把原始取消传播给上层。
-            cleanup_task = asyncio.create_task(
-                _cleanup_after_external_cancel()
-            )
-            while not cleanup_task.done():
-                try:
-                    await asyncio.shield(cleanup_task)
-                except asyncio.CancelledError:
-                    continue
-            await cleanup_task
-            raise cancel_exc
-
-    done, _ = await _await_with_external_cancel(asyncio.wait(
-        waiters, timeout=timeout,
-        return_when=asyncio.FIRST_COMPLETED,
-    ))
-
-    if cancel_task is not None and cancel_task in done:
-        status = "cancelled"
-    elif pressure_task in done:
-        status = "resource_stopped"
-    elif wait_task in done:
-        status = "done"
-    else:
-        status = "timeout"
-    if status == "done" and strong_guard:
-        quiescence = await _await_with_external_cancel(asyncio.to_thread(
-            wait_for_cgroup_quiescence,
-            str(unit),
-            grace_s=limits.cgroup_quiescence_grace_s,
-        ))
-        last_evidence["cgroup_quiescence"] = quiescence
-        if quiescence.get("status") != "quiet":
-            stop_reason.update(
-                reason=(
-                    "build_cgroup_not_quiescent"
-                    if quiescence.get("status") == "busy"
-                    else "build_cgroup_quiescence_unavailable"
-                ),
-                resource="pids",
-                current=quiescence.get("tasks_current"),
-            )
-            status = "resource_stopped"
-    if status != "done":
-        if strong_guard:
-            await _await_with_external_cancel(asyncio.to_thread(
-                kill_guarded_tree, unit, fallback_kill
-            ))
-        else:
-            fallback_kill()
-        try:
-            await _await_with_external_cancel(asyncio.wait_for(
-                asyncio.shield(wait_task), timeout=5
-            ))
-        except Exception:
-            if not wait_task.done():
-                wait_task.cancel()
-    for task in readers:
-        try:
-            await _await_with_external_cancel(
-                asyncio.wait_for(task, timeout=5)
-            )
-        except Exception:
-            task.cancel()
-    # payload wrapper 的 sentinel 可能与 systemd-run 退出同时到达：先完成
-    # wait_task、后由 reader 消费时，不能因先前已暂定 ``done`` 而丢掉资源
-    # 耗尽的终态分类。
-    if status == "done" and stop_event.is_set() and stop_reason:
-        status = "resource_stopped"
-    for task in (monitor_task, pressure_task, cancel_task):
-        if task is not None and not task.done():
-            task.cancel()
-    if log_file is not None:
-        try:
-            log_file.flush()
-        except OSError:
-            pass
-        log_file.close()
-
-    if (
-        strong_guard
-        and stop_reason.get("failure_class") == "resource_exhaustion"
-        and resource_health.get("resource_health") != "exhausted"
-    ):
-        resource_health = {
-            "resource_health": "exhausted",
-            "decision": "emergency_stop",
-            "decision_reasons": [str(stop_reason.get("reason"))],
-            "active_warnings": sorted(
-                active_warnings
-                | {str(stop_reason.get("resource") or "resource")}
-            ),
-            "hard_stop": dict(stop_reason),
-        }
-        active_warnings = set(resource_health["active_warnings"])
-        warned.update(active_warnings)
-
-    out = bytes(tails["stdout"]).decode("utf-8", errors="replace")
-    err = bytes(tails["stderr"]).decode("utf-8", errors="replace")
-    result: dict[str, Any] = {
-        "status": status,
-        "returncode": proc.returncode,
-        "stdout_tail": out[-_STDOUT_TAIL:],
-        "stderr_tail": err[-_STDERR_TAIL:],
-        "log_bytes": written,
-        "truncated": False,
-        "behavior_evidence": last_evidence,
-        "execution_supervisor": "bounded_stream_process_group",
-    }
-    _attach_diagnosis(result, stdout=out, stderr=err)
-    if strong_guard:
-        result["resource_guard"] = {
-            **limits.public(),
-            "unit": unit,
-            "warnings": sorted(warned),
-            "active_warnings": sorted(active_warnings),
-            "resource_health": resource_health.get("resource_health"),
-            "decision": resource_health.get("decision"),
-            "decision_reasons": resource_health.get("decision_reasons") or [],
-        }
-        result["resource_health"] = resource_health.get("resource_health")
-        result["resource_decision"] = resource_health.get("decision")
-        result["resource_decision_reasons"] = (
-            resource_health.get("decision_reasons") or []
-        )
-    if (
-        "disk_free_bytes" in (
-            active_warnings if strong_guard else warned
-        )
-    ):
-        result["required_action"] = (
-            "analyze_build_behavior" if strong_guard
-            else "analyze_execution_behavior"
-        )
-    elif strong_guard and active_warnings & {
-        "host_memory_available_bytes",
-        "host_swap_free_bytes",
-        "host_memory_psi",
-    }:
-        result["required_action"] = "wait_or_reschedule_host_memory"
-    if log_path is not None:
-        result["log_path"] = str(log_path)
-        result["log_sha256"] = digest.hexdigest()
-    if status == "resource_stopped":
-        result.update(
-            status="error", reason=stop_reason.get("reason"),
-            blocker={
-                "kind": (
-                    "build_process_tree_not_quiescent"
-                    if stop_reason.get("reason") in {
-                        "build_cgroup_not_quiescent",
-                        "build_cgroup_quiescence_unavailable",
-                    }
-                    else (
-                        "build_resource_pressure" if strong_guard
-                        else "execution_resource_pressure"
-                    )
-                ),
-                **stop_reason,
-            },
-            error=(
-                (
-                    "顶层进程退出后 cgroup 仍有后代或无法证明已清空，"
-                    if stop_reason.get("reason") in {
-                        "build_cgroup_not_quiescent",
-                        "build_cgroup_quiescence_unavailable",
-                    }
-                    else (
-                        "构建资源接近硬上限，" if strong_guard
-                        else "执行日志文件系统接近紧急保留线，"
-                    )
-                )
-                + "已终止整棵进程树；请先分析行为和资源计划，不要直接重试。"
-            ))
-    return result
-
-
-async def _bounded_build_wait(
-    proc: asyncio.subprocess.Process,
-    *,
-    state: Any,
-    cmd: str,
-    timeout: int,
-    limits: Any,
-    unit: str,
-) -> dict[str, Any]:
-    """兼容入口：构建测试与调用方继续获得 cgroup 强监督语义。"""
-    return await _bounded_process_wait(
-        proc,
-        state=state,
-        cmd=cmd,
-        timeout=timeout,
-        limits=limits,
-        unit=unit,
-        strong_guard=True,
-    )
 
 
 def _sandbox_roots_for_payload(
@@ -1726,7 +969,6 @@ async def _exec_and_log(
         return workdir_error
     cmd, hardened_cd = _harden_leading_cd(cmd)
     try:
-        from core.project_workspace import validate_tool_cwd
 
         # 没传 cwd 时落在本 run 的 run_root，而不是框架的 workspace_root。
         #
@@ -2108,7 +1350,7 @@ def _unified_highrisk_gate(state: Any, text: str, *, mode: str,
       bypass 模式 → 直跑留痕
       fixture allowlist → 事前预授权放行留痕
       已批准（pause 后人工同意）→ 一次性消费放行
-      否则 → pause 问人（highrisk_confirm always-on hook 负责回流批准）
+      否则 → pause 问人（Core 审批运行时领取原调用）
     不再有 EXPERIMENT_ALLOW_HIGHRISK_BASH 旧机制抢跑。
 
     返回 None=放行继续；dict=拦截（pause payload，调用方直接 return）。
@@ -2148,7 +1390,6 @@ def _unified_highrisk_gate(state: Any, text: str, *, mode: str,
             _ev(f"highrisk_{kind}_contained", roots=contained)
             return None
     if _danger.is_confirmed(state, text):
-        _danger.consume_confirmation(state, text)
         _ev(f"highrisk_{kind}_confirmed_run")
         return None
     _ev(f"highrisk_{kind}_blocked_pending_confirm")
@@ -2641,7 +1882,6 @@ def _classify_remote_visible_path(
     return "remote_path_not_declared", (
         "remote command path is not covered by a declared non-container path role"
         + _declared_remote_visible_roles_hint(state))
-
 
 
 def _core_grants_external_write(state: Any, target: str, role_root: str) -> bool:
@@ -3183,7 +2423,6 @@ def _scope_guard_tool_name(kind: str) -> str:
     }.get(kind, f"safe_{kind}")
 
 
-
 def _registration_candidate(target: str, op: str | None) -> str | None:
     """Which directory a human approval should register, if any.
 
@@ -3304,8 +2543,6 @@ def _scope_guard_authorization(
         cmd if highrisk else _scope_authorization_text(
             kind=kind, cmd=cmd, cwd=cwd, target=target, scope=scope, op=op))
     if _danger.is_confirmed(state, approval_text):
-        if not highrisk:
-            _danger.consume_confirmation(state, approval_text)
         registered = None
         if scope in _SCOPE_REGISTRABLE:
             registered = _register_approved_write_root(state, target, op)
@@ -3355,9 +2592,6 @@ def _scope_guard_error(cmd_or_path: str, scope: str, reason: str, target: str,
             pass
         if approval_required and approval_text:
             from shared.lib import dangerous_commands as _danger
-            _danger.register_pending_ask(
-                state, tool=_scope_guard_tool_name(kind),
-                text=approval_text, category=f"scope_guard:{scope}")
             try:
                 state.append_transcript(
                     "scope_guard_approval_requested",
@@ -3392,10 +2626,8 @@ def _scope_guard_error(cmd_or_path: str, scope: str, reason: str, target: str,
                     if scope == "unresolved_target" else
                     f"⚠️ 命令涉及受限写入（{scope}），是否批准执行下述命令？")
                 grant_note = (
-                    "批准由框架共享确认机制保存和消费；不会扩大执行器的实际写权限。\n"
-                    + ("高风险命令按命令内容匹配授权，不额外承诺 cwd/目标的精确绑定。\n"
-                       if approval_text == str(cmd_or_path) else
-                       "本请求的授权内容包含命令、cwd 和目标；不能据此跳过其他权限检查。\n"))
+                    "批准由框架续执行原调用，绑定完整参数、工作目录和执行目标；"
+                    "不会扩大执行器的实际写权限。\n")
             from core.decision_offer import Choice, Offer
 
             shell_target = bash_execution_target().spec if kind == "bash" else None
@@ -3433,11 +2665,13 @@ def _scope_guard_error(cmd_or_path: str, scope: str, reason: str, target: str,
                 "status": "pause",
                 "pause_event": {
                     **offer.to_pause_payload(),
+                    "offer": offer.to_pause_payload(),
                     "asking_node_type": state.node_type,
                     "asking_run_id": state.run_id,
                     "metadata": {
                         "type": "highrisk_confirm",
                         "tool": _scope_guard_tool_name(kind),
+                        "category": f"scope_guard:{scope}",
                         "scope": scope, "target": target,
                         **({"execution_target": shell_target} if shell_target else {}),
                         "registers_root": grant_root,
@@ -4137,7 +3371,6 @@ def _rsync_write_targets(tokens: list[str], base: str) -> list[str]:
     return targets
 
 
-
 _COMPILER_CAPABILITY_PROBE_FLAGS = frozenset({
     "--version", "-V", "-v", "--help", "-dumpversion", "-dumpmachine",
 })
@@ -4379,7 +3612,6 @@ def _remote_visible_operand_targets(
                 targets.append(target)
         index += 1
     return targets
-
 
 
 def _known_application_write_targets(
@@ -6425,8 +5657,6 @@ def _source_write_confirmation(
             kind=kind, cmd=text, cwd=cwd, target=target,
             scope="source_worktree_modification", op=op))
     if danger.is_confirmed(state, approval_text):
-        if not highrisk:
-            danger.consume_confirmation(state, approval_text)
         try:
             state.append_transcript(
                 "source_worktree_write_confirmed", target=target, op=op,
@@ -7423,7 +6653,7 @@ def _merge_confirmed_edges(state: Any, graph: dict[str, Any]) -> dict[str, Any]:
     return graph
 
 
-def _autogen_build_graph(state: Any, source_path: str, build_root: str | None = None) -> dict[str, Any] | None:
+async def _autogen_build_graph(state: Any, source_path: str, build_root: str | None = None) -> dict[str, Any] | None:
     if not source_path:
         return None
     try:
@@ -7440,7 +6670,7 @@ def _autogen_build_graph(state: Any, source_path: str, build_root: str | None = 
     recon_content = _content_obj(recon)
     if not isinstance(recon_content, dict):
         recon_content = {}
-    graph = extract_build_dag(
+    graph = await extract_build_dag(
         source_path, state=state, build_root=build_root, source_recon=recon_content)
     graph = _merge_confirmed_edges(state, graph)
     try:
@@ -7474,7 +6704,7 @@ def _build_graph_actionable(graph: dict[str, Any] | None) -> bool:
     return graph.get("status") == "extracted" and bool(graph.get("actionable"))
 
 
-def _autogen_recon(
+async def _autogen_recon(
     state: Any,
     source_path: str,
     build_root: str | None = None,
@@ -7509,7 +6739,7 @@ def _autogen_recon(
     state.save_artifact("source_recon", f"source_recon_{state.run_id}_{fp}",
                         _json.dumps(recon, ensure_ascii=False, indent=2), metadata=meta)
     if bench_enabled("provision_first"):
-        _autogen_build_graph(state, source_path, build_root=build_root)
+        await _autogen_build_graph(state, source_path, build_root=build_root)
     state.hook_state[_GATE_FP_KEY] = fp
     return "generated"
 
@@ -7673,7 +6903,7 @@ def _build_target_from_cmd(cmd: str, st: dict | None) -> str | None:
     return low.get(nid.lower())
 
 
-def _build_gate(
+async def _build_gate(
     state: Any,
     cmd: str,
     cwd: str | None = None,
@@ -7707,7 +6937,7 @@ def _build_gate(
     if recon_on and not gate_on:
         # benchmark B 组：只生成 recon（缺则补），但【永不阻断】——解耦 recon 与 gate
         if not ({"platform_profile", "source_recon"} <= arts) or not source_recon_ok:
-            status = _autogen_recon(
+            status = await _autogen_recon(
                 state, source_path, build_root=build_root
             )
             try:
@@ -7734,7 +6964,7 @@ def _build_gate(
     # 这是通用 HPC 跑通优先的关键：证据收集不能成为 configure/build 的第一道死锁。
     recon_status = _source_recon_status(state, source_path)
     if not ({"platform_profile", "source_recon"} <= arts) or not source_recon_ok:
-        status = _autogen_recon(
+        status = await _autogen_recon(
             state, source_path, build_root=build_root
         )
         try:
@@ -7756,7 +6986,7 @@ def _build_gate(
             or (graph.get("status") or "unknown") != "extracted"):
         # source/build 二元身份变化或 configure 后图由 unknown 变得可提取时重抽。
         # build_root 不得再作为 source_root 传入。
-        graph = _autogen_build_graph(
+        graph = await _autogen_build_graph(
             state, source_path, build_root=build_root
         )
     graph_status = (graph or {}).get("status")
@@ -8041,7 +7271,6 @@ def _embedded_shell_launcher(
         if evidence is not None:
             return program, evidence
     return None
-
 
 
 def _git_command_is_read_only(args: list[str]) -> bool:
@@ -9220,7 +8449,6 @@ def _resolve_route_context(state: Any, action: dict[str, Any]) -> dict[str, Any]
         }
 
 
-
 def _v3_ready(state: Any) -> bool:
     """S1d：v3 就绪的 run 不读不写旧路线 authority；判定来自 action_boundary。"""
     try:
@@ -9588,7 +8816,6 @@ def _is_formal_scientific_action(
             "process_tree", "scientific_execution", "workspace_write",
         }))
     )
-
 
 
 _MPI_RANK_OPTS = ("-np", "-n", "--np", "--ntasks")
@@ -10221,7 +9448,7 @@ async def _safe_run_bash(state: Any, cmd: str, timeout: int = 600,
     # build gate（第3步）：首次主要 build 前客观侦察 gate（事前拦）
     try:
         # S1d：build gate（侦察 / declared_route 回退）是 v2 的准入仪式；v3 只有边界、沙箱、授权。
-        gate = None if _v3_ready(state) else _build_gate(
+        gate = None if _v3_ready(state) else await _build_gate(
             state, cmd, cwd=cwd, route_decision=route_decision)
     except Exception as exc:
         return _framework_guard_failure(
@@ -11845,7 +11072,6 @@ async def _safe_execute_python(state: Any, code: str, timeout: int = 300,
     if route_result_block is not None:
         return route_result_block
     return result
-
 
 
 _orig_py_def = _REGISTRY.tools.get("execute_python")

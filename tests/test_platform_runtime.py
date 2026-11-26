@@ -710,9 +710,14 @@ async def test_serve_answer_uses_pause_cas_and_rejects_request_replay(tmp_path: 
     errors = {event["request_id"]: event for event in events if event["type"] == "error"}
     assert errors["wrong-answer"]["code"] == "pause_conflict"
     assert errors["wrong-answer"]["details"]["current_pause_id"] == "pause-one"
+    assert errors["wrong-answer"]["details"]["current_pause_event"]["question"] == "第一个问题"
     assert errors["answer-one"]["code"] == "duplicate_request_id"
     assert errors["stale-answer"]["code"] == "pause_conflict"
     assert errors["stale-answer"]["details"]["current_pause_id"] == "pause-two"
+    current = errors["stale-answer"]["details"]["current_pause_event"]
+    assert current["question"] == "第二个问题"
+    assert current["options"] == ["第一答复", "第二答复"]
+    assert current["pending_tool_call_id"] == "pause-two"
     results = {event["request_id"]: event["data"] for event in events if event["type"] == "result"}
     assert results["answer-one"]["status"] == "paused"
     assert results["answer-one"]["pause_id"] == "pause-two"

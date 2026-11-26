@@ -59,6 +59,7 @@ def _draft_has_material(d: dict) -> bool:
         or d.get("summary")
         or (d.get("concerns") or [])
         or (d.get("strengths") or [])
+        or (d.get("question_findings") or [])
         or (d.get("recommended_action") or {}).get("action")
         or d.get("per_dimension_scores")
     )
@@ -152,9 +153,9 @@ def _land_partial_critique(ctx, _result) -> None:
     落的不是判决：模型没 set_verdict 就写 null，绝不替它填一个。
     """
     state = ctx.state
-    if _critique_landed(state):
-        return
     d = _draft(state)
+    if _critique_landed(state) and not d.get("question_findings"):
+        return
     if not _draft_has_material(d):
         return          # 真的什么都没做，没有可抢救的东西 —— 不造产物
 
@@ -174,10 +175,18 @@ def _land_partial_critique(ctx, _result) -> None:
         "summary": d.get("summary", ""),
         "concerns": d.get("concerns") or [],
         "strengths": d.get("strengths") or [],
+        "question_findings": d.get("question_findings") or [],
         "recommended_action": rec or None,
         "review_incomplete": incomplete,
         "_composed_by": "reviewer_critique_lands_hook",
     }
+    subject_id = state.hook_state.get("_question_review_subject_id")
+    if subject_id:
+        subject = state.read_artifact(subject_id) or {}
+        content_obj["review_subject"] = {
+            "artifact_id": subject_id, "version": subject.get("version"),
+            "content_hash": subject.get("content_hash"),
+        }
     if d.get("per_dimension_scores"):
         content_obj["per_dimension_scores"] = d["per_dimension_scores"]
 
@@ -194,6 +203,10 @@ def _land_partial_critique(ctx, _result) -> None:
         # 否则它会把一份截断的审查当成一次正常审查用。
         "review_incomplete": True,
     }
+    if content_obj.get("review_subject"):
+        metadata["review_subject"] = content_obj["review_subject"]
+    if d.get("question_findings"):
+        metadata["question_review_scope"] = d["question_findings"][0]["scope"]
     try:
         from core.artifact_capabilities import save_typed_artifact
 

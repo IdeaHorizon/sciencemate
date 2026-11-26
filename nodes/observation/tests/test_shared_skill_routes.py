@@ -1,5 +1,8 @@
 """Loaded methods must have a route within the consumer's real authority."""
+import ast
 import asyncio
+import re
+import textwrap
 
 import pytest
 
@@ -7,7 +10,7 @@ from core.bootstrap import bootstrap
 from core.loader import load_harness
 from core.skill_loader import load_all_skills
 from core.state import State
-from core.tool_registry import execute, list_tools_for_node
+from core.tool_registry import execute, get_tool, list_tools_for_node
 
 
 @pytest.fixture(autouse=True)
@@ -22,7 +25,17 @@ def isolated(monkeypatch, tmp_path):
 def test_observation_loaded_search_has_literature_route(tmp_path, name):
     st = State.new(node_type="observation", base_dir=tmp_path)
     body = asyncio.run(execute("load_skill", st, name=name))["body_markdown"]
-    assert 'node_type="literature"' in body and "user_note=" in body
+    examples = [call for block in re.findall(r"```python\n(.*?)```", body, re.S)
+                for call in ast.walk(ast.parse(textwrap.dedent(block)))
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                and call.func.id == "run_node"]
+    assert examples, "The loaded method must provide a usable Literature dispatch"
+    properties = get_tool("run_node").parameters_schema["properties"]
+    for call in examples:
+        arguments = {kw.arg: ast.literal_eval(kw.value) for kw in call.keywords}
+        assert set(arguments) <= set(properties), "Examples must use the live tool contract"
+        assert arguments["node_type"] == "literature"
+        assert arguments["node_inputs"]["research_question"].strip()
     h = load_harness("observation")
     tools = {t.name for t in list_tools_for_node("observation", h.tools)}
     assert "run_node" in tools and "literature" in h.callable_nodes

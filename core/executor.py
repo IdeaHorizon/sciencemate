@@ -151,6 +151,8 @@ def _inherit_sandbox_capability(child: State, parent: State) -> None:
     from . import sandbox as _sandbox
 
     child.platform_attempt_id = parent.platform_attempt_id
+    if "approval_principal" in parent.hook_state:
+        child.hook_state["approval_principal"] = parent.hook_state["approval_principal"]
     inherited = parent.sandbox_manifest if isinstance(parent.sandbox_manifest, dict) else None
     if inherited is None:
         return
@@ -618,17 +620,24 @@ async def execute_node(
         with _cancel.bind_run(state):
             from .agent_loop import restore_pause
 
-            restored_pause = await restore_pause(harness, state, messages, llm)
-            if restored_pause is not None:
-                loop_result = restored_pause
-            elif custom is not None:
-                state.append_transcript(
-                    "agent_loop_mode", mode="custom", source=f"nodes/{node_type}/agent_loop.py"
-                )
-                log.info("node %s using custom agent_loop", node_type)
-                loop_result = await custom(harness, state, messages, llm)
-            else:
-                loop_result = await run_loop(harness, state, messages, llm)
+            from core.completion_driver import drive
+            state.hook_state["_executor_finalizes"] = True
+
+            async def candidate_loop():
+                restored_pause = await restore_pause(harness, state, messages, llm)
+                if restored_pause is not None:
+                    return restored_pause
+                if custom is not None:
+                    state.append_transcript(
+                        "agent_loop_mode", mode="custom", source=f"nodes/{node_type}/agent_loop.py")
+                    return await custom(harness, state, messages, llm)
+                return await run_loop(harness, state, messages, llm)
+
+            loop_result = await drive(harness, state, messages, llm, candidate_loop)
+            # Custom loops may return without another model/tool chokepoint.
+            # Stop owns the result before summaries and parent delivery begin.
+            if loop_result.status != "cancelled":
+                _cancel.check("execute_node.result")
     except _cancel.RunCancelled as exc:
         # 自定义 loop 没有 run_loop 的收口，取消会一路冒到这里 —— 同样收成
         # cancelled 的 LoopResult，接着走**统一 finalize**（qinp 的验收 3：
@@ -649,6 +658,7 @@ async def execute_node(
             tool_calls=[],
             messages=messages,
             status="cancelled",
+            terminal_cause="external_kill",
             cancel_meta={**exc.signal, "cancelled_at": exc.where, "cancelled_at_turn": _turn},
         )
     except UnconfirmedToolOutcome:
@@ -723,78 +733,19 @@ async def execute_node(
         unregister_active(state.run_id)
         raise
 
+    from core.completion import configured
+    if configured(harness) and loop_result.status != "suspended":
+        from core.completion_driver import publish_finished
+        publish_finished(state, loop_result)
+
     # ── cancel 传播：子 run 被外部 cancel_node 中止 ─────────────────────────
     if loop_result.status == "cancelled":
         if parent_state is not None:
             parent_state.tokens_used += state.tokens_used
             parent_state.tool_calls_made += state.tool_calls_made
-        summary = {
-            "run_id": state.run_id,
-            "node_type": node_type,
-            "project_id": state.project_id,
-            "status": "cancelled",
-            # 取消不是"没跑过"：轮次照写。这个字段缺席过一次，代价是
-            # 下游 run_node 的 `summary["turns"]` 抛 KeyError，**整条子 run 的
-            # 结局连同 failure_category 一起丢掉**，调度器只看到一句 KeyError
-            # （2026-08-20 前实测 8 次）。消费侧已改成 .get()，产出侧也别缺。
-            "turns": loop_result.turns,
-            # getattr：custom loop / 测试替身可能交鸭子类型的 result —— 边界上
-            # 缺章读成空串（"未盖章"本来就是合法状态），不炸。
-            "loop_terminal": {"kind": getattr(loop_result, "terminal_kind", ""),
-                              "cause": getattr(loop_result, "terminal_cause", "")},
-            "cancel_meta": loop_result.cancel_meta,
-            # v3.9（E2E-4 实测）：cancel 路径的 summary 以前硬编码 missing=[] 且
-            # 完全不带 upstream_rework_requests。后果：data 节点被自己的 terminal
-            # guard 取消了 3 次、每次都调了 request_upstream_rework 申诉，但
-            # ① 申诉在 summary 里是 null → _pending_upstream_requests 扫不到 →
-            #    永远浮不到 orchestrator 面前（不变量①在 cancel 路径上被违背）；
-            # ② 无 missing/failed 信号 → 派发拦截统计里 3 次取消完全隐形，
-            #    同一个节点可以被无限重派。
-            # cancel ≠ 什么都没发生 —— 该带的账一样要带。
-            "missing_required_outputs": [
-                _t
-                for _t in (
-                    harness.required_outputs_for(
-                        {"mode": state.hook_state.get("_request_mode")}
-                    )
-                    or []
-                )
-                if _t
-                not in {
-                    a.get("type")
-                    for a in state.list_artifacts()
-                    if not ((state.read_artifact(a["id"]) or {}).get("metadata") or {}).get(
-                        "_forwarded_input"
-                    )
-                }
-            ],
-            "upstream_rework_requests": list(
-                state.hook_state.get("upstream_rework_requests") or []
-            ),
-            "turns": loop_result.turns,
-            # 「做完了」和「被切断」是两件事 —— 只记 turns 等于逼下游
-            # 拿它跟一个它不知道的上限去比（实测：没人比，空转三小时）。
-            "max_turns": getattr(loop_result, "max_turns", 0) or 0,
-            "stop_reason": summarize_stop_reason(
-                turns=loop_result.turns,
-                max_turns=getattr(loop_result, "max_turns", 0) or 0),
-            "tool_call_count": len(loop_result.tool_calls),
-            "tokens_used": state.tokens_used,
-            # 归属问题必须用 own_only —— 见 State.list_artifacts 的契约。
-            "artifacts": state.list_artifacts(own_only=True),
-            "final_text_preview": (loop_result.final_text or "")[:1000],
-            "state_dir": str(state.root),
-            "project_root": str(state.project_root) if state.project_root else None,
-            "depth": depth,
-            "sub_run_id": sub_run_id,
-        }
-        state.write_summary(summary)
-        state.append_transcript(
-            "run_end",
-            **{k: v for k, v in summary.items() if k != "artifacts"},
+        return await finalize_run(
+            state, harness, loop_result, llm, depth=depth, sub_run_id=sub_run_id,
         )
-        unregister_active(state.run_id)
-        return summary
 
     # ── pause 传播：子 run 暂停就把 status 一路冒泡 ─────────────────────────
     if loop_result.status == "paused":
@@ -1474,6 +1425,78 @@ def audit_delivered_figures(
     return audit.as_dict()
 
 
+def _finalize_cancelled_run(
+    state: State, harness: NodeHarness, loop_result, *, depth: int, sub_run_id: str | None,
+) -> dict[str, Any]:
+    """The sole cancelled-summary writer for fresh and resumed children."""
+    summary = {
+        "run_id": state.run_id,
+        "node_type": harness.node_type,
+        "project_id": state.project_id,
+        "status": "cancelled",
+        # 取消不是"没跑过"：轮次照写。这个字段缺席过一次，代价是
+        # 下游 run_node 的 `summary["turns"]` 抛 KeyError，**整条子 run 的
+        # 结局连同 failure_category 一起丢掉**，调度器只看到一句 KeyError
+        # （2026-08-20 前实测 8 次）。消费侧已改成 .get()，产出侧也别缺。
+        "turns": loop_result.turns,
+        # getattr：custom loop / 测试替身可能交鸭子类型的 result —— 边界上
+        # 缺章读成空串（"未盖章"本来就是合法状态），不炸。
+        "loop_terminal": {"kind": getattr(loop_result, "terminal_kind", ""),
+                          "cause": getattr(loop_result, "terminal_cause", "")},
+        "cancel_meta": loop_result.cancel_meta,
+        # v3.9（E2E-4 实测）：cancel 路径的 summary 以前硬编码 missing=[] 且
+        # 完全不带 upstream_rework_requests。后果：data 节点被自己的 terminal
+        # guard 取消了 3 次、每次都调了 request_upstream_rework 申诉，但
+        # ① 申诉在 summary 里是 null → _pending_upstream_requests 扫不到 →
+        #    永远浮不到 orchestrator 面前（不变量①在 cancel 路径上被违背）；
+        # ② 无 missing/failed 信号 → 派发拦截统计里 3 次取消完全隐形，
+        #    同一个节点可以被无限重派。
+        # cancel ≠ 什么都没发生 —— 该带的账一样要带。
+        "missing_required_outputs": [
+            _t
+            for _t in (
+                harness.required_outputs_for(
+                    {"mode": state.hook_state.get("_request_mode")}
+                )
+                or []
+            )
+            if _t
+            not in {
+                a.get("type")
+                for a in state.list_artifacts()
+                if not ((state.read_artifact(a["id"]) or {}).get("metadata") or {}).get(
+                    "_forwarded_input"
+                )
+            }
+        ],
+        "upstream_rework_requests": list(
+            state.hook_state.get("upstream_rework_requests") or []
+        ),
+        # 「做完了」和「被切断」是两件事 —— 只记 turns 等于逼下游
+        # 拿它跟一个它不知道的上限去比（实测：没人比，空转三小时）。
+        "max_turns": getattr(loop_result, "max_turns", 0) or 0,
+        "stop_reason": summarize_stop_reason(
+            turns=loop_result.turns,
+            max_turns=getattr(loop_result, "max_turns", 0) or 0),
+        "tool_call_count": len(loop_result.tool_calls),
+        "tokens_used": state.tokens_used,
+        # 归属问题必须用 own_only —— 见 State.list_artifacts 的契约。
+        "artifacts": state.list_artifacts(own_only=True),
+        "final_text_preview": (loop_result.final_text or "")[:1000],
+        "state_dir": str(state.root),
+        "project_root": str(state.project_root) if state.project_root else None,
+        "depth": depth,
+        "sub_run_id": sub_run_id,
+    }
+    state.write_summary(summary)
+    state.append_transcript(
+        "run_end",
+        **{k: v for k, v in summary.items() if k != "artifacts"},
+    )
+    unregister_active(state.run_id)
+    return summary
+
+
 async def finalize_run(
     state: State,
     harness: NodeHarness,
@@ -1488,6 +1511,135 @@ async def finalize_run(
     被 execute_node 内部调用；也被 pause_driver 在 resume cascade 完成 leaf child 后调用，
     确保 paused → resumed → completed 的 run 也写完整 summary.json。
     """
+    from core import cancellation
+
+    signal = cancellation.signal_for(state)
+    if signal and loop_result.status != "cancelled":
+        # The shared finalizer is also entered directly after a pause resumes.
+        # Its caller need not be inside cancellation.bind_run.
+        from .agent_loop import LoopResult
+
+        cancellation.mark_cancelled(state, signal)
+        loop_result = LoopResult(
+            final_text=f"(cancelled: {signal.get('reason') or 'run 已取消'})",
+            turns=loop_result.turns,
+            tool_calls=loop_result.tool_calls,
+            messages=loop_result.messages,
+            status="cancelled",
+            terminal_cause="external_kill",
+            max_turns=getattr(loop_result, "max_turns", 0),
+            cancel_meta={**signal, "cancelled_at": "finalize_run"},
+        )
+    from core.completion import configured
+    if loop_result.status == "cancelled" and (signal or not configured(harness)):
+        return _finalize_cancelled_run(
+            state, harness, loop_result, depth=depth, sub_run_id=sub_run_id,
+        )
+
+    from core.completion_driver import drive, suspended_view
+
+    while True:
+        if configured(harness):
+            from core.custom_loop import resolve_custom_loop
+            from core.agent_loop import run_loop
+            custom = resolve_custom_loop(harness.node_type)
+
+            async def continue_loop():
+                return await (custom or run_loop)(harness, state, loop_result.messages, llm)
+
+            with cancellation.bind_run(state):
+                try:
+                    loop_result = await drive(harness, state, loop_result.messages, llm,
+                                              continue_loop, candidate=loop_result)
+                except cancellation.RunCancelled as exc:
+                    cancellation.mark_cancelled(state, exc.signal)
+                    from core.agent_loop import LoopResult
+                    loop_result = LoopResult("运行已停止。", loop_result.turns,
+                        messages=loop_result.messages, status="cancelled", terminal_cause="external_kill",
+                        cancel_meta={**exc.signal, "cancelled_at": "completion.wait"})
+                    return _finalize_cancelled_run(state, harness, loop_result, depth=depth, sub_run_id=sub_run_id)
+            if loop_result.status == "suspended":
+                return suspended_view(state, loop_result)
+
+        summary = await _prepare_final_summary(
+            state, harness, loop_result, depth=depth, sub_run_id=sub_run_id)
+        if cancellation.signal_for(state):
+            # Preparation can await. Return through the one physical-cancel
+            # writer at entry if a stop arrived during that await.
+            return await finalize_run(state, harness, loop_result, llm,
+                                      depth=depth, sub_run_id=sub_run_id)
+        if not configured(harness):
+            break
+        from core.completion import CompletionContext, CompletionPersistenceError, evaluate
+        try:
+            verified = await evaluate(CompletionContext(
+                harness, state, loop_result.messages, loop_result.turns, False), loop_result)
+        except CompletionPersistenceError:
+            # The driver keeps the accepted owner and handles storage recovery.
+            continue
+        admitted = loop_result.completion_admission or {}
+        if (verified.disposition == "allow" and all(
+            verified.to_dict().get(key) == admitted.get(key)
+            for key in ("code", "fact_revision", "task_outcome")
+        )):
+            if cancellation.signal_for(state):
+                continue
+            from core.completion import current_decision
+            summary["completion_admission"] = current_decision(state)
+            break
+        # Facts changed while preparing the summary. Reenter/suspend through
+        # the same driver, then rebuild the whole summary from admitted facts.
+
+    state.write_summary(summary)
+    state.append_transcript(
+        "run_end",
+        **{k: v for k, v in summary.items() if k != "artifacts"},
+    )
+
+    # run-end episode 层已整体删除（2026-08-21 记忆重建）。
+    # 它每个 producing run 烧 1–2 次 LLM call 写一份叙事摘要，而读取方接近零：
+    # 无任何自动注入路径、只有 5 个节点有读工具、索引里连文件名都不出现 ——
+    # 审计认定是整个记忆系统里投入产出比最差的一段。
+    # 日志已经有三份权威载体（transcript / Git history / 决策账本），
+    # 第四份不产生信息。要叙事摘要就从 transcript 现生成 —— 那是投影，
+    # 不是新的真相源。
+
+    # Git is a Platform-owned workspace concern, not a node concern.  Every
+    # node reaches this point, including pause-resumed runs, so one shared hook
+    # can request a node-level checkpoint without editing six node packages.
+    try:
+        from .project_workspace import request_completion_checkpoint
+
+        request_completion_checkpoint(state, summary["status"])
+    except Exception as e:  # a missing observer must not erase the run summary
+        state.append_transcript(
+            "workspace_checkpoint_request_failed",
+            error=f"{type(e).__name__}: {e}"[:500],
+        )
+
+    # 这个 run 批到的 GPU（#893 阶段 1）在它真正结束时放掉。paused run 不到这里 ——
+    # 停在确认卡上等人时，卡仍归它。它起的后台作业还在跑的话，卡继续算作业的。
+    try:
+        from .capability_grants import release_gpu
+
+        freed = release_gpu(state)
+        if freed:
+            state.append_transcript("gpu_released", indices=freed)
+    except Exception as e:  # 放卡失败不能抹掉 run 的收尾；占卡进程没了，下一个分卡的人会回收
+        state.append_transcript("gpu_release_failed", error=f"{type(e).__name__}: {e}"[:300])
+
+    # Active 注册表撤销 —— run 真正结束（completed/incomplete）。
+    # paused run 在这里 NOT 到达；resume 后 pause_driver 调本函数才到达。
+    unregister_active(state.run_id)
+    return summary
+
+
+async def _prepare_final_summary(
+    state: State, harness: NodeHarness, loop_result, *, depth: int, sub_run_id: str | None,
+) -> dict[str, Any]:
+    """Prepare Core's one summary projection; the caller alone stamps its end."""
+    from core.completion import configured
+
     project_workspace_mode = getattr(state, "project_worktree", None) is not None
 
     # Legacy CLI runs still use the run-local typed-artifact contract. Project
@@ -1566,6 +1718,8 @@ async def finalize_run(
 
     blockers = list(state.hook_state.get("blockers") or [])
     final_status = "completed" if not missing else "incomplete"
+    if configured(harness) and loop_result.status in {"failed", "void", "incomplete"}:
+        final_status = "failed" if loop_result.status == "failed" else "incomplete"
     if blockers:
         final_status = "blocked"
 
@@ -1781,45 +1935,7 @@ async def finalize_run(
                 "blocked_situation_capture_failed",
                 error=f"{type(exc).__name__}: {exc}"[:300],
             )
-    state.write_summary(summary)
-    state.append_transcript(
-        "run_end",
-        **{k: v for k, v in summary.items() if k != "artifacts"},
-    )
-
-    # run-end episode 层已整体删除（2026-08-21 记忆重建）。
-    # 它每个 producing run 烧 1–2 次 LLM call 写一份叙事摘要，而读取方接近零：
-    # 无任何自动注入路径、只有 5 个节点有读工具、索引里连文件名都不出现 ——
-    # 审计认定是整个记忆系统里投入产出比最差的一段。
-    # 日志已经有三份权威载体（transcript / Git history / 决策账本），
-    # 第四份不产生信息。要叙事摘要就从 transcript 现生成 —— 那是投影，
-    # 不是新的真相源。
-
-    # Git is a Platform-owned workspace concern, not a node concern.  Every
-    # node reaches this point, including pause-resumed runs, so one shared hook
-    # can request a node-level checkpoint without editing six node packages.
-    try:
-        from .project_workspace import request_completion_checkpoint
-
-        request_completion_checkpoint(state, final_status)
-    except Exception as e:  # a missing observer must not erase the run summary
-        state.append_transcript(
-            "workspace_checkpoint_request_failed",
-            error=f"{type(e).__name__}: {e}"[:500],
-        )
-
-    # 这个 run 批到的 GPU（#893 阶段 1）在它真正结束时放掉。paused run 不到这里 ——
-    # 停在确认卡上等人时，卡仍归它。它起的后台作业还在跑的话，卡继续算作业的。
-    try:
-        from .capability_grants import release_gpu
-
-        freed = release_gpu(state)
-        if freed:
-            state.append_transcript("gpu_released", indices=freed)
-    except Exception as e:  # 放卡失败不能抹掉 run 的收尾；占卡进程没了，下一个分卡的人会回收
-        state.append_transcript("gpu_release_failed", error=f"{type(e).__name__}: {e}"[:300])
-
-    # Active 注册表撤销 —— run 真正结束（completed/incomplete）。
-    # paused run 在这里 NOT 到达；resume 后 pause_driver 调本函数才到达。
-    unregister_active(state.run_id)
+    if configured(harness):
+        from core.completion import current_decision
+        summary["completion_admission"] = current_decision(state)
     return summary

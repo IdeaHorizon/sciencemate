@@ -11,13 +11,12 @@ export type CnkiJob = {
   paper_ids?: string[]; next_cursor?: string; has_more?: boolean;
   document_kind?: CnkiDocumentKind | null;
 };
-export type CnkiDevice = {id: string; name: string; online: boolean; state: string; last_seen_at: string | null; detail: string};
 export type CnkiCollector = {mode:"server";available:boolean;detail:string};
-export const cnkiStatus = (includeJobs = true) => api.request<{collector:CnkiCollector;devices:CnkiDevice[];jobs:CnkiJob[]}>(`/cnki/status?include_jobs=${includeJobs}`);
-export function wakeCnki() { window.postMessage({type:"sciencemate-cnki-wake"},window.location.origin); }
-export async function createCnkiJob(query: string, recurring = false, category: CnkiCategory = "domain", limit: number | null = null, document_kind?:CnkiDocumentKind) {
-  const result = await api.request<CnkiJob>("/cnki/jobs?page_size=200",{method:"POST",body:JSON.stringify({query,recurring,category,limit,document_kind})});
-  return result;
+export const cnkiStatus = () => api.request<{collector:CnkiCollector}>("/cnki/status?include_jobs=false");
+export function createCnkiJob(query: string, limit: number | null, document_kind?: CnkiDocumentKind, search_id?: string) {
+  return api.request<CnkiJob>("/cnki/jobs?page_size=200", {
+    method: "POST", body: JSON.stringify({query, limit, document_kind, search_id}),
+  });
 }
 export const retryCnkiJob = (id:string) => api.request<CnkiJob>(`/cnki/jobs/${encodeURIComponent(id)}/retry`,{method:"POST"});
 export const resetCnkiSession = (jobIds:string[]) => api.request("/cnki/session/reset",{method:"POST",body:JSON.stringify({job_ids:jobIds})});

@@ -113,6 +113,11 @@ class PersonalProjectsRelay:
                     status=409,
                 )
             base = await tunnels.endpoint(record)
+            if (scope["path"].startswith("/api/v1/settings/model-")
+                    or (scope["method"] == "POST" and scope["path"].startswith("/api/v1/chat/projects/"))):
+                from app.services.remote_models import ensure_desktop_defaults
+
+                await ensure_desktop_defaults(server_id)
             token = remote_servers.credentials_for(server_id)["api_token"]
             body = bytearray()
             while True:

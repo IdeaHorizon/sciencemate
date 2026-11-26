@@ -32,6 +32,11 @@ status: proposed
 每阶段怎么验证、失败了往哪分支。这是你的工作假设，事实变了就改它；小构建直接做，
 不用先写计划。跳过不适用的阶段不是违规。
 
+涉及不同执行环境，或工具、路径、能力的观测互相矛盾时，按需读取
+[执行目标与工具链一致性](references/execution-context.md)：从本 skill 返回的 assets 清单选择
+`execution-context.md`，将对应路径原样传给 `load_skill` 的 asset 参数（不同宿主的分隔符可能不同）。
+先辨明当前工具实际在哪执行，再诊断软件；不要把宿主目录或另一个环境的探测当成本次结果。
+
 任务涉及 rank/thread 布局、affinity、伸缩、吞吐或性能回退时，按需读取
 [并行布局与性能诊断](references/parallel-performance.md)：
 `load_skill(name='hpc-build', asset='references/parallel-performance.md')`。

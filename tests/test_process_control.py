@@ -302,3 +302,27 @@ def test_windows_detached_worker_must_not_breakaway_from_the_job(monkeypatch):
         "又把 CREATE_BREAKAWAY_FROM_JOB 加回来了 —— 壳把后端放在不许 breakaway 的 Job 里，"
         "带这个标志起 worker 会 [WinError 5] 拒绝访问，桌面版每一轮都跑不起来"
     )
+
+
+def test_background_windows_launches_allocate_no_console_and_keep_group_membership(monkeypatch):
+    monkeypatch.setattr(pc, "_WINDOWS", True)
+    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    for kwargs in (pc.background_spawn_kwargs(), pc.group_spawn_kwargs(), pc.detached_spawn_kwargs()):
+        assert kwargs["creationflags"] & 0x08000000
+        assert not kwargs["creationflags"] & 0x01000000  # never escape the desktop Job
+    assert pc.group_spawn_kwargs()["creationflags"] & 0x200
+    assert pc.detached_spawn_kwargs()["creationflags"] & 0x200
+
+
+def test_wsl_background_probe_uses_the_no_console_policy(monkeypatch):
+    from core.isolation import wsl
+    monkeypatch.setattr(pc, "_WINDOWS", True)
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, b"ok", b"")
+    monkeypatch.setattr(wsl.subprocess, "run", run)
+    wsl.WslBackend("Ubuntu")._exec(["true"], timeout=3)
+    assert seen["creationflags"] & 0x08000000
+    assert seen["stdin"] == subprocess.DEVNULL and seen["capture_output"]

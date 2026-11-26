@@ -76,6 +76,61 @@ test("a late reset response cannot replace a new search or logout state",async()
   assert.equal(session.getSnapshot().resettingCnki,false);
 });
 
+test("automatic browser recovery continues result delivery after a failed status request",async()=>{
+  const sleepers:(()=>void)[]=[];
+  const searchIds:string[]=[];
+  let reads=0,recovered=false;
+  const job=(id:string)=>({id,query:"主题",state:recovered?"completed":"queued",paper_ids:["old"],
+    next_cursor:"after-old",result:papers("已获取中文论文","cnki")} as CnkiJob);
+  const {session,requests}=setup({
+    status:async()=>({collector:{available:true,mode:"server",detail:""}}),
+    create:async(_query,_limit,kind,searchId)=>{searchIds.push(searchId!);return job(kind!);},
+    read:async id=>{
+      reads++;
+      if (!recovered) throw new Error("temporary connection loss during browser recovery");
+      return {...job(id),paper_ids:["new"],next_cursor:"after-new",result:papers("恢复后新增中文论文","cnki")};
+    },
+    retry:async()=>{throw new Error("No manual retry should be necessary");},
+    resetSession:async()=>{throw new Error("The backend coordinates automatic recovery");},
+    sleep:()=>new Promise<void>(resolve=>{sleepers.push(resolve);}),
+  });
+  session.start({query:"研究问题",language:"zh"});
+  requests[0].progress({stage:"strategy",search_plan:plan});
+  requests[0].done(papers("已获取英文论文"));await tick();
+  assert.equal(new Set(searchIds).size,1);
+  assert.equal(searchIds.length,5);
+  assert.match(searchIds[0],/^[a-f0-9]{32}$/);
+  sleepers.splice(0).forEach(resolve=>resolve());await tick();
+  assert.equal(reads,5);
+  assert.equal(session.getSnapshot().data?.total,2);
+  recovered=true;
+  sleepers.splice(0).forEach(resolve=>resolve());await tick();
+  assert.equal(session.getSnapshot().channels.cnki.state,"completed");
+  assert.deepEqual(new Set(session.getSnapshot().data?.papers.map(p=>p.title)),new Set([
+    "已获取英文论文","已获取中文论文","恢复后新增中文论文",
+  ]));
+  session.reset();
+});
+
+test("retry restarts a collector that exited before creating jobs without rerunning international search",async()=>{
+  let available=false,created=0;
+  const {session,requests}=setup({
+    status:async()=>{if (!available) throw new Error("backend restarting");return {collector:{available:true,mode:"server",detail:""}};},
+    create:async(_query,_limit,kind)=>{created++;return {id:kind!,state:"completed",result:papers("重新连接后中文论文","cnki")} as CnkiJob;},
+  });
+  session.start({query:"研究问题",language:"zh"});
+  requests[0].progress({stage:"strategy",search_plan:plan});
+  requests[0].done(papers("英文论文"));await tick();
+  assert.equal(session.getSnapshot().channels.cnki.state,"error");
+  assert.equal(created,0);
+  available=true;session.retryChinese();await tick();
+  assert.equal(created,5);
+  assert.equal(requests.length,1);
+  assert.equal(session.getSnapshot().data?.total,2);
+  assert.equal(session.getSnapshot().channels.cnki.state,"completed");
+  session.reset();
+});
+
 test("leaving every view does not cancel a search; remount gets finished results and draft",()=>{
   const {session,requests}=setup();
   const leave=session.subscribe(()=>{});
@@ -189,13 +244,34 @@ test("source previews appear while pending and final results replace provisional
   assert.equal(session.getSnapshot().isPending,false);
 });
 
-test("failed Chinese collection leaves the spinner but keeps results and recovery polling",async()=>{
+test("retrying a blocked category does not requeue another category still running",async()=>{
+  const retries:string[]=[],creates:string[]=[],reads:string[]=[];
   const sleepers:(()=>void)[]=[];
+  const snapshot=(id:string,state:string)=>({id,query:"主题",state,result:papers(id,"cnki")} as CnkiJob);
   const {session,requests}=setup({
     status:async()=>({collector:{available:true,mode:"server",detail:""}}),
-    create:async()=>({id:"job",query:"主题",state:"error",detail:"浏览器超时",result:papers("中文缓存","cnki")} as CnkiJob),
-    sleep:()=>new Promise<void>(resolve=>{sleepers.push(resolve);}),
-    read:async()=>({id:"job",query:"主题",state:"completed",result:papers("中文新结果","cnki")} as CnkiJob),
+    create:async(_q,_n,kind)=>{creates.push(kind!);return snapshot(kind!,kind==="journal"?"working":kind==="thesis"?"paused":"completed");},
+    retry:async id=>{retries.push(id);},read:async id=>{reads.push(id);return snapshot(id,"completed");},
+    sleep:()=>new Promise<void>(resolve=>sleepers.push(resolve)),
+  });
+  session.start({query:"问题",language:"zh"});requests[0].progress({stage:"strategy",search_plan:plan});await tick();
+  assert.equal(session.getSnapshot().channels.cnki.state,"paused");
+  session.retryChinese();await tick();
+  assert.deepEqual(retries,["thesis"]);assert.equal(creates.length,5);
+  assert.equal(session.getSnapshot().channels.cnki.state,"completed");
+  const readsAfterRetry=reads.length;
+  sleepers.forEach(resolve=>resolve());await tick();
+  assert.equal(reads.length,readsAfterRetry,"old observer is inactive");
+});
+
+test("a blocked search stops polling; explicit retry resumes the same jobs and keeps partial results",async()=>{
+  const retries:string[]=[],created:string[]=[],reads:string[]=[];
+  const {session,requests}=setup({
+    status:async()=>({collector:{available:true,mode:"server",detail:""}}),
+    create:async(_q,_limit,kind)=>{created.push(kind!); return {id:kind,query:"主题",state:"error",detail:"浏览器超时",result:papers("中文缓存","cnki")} as CnkiJob;},
+    sleep:async()=>{throw Error("blocked jobs must not keep polling");},
+    retry:async id=>{retries.push(id);},
+    read:async id=>{reads.push(id);return {id,query:"主题",state:"completed",result:papers("中文新结果","cnki")} as CnkiJob;},
   });
   session.start({query:"问题",language:"zh"});
   requests[0].progress({stage:"strategy",search_plan:plan});
@@ -204,9 +280,11 @@ test("failed Chinese collection leaves the spinner but keeps results and recover
   assert.equal(session.getSnapshot().cnkiPending,false);
   assert.equal(session.getSnapshot().channels.cnki.state,"error");
   assert.equal(session.getSnapshot().data?.total,2);
-  sleepers.splice(0).forEach(resolve=>resolve());await tick();
+  assert.deepEqual(reads,[]);
+  session.retryChinese();await tick();
+  assert.equal(retries.length,5);assert.equal(created.length,5);assert.equal(reads.length,5);assert.equal(requests.length,1);
   assert.equal(session.getSnapshot().channels.cnki.state,"completed");
-  assert.equal(session.getSnapshot().data?.papers.some(p=>p.title==="中文新结果"),true);
+  assert.deepEqual(new Set(session.getSnapshot().data?.papers.map(p=>p.title)),new Set(["国际结果","中文缓存","中文新结果"]));
 });
 
 test('international pages accumulate without retaining rejected previews or restarting CNKI',async()=>{

@@ -101,8 +101,7 @@ async def test_pause_driver_invokes_finalize_after_resume(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_pause_driver_handles_cancellation_during_resume(tmp_path: Path):
     """resume 过程中 LLM 没调工具但外部已经写 kill_signal → status=cancelled，
-    finalize_fn 仍被调（写 cancelled summary 不在 finalize_run 路径里，
-    但 drive_pause_chain 本身仍能优雅返回）。"""
+    finalize_fn 写出 cancelled summary，drive_pause_chain 优雅返回。"""
     state = State.new(node_type="literature", base_dir=tmp_path)
     state.hook_state["kill_signal"] = {"reason": "cancel mid-resume",
                                           "requested_by": "test"}
@@ -132,11 +131,14 @@ async def test_pause_driver_handles_cancellation_during_resume(tmp_path: Path):
     finalize_called = []
 
     async def stub_finalize(s, h, lr, _llm, **kw):
+        from core.executor import finalize_run
+
         finalize_called.append(lr.status)
-        return {"status": lr.status}
+        return await finalize_run(s, h, lr, _llm, **kw)
 
     ask = await make_scripted_ask(["whatever"])
     text = await drive_pause_chain(ask_fn=ask, finalize_fn=stub_finalize)
     # resume_loop 第一轮就检测到 kill_signal 直接 cancelled
     assert "cancelled" in finalize_called
+    assert json.loads((state.root / "summary.json").read_text())["status"] == "cancelled"
     assert "cancelled" in text or text  # text 含 cancel 标记，或非空

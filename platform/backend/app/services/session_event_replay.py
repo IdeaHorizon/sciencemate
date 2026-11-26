@@ -157,6 +157,7 @@ async def replay_missed_events(
                     context=context,
                     event=record,
                     harness_states=harness_states,
+                    wait_for_writer=True,
                 )
                 # Match live ingestion: one source fact, one transaction.
                 # A failed flush must never poison a batch containing other

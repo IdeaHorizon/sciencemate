@@ -32,6 +32,7 @@ export function sessionTerminalInvalidationTargets(
     { queryKey: qk.sessionConflicts(projectId, sessionId), exact: true },
     { queryKey: qk.sessions(projectId, "api"), exact: true },
     { queryKey: qk.artifacts(projectId), exact: true },
+    { queryKey: qk.projectCatalog(projectId, sessionId), exact: true },
   ];
   if (runId) targets.push({ queryKey: qk.run(runId), exact: true });
   return targets;

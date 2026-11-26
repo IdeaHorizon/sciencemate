@@ -46,9 +46,13 @@ async def main():
         _persist_messages_checkpoint(
             state, [LLMMessage(role="user", content="physical effect already accepted")], turn=1
         )
-        (root / "ready.json").write_text(
+        ready = root / "ready.json.tmp"
+        ready.write_text(
             json.dumps({"parent": state.parent_run_id, "child": state.run_id})
         )
+        # Existence is the parent's crash signal. Publish only complete JSON;
+        # otherwise the parent may kill us between open/truncate and write.
+        ready.replace(root / "ready.json")
         await asyncio.Event().wait()
 
     executor.run_loop = child_loop

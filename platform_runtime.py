@@ -3966,6 +3966,16 @@ class PlatformSession:
     def _pause_id(pending: Any) -> str:
         return str(pending.pause_event.pending_tool_call_id or "").strip()
 
+    def _current_pause_details(self) -> dict[str, Any]:
+        pause_event, pause_path = self._pause_details()
+        if not pause_event:
+            return {}
+        return {
+            "current_pause_id": str(pause_event.get("pending_tool_call_id") or ""),
+            "current_pause_event": pause_event,
+            "current_pause_pending_path": str(pause_path.resolve()),
+        }
+
     def _result(
         self,
         *,
@@ -4221,6 +4231,7 @@ class PlatformSession:
             raise RequestError(
                 "pause_pending",
                 "answer the pending pause before starting another turn",
+                details=self._current_pause_details(),
             )
         self._brief_environment()
         before, tokens_used_before = self._operation_start(request_id, "turn")
@@ -4900,7 +4911,7 @@ class PlatformSession:
             raise RequestError(
                 "pause_conflict",
                 "pause_id does not match the current in-memory pause",
-                details={"current_pause_id": current_pause_id},
+                details=self._current_pause_details(),
             )
         before, tokens_used_before = self._operation_start(request_id, "answer")
         self.state.submission_id = request_id
@@ -5100,7 +5111,9 @@ def _error_code_for(exc: BaseException) -> str:
     from core.llm import is_transient_provider_error
     from core.conversation_store import UnconfirmedToolOutcome
 
-    if isinstance(exc, UnconfirmedToolOutcome):
+    from core.approvals import ApprovalError
+
+    if isinstance(exc, (UnconfirmedToolOutcome, ApprovalError)):
         return exc.code
     try:
         if is_transient_provider_error(exc):
@@ -5119,7 +5132,7 @@ _CONVERSATION_OPS = frozenset({"turn", "run_unattended", "answer", "reset"})
 #: 这是 P1-1 的全部内容：从前请求循环是严格串行的（读一行 → await 完这一轮 →
 #: 才读下一行），于是一轮跑几小时期间，`status` 问不到、`stop` 送不进、插话
 #: 只能绕道文件收件箱。三个补偿机制都是为这一件事存在的。
-_MANAGEMENT_OPS = frozenset({"init", "terminate", "status", "stop", "interject", "sync"})
+_MANAGEMENT_OPS = frozenset({"init", "terminate", "status", "stop", "interject", "sync", "resume_completion"})
 
 
 #: 没有任何 App Server 连着、超过这么久，就认定"没人在看这份工作"。
@@ -5487,12 +5500,15 @@ async def serve_jsonl(
                     # P1-1 之后它**跑轮中也答得上**（管理面不再排在对话后面）。
                     # 全部字段机械可答，一个都不问模型。
                     from core.pause import get_deepest_paused
+                    from core.completion_driver import suspended_runs
 
                     paused = get_deepest_paused() if session is not None else None
                     payload: dict[str, Any] = {
                         "initialized": session is not None,
                         "working": bool(session is not None and session._operation_active),
                         "paused": paused is not None,
+                        "completion_resume": True,
+                        "suspended_runs": suspended_runs() if session is not None else [],
                         "protocol_version": PROTOCOL_VERSION,
                         "sandbox_protocol_version": SANDBOX_PROTOCOL_VERSION,
                         "code_version": _code_version(),
@@ -5606,6 +5622,9 @@ def _apply_request_scope(session: "PlatformSession", raw: dict) -> None:
         session._app_binding = {
             str(k): v for k, v in app_binding.items() if isinstance(k, str)
         }
+        if not hasattr(session.state, "hook_state"):
+            session.state.hook_state = {}
+        session.state.hook_state["approval_principal"] = str(app_binding.get("user_id") or "")
         from core.remote_resources import bind_worker
         bind_worker(user_id=str(app_binding.get("user_id") or ""),
                     project_id=session.state.project_id)
@@ -5751,6 +5770,20 @@ def _handle_management_op(
     """
     from core import session_inbox
 
+    if op == "resume_completion":
+        from core.completion_driver import resume
+
+        run_id = raw.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            raise RequestError("invalid_request", "resume_completion requires a run identity")
+        try:
+            resume(run_id, project_id=session.project_id, session_id=session.session_id)
+        except ValueError as exc:
+            raise RequestError("completion_not_suspended", str(exc)) from exc
+        session.emit("accepted", request_id=request_id, op=op, run_id=run_id,
+                     occupancy="working" if session._operation_active else "idle")
+        return
+
     if op == "sync":
         session.emit(
             "accepted",
@@ -5821,6 +5854,7 @@ def main(argv: list[str] | None = None) -> int:
     # 最前面：Windows 上没在 UTF-8 模式就 re-exec 一次。后端 spawn 的 worker 已经从
     # _child_environment 带了 PYTHONUTF8=1（起时即 utf-8，这里是无操作）；直接手跑
     # platform_runtime 时这道自愈才生效。worker 只往 stdout 写 JSONL，编码必须是 utf-8。
+    from shared.lib.event_loop import run as run_async
     from shared.lib.platform_env import ensure_utf8_mode
     ensure_utf8_mode()
 
@@ -5880,11 +5914,11 @@ def main(argv: list[str] | None = None) -> int:
                         control_address, emit.rebind_stream
                     )
                     try:
-                        serve_reason = asyncio.run(serve_jsonl(source, emit))
+                        serve_reason = run_async(serve_jsonl(source, emit))
                     finally:
                         source.close()
                 else:
-                    serve_reason = asyncio.run(serve_jsonl(sys.stdin, emit))
+                    serve_reason = run_async(serve_jsonl(sys.stdin, emit))
             else:
                 raw = _read_request(sys.stdin)
                 if isinstance(raw, dict) and isinstance(raw.get("request_id"), str):
@@ -5909,32 +5943,32 @@ def main(argv: list[str] | None = None) -> int:
                          **run_kb_promotion(raw))
                 elif isinstance(raw, dict) and raw.get("op") == "kb_resolve_proposal":
                     emit("kb_resolve_proposal_result", request_id=request_id,
-                         **asyncio.run(run_kb_resolve_proposal(raw)))
+                         **run_async(run_kb_resolve_proposal(raw)))
                 elif isinstance(raw, dict) and raw.get("op") == "name_session":
                     # 一次模型调用，不建 run 目录、不进项目状态 —— 呈现层的润色。
                     emit("name_session_result", request_id=request_id,
-                         **asyncio.run(run_name_session(raw)))
+                         **run_async(run_name_session(raw)))
                 elif isinstance(raw, dict) and raw.get("op") == "feed_curate_profile":
                     # 同上：有界的单次调用，零工具、不建 run、不进 KB。
                     emit("feed_curate_profile_result", request_id=request_id,
-                         **asyncio.run(run_feed_curate_profile(raw)))
+                         **run_async(run_feed_curate_profile(raw)))
                 elif isinstance(raw, dict) and raw.get("op") == "literature_search":
                     def _literature_progress(event: dict[str, Any]) -> None:
                         emit("literature_search_progress", request_id=request_id, **event)
                     emit("literature_search_result", request_id=request_id,
-                         **asyncio.run(run_literature_search(raw, progress=_literature_progress)))
+                         **run_async(run_literature_search(raw, progress=_literature_progress)))
                 elif isinstance(raw, dict) and raw.get("op") == "literature_search_plan":
                     emit("literature_search_plan_result", request_id=request_id,
-                         **asyncio.run(run_literature_search_plan(raw)))
+                         **run_async(run_literature_search_plan(raw)))
                 elif isinstance(raw, dict) and raw.get("op") == "literature_translate_page":
                     emit("literature_translation_result", request_id=request_id,
-                         **asyncio.run(run_literature_translate_page(raw)))
+                         **run_async(run_literature_translate_page(raw)))
                 elif isinstance(raw, dict) and raw.get("op") == "feed_digest":
                     # 同上：把调用方给全的材料缩成一段，不建 run、不进 KB。
                     emit("feed_digest_result", request_id=request_id,
-                         **asyncio.run(run_feed_digest(raw)))
+                         **run_async(run_feed_digest(raw)))
                 else:
-                    asyncio.run(run_platform_request(raw, emit))
+                    run_async(run_platform_request(raw, emit))
         return exit_code_for_serve_reason(serve_reason)
     except RequestError as exc:
         emit(

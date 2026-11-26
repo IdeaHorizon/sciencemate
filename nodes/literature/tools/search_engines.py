@@ -1416,6 +1416,22 @@ class GoogleScholarSearch:
 # ========================================================================
 # SearchManager — 统一搜索入口
 # ========================================================================
+def read_search_cache(path: Path) -> list[Paper] | None:
+    """Read only the versioned JSON format written by SearchManager."""
+    if path.suffix != ".json":
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("schema_version") != 1:
+            return None
+        rows = data.get("papers")
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            return None
+        return [Paper(**row) for row in rows]
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
 class SearchManager:
     def __init__(
         self,
@@ -1458,18 +1474,7 @@ class SearchManager:
         return self._cache_dir / f"{key}.json"
 
     def _load_cached_results(self, key: str):
-        path = self._cache_path(key)
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if data.get("schema_version") != 1 or not isinstance(data.get("papers"), list):
-                    return None
-                if not all(isinstance(row, dict) for row in data["papers"]):
-                    return None
-                return [Paper(**row) for row in data["papers"]]
-            except (OSError, ValueError, TypeError, AttributeError):
-                return None
-        return None
+        return read_search_cache(self._cache_path(key))
 
     def _save_cached_results(self, key: str, papers: list):
         path = self._cache_path(key)

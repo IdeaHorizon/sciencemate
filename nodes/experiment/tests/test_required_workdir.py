@@ -324,7 +324,6 @@ def test_default_workdir_derivation_failure_never_starts_an_executor(state, monk
         raise AssertionError("python executor must not start")
 
     monkeypatch.setattr(sb, "experiment_output_dir", broken_default)
-    monkeypatch.setattr(sb, "_orig_run_bash", unexpected_bash)
     monkeypatch.setattr(sb, "_exec_and_log", unexpected_python)
 
     async def run():

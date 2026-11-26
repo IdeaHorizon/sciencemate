@@ -24,10 +24,8 @@ claim 写入归 `_curator`（按需节点，不在 post-node flow 上）；调�
 """
 from __future__ import annotations
 
-import ast
 import asyncio
 import json
-from pathlib import Path
 
 import pytest
 
@@ -288,12 +286,20 @@ def test_projection_adopts_the_proposal_stage_hypothesis_in_place(tmp_path):
 # ── 7. 接线：finalize_run 真的调它（查 Call，不查名字出现）────────────────────
 
 
-def test_finalize_run_calls_the_projector():
-    src = Path(__file__).resolve().parents[1] / "core" / "executor.py"
-    tree = ast.parse(src.read_text(encoding="utf-8"))
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.AsyncFunctionDef) and n.name == "finalize_run")
-    calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
-             and isinstance(n.func, ast.Name)
-             and n.func.id == "project_research_state_to_kb"]
-    assert calls, "finalize_run 里没有对 project_research_state_to_kb 的调用"
+def test_finalize_run_calls_the_projector(tmp_path):
+    """The public finalizer must publish the real evidence-backed hypothesis claim."""
+    from core.agent_loop import LoopResult
+    from core.executor import finalize_run
+    from core.harness import NodeHarness
+
+    state = _analysis_state(tmp_path, verdicts=[
+        {"id": "Q1", "status": "supported", "evidence": ["experiment_log__q1"]},
+    ])
+    assert not _claims(state)
+    summary = asyncio.run(finalize_run(state, NodeHarness(node_type="analysis"),
+                                      LoopResult("evidence delivered", 1), None))
+    assert summary["kb_claim_projection"]
+    claim, = _claims(state)
+    assert claim["status"] == "validated"
+    assert claim["hypothesis_id"] == "Q1"
+    assert summary["kb_claim_projection"][0]["claim_id"] == claim["id"]

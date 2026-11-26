@@ -21,6 +21,7 @@ test("a successful Session terminal refreshes every canonical revision owner exa
     { queryKey: ["sessions", "project-a", "session-a", "conflicts"], exact: true },
     { queryKey: ["sessions", "project-a", "api"], exact: true },
     { queryKey: ["artifacts", "project-a"], exact: true },
+    { queryKey: ["projects", "project-a", "catalog", "session-a"], exact: true },
   ]);
 
   const invalidated: QueryInvalidationTarget[] = [];

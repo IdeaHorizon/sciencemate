@@ -11,7 +11,7 @@ from collections import OrderedDict
 import httpx
 
 from nodes.literature.tools.crossref_http import crossref_list_get
-from nodes.literature.tools.journal_metrics import database_path, normalize_issn
+from nodes.literature.tools.journal_metrics import read_database_path, normalize_issn
 from app.services.feed.profile import journal_display_name, journal_key
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ class JournalSearchUnavailable(RuntimeError):
 
 
 def _local(query: str, limit: int) -> list[dict]:
-    path = database_path()
+    path = read_database_path()
     if not path.is_file():
         return []
     needle = query.casefold()

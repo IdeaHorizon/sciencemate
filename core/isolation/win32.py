@@ -47,6 +47,7 @@ import json
 import os
 import subprocess
 import sys
+from shared.lib.process_control import background_spawn_kwargs
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,7 @@ def _probe() -> tuple[frozenset[Invariant], str, bool]:
         out = subprocess.run(
             [sys.executable, "-I", "-B", str(_WIN32_EXEC), "probe"],
             capture_output=True, text=True, timeout=60, check=False,
+            **background_spawn_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return frozenset(), f"win32 probe failed to run: {exc}", False

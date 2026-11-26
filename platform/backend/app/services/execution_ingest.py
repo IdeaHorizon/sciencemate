@@ -21,6 +21,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 
 from app.models.execution import (
     CANCELLABLE_RUN_STATUSES,
+    TERMINAL_RUN_STATUSES,
     AttemptStatus,
     Command,
     Decision,
@@ -33,11 +34,11 @@ from app.models.execution import (
     RunAttempt,
     RunStatus,
     SessionProjection,
-    TERMINAL_RUN_STATUSES,
 )
+from app.services.execution_presentation import node_dispatch_payload
 from app.services.redaction import DEFAULT_REDACTION_POLICY, RedactionPolicy
-from app.services.say import in_either_language, say
 from app.services.run_status import project_run_status
+from app.services.say import in_either_language, say
 
 #: `file_identity` 含物理 transcript 与平台派生的存储身份。名字在这里
 #: 定义一次，读它的判据 import 它 —— 判据自己拼字面量，就是第二个真相源。
@@ -939,6 +940,17 @@ class TranscriptAdapter:
                 },
                 at,
             )
+        if raw_event == "run_suspended":
+            return EventDraft("run.suspended", EventVisibility.SUMMARY, {
+                "runtimeRunId": raw.get("run_id"),
+                "decision": {key: raw.get(key) for key in (
+                    "disposition", "code", "fact_revision", "facts", "notice")},
+                "recoverable": bool(raw.get("recoverable")),
+                "resumable": bool(raw.get("resumable")),
+            }, at)
+        if raw_event == "completion_resumed":
+            return EventDraft("run.resumed", EventVisibility.SUMMARY,
+                              {"runtimeRunId": raw.get("run_id")}, at)
         if raw_event in {"run_paused", "loop_pause"}:
             payload = {"reason": str(raw.get("reason") or "waiting_human")}
             if raw.get("question"):
@@ -1077,18 +1089,13 @@ class TranscriptAdapter:
                 },
                 at,
             )
-        if raw_event == "node_dispatch_announced":
-            # 调度器派发节点前对用户说的那句话。**这是对话，不是执行日志** ——
-            # 单独一个 kind，前端才能给它对话级的分量；混进 agent.message 就会
-            # 跟子节点的每轮独白一个样式，实测 8 句被 51 句独白淹掉。
+        if raw_event in {"node_dispatched", "node_dispatch_announced"}:
+            # Old workers can still send announcements containing private task
+            # inputs. Both versions become the same text-free runtime fact.
             return EventDraft(
-                "orchestrator.said",
+                "node.dispatched",
                 EventVisibility.SUMMARY,
-                {
-                    "text": str(raw.get("user_note") or ""),
-                    "aboutNodeType": str(raw.get("node_type") or ""),
-                    "background": bool(raw.get("background")),
-                },
+                node_dispatch_payload(raw),
                 at,
             )
         if raw_event == "workspace_changed":
@@ -1227,6 +1234,15 @@ class TranscriptAdapter:
             else None
         )
         return {
+            "nodeType": str(raw.get("node_type") or ""),
+            "measurement": raw.get("measurement") or "legacy",
+            "predictedTokens": _int(raw.get("predicted_tokens")) or None,
+            "budgetTokens": _int(raw.get("budget_tokens")) or _int(raw.get("effective_tokens")),
+            "budgetWindow": _int(raw.get("budget_window")) or window,
+            "providerWindow": _int(raw.get("provider_window")) or None,
+            "reservedOutputTokens": _int(raw.get("reserved_output_tokens")),
+            "compaction": raw.get("compaction") if isinstance(raw.get("compaction"), dict) else None,
+            "requestDigest": str(raw.get("request_digest") or ""),
             "turn": _int(raw.get("turn")),
             "promptTokens": _int(prompt_tokens) if prompt_tokens is not None else None,
             "estimatedTokens": _int(raw.get("est_tokens")),
@@ -2553,6 +2569,7 @@ class ExecutionIngestService:
             "run.started": RunStatus.RUNNING,
             "run.resumed": RunStatus.RUNNING,
             "run.retrying": RunStatus.RETRYING,
+            "run.suspended": RunStatus.SUSPENDED,
             "run.completed": RunStatus.COMPLETED,
             "run.incomplete": RunStatus.INCOMPLETE,
             "run.failed": RunStatus.FAILED,
@@ -2570,7 +2587,7 @@ class ExecutionIngestService:
         lifecycle_kinds = {
             "run.queued", "run.started", "run.resumed", "run.retrying",
             "run.completed", "run.incomplete", "run.failed", "run.cancelled",
-            "run.status_unknown",
+            "run.status_unknown", "run.suspended",
         }
         # ── 「关不关父 attempt」与「写不写自己这一行」是两个问题 ────────────
         #
@@ -2655,6 +2672,10 @@ class ExecutionIngestService:
                     "owningRun": owning_run,
                 },
             )
+        if event.kind == "run.suspended" and projected is not None:
+            run.summary = {**(run.summary or {}), "completion": dict(event.payload)}
+        if event.kind == "run.resumed" and event.payload.get("runtimeRunId"):
+            run.summary = {**(run.summary or {}), "completion": None}
         if event.kind == "run.started":
             run.node_type = event.payload.get("nodeType") or run.node_type
             run.started_at = run.started_at or now

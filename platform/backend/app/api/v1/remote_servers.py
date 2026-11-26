@@ -12,6 +12,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from app.config import settings
+from app.auth import get_current_user
+from app.database import get_db
+from app.models.user import User
+from app.services.remote_models import DesktopModels
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.services import remote_servers as store
 from app.services.other_homes import ThereIsNoSuchHomeError
 from app.services.remote_transport import HostKeyRequiredError, provision, ssh_aliases, tunnels
@@ -84,7 +89,19 @@ async def describe_runtime() -> dict:
         "protocol": store.PROTOCOL,
         "personal": bool(settings.remote_runtime_token),
         "version": installed_version(),
+        "capabilities": ["desktop_model_defaults"],
     }
+
+
+@runtime_router.post("/remote-runtime/models")
+async def inherit_desktop_models(data: DesktopModels, user: User = Depends(get_current_user),
+                                 db: AsyncSession = Depends(get_db)) -> dict:
+    from app.assembly import owns_personal_model_settings
+    if not settings.remote_runtime_token or not owns_personal_model_settings():
+        raise HTTPException(403, "Model inheritance is limited to an authenticated personal runtime")
+    from app.services.remote_models import apply_desktop_defaults
+
+    return await apply_desktop_defaults(db, user, data)
 
 
 @router.get("")
@@ -168,6 +185,9 @@ async def connect_server(
             await asyncio.to_thread(
                 store.save, installed, secrets, remember_secret=data.remember_secret
             )
+            from app.services.remote_models import ensure_desktop_defaults
+
+            operation["model_inheritance"] = await ensure_desktop_defaults(installed["id"], force=True)
             operation.update(phase="ready", server={**installed, "connected": True})
         except HostKeyRequiredError as exc:
             operation.update(phase="host_key", fingerprint=exc.fingerprint, error=exc.said_in(lang))
@@ -208,6 +228,9 @@ async def check_server(server_id: str, lang: Language = Depends(language_on_scre
         info = await store.ask(server_id, "GET", "/api/v1/remote-runtime")
         if info.get("protocol") != store.PROTOCOL or not info.get("personal"):
             raise HTTPException(409, "Update the remote runtime to connect.")
+        from app.services.remote_models import ensure_desktop_defaults
+
+        info["model_inheritance"] = await ensure_desktop_defaults(server_id, force=True)
         return info
     except ThereIsNoSuchHomeError as exc:
         raise HTTPException(exc.status, exc.said_in(lang)) from exc

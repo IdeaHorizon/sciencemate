@@ -1,4 +1,4 @@
-"""Durable managed CNKI queue: leases, private cache, partial batches, daily refresh."""
+"""Run only requested CNKI searches; retain private results and checkpoints."""
 from __future__ import annotations
 
 import asyncio
@@ -22,8 +22,8 @@ from app.services.cnki_browser import Browser, CollectionError
 
 logger = logging.getLogger(__name__)
 MESSAGES = {
-    "waiting_for_verification": "知网要求人工验证，平台已保留进度；请在运行平台的电脑上完成知网验证（远程部署请联系管理员），之后自动继续。",
-    "rate_limited": "知网暂时限制请求，已保留进度，稍后自动重试。",
+    "waiting_for_verification": "知网要求人工验证，平台已保留进度；请在运行平台的电脑上完成知网验证（远程部署请联系管理员），之后点击“重试知网”。",
+    "rate_limited": "知网暂时限制请求，已保留进度，可稍后点击“重试知网”。",
     "access_denied": "知网拒绝当前访问（HTTP 403），已暂停该会话的检索和摘要请求；已取得的题录仍可使用。可在运行平台的电脑上检查知网访问，再点击“重试知网”。",
     "session_paused": "知网会话因上次 HTTP 403 暂停，当前请求未发送到知网；这不代表知网刚刚再次拒绝。已取得的题录仍可使用，稍后重新搜索或点击“重试知网”可检查恢复情况。",
     "virtual_display_unavailable": "后台浏览器需要虚拟桌面组件，请管理员安装 Xvfb 与 xvfb-run。",
@@ -32,13 +32,13 @@ MESSAGES = {
     "browser_profile_in_use": "旧知网采集资料仍被占用或无法移动，请关闭平台打开的采集浏览器后再重建会话；已获取的文献保留。",
     "browser_profile_backup_failed": "知网采集资料备份未完成，已停止重建会话；请检查本机资料目录的访问权限和可用空间。",
     "browser_activation_failed": "知网检索控件未能正常操作，已保留进度；请检查当前知网页面。",
-    "browser_activation_moved": "知网页面变化导致操作未完成，已保留进度，稍后自动重试。",
+    "browser_activation_moved": "知网页面变化导致操作未完成，已保留进度，可稍后点击“重试知网”。",
     "metadata_title_mismatch": "知网返回的题录与标题不一致，已暂停本次补齐。",
     "result_pages_changed": "知网结果分页发生变化，已保留获取到的题录，请重新检索。",
     "result_type_mismatch": "知网返回的文献类型与当前类别不一致，已停止翻页并保留进度，等待修正分类识别。",
     "results_unavailable": "知网暂未提供检索结果，已保留进度，稍后重试；这不代表已确认没有匹配文献。",
-    "cnki_timeout": "知网检索页面响应超时，已保留进度，稍后自动重试；可先查看其他来源结果。",
-    "TimeoutError": "知网浏览器操作超时，已保留进度，稍后自动重试；可先查看其他来源结果。",
+    "cnki_timeout": "知网检索页面响应超时，已保留进度，可稍后点击“重试知网”；可先查看其他来源结果。",
+    "TimeoutError": "知网浏览器操作超时，已保留进度，可稍后点击“重试知网”；可先查看其他来源结果。",
     "search_http_417": "知网题录接口拒绝本次请求（HTTP 417），该来源尚未完成，已保留进度；可先查看其他来源结果。",
     "verification_result_pending": "正在等待知网载入验证后的结果，已保留进度，不会重复提交查询。",
 }
@@ -71,22 +71,46 @@ class Collector:
         self.sessions = sessions
         self.browser = browser
         self.task = None
+        self._requested: set[str] = set()
+        self._keep_verification_window = False
 
-    def start(self):
-        if settings.cnki_server_enabled and (self.task is None or self.task.done()):
-            self.task = asyncio.create_task(self.run(), name="cnki-collector")
+    def start(self, *job_ids: str):
+        """Called only after committing a user request, including explicit retries."""
+        if not settings.cnki_server_enabled or not job_ids:
+            return
+        self._requested.update(job_ids)
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self.run(), name="cnki-search")
+            self.task.add_done_callback(self._finished)
+
+    def _finished(self, task):
+        if not task.cancelled() and (error := task.exception()):
+            logger.warning("CNKI search worker stopped: %s", type(error).__name__)
+        if self.task is task:
+            self.task = None
+            # A submit can arrive during browser/lock cleanup after the final claim.
+            if self._requested:
+                self.start(*self._requested)
 
     async def stop(self):
+        self._requested.clear()
         if self.task:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
             self.task = None
+        if self._keep_verification_window:
+            await self.browser.close()
+            self._keep_verification_window = False
 
-    async def claim(self, user_id=None, *, server_slots=1):
+    async def claim(self, user_id=None, *, server_slots=1, job_ids=None):
         async with self.sessions.begin() as db:
-            ids = (await db.scalars(select(CnkiJob.user_id).join(User, User.id==CnkiJob.user_id)
-                .where(CnkiJob.enabled.is_(True), User.is_active.is_(True))
-                .order_by(CnkiJob.last_report_at.asc().nullsfirst(), CnkiJob.created_at))).all()
+            statement = select(CnkiJob.user_id).join(User, User.id==CnkiJob.user_id).where(
+                CnkiJob.enabled.is_(True), CnkiJob.recurring.is_(False),
+                CnkiJob.last_completed_at.is_(None), User.is_active.is_(True))
+            if job_ids is not None:
+                statement = statement.where(CnkiJob.id.in_(job_ids))
+            ids = (await db.scalars(statement.order_by(
+                CnkiJob.last_report_at.asc().nullsfirst(), CnkiJob.created_at))).all()
         for owner in dict.fromkeys(ids):
             if user_id is not None and owner != user_id:
                 continue
@@ -96,7 +120,7 @@ class Collector:
                 if not user or not user.is_active:
                     continue
                 device = SimpleNamespace(id=str(uuid5(NAMESPACE_URL, owner+"/cnki-server")), user_id=owner)
-                job = await store.claim_job(db, device, executor="server", server_slots=server_slots)
+                job = await store.claim_job(db, device, executor="server", server_slots=server_slots, job_ids=job_ids)
                 if job:
                     return device, job
         return None
@@ -111,6 +135,8 @@ class Collector:
             job.lease_until = store.now()+timedelta(seconds=90) if state=="working" else store.now()
             if metrics:
                 job.checkpoint = {**job.checkpoint, **metrics}
+            if state == "paused" and code in {"access_denied", "session_paused"}:
+                await store.request_session_reset(db, device.user_id, {job.id}, automatic=True)
 
     async def batch(self, device, task, **values):
         async with self.sessions.begin() as db:
@@ -274,7 +300,7 @@ class Collector:
             waiting = code in {"waiting_for_verification", "verification_result_pending", "search_http_417"}
             state = "waiting_for_verification" if waiting else "paused" if code in {"access_denied", "session_paused", "result_type_mismatch"} else "error"
             try:
-                await self.report(device, task, state, MESSAGES.get(code, "知网采集暂时失败，已保留进度，稍后自动重试。"),
+                await self.report(device, task, state, MESSAGES.get(code, "知网采集暂时失败，已保留进度，可稍后点击“重试知网”。"),
                                   code=code,
                                   metrics={f"{task.get('phase', 'index')}_seconds":round(time.monotonic()-started, 3),
                                            **({"resume_verification": True} if waiting and task.get("phase", "index") == "index" else {})})
@@ -289,14 +315,16 @@ class Collector:
             pulse.cancel()
             await asyncio.gather(pulse, return_exceptions=True)
 
-    async def reset_requested_session(self, active):
-        """One manual reset for all categories, serialized by the worker lock."""
+    async def reset_requested_session(self, active, *, job_ids=None):
+        """One recovery for all affected categories, serialized by the worker lock."""
         owner = next((owner for owner, _ in active.values()), None)
         async with self.sessions.begin() as db:
             statement = select(CnkiJob).join(User, User.id == CnkiJob.user_id).where(
-                CnkiJob.enabled.is_(True), User.is_active.is_(True),
+                CnkiJob.enabled.is_(True), CnkiJob.recurring.is_(False), User.is_active.is_(True),
                 CnkiJob.checkpoint["reset_session"].as_string().is_not(None),
             ).order_by(CnkiJob.created_at)
+            if job_ids is not None:
+                statement = statement.where(CnkiJob.id.in_(job_ids))
             if owner is not None:
                 statement = statement.where(CnkiJob.user_id == owner)
             request = await db.scalar(statement.limit(1))
@@ -310,21 +338,27 @@ class Collector:
         await asyncio.gather(*(work for _, work in active.values()), return_exceptions=True)
         active.clear()
         code = None
+        statement = select(CnkiJob).where(CnkiJob.user_id == owner, CnkiJob.recurring.is_(False))
+        if job_ids is not None:
+            statement = statement.where(CnkiJob.id.in_(job_ids))
         async with self.sessions.begin() as db:
             await store.lock_user(db, owner)
-            jobs = list((await db.scalars(select(CnkiJob).where(CnkiJob.user_id == owner))).all())
+            jobs = list((await db.scalars(statement)).all())
             selected = [job for job in jobs if (job.checkpoint or {}).get("reset_session") == request_id]
             needed = any(job.enabled and store.job_state(job) != "completed" for job in selected)
+            automatic = any((job.checkpoint or {}).get("automatic_reset") for job in selected)
         if needed:
             # Browser shutdown can take seconds. Do not hold the database lock
             # while waiting; new requests join the same persisted reset ID.
             try:
+                if automatic:
+                    await self.browser.check_recovery_verification(owner)
                 await self.browser.reset_session(owner, request_id)
             except Exception as exc:
                 code = str(exc) if isinstance(exc, CollectionError) else "browser_profile_backup_failed"
         async with self.sessions.begin() as db:
             await store.lock_user(db, owner)
-            jobs = list((await db.scalars(select(CnkiJob).where(CnkiJob.user_id == owner))).all())
+            jobs = list((await db.scalars(statement)).all())
             selected = [job for job in jobs if (job.checkpoint or {}).get("reset_session") == request_id]
             if needed:
                 moment = store.now()
@@ -335,10 +369,22 @@ class Collector:
                         job.checkpoint = {**(job.checkpoint or {}), "resume_verification": False,
                                           "recover_session": False, "check_session": False}
                     if job in selected:
-                        job.checkpoint = {**job.checkpoint, "session_reset_at": moment.isoformat()}
+                        if code == "waiting_for_verification":
+                            # No profile was replaced. Keep the challenge and
+                            # let the ordinary verification poll resume first.
+                            # If it then encounters the old denial, it can still
+                            # use this search's one actual recovery attempt.
+                            job.checkpoint = {key: value for key, value in job.checkpoint.items()
+                                              if key != "auto_recovery_used"}
+                            if job.checkpoint.get("phase", "index") == "index":
+                                job.checkpoint = {**job.checkpoint, "resume_verification": True}
+                        else:
+                            job.checkpoint = {**job.checkpoint, "session_reset_at": moment.isoformat()}
                         job.lease_until, job.lease_hash = moment, None
                         job.last_report_at = moment
-                        job.last_report = {"state": "paused" if code else "queued", "code": code,
+                        state = ("waiting_for_verification" if code == "waiting_for_verification"
+                                 else "paused" if code else "queued")
+                        job.last_report = {"state": state, "code": code,
                             "detail": MESSAGES.get(code, "旧会话已备份，正在使用新会话继续检索；如知网要求验证，请在采集窗口完成。")}
                 logger.info("CNKI session reset user=%s request=%s code=%s", owner, request_id, code or "ok")
             for job in selected:
@@ -351,43 +397,68 @@ class Collector:
         self.sessions = self.sessions or get_session_factory()
         self.browser = self.browser or Browser()
         active = {}
+        scope: set[str] = set()
+        keep_window = False
         try:
             while True:
-                try:
-                    if lock is None:
-                        lock = _the_file_lock().try_hold(the_data_root()/"cnki/worker.lock")
-                    if lock:
-                        for slot, (_, work) in list(active.items()):
-                            if work.done():
-                                await asyncio.gather(work, return_exceptions=True)
-                                del active[slot]
-                        if await self.reset_requested_session(active):
-                            continue
-                        owner = next((owner for owner, _ in active.values()), None)
-                        if len(active) < 2:
-                            claimed = await self.claim(owner, server_slots=2)
-                            if claimed:
-                                device, task = claimed
-                                slot = next(s for s in range(2) if s not in active)
-                                child = Collector(self.sessions, self.browser.lane(slot))
-                                active[slot] = (device.user_id, asyncio.create_task(child.process(device, task)))
-                                continue
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.warning("CNKI queue unavailable: %s", type(exc).__name__)
+                scope.update(self._requested)
+                self._requested.clear()
+                if not scope:
+                    return
+                if lock is None:
+                    lock = _the_file_lock().try_hold(the_data_root()/"cnki/worker.lock")
+                    if not lock:
+                        # Another backend process is finishing an interactive search.
+                        await asyncio.sleep(1)
+                        continue
+                for slot, (_, work) in list(active.items()):
+                    if work.done():
+                        await work
+                        del active[slot]
+                if await self.reset_requested_session(active, job_ids=scope):
+                    continue
+                owner = next((owner for owner, _ in active.values()), None)
+                if len(active) < 2:
+                    claimed = await self.claim(owner, server_slots=2, job_ids=scope)
+                    if claimed:
+                        device, task = claimed
+                        slot = next(s for s in range(2) if s not in active)
+                        child = Collector(self.sessions, self.browser.lane(slot))
+                        active[slot] = (device.user_id, asyncio.create_task(child.process(device, task)))
+                        continue
                 if active:
-                    await asyncio.wait([work for _, work in active.values()], timeout=3,
+                    await asyncio.wait([work for _, work in active.values()], timeout=1,
                                        return_when=asyncio.FIRST_COMPLETED)
-                else:
-                    await asyncio.sleep(3)
+                    continue
+                # No further pages/metadata to claim. A still-valid lease (e.g.
+                # after backend restart) may temporarily block an explicit request.
+                async with self.sessions() as db:
+                    jobs = (await db.scalars(select(CnkiJob).join(User, User.id == CnkiJob.user_id).where(
+                        User.is_active.is_(True), CnkiJob.id.in_(scope), CnkiJob.enabled.is_(True), CnkiJob.recurring.is_(False),
+                        CnkiJob.last_completed_at.is_(None)))).all()
+                states = [store.job_state(job) for job in jobs
+                          if (job.checkpoint or {}).get("executor", "server") == "server"]
+                if self._requested:
+                    continue
+                if any(state in {"queued", "working"} for state in states):
+                    await asyncio.sleep(1)
+                    continue
+                # Verification is manual: leave the challenge visible but stop
+                # polling. The search page's Retry submits the next wake-up.
+                keep_window = "waiting_for_verification" in states
+                return
         finally:
             for _, work in active.values():
                 work.cancel()
             await asyncio.gather(*(work for _, work in active.values()), return_exceptions=True)
-            await self.browser.close()
-            if lock:
-                lock.close()
+            try:
+                if lock:
+                    self._keep_verification_window = keep_window
+                    if not keep_window:
+                        await self.browser.close()
+            finally:
+                if lock:
+                    lock.close()
 
 
 cnki_collector = Collector()

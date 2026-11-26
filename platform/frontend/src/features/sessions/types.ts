@@ -15,7 +15,7 @@ export type SessionLifecycleStatus = "active" | "completed" | "archived";
  * 后端契约见 services/execution_view.py。
  */
 export type ExecutionPhase = "alive" | "ended" | "interrupted";
-export type WaitingKind = "human" | "permission" | "compute";
+export type WaitingKind = "human" | "permission" | "compute" | "completion";
 
 /**
  * **答案从哪儿进来** —— 后端 `execution_view.answer_affordance` 的投影。
@@ -78,6 +78,7 @@ export interface RunExecutionView {
  * 由另外两段代码各自回答 —— 三个答案，分叉时全都不报错（2026-09-01，6 小时）。
  */
 export interface SessionExecutionView extends RunExecutionView {
+  completions?: { runId: string; notice: string | null; canResume: boolean; recoverable: boolean }[];
   answer: AnswerAffordance;
 }
 

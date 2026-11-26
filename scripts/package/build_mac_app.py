@@ -209,7 +209,7 @@ def build_the_wheel() -> Path:
 
     names = zipfile.ZipFile(wheel).namelist()
     for needed in ("app/harness/core/agent_loop.py", "app/static_ui/index.html",
-                   "app/harness/docs/xiaohongshu_journal_map.tsv"):
+                   *(f"app/harness/{rel}" for rel in git_tracked.HARNESS_RUNTIME_FILES)):
         if needed not in names:
             raise SystemExit(f"wheel 里没有 {needed} —— 装出来的包会缺半边")
     print(f"  {wheel.name}（{len(names)} 个文件，{wheel.stat().st_size // 1024} KB）")

@@ -549,6 +549,13 @@ def is_read_only(tool_name: str, arguments: dict | None = None) -> bool:
 
 
 async def execute(tool_name: str, state, /, **kwargs: Any) -> dict[str, Any]:
+    from core import approvals
+    with approvals.invocation(state, canonical_tool_name(tool_name), kwargs):
+        result = await _execute_with_witness(tool_name, state, **kwargs)
+        return await approvals.capture(state, result)
+
+
+async def _execute_with_witness(tool_name: str, state, /, **kwargs: Any) -> dict[str, Any]:
     """按名字调度工具。返回工具的 dict 结果（带 envelope 保证）。
 
     保证返回 dict 一定有 `status` 字段（success / error / pause）：

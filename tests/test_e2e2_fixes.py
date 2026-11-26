@@ -31,7 +31,7 @@ def _review_provenance(state):
 
 # ── 1. summarizer 真校准 ─────────────────────────────────────────────────────
 
-def test_observed_ratio_only_increases_and_caps():
+def test_observed_ratio_uses_recent_upper_estimate_and_caps():
     import core.summarizer as sm
 
     class _S:
@@ -39,10 +39,13 @@ def test_observed_ratio_only_increases_and_caps():
     s = _S()
     s.hook_state = {}
     sm.note_observed_prompt_tokens(s, local_estimate=100_000, server_prompt_tokens=185_000)
-    assert abs(sm.effective_calibration(s) - 1.85) < 0.01, "观测比 1.85 应生效"
-    # 更低的观测不回退（context 安全要上界）
+    assert sm.effective_calibration(s) == pytest.approx(1.85 * 1.05)
+    # 一次低观测不抹掉近期上界；持续低观测能纠正过去的高估。
     sm.note_observed_prompt_tokens(s, local_estimate=100_000, server_prompt_tokens=120_000)
-    assert abs(sm.effective_calibration(s) - 1.85) < 0.01
+    assert sm.effective_calibration(s) == pytest.approx(1.85 * 1.05)
+    for _ in range(16):
+        sm.note_observed_prompt_tokens(s, local_estimate=100_000, server_prompt_tokens=120_000)
+    assert sm.effective_calibration(s) == pytest.approx(1.2 * 1.05)
     # 异常值封顶
     sm.note_observed_prompt_tokens(s, local_estimate=100_000, server_prompt_tokens=999_000)
     assert sm.effective_calibration(s) <= sm._CONTEXT_CALIBRATION_CAP + 1e-9
@@ -53,10 +56,11 @@ def test_tool_schema_tokens_counted_in_should_compress():
     from core.harness import NodeHarness, SummarizerConfig
     from core.llm import LLMMessage
 
-    msgs = [LLMMessage(role="user", content="x" * 4000)]   # est ≈ 1000
+    msgs = [LLMMessage(role="user", content="x" * 40000)]
     est = sm.estimate_tokens(msgs)
     harness = NodeHarness(
         node_type="t", max_context_tokens=int(est * 2.8),   # threshold=1.4×est
+        max_output_tokens=0,  # Isolate schemas from the separate output reserve.
         summarizer=SummarizerConfig(enabled=True, trigger_threshold=0.5,
                                      strategy="truncate"),
     )

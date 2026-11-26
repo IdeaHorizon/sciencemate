@@ -21,10 +21,8 @@ zenodo），**全是装软件用的，没有一个科学数据源**。于是每�
 
 ## 三条不打算让步的
 
-**一、授权按 run 计，不落盘、不进环境。** 一次授权只在这一次 run 里算数。
-写进 os.environ 等于让 agent 改自己的墙；写进磁盘等于建一份没人复核、只会变长的
-名单。要长期放行某个域，那是人去改部署配置的事，是一次有意的决定，不该由
-"agent 问了一次、人点了一下"顺带完成。
+**一、授权按 run 计，随 run 的 checkpoint 恢复，不进环境。** 恢复不会扩大到其他
+run；长期配置仍由人显式修改。网络授权存于已有 hook_state，GPU 能力仍以真实 lease 为准。
 
 **二、主机逐个批，不批通配。** 批 ``data.example.org`` 不等于批
 ``*.example.org``。父域放行会让一次点击的含义变得没边 —— 人以为批了一个数据源，
@@ -41,14 +39,11 @@ zenodo），**全是装软件用的，没有一个科学数据源**。于是每�
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 #: pause 载荷里标记这是一次能力授权请求。UI 可据此画确认卡而不是普通问答框。
 GRANT_PAUSE_TYPE = "capability_grant"
-
-#: state 上挂授权记录的属性名。**只在内存里**，不进 state 的持久化字段。
-_ATTR = "_capability_grants"
 
 #: 人答什么算"准"。大小写无关，两端空白忽略。
 _YES = frozenset({"allow", "yes", "y", "grant", "approve", "ok",
@@ -191,14 +186,14 @@ def _in_deployment_allowlist(host: str) -> bool:
 
 
 def _grants(state: Any) -> dict[str, NetworkGrant]:
-    existing = getattr(state, _ATTR, None)
-    if not isinstance(existing, dict):
-        existing = {}
-        try:
-            setattr(state, _ATTR, existing)
-        except Exception:               # state 可能是只读替身
-            return {}
-    return existing
+    """Run-scoped grants survive a worker restart through its existing snapshot."""
+    stored = state.hook_state.get("network_grants") or {}
+    return {host: NetworkGrant(**record) for host, record in stored.items()
+            if record.get("asked_by_run_id") == getattr(state, "run_id", "")}
+
+
+def _save_grants(state, grants):
+    state.hook_state["network_grants"] = {host: grant.as_dict() for host, grant in grants.items()}
 
 
 def granted_hosts(state: Any) -> tuple[str, ...]:
@@ -214,6 +209,20 @@ def is_granted(state: Any, host_or_url: str) -> bool:
     """
     host = normalize_host(host_or_url)
     return bool(host) and host in _grants(state)
+
+
+def _offered_grant(state, result):
+    from core.decision_offer import Choice, Offer, PAUSE_OFFER_KEY
+    import hashlib
+    import json
+    payload = result["pause_event"]
+    identity = json.dumps(payload["metadata"], sort_keys=True, ensure_ascii=False)
+    offer = Offer(decision_id=f"{state.run_id}:capability:{hashlib.sha256(identity.encode()).hexdigest()}",
+                  kind="capability_grant", question=payload["question"], context=payload["context"],
+                  choices=(Choice(id="approve", label=payload["options"][0]),
+                           Choice(id="deny", label=payload["options"][1])), recommended_id="deny").to_pause_payload()
+    result["pause_event"] = {**payload, **offer, PAUSE_OFFER_KEY: offer}
+    return result
 
 
 def request_network_grant(
@@ -266,10 +275,10 @@ def request_network_grant(
                 "本次 run 也没授权过 —— 这不像伴随域，更像在换源。"
             )
     context_lines.append(
-        "批准只在**本次 run** 内有效：不写进环境变量、不落盘、不含子域。"
+        "批准只在**本次 run** 内有效：随本 run 的恢复断点保存、不含子域。"
         "要长期放行请改部署配置。"
     )
-    return {
+    result = {
         "status": "pause",
         "pause_event": {
             "question": question,
@@ -289,6 +298,7 @@ def request_network_grant(
             },
         },
     }
+    return _offered_grant(state, result)
 
 
 def grant_from_answer(
@@ -309,13 +319,15 @@ def grant_from_answer(
     verdict = read_answer(answer)
     if verdict is not True:
         return False
-    _grants(state)[host] = NetworkGrant(
+    grants = _grants(state)
+    grants[host] = NetworkGrant(
         host=host,
         reason=reason,
         asked_by_node_type=getattr(state, "node_type", "") or "",
         asked_by_run_id=getattr(state, "run_id", "") or "",
         answer=str(answer or ""),
     )
+    _save_grants(state, grants)
     return True
 
 
@@ -329,7 +341,7 @@ def grants_ledger(state: Any) -> list[dict[str, Any]]:
 # 冻结预注册的「数据源 / 许可与前提」里显式写了的主机，是人批准这份计划时就看过、批过的；
 # 派发绑定它的 run 时一并落成授权，无人值守的长课题第一次取数据就不会停下来等一个没人
 # 答的问题。边界：只认显式声明的主机（`core.prereg_sources`，宁可漏报不可误报）；运行中新
-# 冒出来的主机照旧问人；授权仍只在内存里，跟着 run 走，不落盘。
+# 冒出来的主机照旧问人；授权跟着本 run 的 checkpoint 恢复，不成为全局名单。
 
 
 def grant_declared_hosts(state: Any, hosts: list[str], *, basis: str) -> list[str]:
@@ -349,6 +361,7 @@ def grant_declared_hosts(state: Any, hosts: list[str], *, basis: str) -> list[st
             basis=basis,
         )
         granted.append(host)
+    _save_grants(state, grants)
     return granted
 
 
@@ -484,9 +497,9 @@ def request_gpu_grant(state: Any, gpus: int, reason: str) -> dict[str, Any]:
         "批准后：这几张卡在本 run 结束前只归它用（本平台的其它 run 分不到）；它的命令"
         "看得见这几张卡；Linux 上墙会放开 CUDA 运行时需要写的 /proc。",
         "不是隔离：同机不经本平台的程序仍看得见这些卡。批准只在**本次 run** 内有效。",
-        "批准后请原样重新提交这个作业（提交本身还有一张确认卡）。",
+        "批准后由框架续执行原调用；提交涉及其他权限时会另行说明。",
     ])
-    return {
+    result = {
         "status": "pause",
         "pause_event": {
             "question": question,
@@ -505,6 +518,7 @@ def request_gpu_grant(state: Any, gpus: int, reason: str) -> dict[str, Any]:
             },
         },
     }
+    return _offered_grant(state, result)
 
 
 def grant_gpu_from_answer(state: Any, gpus: int, answer: str | None, *,

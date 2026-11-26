@@ -166,7 +166,8 @@ export function buildRunTimeline(
   for (const said of saids) {
     const previous = items.at(-1);
     // 回执不按正文去重（正文恒空，两条不同插话的回执会被错并成 ×2）。
-    if (previous?.kind === "said" && !said.receipt && !previous.said.receipt
+    if (previous?.kind === "said" && !said.dispatch && !previous.said.dispatch
+      && !said.receipt && !previous.said.receipt
       && previous.said.text === said.text) {
       previous.repeats = (previous.repeats ?? 1) + 1;
       continue;

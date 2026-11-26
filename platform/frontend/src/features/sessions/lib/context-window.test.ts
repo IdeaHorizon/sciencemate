@@ -91,15 +91,26 @@ test("两处来源按时刻挑最新；同一时刻取事件流的", () => {
   assert.equal(latestContextWindow(fromSession, undefined)?.effectiveTokens, 100);
 });
 
-test("百分比与色调按 effectiveTokens 而不是服务端实收", () => {
+test("实收计数、预测和保守预算是三种不同的事实", () => {
   const state = readContextWindow({ ...payload, at: "2026-09-19T08:00:00Z" });
   assert.ok(state);
-  assert.equal(contextWindowPercent(state), 52);
+  assert.equal(contextWindowPercent(state), 48);
   assert.equal(contextWindowTone(state), "ok");
-  assert.equal(contextWindowTone({ ...state, effectiveTokens: 700_000 }), "near", "到了自动压缩线");
-  assert.equal(contextWindowTone({ ...state, effectiveTokens: 950_000 }), "over", "过了紧急线");
-  assert.equal(contextWindowTone({ ...state, effectiveTokens: 950_000, compressAt: null, emergencyAt: null }), "ok", "没有线就没有近远");
-  assert.equal(contextWindowPercent({ ...state, effectiveTokens: 1_100_000 }), 110, "压缩前的瞬间确实会超过 100");
+  assert.equal(contextWindowPercent({ ...state, effectiveTokens: 1_100_000 }), 48);
+  assert.equal(contextWindowTone({ ...state, promptTokens: 950_000 }), "over");
+  assert.equal(contextWindowPercent({ ...state, promptTokens: null, predictedTokens: 600_000 }), 60);
+  assert.equal(contextWindowPercent({ ...state, promptTokens: null }), 52);
+});
+
+test("子节点的实测也不能覆盖调度器的上下文", () => {
+  const root = readContextWindow({ ...payload, promptTokens: 83005, window: 256000, configuredWindow: 256000,
+    at: "2026-11-13T04:56:13Z", runId: "root" });
+  const child = { ...event("2026-11-13T05:32:52Z", { promptTokens: 146058, effectiveTokens: 255665,
+    window: 256000 }), parentRunId: "root", runId: "analysis-child" };
+  assert.equal(contextWindowFromEvent(child), null);
+  assert.equal(latestContextWindow(root, [child])?.runId, "root");
+  assert.equal(contextWindowPercent(latestContextWindow(root, [child])!), 32);
+  assert.equal(latestContextWindow(null, [child]), null);
 });
 
 test("分段条：各段等比缩放到 effective，再补一段 free 到窗口，加起来刚好铺满", () => {
@@ -132,4 +143,17 @@ test("分段条：harness 没给分段时只有 free", () => {
   const state = readContextWindow({ window: 1000, effectiveTokens: 400, at: "2026-09-19T08:00:00Z" });
   assert.ok(state);
   assert.deepEqual(contextWindowSegments(state), [{ key: "free", tokens: 600, share: 0.6 }]);
+});
+
+
+test("旧版退化水位不能冒充模型的物理窗口", () => {
+  const legacy = readContextWindow({ ...payload, window: 64000, configuredWindow: 128000,
+    promptTokens: 40000, at: "2026-11-13T08:00:00Z" });
+  assert.ok(legacy);
+  assert.equal(legacy.window, 128000);
+  assert.equal(legacy.budgetWindow, 64000);
+  assert.equal(contextWindowPercent(legacy), 31);
+  const observed = readContextWindow({ ...payload, window: 64000, configuredWindow: 128000,
+    providerWindow: 64000, promptTokens: 40000, at: "2026-11-13T08:00:00Z" });
+  assert.equal(contextWindowPercent(observed!), 63);
 });

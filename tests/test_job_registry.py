@@ -63,6 +63,9 @@ def test_declare_then_visible_to_orchestrator():
     rendered = jobs.render_for_orchestrator(st)
     assert "H3 235B 路由推理" in rendered
     assert "4×A100" in rendered, "调度器要看得到占了什么算力"
+    assert f"job_id={r['job_id']}" in rendered
+    assert "pid=12345" in rendered
+    assert f"run_id={st.run_id}" in rendered
 
 
 def test_expected_duration_is_mandatory():

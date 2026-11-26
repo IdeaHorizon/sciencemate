@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -74,6 +73,42 @@ def test_compare_only_looks_at_paths_both_snapshots_know(tmp_path):
     before = {"entries": {"a": {"mode": "0o700", "owner": "1"}, "gone": {"mode": "0o700", "owner": "1"}}}
     after = {"entries": {"a": {"mode": "0o500", "owner": "1"}, "new": {"mode": "0o700", "owner": "1"}}}
     assert snap.compare(before, after) == [{"path": "a", "field": "mode", "before": "0o700", "after": "0o500"}]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_upgrade_hardening_does_not_claim_session_data_cannot_be_saved(tmp_path):
+    root = _root(tmp_path)
+    pointer = root / "payload" / "current.json"
+    pointer.write_text("{}")
+    pointer.chmod(0o644)
+    snap.record_startup(root, app_version="0.5.15")
+    pointer.chmod(0o600)
+    assert snap.record_startup(root, app_version="0.5.16") is None
+    assert snap.latest_change() is None
+    assert pointer.read_text() == "{}"
+    pointer.write_text('{"ok":true}')
+    # Losing the owner's write permission must still warn.
+    pointer.chmod(0o400)
+    try:
+        change = snap.record_startup(root, app_version="0.5.17")
+        assert change is not None
+        assert change["diffs"] == [{
+            "path": "payload/current.json", "field": "mode", "before": "0o600", "after": "0o400"}]
+    finally:
+        pointer.chmod(0o600)
+
+
+def test_new_or_removed_watched_paths_are_not_permission_changes():
+    missing = {"error": "missing", "owner": None, "mode": None}
+    present = {"error": None, "owner": "501", "mode": "0o700"}
+    assert snap.compare({"entries": {"a": missing}}, {"entries": {"a": present}}) == []
+    assert snap.compare({"entries": {"a": present}}, {"entries": {"a": missing}}) == []
+
+
+def test_group_access_loss_on_a_file_owned_by_someone_else_is_still_reported():
+    diff = {"path": "shared", "field": "mode", "before": "0o664", "after": "0o600"}
+    assert snap.access_regressions([diff], {"shared": {"owner": "another-user"}}) == [diff]
+    assert snap.access_regressions([diff], {}) == [diff]
 
 
 def test_describe_entry_names_a_missing_or_unreadable_path(tmp_path):

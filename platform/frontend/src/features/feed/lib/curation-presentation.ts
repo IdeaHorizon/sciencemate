@@ -19,9 +19,18 @@ export function curationStatusLine(
   if (!state.enabled) {
     return { tone: "idle", text: fc("curation.off", lang) };
   }
+  if (state.project_status === "no_projects") {
+    return { tone: "idle", text: fc("curation.no_projects", lang) };
+  }
+  if (state.project_status === "unavailable") {
+    return { tone: "idle", text: fc("curation.remote_unavailable", lang) };
+  }
   if (state.last_error) {
     // 开着但没工作，要说清为什么 —— 否则和"确实没什么可推断的"长得一样。
     return { tone: "error", text: fc("curation.failed", lang, { error: state.last_error }) };
+  }
+  if (state.project_status === "pending") {
+    return { tone: "idle", text: fc("curation.projects_pending", lang) };
   }
   if (state.inferred_domains.length > 0) {
     return {

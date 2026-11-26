@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import { Bookmark, BookmarkCheck, ExternalLink, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { retainDetailTranslation, type DetailTranslation } from "../lib/feed-detail-translation";
+import { ExternalLink, X } from "lucide-react";
 import { Badge } from "@/shared/ui";
 import { api, literatureAssetUrl, type FeedItem } from "@/lib/api";
 import { say, useLanguage } from "@/shared/i18n";
@@ -19,6 +20,7 @@ import {
 import { useFeedEngagement } from "../hooks/useFeed";
 import { useFeedImageAsset } from "../hooks/useFeedImage";
 import { HandoffAction } from "./HandoffAction";
+import { FeedSaveAction } from "./FeedSaveAction";
 
 /**
  * 点开一张卡之后的详情窗。
@@ -53,8 +55,17 @@ export function FeedItemDialog({
   summaryZh?: string;
   onClose: () => void;
 }) {
-  const { record, undo } = useFeedEngagement();
+  const { record } = useFeedEngagement();
   const lang = useLanguage();
+  const [previousTranslation, setPreviousTranslation] = useState<DetailTranslation | null>(null);
+  const detailTranslation = retainDetailTranslation(previousTranslation, {
+    id: item.id, title: item.title, summary: item.summary,
+    titleZh: titleZh || item.title_zh || undefined,
+    summaryZh: summaryZh || item.abstract_zh || undefined,
+  });
+  if (detailTranslation !== previousTranslation) setPreviousTranslation(detailTranslation);
+  const displayedTitleZh = lang === "zh" ? detailTranslation.titleZh : undefined;
+  const displayedSummaryZh = lang === "zh" ? detailTranslation.summaryZh : undefined;
   const imageAsset = useFeedImageAsset(item.id);
   const imageSrc = imageAsset?.src ?? null;
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -64,6 +75,8 @@ export function FeedItemDialog({
   useEffect(() => {
     // Esc 关掉。一个只能靠鼠标点右上角叉才能关的浮层，键盘用户出不去。
     const onKey = (event: KeyboardEvent) => {
+      const dialogs = document.querySelectorAll('[role="dialog"]');
+      if (dialogs[dialogs.length - 1] !== closeRef.current?.closest('[role="dialog"]')) return;
       if (event.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);
@@ -137,7 +150,7 @@ export function FeedItemDialog({
           ) : (
             <h2 className="feed-dialog-title">{item.title}</h2>
           )}
-          {titleZh && <p className="feed-card-title-zh">{titleZh}</p>}
+          {displayedTitleZh && <p className="feed-card-title-zh">{displayedTitleZh}</p>}
 
           {reason && <p className="feed-card-reason">{reason}</p>}
 
@@ -145,7 +158,7 @@ export function FeedItemDialog({
           {Boolean(item.extra.school_library) && <p className="feed-dialog-attribution">{say({ zh: "学校馆藏：{name}", en: "School library: {name}" }, lang, { name: String(item.extra.school_library) })}</p>}
 
           {/* 摘要**不截断** —— 这正是打开详情要看的东西。 */}
-          {(summaryZh || item.summary) && <p className="feed-dialog-summary">{summaryZh || item.summary}</p>}
+          {(displayedSummaryZh || item.summary) && <p className="feed-dialog-summary">{displayedSummaryZh || item.summary}</p>}
 
           <div className="feed-dialog-actions">
             {typeof item.extra.school_fulltext_url === "string" && item.extra.school_fulltext_url && (
@@ -179,19 +192,7 @@ export function FeedItemDialog({
                 <ExternalLink size={15} /> <span>{fc("action.open_source", lang)}</span>
               </a>
             )}
-            <button
-              type="button"
-              className="feed-action"
-              aria-pressed={item.saved}
-              onClick={() =>
-                item.saved
-                  ? undo.mutate({ itemId: item.id, action: "save" })
-                  : record.mutate({ itemId: item.id, action: "save" })
-              }
-            >
-              {item.saved ? <BookmarkCheck size={15} /> : <Bookmark size={15} />}
-              <span>{item.saved ? fc("action.saved", lang) : fc("action.save", lang)}</span>
-            </button>
+            <FeedSaveAction item={item} />
             <HandoffAction
               item={item}
               onOpened={() => record.mutate({ itemId: item.id, action: "open" })}

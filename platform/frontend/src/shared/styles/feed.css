@@ -1080,3 +1080,18 @@ a.feed-dialog-title:hover {
 .feed-subscription-result > button { flex-shrink: 0; }
 
 .feed-scholar-name { flex: none; white-space: nowrap; }
+
+.feed-save-backdrop { position: fixed; inset: 0; z-index: 1100; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(0,0,0,.4); }
+.feed-save-dialog { width: min(420px, 100%); max-height: 90vh; overflow-y: auto; padding: 20px; border: 1px solid var(--color-border); border-radius: 12px; background: var(--color-bg-elevated); box-shadow: 0 12px 48px rgba(0,0,0,.2); }
+.feed-save-dialog header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.feed-save-dialog h2 { margin: 0; font-size: var(--font-size-title); }
+.feed-save-dialog form, .feed-save-dialog label { display: grid; gap: 10px; }
+.feed-save-dialog form { gap: 16px; }
+.feed-save-dialog select, .feed-save-dialog input, .feed-saved-folders select, .feed-folder-create input { min-width: 0; border: 1px solid var(--color-border); border-radius: 6px; padding: 8px 10px; color: var(--color-fg); background: var(--color-bg); font: inherit; }
+.feed-save-dialog p, .feed-saved-folders p { margin: 0; color: var(--color-fg-muted); font-size: var(--font-size-label); }
+.feed-save-dialog footer { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
+.feed-saved-folders { display: grid; gap: 12px; margin: 16px 0 20px; }
+.feed-saved-folder-controls, .feed-folder-create { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.feed-saved-folder-controls label, .feed-folder-create label { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.feed-saved-folder-controls select { max-width: min(340px, 65vw); }
+.feed-folder-create input { width: min(240px, 50vw); }

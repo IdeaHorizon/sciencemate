@@ -7,6 +7,7 @@ import {
   fileTabId,
   fileTabsForProject,
   RESEARCH_TAB_ID,
+  OUTPUTS_TAB_ID,
   useWorkspacePanel,
 } from "../../../stores/workspace-panel.ts";
 
@@ -17,7 +18,7 @@ function source(path: string) {
 const tab = (path: string, projectId = "p1", sessionId = "s1") => ({ projectId, sessionId, path });
 
 test.beforeEach(() => {
-  useWorkspacePanel.setState({ open: false, activeTabId: RESEARCH_TAB_ID, files: [] });
+  useWorkspacePanel.setState({ open: false, activeTabId: RESEARCH_TAB_ID, returnTabId: RESEARCH_TAB_ID, files: [] });
 });
 
 // ── 该显示哪个 Tab ──────────────────────────────────────────────────────
@@ -47,6 +48,22 @@ test("记着的那个 Tab 属于别的项目时不显示它", () => {
 
 test("什么都没有时不报错", () => {
   assert.equal(resolveActiveTab("file:x", { hasResearch: false, fileIds: [] }), RESEARCH_TAB_ID);
+});
+
+test("the outputs tab is available in sessions and falls back safely on the files page", () => {
+  assert.equal(resolveActiveTab(OUTPUTS_TAB_ID, { hasResearch: true, hasOutputs: true, fileIds: [] }), OUTPUTS_TAB_ID);
+  const file = fileTabId(tab("paper/main.pdf"));
+  assert.equal(resolveActiveTab(OUTPUTS_TAB_ID, { hasResearch: false, fileIds: [file] }), file);
+  assert.equal(resolveActiveTab(RESEARCH_TAB_ID, { hasResearch: false, hasOutputs: true, fileIds: [] }), OUTPUTS_TAB_ID);
+});
+
+test("closing a preview opened from outputs returns to outputs without closing the panel", () => {
+  const { activate, openFile, closeTab } = useWorkspacePanel.getState();
+  activate(OUTPUTS_TAB_ID);
+  openFile(tab("paper/main.pdf"));
+  closeTab(fileTabId(tab("paper/main.pdf")));
+  assert.equal(useWorkspacePanel.getState().activeTabId, OUTPUTS_TAB_ID);
+  assert.equal(useWorkspacePanel.getState().open, true);
 });
 
 // ── store ───────────────────────────────────────────────────────────────

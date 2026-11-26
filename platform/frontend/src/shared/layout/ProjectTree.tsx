@@ -19,30 +19,62 @@ function SessionItem({ session, selected, canArchive, mode }: {
   session: ResearchSession; selected: boolean; canArchive: boolean; mode: "api" | "fixture";
 }) {
   const t = useT();
+  const router = useRouter();
   const menu = useContextMenu();
   const mutations = useSessionMutations(session.projectId);
+  const [renaming, setRenaming] = useState(false);
+  const [title, setTitle] = useState(session.title);
   const { settings: interfaceSettings } = useInterfaceSettings();
   const usage = interfaceSettings.show_run_usage && session.usage.totalTokens > 0
     ? ` · ${session.usage.totalTokens.toLocaleString()} tokens` : "";
   return (
-    <>
-      <Link
+    <div className={cn("project-tree-session-row", selected && "is-selected")} data-menu-open={menu.at ? "true" : undefined}
+      onContextMenu={canArchive ? menu.onContextMenu : undefined}>
+      {renaming ? <form className="project-tree-session-rename" onSubmit={(event) => {
+        event.preventDefault();
+        const next = title.trim();
+        if (!next) return;
+        if (next === session.title) { setRenaming(false); return; }
+        mutations.rename.mutate({ sessionId: session.id, title: next }, { onSuccess: () => setRenaming(false) });
+      }}>
+        <input autoFocus value={title} onChange={(event) => setTitle(event.target.value)}
+          aria-label={t({ zh: "会话名称", en: "Session name" })}
+          title={t({ zh: "Enter 保存，Esc 取消", en: "Enter to save, Esc to cancel" })}
+          disabled={mutations.rename.isPending} onFocus={(event) => event.currentTarget.select()}
+          onBlur={() => setRenaming(false)} onKeyDown={(event) => {
+            if (event.key === "Escape") { event.preventDefault(); setRenaming(false); }
+          }} />
+      </form> : <Link
         href={`/projects/${encodeURIComponent(session.projectId)}/sessions/${encodeURIComponent(session.id)}${mode === "fixture" ? "?mode=demo" : ""}`}
-        className={cn("project-tree-session", selected && "is-selected")}
+        className="project-tree-session"
         aria-current={selected ? "page" : undefined}
         title={`${session.title} · ${session.execution.label}${usage}`}
-        onContextMenu={canArchive ? menu.onContextMenu : undefined}
       >
-        <i className={`session-state-dot state-${session.execution.phase}`} data-waiting={session.execution.waitingOn?.kind} data-outcome={session.execution.outcome ?? undefined} aria-hidden="true" />
+        {session.execution.phase === "alive" && <i className="session-state-dot state-alive" data-waiting={session.execution.waitingOn?.kind} aria-hidden="true" />}
         <span>{session.title}</span>
-      </Link>
+      </Link>}
+      {canArchive && !renaming && <button type="button" className="project-tree-session-menu" aria-haspopup="menu" aria-expanded={Boolean(menu.at)}
+        aria-label={t({ zh: "{name} 的会话菜单", en: "Session menu for {name}" }, { name: session.title })}
+        onClick={(event) => { const rect = event.currentTarget.getBoundingClientRect(); menu.openAt(rect.left, rect.bottom); }}>
+        <MoreHorizontal size={14} />
+      </button>}
       {canArchive && <ContextMenu at={menu.at} onClose={menu.close} items={[{
+        label: t({ zh: "重命名", en: "Rename" }),
+        disabled: mutations.rename.isPending,
+        onSelect: () => {
+          setTitle(session.title);
+          setRenaming(true);
+        },
+      }, {
         label: t({ zh: "归档 / 删除会话", en: "Archive or delete session" }),
         danger: true,
+        disabled: mutations.archive.isPending,
         confirm: t({ zh: `归档或删除「${session.title}」？有内容的会话会被归档，空会话会被直接删除。`, en: `Archive or delete "${session.title}"? Empty sessions are deleted; others are archived.` }),
-        onSelect: () => mutations.archive.mutate(session.id),
+        onSelect: () => mutations.archive.mutate(session.id, { onSuccess: () => {
+          if (selected) router.push(`/projects/${encodeURIComponent(session.projectId)}/chat`);
+        } }),
       }]} />}
-    </>
+    </div>
   );
 }
 
@@ -61,7 +93,9 @@ function ProjectBranch({ project, activeProjectId, selectedId, query }: {
   const open = expanded || Boolean(query.trim());
   // Collapsed projects do not fetch session lists. Searching loads them on demand.
   const mode = process.env.NEXT_PUBLIC_SESSION_MODE === "demo" ? "fixture" : "api";
-  const sessions = useProjectSessions(open ? project.id : undefined, mode);
+  const sessions = useProjectSessions(open ? project.id : undefined, mode, {
+    refetchInterval: open && mode === "api" ? 15000 : false,
+  });
   const mutations = useSessionMutations(project.id);
   const drivesThisProject = project.capabilities?.includes("drive") ?? false;
   const canCreate = canCreateSessions(user) && mode === "api" && drivesThisProject && project.status !== "archived";
@@ -89,7 +123,7 @@ function ProjectBranch({ project, activeProjectId, selectedId, query }: {
 
   return (
     <section className={cn("project-tree-branch", active && "is-active")}>
-      <div className="project-tree-heading" onContextMenu={menu.onContextMenu}>
+      <div className="project-tree-heading" data-menu-open={menu.at ? "true" : undefined} onContextMenu={menu.onContextMenu}>
         <button type="button" className="project-tree-disclosure" aria-expanded={open} aria-controls={childrenId}
           aria-label={t({ zh: "展开或收起 {name}", en: "Expand or collapse {name}" }, { name: project.name })}
           onClick={() => setExpanded(!open)}><ChevronRight size={13} className={open ? "is-open" : ""} /></button>
@@ -99,7 +133,7 @@ function ProjectBranch({ project, activeProjectId, selectedId, query }: {
             aria-label={t({ zh: "在 {name} 新建会话", en: "New session in {name}" }, { name: project.name })}>
             {mutations.create.isPending ? <Loader2 size={13} className="spin" /> : <Plus size={13} />}
           </button>}
-          <button type="button" aria-label={t({ zh: "{name} 的项目菜单", en: "Project menu for {name}" }, { name: project.name })}
+          <button type="button" aria-haspopup="menu" aria-expanded={Boolean(menu.at)} aria-label={t({ zh: "{name} 的项目菜单", en: "Project menu for {name}" }, { name: project.name })}
             onClick={(event) => { const rect = event.currentTarget.getBoundingClientRect(); menu.openAt(rect.left, rect.bottom); }}>
             <MoreHorizontal size={14} />
           </button>

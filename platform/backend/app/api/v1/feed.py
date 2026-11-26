@@ -14,6 +14,7 @@ import httpx
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import unquote
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import String, cast, func, or_, select
@@ -27,6 +28,7 @@ from app.database import get_db
 from app.models.feed import (
     FeedEngagement,
     FeedEngagementAction,
+    FeedSaveFolder,
     FeedItem,
     FeedItemKind,
     FeedSource,
@@ -44,6 +46,10 @@ from app.schemas.feed import (
     EngagementWrite,
     FeedCard,
     FeedItemOut,
+    SaveFolderWrite,
+    SaveFolderOut,
+    SaveFoldersOut,
+    SaveLocationWrite,
     FeedStatusOut,
     FeedTodayOut,
     FeedProgressOut,
@@ -201,6 +207,7 @@ def _to_out(
     source_names: dict[str, str] | None = None,
     author_names: dict[str, str] | None = None,
     saved_ids: frozenset[str] = frozenset(),
+    saved_folders: dict[str, str | None] | None = None,
     opened_ids: frozenset[str] = frozenset(),
     lang: str = "zh",
 ) -> FeedItemOut:
@@ -220,6 +227,7 @@ def _to_out(
         source_name=(source_names or {}).get(item.source_id or ""),
         author_display_name=(author_names or {}).get(item.author_user_id or ""),
         saved=str(item.id) in saved_ids,
+        saved_folder_id=(saved_folders or {}).get(str(item.id)),
         viewed=str(item.id) in opened_ids,
         extra=item.extra if isinstance(item.extra, dict) else {},
     )
@@ -266,16 +274,40 @@ async def _lookup_names(db: AsyncSession, items: list[FeedItem]) -> tuple[dict, 
     return sources, authors
 
 
-async def _saved_ids(db: AsyncSession, *, user_id: str) -> frozenset[str]:
-    rows = (
-        await db.execute(
-            select(FeedEngagement.item_id).where(
-                FeedEngagement.user_id == user_id,
-                FeedEngagement.action == FeedEngagementAction.SAVE,
-            )
+async def _saved_folders(db: AsyncSession, *, user_id: str) -> dict[str, str | None]:
+    rows = await db.execute(
+        select(FeedEngagement.item_id, FeedEngagement.folder_id).where(
+            FeedEngagement.user_id == user_id,
+            FeedEngagement.action == FeedEngagementAction.SAVE,
         )
-    ).scalars().all()
-    return frozenset(rows)
+    )
+    return {str(item_id): str(folder_id) if folder_id else None for item_id, folder_id in rows}
+
+
+async def _saved_ids(db: AsyncSession, *, user_id: str) -> frozenset[str]:
+    return frozenset(await _saved_folders(db, user_id=user_id))
+
+
+async def _require_save_folder(
+    db: AsyncSession, user: User, folder_id: str | UUID | None
+) -> str | None:
+    if folder_id is None:
+        return None
+    try:
+        identifier = str(UUID(str(folder_id)))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail=t("error.folder_not_found", language_for(user))
+        ) from exc
+    folder = await db.scalar(
+        select(FeedSaveFolder.id).where(
+            FeedSaveFolder.id == identifier, FeedSaveFolder.user_id == user.id
+        )
+    )
+    if folder is None:
+        # Missing and another user's folder are intentionally indistinguishable.
+        raise HTTPException(status_code=404, detail=t("error.folder_not_found", language_for(user)))
+    return str(folder)
 
 
 async def _opened_ids(db: AsyncSession, *, user_id: str) -> frozenset[str]:
@@ -485,7 +517,8 @@ async def _build_feed_pool(user: User, db: AsyncSession, lang: Language | None =
             by_id[str(item.id)] = item
 
     project_names = {p.project_id: p.name for p in profile.projects}
-    saved = await _saved_ids(db, user_id=user.id)
+    saved_folders = await _saved_folders(db, user_id=user.id)
+    saved = frozenset(saved_folders)
     opened = await _opened_ids(db, user_id=user.id)
     pick_items = [by_id[str(i)] for i in pick_ids if str(i) in by_id]
     source_names, author_names = await _lookup_names(db, [*candidates, *pick_items])
@@ -502,15 +535,21 @@ async def _build_feed_pool(user: User, db: AsyncSession, lang: Language | None =
     ) -> FeedCard:
         return FeedCard(
             item=_to_out(
-                item, source_names=source_names, author_names=author_names,
-                saved_ids=saved, opened_ids=opened, lang=lang,
+                item,
+                source_names=source_names,
+                author_names=author_names,
+                saved_ids=saved,
+                saved_folders=saved_folders,
+                opened_ids=opened,
+                lang=lang,
             ),
             reason=ranking.say_why(why, lang),
             project_id=project_id,
             project_name=project_name,
             is_today_pick=is_today_pick,
             recommendation_sources=_recommendation_sources(
-                item, profile, why=why or {}, project_id=project_id),
+                item, profile, why=why or {}, project_id=project_id
+            ),
         )
 
     # 今日必读：每天替你挑的少数几条，挂角标、排在流最前。
@@ -594,7 +633,10 @@ async def _build_feed_pool(user: User, db: AsyncSession, lang: Language | None =
         # 开关。它们默认都是 True 且个人档从不覆盖，所以只看开关的话，一台
         # 永不采集的机器会走到"第一轮几分钟内完成"那一句 —— 一句永远兑现不了
         # 的承诺，而用户只会以为再等等就好。
-        if not assembly.background_collection_enabled() and not (profile.domains or profile.journals or profile.scholars):
+        if not assembly.background_collection_enabled() and not (
+            profile.domains or profile.journals or profile.scholars
+            or (profile.projects and curation.is_enabled(user))
+        ):
             empty_reason = t("empty.no_collector_here", lang)
         elif not settings.feed_external_fetch_enabled:
             empty_reason = t("empty.collection_disabled", lang)
@@ -648,6 +690,7 @@ async def _build_feed_pool(user: User, db: AsyncSession, lang: Language | None =
         refreshing=(
             literature_index_harvester.is_online_refreshing(user.id)
             or discovery.is_subscription_refreshing(user.id)
+            or bool(discovery._project_inflight.get(str(user.id)))
         ),
     )
 
@@ -703,7 +746,8 @@ async def recommendation_pool(user: User, db: AsyncSession, *, allow_stale=True,
         group["translated"] += int(translation_ready(card.item))
     result.progress.source_groups = list(groups.values())
     result.refreshing = (literature_index_harvester.is_online_refreshing(user.id)
-                         or discovery.is_subscription_refreshing(user.id))
+                         or discovery.is_subscription_refreshing(user.id)
+                         or bool(discovery._project_inflight.get(str(user.id))))
     return result
 
 
@@ -794,6 +838,18 @@ async def feed_progress(user: User = Depends(get_current_user), db: AsyncSession
     return progress
 
 
+@router.get("/project-contexts")
+async def feed_project_contexts(user: User = Depends(get_current_user),
+                                db: AsyncSession = Depends(get_db)) -> dict:
+    """Only this user's active projects on this backend, never recursive remotes."""
+    from dataclasses import asdict
+    from app.services.feed.project_context import local_projects
+
+    return {"projects": [
+        {**asdict(project), "status": "active"} for project in await local_projects(db, user)
+    ]}
+
+
 @router.post("/refresh", status_code=204)
 async def refresh_recommendations(user: User = Depends(get_current_user)):
     from app.services.feed.pool_cache import clear
@@ -805,20 +861,31 @@ async def list_items(
     domain: str | None = None,
     kind: str | None = None,
     saved: bool = False,
+    folder_id: str | None = None,
     limit: int = Query(default=30, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[FeedItemOut]:
     """点进去看更多。"""
+    if folder_id is not None and not saved:
+        raise HTTPException(
+            status_code=422, detail=t("error.folder_filter_requires_saved", language_for(user))
+        )
     query = select(FeedItem).where(_visible_clause(user))
     if kind:
         query = query.where(FeedItem.kind == kind)
     if saved:
-        saved_ids = await _saved_ids(db, user_id=user.id)
-        if not saved_ids:
-            return []
-        query = query.where(FeedItem.id.in_(saved_ids))
+        saves = select(FeedEngagement.item_id).where(
+            FeedEngagement.user_id == user.id,
+            FeedEngagement.action == FeedEngagementAction.SAVE,
+        )
+        if folder_id is not None:
+            target = (
+                None if folder_id == "default" else await _require_save_folder(db, user, folder_id)
+            )
+            saves = saves.where(FeedEngagement.folder_id == target)
+        query = query.where(FeedItem.id.in_(saves))
     query = query.order_by(ranking.recent_order()).limit(limit).offset(offset)
     items = list((await db.execute(query)).scalars().all())
     # 「收藏」列的是这个人自己收下的东西：文献投影事后把一条判成不合格（`literature_eligible`
@@ -844,13 +911,23 @@ async def list_items(
             ) from exc
 
     source_names, author_names = await _lookup_names(db, items)
-    saved_ids = await _saved_ids(db, user_id=user.id)
+    saved_folders = await _saved_folders(db, user_id=user.id)
+    saved_ids = frozenset(saved_folders)
     opened_ids = await _opened_ids(db, user_id=user.id)
-    return await _attach_cached_translations([
-        _to_out(i, source_names=source_names, author_names=author_names,
-                saved_ids=saved_ids, opened_ids=opened_ids, lang=language_for(user))
-        for i in items
-    ])
+    return await _attach_cached_translations(
+        [
+            _to_out(
+                i,
+                source_names=source_names,
+                author_names=author_names,
+                saved_ids=saved_ids,
+                saved_folders=saved_folders,
+                opened_ids=opened_ids,
+                lang=language_for(user),
+            )
+            for i in items
+        ]
+    )
 
 
 @router.get("/items/{item_id}", response_model=FeedItemOut)
@@ -865,11 +942,17 @@ async def get_item(
     if item is None or not _eligible_feed_item(item):
         raise HTTPException(status_code=404, detail=say(refusals.FEED_ITEM_NOT_FOUND, language_for(user)))
     source_names, author_names = await _lookup_names(db, [item])
-    saved_ids = await _saved_ids(db, user_id=user.id)
+    saved_folders = await _saved_folders(db, user_id=user.id)
+    saved_ids = frozenset(saved_folders)
     opened_ids = await _opened_ids(db, user_id=user.id)
     result = _to_out(
-        item, source_names=source_names, author_names=author_names, saved_ids=saved_ids,
-        opened_ids=opened_ids, lang=language_for(user),
+        item,
+        source_names=source_names,
+        author_names=author_names,
+        saved_ids=saved_ids,
+        saved_folders=saved_folders,
+        opened_ids=opened_ids,
+        lang=language_for(user),
     )
     await _attach_cached_translations([result])
     return result
@@ -888,31 +971,135 @@ async def record_engagement(
     )
     if item is None or not _eligible_feed_item(item):
         raise HTTPException(status_code=404, detail=say(refusals.FEED_ITEM_NOT_FOUND, language_for(user)))
-    await _record_engagement(db, user_id=user.id, item_id=item_id, action=data.action)
-
-
-async def _record_engagement(db: AsyncSession, *, user_id: str, item_id: str, action: str) -> None:
-    """记一次互动。幂等：同一个人对同一条做同一个动作只记一次。"""
-    already = await db.scalar(
-        select(FeedEngagement.id).where(
-            FeedEngagement.user_id == user_id,
-            FeedEngagement.item_id == item_id,
-            FeedEngagement.action == action,
-        )
+    folder_id = (
+        await _require_save_folder(db, user, data.folder_id) if data.action == "save" else None
     )
+    await _record_engagement(
+        db,
+        user_id=user.id,
+        item_id=item_id,
+        action=data.action,
+        folder_id=folder_id,
+        update_folder="folder_id" in data.model_fields_set,
+    )
+
+
+async def _record_engagement(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    item_id: str,
+    action: str,
+    folder_id: str | None = None,
+    update_folder: bool = False,
+) -> None:
+    """Replay is idempotent; an explicit save location updates the same row."""
+    query = select(FeedEngagement).where(
+        FeedEngagement.user_id == user_id,
+        FeedEngagement.item_id == item_id,
+        FeedEngagement.action == action,
+    )
+    already = await db.scalar(query)
     if already is not None:
+        if action == FeedEngagementAction.SAVE and update_folder:
+            already.folder_id = folder_id
+            await db.flush()
         return
     try:
-        # `db.add` 必须在 savepoint **里面**。放外面的话，撞唯一键之后
-        # savepoint 回滚，但这个待插入对象还留在 session 里 —— 请求收尾
-        # 那次 commit 会把它再插一遍，于是抛 PendingRollbackError，
-        # 一个"幂等重放"变成 500。（真跑一次才现形：新库里没有重复。）
+        # Add inside the savepoint: a racing unique insert cannot poison the session.
         async with db.begin_nested():
-            db.add(FeedEngagement(user_id=user_id, item_id=item_id, action=action))
+            db.add(
+                FeedEngagement(
+                    user_id=user_id,
+                    item_id=item_id,
+                    action=action,
+                    folder_id=folder_id if action == FeedEngagementAction.SAVE else None,
+                )
+            )
             await db.flush()
     except IntegrityError:
-        # 上面查过了还撞上 = 两个请求同时来。这是幂等，不是错误。
-        pass
+        if action == FeedEngagementAction.SAVE and update_folder:
+            existing = await db.scalar(query)
+            if existing is not None:
+                existing.folder_id = folder_id
+                await db.flush()
+
+
+@router.get("/folders", response_model=SaveFoldersOut)
+async def list_save_folders(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SaveFoldersOut:
+    counts = dict(
+        (
+            await db.execute(
+                select(FeedEngagement.folder_id, func.count(FeedEngagement.id))
+                .join(FeedItem, FeedItem.id == FeedEngagement.item_id)
+                .where(
+                    FeedEngagement.user_id == user.id,
+                    FeedEngagement.action == FeedEngagementAction.SAVE,
+                    _visible_clause(user),
+                )
+                .group_by(FeedEngagement.folder_id)
+            )
+        ).all()
+    )
+    folders = (
+        await db.scalars(
+            select(FeedSaveFolder)
+            .where(FeedSaveFolder.user_id == user.id)
+            .order_by(FeedSaveFolder.created_at, FeedSaveFolder.id)
+        )
+    ).all()
+    return SaveFoldersOut(
+        folders=[
+            SaveFolderOut(id=str(folder.id), name=folder.name, item_count=counts.get(folder.id, 0))
+            for folder in folders
+        ],
+        default_count=counts.get(None, 0),
+    )
+
+
+@router.post("/folders", response_model=SaveFolderOut, status_code=201)
+async def create_save_folder(
+    data: SaveFolderWrite,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SaveFolderOut:
+    folder = FeedSaveFolder(user_id=user.id, name=data.name)
+    try:
+        async with db.begin_nested():
+            db.add(folder)
+            await db.flush()
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409, detail=t("error.folder_name_exists", language_for(user))
+        ) from exc
+    return SaveFolderOut(id=str(folder.id), name=folder.name)
+
+
+@router.put("/items/{item_id}/save", status_code=204)
+async def move_saved_item(
+    item_id: str,
+    data: SaveLocationWrite,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    folder_id = await _require_save_folder(db, user, data.folder_id)
+    engagement = await db.scalar(
+        select(FeedEngagement)
+        .join(FeedItem, FeedItem.id == FeedEngagement.item_id)
+        .where(
+            FeedEngagement.user_id == user.id,
+            FeedEngagement.item_id == item_id,
+            FeedEngagement.action == FeedEngagementAction.SAVE,
+            _visible_clause(user),
+        )
+    )
+    if engagement is None:
+        raise HTTPException(status_code=404, detail=t("error.item_not_saved", language_for(user)))
+    engagement.folder_id = folder_id
+    await db.flush()
 
 
 @router.post("/saved-papers", response_model=FeedItemOut, status_code=201)
@@ -931,6 +1118,7 @@ async def save_a_paper(
     之前检索页上的「收藏」只是页面里的一个状态：刷新就没了，也从来进不了「收藏」页签。
     """
     lang = language_for(user)
+    folder_id = await _require_save_folder(db, user, data.folder_id)
     doi = canonical.doi(data.doi or "") or canonical.doi(data.url or "")
     key = canonical.canonical_key(url=data.url or "", text=doi or "")
     if not key:
@@ -968,10 +1156,24 @@ async def save_a_paper(
     if not visible:
         raise HTTPException(status_code=404, detail=say(refusals.FEED_ITEM_NOT_FOUND, lang))
 
-    await _record_engagement(db, user_id=user.id, item_id=item.id, action=FeedEngagementAction.SAVE)
+    await _record_engagement(
+        db,
+        user_id=user.id,
+        item_id=item.id,
+        action=FeedEngagementAction.SAVE,
+        folder_id=folder_id,
+        update_folder="folder_id" in data.model_fields_set,
+    )
+    saved_folders = await _saved_folders(db, user_id=user.id)
     source_names, author_names = await _lookup_names(db, [item])
-    result = _to_out(item, source_names=source_names, author_names=author_names,
-                     saved_ids=frozenset({str(item.id)}), lang=lang)
+    result = _to_out(
+        item,
+        source_names=source_names,
+        author_names=author_names,
+        saved_ids=frozenset({str(item.id)}),
+        saved_folders=saved_folders,
+        lang=lang,
+    )
     await _attach_cached_translations([result])
     return result
 
@@ -1293,14 +1495,25 @@ async def subscription_items(
     reasons = {str(item.id): (source, reason) for item, source, reason in matched}
     chosen = [value.item for value in ranked[offset:offset + limit]]
     source_names, author_names = await _lookup_names(db, chosen)
-    saved = await _saved_ids(db, user_id=user.id)
+    saved_folders = await _saved_folders(db, user_id=user.id)
+    saved = frozenset(saved_folders)
     opened = await _opened_ids(db, user_id=user.id)
-    cards = [FeedCard(
-        item=_to_out(item, source_names=source_names, author_names=author_names,
-                     saved_ids=saved, opened_ids=opened, lang=lang),
-        reason=reasons[str(item.id)][1],
-        recommendation_sources=[reasons[str(item.id)][0]],
-    ) for item in chosen]
+    cards = [
+        FeedCard(
+            item=_to_out(
+                item,
+                source_names=source_names,
+                author_names=author_names,
+                saved_ids=saved,
+                saved_folders=saved_folders,
+                opened_ids=opened,
+                lang=lang,
+            ),
+            reason=reasons[str(item.id)][1],
+            recommendation_sources=[reasons[str(item.id)][0]],
+        )
+        for item in chosen
+    ]
     await _attach_cached_translations([card.item for card in cards])
     return cards
 
@@ -1455,6 +1668,18 @@ async def _curation_state(db: AsyncSession, user: User) -> CurationOut:
         except ValueError:
             last = None
     inferred = list(curation.inferred_domains(user))
+    projects = await curation.user_projects(db, user)
+    project_status = curation.project_context.collection_status(user)
+    if project_status == "current":
+        if not projects:
+            project_status = "no_projects"
+        else:
+            examples = await curation.saved_project_examples(db, user, projects)
+            if stored.get("curated_fingerprint") != curation.project_fingerprint(projects, examples):
+                project_status = "pending"
+    no_projects = project_status == "no_projects"
+    if no_projects:
+        inferred = []
     return CurationOut(
         enabled=curation.is_enabled(user),
         # 「配了模型吗」和「用户开了吗」分开答 —— 合成一个布尔值，用户就
@@ -1467,7 +1692,10 @@ async def _curation_state(db: AsyncSession, user: User) -> CurationOut:
         last_error=stored.get("curated_error") or None,
         inferred_domains=inferred,
         inferred_domain_labels=_labels(inferred, language_for(user)),
-        inferred_queries=list(curation.inferred_queries(user)),
+        inferred_queries=[] if no_projects else list(curation.inferred_queries(user)),
+        project_status=project_status,
+        local_project_count=sum(not getattr(project, "home", "") for project in projects),
+        remote_project_count=sum(bool(getattr(project, "home", "")) for project in projects),
     )
 
 
@@ -1524,6 +1752,12 @@ async def put_curation(
             await db.delete(today)
         await db.flush()
 
+    # The independent worker must see the saved opt-in before reading its queue.
+    await db.commit()
+    if data.enabled:
+        from app.services.feed.scheduler import feed_collector
+
+        feed_collector.request_project_refresh()
     return await _curation_state(db, user)
 
 

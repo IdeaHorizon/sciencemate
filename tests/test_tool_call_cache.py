@@ -160,7 +160,7 @@ async def test_summarizer_injects_digest_after_compression(tmp_path: Path):
              {"status": "success", "total_matched": 3}, turn=1)
 
     harness = NodeHarness(
-        node_type="test", max_context_tokens=4000,
+        node_type="test", max_context_tokens=4000, max_output_tokens=512,
         summarizer=SummarizerConfig(enabled=True, trigger_threshold=0.5,
                                      strategy="truncate", keep_last_n_turns=1),
     )
@@ -171,11 +171,31 @@ async def test_summarizer_injects_digest_after_compression(tmp_path: Path):
     ]
     out = await run_summarizer(harness, state, msgs, llm=None, turn=3,
                                 estimated_tokens=99999)
-    tail = out[-1]
+    snapshots = [m for m in out if m.context_slot == "tool_findings"]
+    assert len(snapshots) == 1
+    tail = snapshots[0]
     # 判据看内容不看角色：台账现在以 framework-notice（user + 归属信封）注回 ——
     # 中段的 system 消息模型归属不了（PR#462 实测复述率 13/14）。
     assert tail.role != "system", "框架还在中段用 system 角色说话"
     assert "ATLAS" in (tail.content or ""), "压缩结果里应含已查过的条目台账"
+    assert state.hook_state["_context_compaction"]["target_met"]
+
+    # 再整理替换同一个快照，不累加台账；旧代次不得继续冒充当前查询结果。
+    tc.store(state, "search_kb", {"query": "Qodara"},
+             {"status": "success", "total_matched": 0}, turn=4)
+    expanded = [*out, *[LLMMessage(role="assistant", content="filler " * 600)
+                           for _ in range(6)]]
+    out = await run_summarizer(harness, state, expanded, llm=None, turn=5,
+                               estimated_tokens=99999)
+    snapshots = [m for m in out if m.context_slot == "tool_findings"]
+    assert len(snapshots) == 1
+    assert "ATLAS" in snapshots[0].content and "Qodara" in snapshots[0].content
+    tc.note_mutation(state)
+    expanded = [*out, *[LLMMessage(role="assistant", content="filler " * 600)
+                           for _ in range(6)]]
+    out = await run_summarizer(harness, state, expanded, llm=None, turn=7,
+                               estimated_tokens=99999)
+    assert not any(m.context_slot == "tool_findings" for m in out)
 
 
 # ── 接线：agent_loop 分发路径确实走缓存（最易"静默没生效"的一环）──────────

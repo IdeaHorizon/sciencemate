@@ -6,8 +6,9 @@
   打标签），由 `core/isolation/_win32_exec.py` 在改的那一刻追加：路径、改前、改后、哪个 run、哪个
   spawn token、时间、返回码。这里只读。
 - **快照** `logs/permissions-snapshot.json`：每次启动对关键目录记所有者 / 权限 / 标签的一张表；
-  **应用版本号变了**就和上一份比，差异作为 `environment_warning` 报出，并附上这段时间账本里我们自己
-  做过的改动 —— 于是任何权限悬案先查两样：账本答「是不是我们干的」，快照答「什么时候、变了什么」。
+  **应用版本号变了**就和上一份比，访问权限减少才作为 `environment_warning` 报出，
+  并附上这段时间账本里我们自己做过的改动 —— 于是任何权限悬案先查两样：
+  账本答「是不是我们干的」，快照答「什么时候、变了什么」。
 
 只扫顶层与一层子目录，不递归整棵树：启动期全量扫描是另一种门槛（RFC §8）。
 第一次启动没有上一份就只记不比；快照读不到、写不进都不拦启动。
@@ -149,10 +150,36 @@ def compare(previous: dict[str, Any], current: dict[str, Any]) -> list[dict[str,
     after = current.get("entries") or {}
     for key in sorted(set(before) & set(after)):
         old, new = before[key], after[key]
+        # A path created or removed between launches has no comparable permissions.
+        if old.get("error") == "missing" or new.get("error") == "missing":
+            continue
         for field in ("owner", "mode", "acl_sha256", "label", "error"):
             if old.get(field) != new.get(field):
                 diffs.append({"path": key, "field": field, "before": old.get(field), "after": new.get(field)})
     return diffs
+
+
+def access_regressions(
+    diffs: list[dict[str, Any]], entries: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Metadata hardening is not a loss of the user's ability to save data.
+
+    POSIX group/other bits do not affect the unchanged owner running this app.
+    Keep ownership, ACL and read errors conservative; retain every raw difference
+    in the startup log even when there is no user-facing warning.
+    """
+    regressions = []
+    for diff in diffs:
+        if diff["field"] == "mode" and diff["before"] is not None and diff["after"] is not None:
+            entry = entries.get(diff["path"], {})
+            owned = hasattr(os, "getuid") and entry.get("owner") == str(os.getuid())
+            relevant_bits = 0o700 if owned else 0o777
+            if not (int(diff["before"], 8) & ~int(diff["after"], 8) & relevant_bits):
+                continue
+        elif diff["field"] == "error" and diff["after"] is None:
+            continue
+        regressions.append(diff)
+    return regressions
 
 
 def read_journal_since(journal: Path, since_iso: str | None) -> list[dict[str, Any]]:
@@ -176,7 +203,7 @@ def read_journal_since(journal: Path, since_iso: str | None) -> list[dict[str, A
 
 
 def record_startup(data_root: Path, *, app_version: str | None) -> dict[str, Any] | None:
-    """启动时记一份；版本号变了就比。返回差异事件（没有差异 / 第一次 / 同版本 → None）。"""
+    """启动记快照，跨版本比较；返回访问权限减少的事件，普通权限收紧只记日志。"""
     global _latest_change
     logs = data_root / "logs"
     snapshot_path = logs / SNAPSHOT_NAME
@@ -192,7 +219,11 @@ def record_startup(data_root: Path, *, app_version: str | None) -> dict[str, Any
         if reason:
             logger.info("permissions snapshot not compared across %s → %s: %s",
                         previous.get("app_version"), app_version, reason)
-        diffs = [] if reason else compare(previous, current)
+        raw_diffs = [] if reason else compare(previous, current)
+        if raw_diffs:
+            logger.info("data root permission differences across %s → %s: %s",
+                        previous.get("app_version"), app_version, raw_diffs)
+        diffs = access_regressions(raw_diffs, current["entries"])
         if diffs:
             ours = read_journal_since(logs / JOURNAL_NAME, str(previous.get("taken_at") or "") or None)
             touched_by_us = {str(r.get("path")) for r in ours}

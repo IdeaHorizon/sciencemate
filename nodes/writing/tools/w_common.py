@@ -104,6 +104,7 @@ PART_CRAFT = {
     "results": "results",
     "discussion": "discussion_conclusion",
     "conclusion": "discussion_conclusion",
+    "appendix": "appendix",
 }
 
 
@@ -130,41 +131,89 @@ def genre_brief_summary(genre: dict[str, Any], variant: str | None = None) -> st
 
 # ── 有界 LLM 调用 ───────────────────────────────────────────────────────────
 
+class WritingResponseError(RuntimeError):
+    """A bounded call exhausted recovery without producing complete content."""
+
+    def __init__(self, *, phase: str, model: str, attempts: list[dict]) -> None:
+        kind = attempts[-1]["response_kind"]
+        self.result = {
+            "status": "error", "reason": f"writing_{kind}_response",
+            "error": "写作调用未返回完整内容；已有稿件、简报、提纲和参考文献已保留。",
+            "phase": phase, "model": model, "attempts": attempts,
+            "retryable": False,
+            "next": "不要重复相同调用或重做前置工作；检查模型输出上限或后端响应，修复后继续。",
+        }
+        super().__init__(self.result["error"])
+
+
 async def bounded_llm(state: Any, *, phase: str, system: str, user: str,
                       max_tokens: int = 6000, temperature: float = 0.4) -> str:
-    """一次不带工具、不进主循环上下文的调用；花费记进同一本账。"""
+    """A complete response, with one bounded recovery for reasoning/truncation."""
     from core import cost_ledger
     from core.llm import LLMClient, LLMMessage, opening_system_prompt
 
     client = LLMClient()
     messages = [opening_system_prompt(system), LLMMessage(role="user", content=user)]
-    t0 = time.monotonic()
-    resp = await client.chat(messages, tools=None, max_tokens=int(max_tokens),
-                             temperature=float(temperature))
-    elapsed = round(time.monotonic() - t0, 1)
-    usage = getattr(resp, "usage", None) or {}
-    try:
-        cost_ledger.record(
-            project_root=getattr(state, "project_root", None),
-            run_id=getattr(state, "run_id", None),
-            node_type="writing",
-            provider=cost_ledger.provider_label(getattr(client, "base_url", None)),
-            model=getattr(client, "model", None),
-            usage=usage,
-            extra={"bounded_phase": phase},
-        )
-    except Exception:  # noqa: BLE001 — 观测不打断主流程
-        pass
-    try:
-        state.append_transcript(
-            "writing_bounded_call", phase=phase, elapsed_s=elapsed,
-            prompt_tokens=usage.get("prompt_tokens"), completion_tokens=usage.get("completion_tokens"),
-            system_chars=len(system), user_chars=len(user),
-        )
-    except Exception:  # noqa: BLE001
-        pass
-    content = (resp.content or "").strip()
-    return strip_code_fence(content)
+    budget = int(max_tokens)
+    attempts = []
+    for attempt in range(2):
+        t0 = time.monotonic()
+        resp = await client.chat(messages, tools=None, max_tokens=budget,
+                                 temperature=float(temperature))
+        usage = getattr(resp, "usage", None) or {}
+        details = usage.get("completion_tokens_details") or {}
+        reasoning_tokens = int(details.get("reasoning_tokens")
+                               or usage.get("reasoning_tokens") or 0)
+        reasoning_chars = len(getattr(resp, "reasoning_content", None) or "")
+        content = strip_code_fence((resp.content or "").strip()).strip()
+        finish = resp.finish_reason
+        if finish == "length":
+            kind = "truncated"
+        elif finish == "content_filter":
+            kind = "filtered"
+        elif not content and (reasoning_tokens or reasoning_chars):
+            kind = "reasoning_only"
+        else:
+            kind = "complete" if content else "empty"
+        diagnostic = {
+            "attempt": attempt + 1, "finish_reason": finish, "response_kind": kind,
+            "output_budget": budget, "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "reasoning_tokens": reasoning_tokens, "reasoning_chars": reasoning_chars,
+            "content_chars": len(content),
+        }
+        attempts.append(diagnostic)
+        try:
+            cost_ledger.record(
+                project_root=getattr(state, "project_root", None),
+                run_id=getattr(state, "run_id", None), node_type="writing",
+                provider=cost_ledger.provider_label(getattr(client, "base_url", None)),
+                model=getattr(client, "model", None), usage=usage,
+                extra={"bounded_phase": phase, "attempt": attempt + 1},
+            )
+        except Exception:  # noqa: BLE001 — 观测不打断主流程
+            pass
+        if hasattr(state, "tokens_used"):
+            state.tokens_used += int(usage.get("total_tokens") or 0)
+        try:
+            state.append_transcript(
+                "writing_bounded_call", phase=phase, **diagnostic,
+                model=getattr(client, "model", None),
+                elapsed_s=round(time.monotonic() - t0, 1),
+                system_chars=len(system), user_chars=len(user),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        if kind == "complete":
+            return content
+        # The client already retries transport failures and true blank stops.
+        # Only a larger output allowance can repair a reasoning-only/length
+        # result here. Never publish partial text or reasoning as manuscript.
+        larger = min(32768, max(8192, budget * 2, reasoning_tokens + int(max_tokens)))
+        if kind not in {"truncated", "reasoning_only"} or larger <= budget:
+            break
+        budget = larger
+    raise WritingResponseError(phase=phase, model=getattr(client, "model", ""), attempts=attempts)
 
 
 def figure_text_sample(stem: str, dirs: list[Path], limit: int = 220) -> str:

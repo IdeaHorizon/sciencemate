@@ -127,7 +127,6 @@ _FALLS_TO_GENERIC: dict[str, str] = {
     "invalid_execution_target": "后端拼错了",
     "sandbox_target_mismatch": "后端与 worker 对不上：在跑的一轮不能原地换执行位置",
     "no_pause_pending": "没有待答的 pause：前端状态过期，重发即可",
-    "pause_conflict": "pause 版本冲突：前端状态过期，重发即可",
     "pause_not_addressable": "pause 不可寻址：前端状态过期，重发即可",
     # ── 知识 / 组织面：参数不合法（后端拼错了）──
     "invalid_entity": "后端拼错了",
@@ -151,6 +150,30 @@ _FALLS_TO_GENERIC: dict[str, str] = {
 #: `execution_failed` 一模一样，那就别加 —— 多一个条目只是多一句同义的话，
 #: 不会让任何人多做对一件事。
 _COPY: dict[str, _Copy] = {
+    "completion_not_suspended": _Copy(
+        title={"zh": "该运行暂时无法继续", "en": "This run cannot continue yet"},
+        body={"zh": "该运行已恢复，或原运行时尚未准备好接续。没有重派任务。",
+              "en": "The run has already resumed, or its original runtime is not ready. No task was redispatched."},
+        recovery={"zh": "刷新状态并核对原运行；运行时离线时先恢复它。",
+                  "en": "Refresh and inspect the original run. Restore its runtime if it is offline."},
+        retryable=False,
+    ),
+    "approval_conflict": _Copy(
+        title={"zh": "这次授权已失效", "en": "This approval is no longer current"},
+        body={"zh": "操作、执行环境或审批呈递已改变，旧答复未被用于执行。",
+              "en": "The operation, execution context or offer changed. The old answer was not used to execute it."},
+        recovery={"zh": "刷新并核对当前操作，再回答当前审批卡。",
+                  "en": "Refresh, inspect the current operation and answer its current card."},
+        retryable=False,
+    ),
+    "approval_expired": _Copy(
+        title={"zh": "授权已过期", "en": "Approval expired"},
+        body={"zh": "这次授权超过有效期，操作尚未执行。",
+              "en": "The approval expired before the operation was executed."},
+        recovery={"zh": "核对重新呈递的操作后再批准。",
+                  "en": "Inspect the renewed operation before approving it."},
+        retryable=False,
+    ),
     "unconfirmed_tool_outcome": _Copy(
         title={"zh": "先核对中断的动作", "en": "Reconcile the interrupted action"},
         body={"zh": "断点保存了工具调用，但没有确认结果；该动作可能已经执行。自动续跑已停止。",
@@ -532,6 +555,20 @@ _COPY: dict[str, _Copy] = {
                 "Include the reference number under Technical details when you report it."
             ),
         },
+    ),
+    "pause_conflict": _Copy(
+        title={"zh": "待回答的问题已更新", "en": "The pending question changed"},
+        body={
+            "zh": "这次答复没有应用到新问题，原任务仍在等待你的选择。",
+            "en": ("This answer was not applied to the new question; "
+                   "the original task is still waiting."),
+        },
+        recovery={
+            "zh": "查看当前问题后重新选择；若问题无法刷新，请附上技术细节中的参考编号反馈。",
+            "en": ("Review the current question before choosing. If it cannot be refreshed, "
+                   "report the reference under Technical details."),
+        },
+        retryable=False,
     ),
     "pause_pending": _Copy(
         # 这条不是故障 —— 它是**守卫成功了**：run 正停在一个决策点上等人，

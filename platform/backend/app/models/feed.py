@@ -236,6 +236,25 @@ class FeedItem(Base):
     )
 
 
+class FeedSaveFolder(Base):
+    """A user's named save location; NULL on an engagement is the default folder."""
+
+    __tablename__ = "feed_save_folders"
+
+    id: Mapped[str] = mapped_column(
+        Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid4())
+    )
+    user_id: Mapped[str] = mapped_column(
+        Uuid(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_feed_save_folders_user_name"),
+    )
+
+
 class FeedEngagement(Base):
     """用户对一条内容做过的一个动作。
 
@@ -257,6 +276,11 @@ class FeedEngagement(Base):
         nullable=False,
         index=True,
     )
+    # The location belongs to this user's SAVE, never to the shared FeedItem.
+    # Existing saves stay in the default location without rewriting their dates.
+    folder_id: Mapped[str | None] = mapped_column(
+        Uuid(as_uuid=False), ForeignKey("feed_save_folders.id", ondelete="SET NULL"), nullable=True
+    )
     action: Mapped[str] = mapped_column(String(20), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), server_default=func.now()
@@ -267,6 +291,7 @@ class FeedEngagement(Base):
         # 次数放大，而它要回答的是"这条露过面没有"。
         UniqueConstraint("user_id", "item_id", "action", name="uq_feed_engagement_once"),
         Index("ix_feed_engagements_user_action", "user_id", "action"),
+        Index("ix_feed_engagements_user_folder", "user_id", "folder_id"),
     )
 
 

@@ -229,6 +229,7 @@ def _v3_nonce_intent(tmp_path):
 
 @pytest.mark.parametrize('standalone', [False, True])
 def test_v3_nonce_recovers_lost_ack_into_existing_ledger_without_legacy_route(tmp_path, monkeypatch, standalone):
+    from core.tasks import TaskList
     from nodes.experiment.tools import ledger
     if standalone:
         import sys
@@ -240,10 +241,17 @@ def test_v3_nonce_recovers_lost_ack_into_existing_ledger_without_legacy_route(tm
             if isinstance(module, types.ModuleType):
                 monkeypatch.setitem(sys.modules, 'tools.' + name, module)
     state, intent = _v3_nonce_intent(tmp_path)
+    state.project_root = tmp_path / 'project'
     assert recovery.dangling_external_submission_intents(state)[0]['submission_nonce'] == NONCE
     calls = _ssh(monkeypatch)
     result = recovery.reconcile_external_submission(state, NONCE, query_runner=_no_local)
     assert result['status'] == 'success', result
+    assert result['normal_workflow'] == {
+        'status': 'success', 'authority': 'run_ledger',
+        'workflow_artifact_id': None, 'task_id': None,
+    }
+    assert not state.list_artifacts('external_job_workflow')
+    assert not TaskList(state.project_root / 'tasks').list_all()
     book = ledger.open_ledger(state)
     assert ledger.project_jobs(book.records())[NONCE]['external_id'] == '42'
     assert len([row for row in book.records() if row['kind'] == 'job_reconciled']) == 1
@@ -254,6 +262,38 @@ def test_v3_nonce_recovers_lost_ack_into_existing_ledger_without_legacy_route(tm
     assert len(calls) == count
     assert len([row for row in book.records() if row['kind'] == 'job_reconciled']) == 1
     assert all(argv[0] not in {'sbatch', 'scancel'} for target, argv, timeout in calls)
+
+
+def test_v3_recovery_retries_failed_binding_without_creating_legacy_handoff(tmp_path, monkeypatch):
+    from core.tasks import TaskList
+    from nodes.experiment.tools import ledger
+
+    state, _intent_value = _v3_nonce_intent(tmp_path)
+    state.project_root = tmp_path / 'project'
+    calls = _ssh(monkeypatch)
+    append = ledger.Ledger.append
+
+    def lose_binding(owner, kind, **fields):
+        if kind == 'job_reconciled':
+            raise OSError('injected authoritative binding failure')
+        return append(owner, kind, **fields)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger.Ledger, 'append', lose_binding)
+        pending = recovery.reconcile_external_submission(state, NONCE, query_runner=_no_local)
+    assert pending['status'] == 'integration_pending'
+    assert pending['route_projection']['reason'] == 'run_ledger_identity_projection_failed'
+    assert pending['do_not_resubmit'] is True
+    assert ledger.project_jobs(ledger.open_ledger(state).records())[NONCE]['external_id'] is None
+    count = len(calls)
+    recovered = recovery.reconcile_external_submission(state, NONCE, query_runner=_no_local)
+    assert recovered['status'] == 'success' and recovered['already_reconciled'] is True
+    assert len(calls) == count
+    rows = ledger.open_ledger(state).records()
+    assert len([row for row in rows if row['kind'] == 'job_reconciled']) == 1
+    assert ledger.project_jobs(rows)[NONCE]['external_id'] == '42'
+    assert not state.list_artifacts('external_job_workflow')
+    assert not TaskList(state.project_root / 'tasks').list_all()
 
 
 @pytest.mark.parametrize('damage', ['target', 'owner', 'bound_job'])

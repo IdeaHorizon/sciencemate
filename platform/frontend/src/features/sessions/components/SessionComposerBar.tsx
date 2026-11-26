@@ -25,7 +25,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Bot, Check, GitBranch, Loader2, Paperclip, Server, Zap } from "lucide-react";
+import { Bot, Check, GitBranch, Loader2, Package, Paperclip, Server, Zap } from "lucide-react";
 
 import { pushError } from "@/stores/notification";
 import { useT, type Phrase } from "@/shared/i18n";
@@ -162,6 +162,8 @@ export function SessionComposerBar({
   branch,
   unpublishedCount,
   onOpenChanges,
+  onOpenOutputs,
+  outputsOpen = false,
   onAddFile,
   addingFile,
   canAddFile,
@@ -185,6 +187,8 @@ export function SessionComposerBar({
   branch: string | null;
   unpublishedCount: number;
   onOpenChanges?: () => void;
+  onOpenOutputs?: () => void;
+  outputsOpen?: boolean;
   onAddFile?: (file: File) => void;
   addingFile?: boolean;
   canAddFile: boolean;
@@ -369,6 +373,12 @@ export function SessionComposerBar({
           {unpublishedCount > 0 && <em className="composer-chip-badge">{unpublishedCount}</em>}
         </button>
       )}
+
+      {onOpenOutputs && <button type="button" className={`composer-chip composer-chip--outputs${outputsOpen ? " is-on" : ""}`}
+        aria-pressed={outputsOpen} onClick={() => { setOpenMenu(null); onOpenOutputs(); }}
+        title={t({ zh: "查看已定稿产物和其他成果", en: "View finalized outputs and other results" })}>
+        <Package size={13} />{t({ zh: "产物", en: "Outputs" })}
+      </button>}
 
       {/* 添加文件 —— 平台唯一的上传入口 */}
       {canAddFile && onAddFile && (

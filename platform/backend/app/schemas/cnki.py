@@ -17,10 +17,12 @@ class PairIn(StrictModel):
 class JobIn(StrictModel):
     query: str = Field(min_length=1, max_length=500)
     category: Literal["domain", "journal", "scholar", "project"] = "domain"
-    recurring: bool = False
+    recurring: Literal[False] = False  # Kept for older one-off search clients.
     limit: int | None = Field(default=None, ge=1)
     executor: Literal["server", "local"] = "server"
     document_kind: Literal["journal", "thesis", "conference", "book", "other"] | None = None
+    # All categories/query groups of one interactive search share one recovery.
+    search_id: str | None = Field(default=None, min_length=16, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
 
     @field_validator("query")
     @classmethod

@@ -8,8 +8,9 @@ import { waitForFeedSettingWrites } from "../lib/feed-setting-writes";
 import { Button, Empty, Skeleton } from "@/shared/ui";
 import { useFeedItems, useFeedToday, useRefreshFeedToday, useFeedSubscriptions, useFeedSubscriptionSearch, useFeedSubscriptionItems, useSaveFeedSubscriptions } from "../hooks/useFeed";
 import { useFeedTranslation } from "../hooks/useFeedTranslation";
+import { feedCardTranslation } from "../lib/feed-card-translation";
 import { feedTranslationReady } from "../lib/feed-translation-ready";
-import { feedProgressText } from "../lib/feed-progress-text";
+import { feedEmptyState } from "../lib/feed-progress-text";
 import { shouldPreloadFeedPage } from "../lib/feed-pagination";
 import { say, useLanguage, type Language } from "@/shared/i18n";
 import { fc } from "../lib/feed-copy";
@@ -23,6 +24,7 @@ import {
 import { FeedItemCard } from "./FeedItemCard";
 import { FeedMasonry } from "./FeedMasonry";
 import { FeedItemDialog } from "./FeedItemDialog";
+import { SavedFolderToolbar } from "./SavedFolderToolbar";
 import { InterestPicker } from "./InterestPicker";
 import { CurationSwitch } from "./CurationSwitch";
 import { ShareLinkForm } from "./ShareLinkForm";
@@ -244,7 +246,8 @@ export function FeedHome() {
     }
   };
 
-  const saved = useFeedItems({ saved: true, limit: 50 });
+  const [savedFolder, setSavedFolder] = useState("all");
+  const saved = useFeedItems({ saved: true, limit: 50, ...(savedFolder !== "all" ? { folder_id: savedFolder } : {}) });
 
   const data = useMemo(() => {
     const pages = today.data?.pages;
@@ -257,6 +260,7 @@ export function FeedHome() {
     });
     return { ...pages[0], feed };
   }, [today.data]);
+  const recommendations = useMemo(() => new Map(data?.feed.map((card) => [card.item.id, card])), [data?.feed]);
   const loadMoreRef = useRef<HTMLDivElement>(null);
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = today;
   const [translationRetry, setTranslationRetry] = useState(0);
@@ -357,16 +361,14 @@ export function FeedHome() {
     );
   }
 
-  // 从**当前**数据里找，不存副本 —— 收藏之后详情里的按钮要跟着变。
-  const allVisible = [
-    ...(data?.feed.map((c) => c.item) ?? []),
-    ...(saved.data ?? []),
-  ];
-  const detailItem = detailId ? allVisible.find((i) => i.id === detailId)
-    ?? (detailSnapshot?.item.id === detailId ? detailSnapshot.item : null) : null;
-  const detailReason = detailId
-    ? data?.feed.find((c) => c.item.id === detailId)?.reason ?? detailSnapshot?.reason
-    : undefined;
+  const translationFor = (item: FeedItem) => feedCardTranslation(
+    lang, item, recommendations.get(item.id)?.item, translations[item.id],
+  );
+  const recommendedDetail = detailId ? recommendations.get(detailId) : undefined;
+  const savedDetail = detailId ? saved.data?.find((item) => item.id === detailId) : undefined;
+  const detailItem = (pane === "saved" ? savedDetail ?? recommendedDetail?.item : recommendedDetail?.item ?? savedDetail)
+    ?? (detailId && detailSnapshot?.item.id === detailId ? detailSnapshot.item : null);
+  const detailReason = recommendedDetail?.reason ?? detailSnapshot?.reason;
 
   return (
     <div className="feed-home">
@@ -376,8 +378,7 @@ export function FeedHome() {
           item={detailItem}
           reason={detailReason}
           now={now}
-          titleZh={translations[detailItem.id]?.titleZh}
-          summaryZh={translations[detailItem.id]?.abstractZh}
+          {...translationFor(detailItem)}
           onClose={() => { setDetailId(null); setDetailSnapshot(null); }}
         />
       )}
@@ -387,7 +388,7 @@ export function FeedHome() {
           className={pane === "recommendations" ? "feed-tab feed-tab-on" : "feed-tab"}
           onClick={() => setPane("recommendations")}
         >
-          {fc("pane.today", lang)}
+          <Sparkles size={14} aria-hidden /> {fc("pane.today", lang)}
         </button>
         <button
           type="button"
@@ -413,7 +414,9 @@ export function FeedHome() {
       {pane === "saved" && (
         <section className="feed-section">
           <h2 className="feed-section-title">{fc("home.saved.title", lang)}</h2>
+          <SavedFolderToolbar selected={savedFolder} onSelect={setSavedFolder} />
           {saved.isLoading && <Skeleton height={200} />}
+          {saved.isError && <Empty title={say({ zh: "收藏加载失败", en: "Saved articles could not be loaded" }, lang)} action={<Button onClick={() => void saved.refetch()}>{say({ zh: "重试", en: "Retry" }, lang)}</Button>} />}
           {saved.data && saved.data.length === 0 && (
             <Empty title={fc("home.saved.empty", lang)} hint={fc("home.saved.empty_hint", lang)} />
           )}
@@ -422,8 +425,9 @@ export function FeedHome() {
               <FeedItemCard
                 key={item.id}
                 item={item}
+                {...translationFor(item)}
                 now={now}
-                onOpenDetail={() => setDetailId(item.id)}
+                onOpenDetail={() => { setDetailSnapshot({ item }); setDetailId(item.id); }}
               />
             ))}
           </div>
@@ -484,10 +488,7 @@ export function FeedHome() {
             {visibleFeed.length === 0 && (pendingTranslations > 0 || today.isPlaceholderData) ? (
               <Skeleton height={220} />
             ) : visibleFeed.length === 0 ? (
-              <Empty
-                title={data.refreshing ? fc("home.empty.refreshing_title", lang) : fc("home.empty.title", lang)}
-                hint={data.feed.length > 0 ? (say({ zh: "没有符合所选来源的内容，请调整上方的筛选。", en: "No items match the selected filters." }, lang)) : data.empty_reason || (data.progress ? feedProgressText(data.progress, lang) : fc("home.empty.hint", lang))}
-              />
+              <Empty {...feedEmptyState(data, recommendationSources, lang)} />
             ) : (
               viewMode === "grid" ? (
                 <FeedMasonry

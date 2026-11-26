@@ -99,6 +99,74 @@ def test_capture_scrubs_secrets_and_remembers_what_to_check(tmp_path):
     assert json.loads((out / rehearsal.MANIFEST).read_text(encoding="utf-8"))["kb_claims"] == {"p1": 3}
 
 
+def test_capture_matches_sqlite_uuid_ids_to_api_and_project_knowledge(tmp_path):
+    """SQLite stores hex UUIDs; API identities and real project homes use hyphens."""
+    from uuid import UUID
+
+    root = _fake_data_root(tmp_path)
+    project = UUID("592921c6-2f14-4716-9cad-f9b066be8e07")
+    session = UUID("81b69d10-0342-40c8-925c-f20cb621175e")
+    run = UUID("72a31ab2-9e6f-465a-b538-e6c149f6cf1e")
+    con = sqlite3.connect(root / "db.sqlite")
+    con.execute("update projects set id=?", (project.hex,))
+    con.execute("update sessions set session_id=?, project_id=?", (session.hex, project.hex))
+    con.execute("delete from runs where id='run_b'")
+    con.execute("update runs set id=?, session_id=?, project_id=?", (run.hex, session.hex, project.hex))
+    con.commit()
+    con.close()
+    (root / "harness-state/projects/p1").rename(root / "harness-state/projects" / str(project))
+    manifest = rehearsal.capture(root, tmp_path / "uuid-fixture", version="0.5.16")
+    assert manifest["projects"][0]["id"] == str(project)
+    assert manifest["sessions"][0]["id"] == str(session)
+    assert manifest["runs"][0]["id"] == str(run)
+    assert manifest["kb_claims"] == {str(project): 3}
+    # Capture is an observation, not an in-place database migration.
+    with sqlite3.connect(root / "db.sqlite") as con:
+        assert con.execute("select id from runs").fetchone()[0] == run.hex
+
+
+@pytest.mark.parametrize("old_run_still_present", [True, False])
+def test_upgrade_check_accepts_uuid_spelling_but_rejects_a_missing_run(
+    tmp_path, monkeypatch, old_run_still_present
+):
+    from uuid import UUID
+
+    old = UUID("72a31ab2-9e6f-465a-b538-e6c149f6cf1e")
+    session = UUID("81b69d10-0342-40c8-925c-f20cb621175e")
+    fixture = tmp_path / "legacy-hex-fixture"
+    fixture.mkdir()
+    (fixture / rehearsal.MANIFEST).write_text(json.dumps({
+        "previous_version": "0.5.16", "captured_at": "2026-11-26T00:00:00Z",
+        "sessions": [{"id": str(session), "project_id": "p1"}],
+        "runs": [{"id": old.hex, "session_id": session.hex, "project_id": "p1"}],
+        "kb_claims": {"p1": 1},
+    }))
+
+    class Failed(RuntimeError):
+        pass
+
+    def request(method, url, **kwargs):
+        if "/runs?" in url:
+            return 200, json.dumps({"items": [{"id": str(old)}] if old_run_still_present else []})
+        if "/environment" in url:
+            return 200, json.dumps({"warnings": [], "capabilities": {"fixture": True}})
+        if "/kb/claims?" in url:
+            return 200, json.dumps([{"id": "fixture-claim"}])
+        return 200, json.dumps({"id": "controlled-fixture-model"})
+
+    smoke = types.SimpleNamespace(
+        start_fake_model=lambda: (types.SimpleNamespace(shutdown=lambda: None), "http://fixture.invalid"),
+        wait_until_ready=lambda *args: None, request=request,
+        expect=lambda status, text, allowed, reason: json.loads(text),
+        wait_for_reply=lambda *args: "unit fixture reply",
+        _FakeModel=types.SimpleNamespace(calls=["unit fixture invocation"]), Failed=Failed,
+    )
+    monkeypatch.setattr(rehearsal, "_smoke", lambda: smoke)
+    monkeypatch.setattr(rehearsal, "permission_diffs", lambda root: ([], 7))
+    outcome = rehearsal.check("http://fixture.invalid", fixture, tmp_path, receipt=None, installer=None)
+    assert outcome == (0 if old_run_still_present else 1)
+
+
 def test_capture_refuses_a_fixture_that_still_carries_a_key(tmp_path):
     root = _fake_data_root(tmp_path)
     (root / "user").mkdir()

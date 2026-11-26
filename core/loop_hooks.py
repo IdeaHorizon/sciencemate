@@ -76,6 +76,9 @@ class LoopHook:
     # A current view rebuilt on each on_turn_start evaluation. None means an
     # event/delta: it belongs to history and must not replace earlier events.
     context_slot: str | None = None
+    # Explicitly selected by harness.completion_provider. Unlike observation
+    # hooks, an unavailable or failing admission provider must fail closed.
+    on_completion_admission: Callable[[Any, Any], Any] | None = None
 
 
 _HOOKS: dict[str, LoopHook] = {}

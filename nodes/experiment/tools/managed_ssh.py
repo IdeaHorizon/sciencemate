@@ -468,7 +468,6 @@ async def status(
                     category="取消真实外部作业",
                     preview=approval,
                 )
-            dangerous_commands.consume_confirmation(state, approval)
         try:
             if not _bind(state, intent, result):
                 return _unresolved(intent)
@@ -747,7 +746,6 @@ async def _submit_intent(
                     "The account's usual filesystem and memory permissions apply."
                 ),
             )
-        dangerous_commands.consume_confirmation(state, approval)
     try:
         context = capture_context(
             state,

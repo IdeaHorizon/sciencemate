@@ -154,6 +154,7 @@ _WAITING_LABEL: dict[str, dict[str, str]] = {
     "human": {"zh": "等待你回答", "en": "Needs your answer"},
     "permission": {"zh": "等待你授权", "en": "Needs your approval"},
     "compute": {"zh": "等待算力", "en": "Waiting for compute"},
+    "completion": {"zh": "交付尚未核实，等待继续处理", "en": "Delivery needs verification before finishing"},
 }
 
 
@@ -208,6 +209,8 @@ def _waiting_on(observed_status: str, *,
             else "human"
         )
         return {"kind": kind}
+    if observed_status == RunStatus.SUSPENDED.value:
+        return {"kind": "completion"}
     if observed_status == RunStatus.WAITING_COMPUTE.value:
         return {"kind": "compute"}
     return None
@@ -285,6 +288,7 @@ def build_session_view(
     run: Run | None,
     *,
     pause: dict[str, Any] | None,
+    completion_runs: list[Run] | None = None,
     readonly_reason: str | Mapping[str, str] | None = None,
     readonly_until: str | None = None,
     **kwargs: Any,
@@ -296,6 +300,14 @@ def build_session_view(
     渲染出可点的卡片，因此在构造上不可能。
     """
     view = build(run, **kwargs)
+    view["completions"] = [
+        {"runId": item.id, "notice": (receipt.get("decision") or {}).get("notice"),
+         "canResume": bool(kwargs.get("may_drive", True) and kwargs.get("live_runtime")
+                           and receipt.get("runtimeRunId") and receipt.get("resumable")),
+         "recoverable": bool(receipt.get("recoverable"))}
+        for item in completion_runs or []
+        if isinstance((receipt := (item.summary or {}).get("completion")), dict)
+    ]
     view["answer"] = answer_affordance(
         phase=view["phase"],
         waiting=view["waitingOn"],

@@ -819,8 +819,10 @@ class State:
         self.transcript_path.parent.mkdir(parents=True, exist_ok=True)
         from core.secrets import redact
         record = redact(record)
+        from core.workspace_transcript import encode_workspace_record
+        line = encode_workspace_record(record, self.transcript_path)
         with self.transcript_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            f.write(line.decode("utf-8"))
 
     # ── Summary ─────────────────────────────────────────────────────────────
     def write_summary(self, summary: dict) -> None:

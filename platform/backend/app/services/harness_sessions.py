@@ -140,6 +140,20 @@ class HarnessAnswerSupersededError(HarnessSessionError):
         self.live = live
 
 
+def current_pause_result(details: dict | None) -> dict | None:
+    """Validate one runtime snapshot before replacing an addressable pause."""
+    if not isinstance(details, dict):
+        return None
+    pause = details.get("current_pause_event")
+    pause_id = str(details.get("current_pause_id") or "").strip()
+    if (not isinstance(pause, dict) or not pause_id
+            or pause_id != str(pause.get("pending_tool_call_id") or "").strip()
+            or not str(pause.get("question") or "").strip()):
+        return None
+    return {"status": "paused", "pause_id": pause_id, "pause_event": pause,
+            "pause_pending_path": details.get("current_pause_pending_path")}
+
+
 class HarnessSessionProcessError(HarnessSessionError):
     """The kept-alive Harness child exited before completing an RPC."""
 
@@ -2002,6 +2016,16 @@ class _ProjectHarnessSession:
             "occupancy": str(terminal.get("occupancy") or ""),
         }
 
+    async def resume_completion(self, run_id: str) -> None:
+        status = await _probe_worker_status(self)
+        if not status or not status.get("completion_resume"):
+            raise HarnessSessionError("This runtime does not support completion recovery")
+        await self._rpc_locked(
+            {"op": "resume_completion", "run_id": run_id,
+             "request_id": f"completion-{uuid4().hex}"},
+            terminal_types={"accepted"}, on_progress=_noop_callback,
+            on_protocol_event=_noop_callback, timeout_seconds=10.0, conversation=False)
+
     async def sync_scope(self, *, include_binding: bool = True) -> list[str]:
         """把这个会话**当下**的档位推给 worker，返回它施加之后自报的档位。
 
@@ -2103,7 +2127,12 @@ class _ProjectHarnessSession:
                 on_protocol_event=on_protocol_event,
                 timeout_seconds=None,
             )
-        except BaseException:
+        except BaseException as exc:
+            current = (current_pause_result(getattr(exc, "details", None))
+                       if getattr(exc, "code", "") == "pause_conflict" else None)
+            if current is not None:
+                await self._apply_result_pause(current)
+                raise
             self.pause_id, self.offer_id = consumed
             self.paused = True
             raise
@@ -2437,6 +2466,8 @@ class HarnessSessionManager:
         fingerprint = _backend_fingerprint(role_bindings)
         platform_context_hash = _snapshot_hash(platform_context_snapshot)
         async with self._registry_lock:
+            if str(project_id) in getattr(self, "_retiring_projects", set()):
+                raise RuntimeError("Project deletion is in progress; no worker may be started")
             existing = self._sessions.get(key)
             if existing is None:
                 # 注册表空缺 ≠ 没有 worker：上一代后端放手的那个可能还在 accept
@@ -2806,6 +2837,12 @@ class HarnessSessionManager:
             kind=kind, text=text, author=author, message_id=message_id
         )
 
+    async def resume_completion(self, *, project_id: str, session_id: str, run_id: str) -> None:
+        session = self._sessions.get(self._key(project_id, session_id))
+        if session is None or not session.alive:
+            raise NothingRunning("运行时已离线，需先恢复原运行。", en="Restore the original runtime before continuing.")
+        await session.resume_completion(run_id)
+
     async def broadcast_autonomy(
         self, project_id: str, autonomy: object, *, db: AsyncSession
     ) -> list[str]:
@@ -3111,6 +3148,27 @@ class HarnessSessionManager:
     def clear_cancelled(self, run_id: str) -> None:
         self._cancelled_run_ids.discard(run_id)
 
+    async def terminate_project(self, project_id: str, session_ids: list[str]) -> None:
+        """Fence new starts, reconnect owned workers, and verify their exit."""
+        async with self._registry_lock:
+            if not hasattr(self, "_retiring_projects"):
+                self._retiring_projects = set()
+            self._retiring_projects.add(str(project_id))
+            for session_id in session_ids:
+                key = self._key(project_id, session_id)
+                if key not in self._sessions:
+                    await self._adopt_locked(project_id, session_id, owner_user_id="")
+            for key, session in list(self._sessions.items()):
+                if str(session.project_id) != str(project_id):
+                    continue
+                try:
+                    await asyncio.wait_for(session.terminate(), timeout=15)
+                except TimeoutError:
+                    await session._kill()
+                if session.worker.alive:
+                    raise RuntimeError(f"Project worker {session.session_id} did not terminate")
+                self._sessions.pop(key, None)
+
     async def terminate_user(self, user_id: str) -> list[AppRunBinding]:
         """Terminate a user's processes and return pauses made stale by that action."""
         stale_bindings: list[AppRunBinding] = []
@@ -3235,6 +3293,7 @@ async def probe_runtime_environment(*, self_heal: bool = False) -> str | None:
             cwd=str(root),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
+            **harness_module("shared.lib.process_control").background_spawn_kwargs(),
         )
         try:
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=90)
@@ -3266,6 +3325,7 @@ async def probe_runtime_environment(*, self_heal: bool = False) -> str | None:
         cwd=str(root),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        **harness_module("shared.lib.process_control").background_spawn_kwargs(),
     )
     try:
         output, _ = await asyncio.wait_for(heal.communicate(), timeout=600)

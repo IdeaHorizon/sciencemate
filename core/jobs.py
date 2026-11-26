@@ -565,6 +565,14 @@ def render_for_orchestrator(state: Any) -> str:
         lines.append(
             f"  · {j.purpose or j.job_id} —— {j.resources or '资源未声明'}；"
             f"已跑 {j.elapsed_s/3600:.1f}h / 预计还要 {eta}{over}{alive_s}")
+        handles = [f"job_id={j.job_id}"]
+        if j.pid is not None:
+            handles.append(f"pid={j.pid}")
+        if j.scheduler_job_id:
+            handles.append(f"scheduler_job_id={j.scheduler_job_id}")
+        if j.run_id:
+            handles.append(f"run_id={j.run_id}")
+        lines.append("    已登记标识：" + "; ".join(handles))
         recon = gpu_reconciliation(j, by_pid)
         if recon:
             lines.append(f"    {recon}")

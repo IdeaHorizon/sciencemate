@@ -7,7 +7,6 @@ import asyncio
 import time
 import re
 import ast
-import subprocess
 import hashlib
 import difflib
 import sys
@@ -17,6 +16,8 @@ from typing import Any
 from core.llm import LLMHTTPError, LLMMessage
 from nodes.data.model_client import data_model_client, reasoning_options
 from core.state import State
+from .managed_commands import run_data_command
+from shared.lib.shell import bash_shell
 from core.tool_registry import ToolDefinition, execute, register_tool
 from nodes.data.planning.schemas import (
     blocked_placeholder_markers,
@@ -118,7 +119,7 @@ def _runtime_dependencies_for_artifact(
     return result
 
 
-def _validate_generated_artifact_format(path: Path, artifact_format: str) -> str | None:
+async def _validate_generated_artifact_format(path: Path, artifact_format: str, *, state: State) -> str | None:
     """Validate the declared text format after the generic writer has produced it."""
     normalized = str(artifact_format or "").strip().lower()
     suffix = path.suffix.lower()
@@ -148,8 +149,8 @@ def _validate_generated_artifact_format(path: Path, artifact_format: str) -> str
         return _validate_fortran_namelist(content)
     if "shell" in normalized or "bash" in normalized or suffix in {".sh", ".bash"}:
         try:
-            checked = subprocess.run(
-                ["bash", "-n", str(path)], capture_output=True, text=True, check=False
+            checked = await run_data_command(state,
+                [bash_shell(), "-n", str(path)], capture_output=True, text=True, check=False
             )
         except OSError:
             return "bash is unavailable for shell syntax validation"
@@ -438,7 +439,7 @@ async def execute_preprocessing_python(
         source_file = (input_files or {}).get(script_asset, "")
         if not source_file or not Path(source_file).is_file():
             return {"status": "error", "error": f"Script asset {script_asset!r} is not bound to an existing input file."}
-        validation_error = _validate_generated_artifact_format(Path(source_file), "Python")
+        validation_error = await _validate_generated_artifact_format(Path(source_file), "Python", state=state)
         if validation_error:
             return {"status": "needs_revision", "error": validation_error,
                     "validation_diagnostics": [{
@@ -1188,7 +1189,7 @@ async def generate_preprocessing_artifact(
             diagnostics.append(_artifact_validation_diagnostic(str(output_id), error, artifact_spec))
             continue
         measured = {}
-        validation_error = _validate_generated_artifact_format(path, artifact_format)
+        validation_error = await _validate_generated_artifact_format(path, artifact_format, state=state)
         if validation_error is None and configuration_schema:
             try:
                 measured = inspect_mpas_configuration(path.read_text(), path.name, configuration_schema)

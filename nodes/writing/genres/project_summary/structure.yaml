@@ -1,0 +1,31 @@
+id: project_summary
+display_name: 项目总结
+document_kind: project_summary
+craft: project_summary
+language: {body: zh, figures: en, title: zh}
+renderer: zh_article
+variants:
+  work_packages:
+    description: 按项目工作与成果逐项回顾
+    parts: [introduction, results, conclusion]
+required_parts: [introduction, results, conclusion]
+front_matter: [title, authors_optional]
+back_matter: [references]
+parts:
+  introduction:
+    heading: 项目目标与范围
+    moves: [交代读者需要回顾的项目范围与明确要求, 概括已完成工作的组织方式]
+    chars: [400, 1000]
+  results:
+    heading: 工作与成果回顾
+    moves: [按任务或工作包逐项呈现成果, 每项对应已有证据与边界, 独立成果不因论文聚焦而被省略]
+    chars: [1000, 5000]
+  conclusion:
+    heading: 总结与后续
+    moves: [概括共同认识并保留各项结论差异, 区分已完成成果与后续建议]
+    chars: [300, 1000]
+  appendix:
+    heading: 附录
+    moves: [保留逐项细节及可追溯证据]
+    chars: [0, 4000]
+references: {min_count: 0, style: gb7714-2015, must_be_cited: true, must_resolve: true}

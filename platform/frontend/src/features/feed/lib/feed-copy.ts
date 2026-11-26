@@ -19,6 +19,10 @@ import { say, type Language, type Phrase } from "../../../shared/i18n/language.t
  * 定义，两张表不是彼此的抄件。
  */
 export const FEED_COPY = {
+  "curation.no_projects": { zh: "本次没有读到进行中的项目，未生成项目推断。你手动选择的学科仍然保留。", en: "No active projects were found this time, so no project inference was generated. Your selected fields are kept." },
+  "curation.remote_unavailable": { zh: "远程服务器暂不可达，暂不能确认完整项目列表；已有分析结果保留。", en: "A remote server is unavailable, so the complete project list cannot be confirmed. Previous analysis is kept." },
+  "curation.projects_pending": { zh: "正在读取项目或等待按当前项目重新分析；已有结果暂时保留。", en: "Reading projects or waiting to analyze the current projects. Previous results are kept for now." },
+  "curation.project_counts": { zh: "当前可见项目：本地 {local} 个，远程 {remote} 个", en: "Visible projects: {local} local, {remote} remote" },
   // —— 卡片上的类型徽章 ——
   "kind.paper": { zh: "论文", en: "Paper" },
   "kind.release": { zh: "发布", en: "Release" },

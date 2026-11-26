@@ -150,6 +150,11 @@ def event_blobs() -> ModuleType:
     return _contract_module("event_blobs", "事件日志大 payload 的外置引用格式")
 
 
+def workspace_transcript_module() -> ModuleType:
+    """Workspace JSONL budget and detail codec from the selected runtime."""
+    return _contract_module("workspace_transcript", "工作区转录字节预算与分页明细格式")
+
+
 def domain_registry_module() -> ModuleType:
     """域词表（harness 定义，App Server 只读着用）。
 

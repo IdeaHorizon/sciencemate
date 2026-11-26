@@ -22,6 +22,9 @@ from core.loop_hooks_builtin import ORIENTATION_PREFIX
 
 class _State:
     def __init__(self, worktree=None):
+        import tempfile
+        self._storage = tempfile.TemporaryDirectory()
+        self.root = Path(self._storage.name)
         self.hook_state: dict = {}
         self.tokens_used = 0
         self.project_worktree = worktree
@@ -109,19 +112,12 @@ def test_a_caller_quoting_orientation_text_is_not_replaced(tmp_path: Path) -> No
 
 
 # ── P6 ───────────────────────────────────────────────────────────────────
-def test_rotation_advised_when_compression_cannot_win(tmp_path: Path) -> None:
-    """窗口小到压完仍超 90% → 必须亮牌，且只亮一次。"""
+def test_irreducible_context_is_reported_without_model_driven_session_rotation(tmp_path: Path) -> None:
     state = _State()
-    msgs = _msgs(n=12)
-    out = _compress(state, msgs, window=1_000)   # 压完必然还是远超 1k
-    advisory = [m for m in out if "压缩已到极限" in (m.content or "")]
-    assert len(advisory) == 1
-    assert "publish" in advisory[0].content
-    assert ("session_rotation_advised" in [e for e, _ in state.transcript])
-
-    out2 = _compress(state, out, window=1_000)
-    assert sum(1 for m in out2 if "压缩已到极限" in (m.content or "")) == 1, \
-        "同一 run 只建议一次，不刷屏"
+    out = _compress(state, _msgs(n=12), window=1_000)
+    assert state.hook_state["_context_compaction"]["status"] == "irreducible"
+    assert not any("压缩已到极限" in (m.content or "") for m in out)
+    assert "session_rotation_advised" not in [e for e, _ in state.transcript]
 
 
 def test_no_rotation_noise_when_compression_succeeds(tmp_path: Path) -> None:

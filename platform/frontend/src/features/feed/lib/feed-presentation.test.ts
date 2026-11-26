@@ -173,7 +173,10 @@ test("资讯卡保留通往研究的三个出口", () => {
     new URL("../components/FeedItemCard.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /action: "save"/);
+  assert.match(source, /<FeedSaveAction\b/);
+  const saving = readFileSync(new URL("../components/FeedSaveAction.tsx", import.meta.url), "utf8");
+  assert.match(saving, /useSaveFeedItem\(\)/);
+  assert.match(saving, /save\.mutateAsync\(/);
   assert.match(source, /action: "dismiss"/);
   assert.match(source, /<HandoffAction\b/);
   // 外链一律新窗口打开，且必须带 noopener —— 少了它，被打开的页面能通过
@@ -300,6 +303,25 @@ test("自动挖掘开关不许把「没配模型」说成「已开启」", async
   assert.match(first.text, /正在分析你的项目/);
 
   assert.match(curationStatusLine(base, "zh").text, /已关闭/);
+});
+
+test("project inference distinguishes an empty list, an unavailable server and pending reanalysis", async () => {
+  const { curationStatusLine } = await import("./curation-presentation.ts");
+  const previous = {
+    enabled: true, available: true, model_label: "x · y", last_error: null,
+    last_run_at: "2026-08-22T00:00:00Z", inferred_domains: ["physics"],
+    inferred_domain_labels: ["Physics"], inferred_queries: ["old project"],
+  };
+  for (const lang of ["zh", "en"] as const) {
+    for (const project_status of ["no_projects", "unavailable", "pending"] as const) {
+      const line = curationStatusLine({ ...previous, project_status }, lang);
+      assert.equal(line.tone, "idle");
+      assert.doesNotMatch(line.text, /Physics/);
+    }
+  }
+  assert.match(curationStatusLine({ ...previous, project_status: "no_projects" }, "zh").text, /没有读到/);
+  assert.match(curationStatusLine({ ...previous, project_status: "unavailable" }, "zh").text, /暂不可达/);
+  assert.match(curationStatusLine({ ...previous, project_status: "current" }, "zh").text, /Physics/);
 });
 
 /**
@@ -457,9 +479,9 @@ test("详情窗给完整摘要，且能用键盘关掉", () => {
     "utf8",
   );
   const code = stripComments(dialog);
-  // 摘要直接渲染，不经 truncate。有译文时显示译文（`summaryZh || item.summary`）：
+  // 摘要直接渲染，不经 truncate。有译文时显示译文（`displayedSummaryZh || item.summary`）：
   // 与学术搜索结果卡片同一处理，但**详情里必须完整**，所以仍然不许出现 truncate。
-  assert.match(code, /\{summaryZh \|\| item\.summary\}/);
+  assert.match(code, /\{displayedSummaryZh \|\| item\.summary\}/);
   assert.ok(!/truncate\(item\.summary/.test(code), "详情里的摘要被截断了");
   // Esc 能关 —— 只能鼠标点叉的浮层，键盘用户出不去。
   assert.match(code, /Escape/);

@@ -6,12 +6,12 @@ import json
 import math
 import re
 import shlex
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from core.state import State
+from .managed_commands import run_data_command
 from nodes.data.planning.store import witness_plan_approval
 from nodes.data.progress import emit_progress
 
@@ -718,7 +718,7 @@ def _extract_pdf_with_pypdf(path: Path, errors: list[str]) -> str:
     return ""
 
 
-def _read_reference_document(path: Path, state: State | None = None) -> tuple[str, dict[str, Any] | None]:
+async def _read_reference_document(path: Path, state: State) -> tuple[str, dict[str, Any] | None]:
     if path.suffix.lower() in _REFERENCE_TEXT_SUFFIXES:
         return path.read_text(encoding="utf-8", errors="replace")[:2_000_000], None
     if path.suffix.lower() == ".pdf":
@@ -737,7 +737,7 @@ def _read_reference_document(path: Path, state: State | None = None) -> tuple[st
         except ImportError as exc:
             errors.append(f"PyPDF2: {type(exc).__name__}: {exc}")
         try:
-            completed = subprocess.run(
+            completed = await run_data_command(state,
                 ["pdftotext", "-layout", str(path), "-"],
                 check=False,
                 capture_output=True,
@@ -1006,7 +1006,7 @@ async def recover_atomic_structure(
         if path.is_file() and recognized:
             inspected.append(_inspect_structure_file(path, expected))
         elif path.is_file():
-            text, requirement = _read_reference_document(path, state=state)
+            text, requirement = await _read_reference_document(path, state=state)
             if text:
                 document_evidence.append({"source_type": "local_reference_document", "path": str(path), "text": text})
             if requirement:

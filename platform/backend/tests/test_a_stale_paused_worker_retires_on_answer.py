@@ -7,8 +7,7 @@ worker 09-08 15:33 起，之后部署了三次，它一次都没跟上：新一�
 人一直点卡、它就一直活着跑旧代码。修复上线了，对它不生效。
 
 换代不是新机制：respawn 已经对停靠 worker 成立（pause 由 stale-binding 钩子标成
-可恢复，checkpoint 接续）。这里只是让答复那条路也走它，并把人的那一下点击化成一句
-话交给新 worker（它的流程账本记着这个决定点，会重新呈递；连续档下当场自动放行）。
+可恢复，checkpoint 接续）。这里只是让答复那条路也走它，旧点击必须返回 409；恢复后核对新卡，不把旧选择降为一句文本授权。
 """
 from __future__ import annotations
 
@@ -18,7 +17,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.api.v1.chat import ChoiceAnswer, _choice_as_words
 from app.services.harness_sessions import AppRunBinding, HarnessSessionManager
 
 _BACKEND = pathlib.Path(__file__).resolve().parents[1]
@@ -80,22 +78,6 @@ async def test_retiring_terminates_the_worker_and_marks_its_pause_recoverable() 
     assert manager._sessions == {}
 
 
-@pytest.mark.asyncio
-async def test_the_click_becomes_the_label_the_card_showed() -> None:
-    decision = SimpleNamespace(choices=[
-        {"choiceId": "proceed", "label": "PROCEED to next stage"},
-        {"choiceId": "abort", "label": "ABORT pipeline"},
-    ])
-
-    class _DB:
-        async def scalar(self, _stmt):
-            return decision
-
-    answer = ChoiceAnswer(kind="choice", offer_id="a:b:c", choice_id="proceed", note="继续不要停")
-    assert await _choice_as_words(_DB(), "run-x", answer) == "PROCEED to next stage 继续不要停"
-    bare = ChoiceAnswer(kind="choice", offer_id="a:b:c", choice_id="revise", note="")
-    assert await _choice_as_words(_DB(), "run-x", bare) == "revise", "找不到 label 就用 id，不编"
-
 
 def test_the_chat_entry_retires_before_it_gates_on_a_live_pause() -> None:
     """AST：`retire_paused_worker` 的调用必须排在 `no_pause_to_answer` 那道闸之前。"""
@@ -108,3 +90,5 @@ def test_the_chat_entry_retires_before_it_gates_on_a_live_pause() -> None:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     }
     assert {"paused_worker_is_stale", "retire_paused_worker"} <= calls
+    assert "_choice_as_words" not in source
+    assert "会话执行器已升级" in source

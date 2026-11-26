@@ -473,6 +473,29 @@ def _resolve_task_identity(state, node_type: str,
                 "候选：" + "、".join(
                     f"{r.digest[:12]}…(rev{r.revision})" for r in revisions[-4:])),
         }
+    # The digest identifies an immutable contract, including its recipient.
+    # Unspecified targets belong to legacy contracts; do not invent one when
+    # reading them. Aliases are compared without rewriting signed content.
+    if chosen.target_node and not same_node(chosen.target_node, node_type):
+        return None, {
+            "status": "error",
+            "error_code": "task_contract_target_mismatch",
+            "task_instance_uuid": chosen.task_instance_uuid,
+            "task_contract_digest": chosen.digest,
+            "task_contract_revision": chosen.revision,
+            "contract_target_node": chosen.target_node,
+            "node_type": node_type,
+            "child_started": False,
+            "error": (
+                f"合同目标为 {chosen.target_node!r}，本次却派给 {node_type!r}。"
+                "未登记委派或启动 child。若承办节点选错，改用合同指定节点；"
+                "若合同目标写错，使用 task(action='contract', task_id='<原任务>', "
+                f"target_node={node_type!r}, parent_revision_digest={chosen.digest!r}, "
+                "reason='纠正承办节点', ...) 创建明确的新 revision，保留原任务、约束和预注册绑定，"
+                "再用新摘要派发。已有运行和冻结证据保持原身份；交接既有产物供核验，"
+                "不要为修正合同重做已完成计算。"
+            ),
+        }
     return {
         "task_instance_uuid": chosen.task_instance_uuid,
         "task_contract_revision": chosen.revision,
@@ -1291,7 +1314,6 @@ async def _run_node_tool(
     forward_artifact_ids: list[str] | None = None,
     background: bool = False,
     task_id: str | None = None,
-    user_note: str | None = None,
     resume_run_id: str | None = None,
     deliverable: dict | None = None,
     planned_stop_authorized: bool = False,
@@ -1312,11 +1334,6 @@ async def _run_node_tool(
         for entry in state.hook_state["pending_post_node_flow"] or []:
             if isinstance(entry, dict):
                 entry.update(canonical_node_fields(entry))
-
-    # Legacy internal callers may supply a note. Task-bearing nodes below derive
-    # it from the actual request instead of requiring a second model-authored text.
-    _note = (user_note or "").strip()
-    # 宣告**不在这里**发 —— 见下方真正派发点前的那处。
 
     # ── node_inputs 先收成对象，收不成就拒（#1165）──────────────────────────
     # 必须是第一步：下面的偏离记账、委派登记都读它、也都有副作用。坏输入要在
@@ -1366,6 +1383,16 @@ async def _run_node_tool(
             return await _resume_child_dispatch(state, candidates[0])
         if len(candidates) > 1:
             raise ValueError("More than one original child matches this nested dispatch")
+
+    # Validate a supplied contract before delegation, flow transitions or other
+    # dispatch effects. Recovery above resumes the exact recorded child instead
+    # of retroactively changing its accepted contract.
+    _identity = None
+    if task_instance_uuid:
+        _identity, _identity_error = _resolve_task_identity(
+            state, node_type, task_instance_uuid, task_contract_digest)
+        if _identity_error:
+            return _identity_error
 
     # ── 派发前范畴检查（2026-08-18）──────────────────────────────────────
     #
@@ -1687,7 +1714,7 @@ async def _run_node_tool(
                 "后台 child 会与父节点/Platform checkpoint 并发改同一工作树。"
                 "请去掉 background 同步运行；真正需要并行研究时应创建独立 Session worktree。"
                 "重发时**只去掉 background**，其余参数（node_inputs、task_instance_uuid、"
-                "task_contract_digest、user_note）原样带上 —— 这次被拒与它们无关。"
+                "task_contract_digest）原样带上 —— 这次被拒与它们无关。"
             ),
         }
 
@@ -1717,13 +1744,10 @@ async def _run_node_tool(
             return {
                 "status": "error", "error_code": "missing_dispatch_task",
                 "error": f"{node_type} 缺少本次实际任务；在 node_inputs 中提供 "
-                         f"{' 或 '.join(task_fields)}。进度说明直接来自该任务。",
+                         f"{' 或 '.join(task_fields)}。",
                 "task_input_fields": task_fields,
                 "expected_inputs": _expected_inputs,
             }
-        _note = "\n".join(value.strip() if isinstance(value, str)
-                          else json.dumps(value, ensure_ascii=False)
-                          for _, value in task_values)
     if node_inputs and _expected_inputs and not (set(node_inputs) & set(_expected_inputs)):
         return {
             "status": "error",
@@ -1737,8 +1761,6 @@ async def _run_node_tool(
         }
 
     state.hook_state["_dispatched_any_child"] = True
-    if not _note:
-        _note = f"{node_type}: " + json.dumps(node_inputs or {}, ensure_ascii=False)
 
     # ── 服务节点不许异步（2026-08-04 e2e8 实测）────────────────────────────
     #
@@ -2000,10 +2022,11 @@ async def _run_node_tool(
                        "顺延给你的裁决（必读）": "\n".join(_brief)}
 
     # ── 任务身份：解析 + 核对（#1080 第 3/4 条）────────────────────────────
-    _identity, _identity_error = _resolve_task_identity(
-        state, node_type, task_instance_uuid, task_contract_digest)
-    if _identity_error:
-        return _identity_error
+    if not task_instance_uuid:
+        _identity, _identity_error = _resolve_task_identity(
+            state, node_type, task_instance_uuid, task_contract_digest)
+        if _identity_error:
+            return _identity_error
     _dispatch_id = f"disp_{uuid4().hex}"
 
     state.append_transcript(
@@ -2119,10 +2142,11 @@ async def _run_node_tool(
                 return {"status": "error", "error": str(exc)}
         deliverable = {"artifact_type": _dl_type, "path": _dl_path}
 
-    # Announce only once all dispatch validation, including the delivery path,
-    # has succeeded. The visible brief and the child's request share one source.
+    # Dispatch is a runtime fact, not model-authored speech. Task inputs stay in
+    # the child request/checkpoint; readers render status from these identities.
+    # Emit only after validation, so rejected requests never promise execution.
     state.append_transcript(
-        "node_dispatch_announced", node_type=node_type, user_note=_note[:1000],
+        "node_dispatched", node_type=node_type, dispatch_id=_dispatch_id,
         background=bool(background),
     )
 
@@ -2547,14 +2571,8 @@ async def _run_post_producing_flow(
                 "post_node_review_skipped_no_artifacts",
                 producing_run_id=entry.get("producing_run_id"))
         else:
-            # 内部审查说明绑定本次交付；不再要求模型另写一份派发说明。
-            # 运行时自己派也一样要说 —— 用户在对话里看不到节点内部过程，这一句
-            # 是他唯一的信号，而"谁发起的"不改变这一点。
-            #
-            # 2026-08-19 本地 e2e 抓到：第一版这里没传，于是运行时派 reviewer
-            # **当场被自己的门拦下**，reviewer 根本不跑，流程带着
-            # review_state=pending 直接去呈递决策。八条单测全绿 —— 因为它们把
-            # `_run_node_tool` 整个 mock 掉了，边界层不在场。
+            # Runtime-owned review uses the same typed dispatch fact as model
+            # calls. Its artifact inputs remain internal to the child request.
             _rv = await _run_node_tool(
                 state,
                 "_reviewer",
@@ -2564,7 +2582,6 @@ async def _run_post_producing_flow(
                     "producer_run_id": entry.get("producing_run_id"),
                 },
                 forward_artifact_ids=artifact_ids,
-                user_note=f"{node_type} 已交付，正在对其产物做独立审查。",
             )
             if isinstance(_rv, dict) and _rv.get("status") == "pause":
                 return _rv
@@ -3491,13 +3508,20 @@ register_tool(
                 "node_type": {
                     "type": "string",
                     "description": (
-                        "要调起的节点名（如 'analysis'、'experiment'、'observation'、"
-                        "'_reviewer'）。\n"
-                        "证据生产有两种模态，按**还欠哪类闭合条目**选：\n"
+                        "先按本轮主交付选承办节点：论文检索、全文原句/页码核验、文献补检"
+                        "用 literature；正式数据准备用 data；科学裁决用 analysis；"
+                        "论文撰写用 writing；实际构建/执行/测量/机械核验用 experiment。\n"
+                        "研究计划中的文献阶段也可直接派 literature，并转交已有索引与缺口；"
+                        "不要因任务曾派给 experiment，或需要输出表格，就继续错派。"
+                        "确有实验主交付、只缺一个方法参数时仍派 experiment，"
+                        "由它调用定向文献服务。\n"
+                        "主交付本身是研究证据生产时，再区分两种模态：\n"
                         "  `experiment`  干预式 —— 让世界（或它的模型）产生新数据。"
                         "兑现**数值条**。\n"
                         "  `observation` 检视式 —— 系统性检视既有记录（文献/档案/既有"
-                        "数据集/观测）。兑现**陈述条**。\n"
+                        "数据集/观测），完成观察性研究记录。兑现**陈述条**。"
+                        "专业文献检索与逐篇全文核验仍归 literature，"
+                        "不因同属既有材料就改派 observation。\n"
                         "选反了框架不拦，但会把这次偏离连同你在 node_inputs 里写的 "
                         "`modality_rationale`（没写就记 not_declared）写进永久记录、"
                         "交 referee 终审 —— 陈述条确实可能需要跑一次模拟才能兑现，"
@@ -3580,7 +3604,8 @@ register_tool(
                     "description": (
                         "传给子节点的本次实际任务"
                         "（如 {research_question: '检验某项具体主张，返回证据与反例'}）。"
-                        "进度说明由同一份任务生成；literature 必须给 research_question，"
+                        "任务输入只交给执行节点，不作为对外进度文案。派发状态由框架记录；"
+                        "需要解释本步目的时，在正常回复正文中说明。literature 必须给 research_question，"
                         "analysis 给 research_goal 或 research_question，"
                         "writing 给 research_question 或 rewrite_spec。\n"
                         "  ⚠️ **本轮受哪份预注册约束，不在这里说** —— 它是任务合同的一部分："
@@ -3682,10 +3707,6 @@ async def _run_nodes_parallel(
                             _call_slot=idx,
                             node_inputs=job.get("node_inputs") or {},
                             forward_artifact_ids=job.get("forward_artifact_ids") or [],
-                            # 并行派发同样要先跟用户说一句 —— 漏传这一个参数，
-                            # 整条并行路径就会被 run_node 的契约全数拒掉，而且
-                            # 症状是"并行怎么都起不来"，指不回这里。
-                            user_note=job.get("user_note"),
                             # 并行派发也要带任务身份（#1080 第 3 条）：漏传的话
                             # 同一批并行子 run 会各自去扫项目现状认领自己该做什么，
                             # 而那正是串行路径刚堵上的洞。serial 与 parallel 语义

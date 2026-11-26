@@ -73,6 +73,8 @@ KEPT_INSIDE_EXCLUDED = (
     "docs/compression-fate-table.md",
     # 文献采集在运行时读的期刊映射（app/services/literature_harvester.py）。
     "docs/xiaohongshu_journal_map.tsv",
+    "nodes/literature/data/reference/journal_metrics.sqlite3",
+    "nodes/literature/data/reference/journal_catalog.md",
 )
 
 #: 数据与材料：有版权的分区表、公司自己的研究夹具。

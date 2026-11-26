@@ -499,14 +499,15 @@ def test_node_inputs_cannot_declare_the_owned_workspace_role(tmp_path):
 # 判 safe。已实测能写进 postprocess/。框架侧为此专门加过一层 deny，节点侧
 # 之前没有对应防护。
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX /tmp fallback; Windows target paths have separate coverage")
 def test_tmp_fallback_does_not_cover_a_worktree_that_lives_under_tmp(tmp_path):
     import tempfile
 
-    tmp_root = Path(tempfile.mkdtemp(prefix="hf-worktree-in-tmp-"))
+    tmp_root = Path(tempfile.mkdtemp(prefix="hf-worktree-in-tmp-", dir="/tmp"))
     try:
         state = _planned_state(tmp_path)
         _bind_worktree(state, tmp_root / "worktree")
-        assert str(state.project_worktree).startswith(tempfile.gettempdir())
+        assert tmp_root.parent.resolve() == Path("/tmp").resolve()
 
         sibling = state.project_worktree / "figures" / "fig.png"
         scope, _ = sb._classify_write_path(str(sibling), state)
@@ -514,7 +515,7 @@ def test_tmp_fallback_does_not_cover_a_worktree_that_lives_under_tmp(tmp_path):
 
         # worktree 之外的真 scratch 仍然可用 —— 收窄的是归属，不是 /tmp 本身。
         outside_scope, _ = sb._classify_write_path(
-            str(Path(tempfile.gettempdir()) / "unrelated_scratch" / "x.log"), state)
+            str(Path("/tmp") / "unrelated_scratch" / "x.log"), state)
         assert outside_scope == "safe"
     finally:
         import shutil
@@ -1400,29 +1401,32 @@ def test_python_benign_dynamic_import_is_not_reported_as_process_launch():
     ) == []
 
 
-def test_python_audit_hook_allows_run_local_unix_socket(tmp_path):
-    local_socket = tmp_path / "normal.sock"
-    code = sb._with_no_child_process_audit(
-        "import socket\n"
-        "server = socket.socket(socket.AF_UNIX)\n"
-        f"server.bind({str(local_socket)!r})\n"
-        "server.listen(1)\n"
-        "client = socket.socket(socket.AF_UNIX)\n"
-        f"client.connect({str(local_socket)!r})\n"
-        "peer, _ = server.accept()\n"
-        "peer.close(); client.close(); server.close()\n"
-    )
+def test_python_audit_hook_allows_run_local_unix_socket():
+    # AF_UNIX has a byte-length limit (104 on macOS); pytest node names
+    # can exceed it before the behavior under test is reached.
+    with tempfile.TemporaryDirectory(prefix="hf-sock-") as socket_dir:
+        local_socket = Path(socket_dir) / "normal.sock"
+        code = sb._with_no_child_process_audit(
+            "import socket\n"
+            "server = socket.socket(socket.AF_UNIX)\n"
+            f"server.bind({str(local_socket)!r})\n"
+            "server.listen(1)\n"
+            "client = socket.socket(socket.AF_UNIX)\n"
+            f"client.connect({str(local_socket)!r})\n"
+            "peer, _ = server.accept()\n"
+            "peer.close(); client.close(); server.close()\n"
+        )
 
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
 
-    assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, result.stderr
 
 
 def test_python_audit_hook_still_blocks_inet_socket():

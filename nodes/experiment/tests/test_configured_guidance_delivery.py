@@ -31,7 +31,6 @@ from core.state import State
 from nodes.experiment import hooks
 from nodes.experiment.tests.test_035a_health_and_roc import _local_record, _probe
 from nodes.experiment.tools import diagnose
-from nodes.experiment.tools import resource_manager as manager
 from nodes.experiment.tools import safe_bash
 from nodes.experiment.tools.run_contract import _classify_experiment_scope
 
@@ -122,32 +121,6 @@ def test_successful_or_unmatched_results_get_no_diagnosis_key():
     unmatched = {"status": "error", "returncode": 2}
     safe_bash._attach_diagnosis(unmatched, stdout="", stderr="make: *** No rule to make target 'x'\n")
     assert "diagnosis" not in unmatched
-
-
-def test_bounded_process_builder_also_carries_the_configured_fix(tmp_path, monkeypatch):
-    """The second result builder (bounded stream supervisor, kept for the build-guard
-    callers) attaches the same diagnosis; a real child process, no sandbox needed."""
-    from nodes.experiment.tests.test_build_resource_guard import _State
-    from nodes.experiment.tools import build_resource_guard as guard
-    state = _State(tmp_path)
-    monkeypatch.setattr(safe_bash, "experiment_output_dir", lambda *_a, **_k: tmp_path)
-    limits = guard.BuildLimits(
-        parallelism=1, tasks_max=64, memory_high_bytes=10**9, memory_max_bytes=2 * 10**9,
-        memory_swap_max_bytes=10**8, timeout_s=10,
-        disk_warning_free_bytes=1, disk_stop_free_bytes=0)
-
-    async def run():
-        proc = await asyncio.create_subprocess_exec(
-            "bash", "-c", f"printf '%s\\n' '{YAML_ONLY_LINE}' >&2; exit 1",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            start_new_session=True)
-        return await safe_bash._bounded_process_wait(
-            proc, state=state, cmd="mpiifort -c a.f90", timeout=10,
-            limits=limits, unit=None, strong_guard=False)
-
-    result = asyncio.run(run())
-    assert result["returncode"] == 1, result
-    assert result["diagnosis"][0]["fix"].startswith(YAML_ONLY_FIX[:6]), result
 
 
 def test_repeated_error_focus_block_carries_the_tool_diagnosis(tmp_path):

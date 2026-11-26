@@ -529,6 +529,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     harness_session_manager.set_adoption_handler(rejoin_adopted_session)
 
+    from app.services.project_deletion import resume_pending_deletions
+
+    await resume_pending_deletions(get_session_factory())
     app.state.startup_reconciliation = "ok"
     try:
         factory = get_session_factory()
@@ -579,7 +582,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     delivery_reconciler.start()
     from app.services.cnki_worker import cnki_collector
-    cnki_collector.start()
     from app.services.literature_access import literature_access
     await literature_access.start()
 

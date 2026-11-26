@@ -38,9 +38,7 @@ from app.services.execution_ingest import (
     ExecutionIngestService,
     IngestContext,
 )
-
-#: 一条 transcript 记录的字节上限。超过就是包装事件坏了，不是一条大记录。
-MAX_TRANSCRIPT_RECORD_BYTES = 5_000_000
+from app.services.harness_contract import workspace_transcript_module
 
 
 
@@ -271,14 +269,17 @@ def resolve_wrapper(
         raise RuntimeError("Harness transcript escaped the configured state root")
     byte_start = int(event.get("byte_start") or 0)
     byte_end = int(event.get("byte_end") or 0)
+    # Read the same protocol budget as the configured worker, without importing
+    # a runtime before the standalone backend has selected its checkout.
+    maximum = workspace_transcript_module().MAX_TRANSCRIPT_RECORD_BYTES
     if (
         byte_start < 0
         or byte_end <= byte_start
-        or byte_end - byte_start > MAX_TRANSCRIPT_RECORD_BYTES
+        or byte_end - byte_start > maximum
     ):
         raise RuntimeError(
             "Harness transcript wrapper has an invalid byte range "
-            f"(start={byte_start}, end={byte_end}, maximum={MAX_TRANSCRIPT_RECORD_BYTES})"
+            f"(start={byte_start}, end={byte_end}, maximum={maximum})"
         )
     return transcript_path, byte_start, byte_end
 
@@ -332,6 +333,10 @@ async def ingest_transcript_wrapper(
         ) from exc
     if not isinstance(native, dict):
         raise RuntimeError("A transcript record must be a JSON object")
+    try:
+        native = workspace_transcript_module().restore_workspace_record(native, transcript_path)
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        raise RuntimeError(f"Invalid external workspace record: {exc}") from exc
     file_identity = file_identity_of(transcript_path)
     await service.ingest_raw_record(
         db,
@@ -345,8 +350,18 @@ async def ingest_transcript_wrapper(
     return native
 
 
+class TranscriptWritePendingError(OperationalError):
+    """The source fact is durable, but SQLite has not admitted its projection.
+
+    This is recording work to resume, not a failure of the research worker.
+    Keep the driver's exception identity for diagnostics and ordinary callers
+    while giving the live reader an explicit, narrow recoverable condition.
+    """
+
+
 async def commit_transcript_wrapper(db: AsyncSession, *, harness_states: dict[str, dict],
-                                    ingest=None, **kwargs) -> dict[str, Any]:
+                                    ingest=None, wait_for_writer: bool = False,
+                                    **kwargs) -> dict[str, Any]:
     """Commit one source fact; retry only SQLite busy/locked transactions.
 
     Adapter state becomes visible only with its committed projection. A retry
@@ -354,7 +369,8 @@ async def commit_transcript_wrapper(db: AsyncSession, *, harness_states: dict[st
     it never re-executes the research tool or allocates a new dispatch.
     """
     ingest = ingest or ingest_transcript_wrapper
-    for attempt in range(4):
+    attempt = 0
+    while True:
         staged = copy.deepcopy(harness_states)
         try:
             native = await ingest(db, harness_states=staged, **kwargs)
@@ -369,11 +385,18 @@ async def commit_transcript_wrapper(db: AsyncSession, *, harness_states: dict[st
                          or str(original).lower() in {
                              "database is locked", "database table is locked",
                              "database schema is locked"}))
-            if not busy or attempt == 3:
+            if not busy:
                 raise
-            logging.getLogger(__name__).warning(
-                "SQLite transcript write busy; retrying the same fact (%s/3)", attempt + 1)
-            await asyncio.sleep(0.05 * 2 ** attempt)
+            if attempt >= 3 and not wait_for_writer:
+                raise TranscriptWritePendingError(
+                    exc.statement, exc.params, original, hide_parameters=True,
+                ) from exc
+            logger = logging.getLogger(__name__)
+            report = logger.warning if attempt < 4 else logger.debug
+            report("SQLite transcript write busy; retrying the same source fact (%s)",
+                   attempt + 1)
+            await asyncio.sleep(0.05 * 2 ** min(attempt, 3))
+            attempt += 1
         else:
             harness_states.clear()
             harness_states.update(staged)

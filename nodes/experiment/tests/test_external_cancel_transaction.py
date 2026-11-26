@@ -130,7 +130,7 @@ def test_cancel_confirmation_category_matches_scheduler(
     ))
 
     assert result["status"] == "pause", result
-    assert result["pause_event"]["metadata"] == {
+    assert {k: result["pause_event"]["metadata"][k] for k in ("type", "tool", "category")} == {
         "type": "highrisk_confirm",
         "tool": "cancel_job",
         "category": expected_category,
@@ -172,13 +172,13 @@ def test_cancel_pause_preview_shows_elapsed_runtime_and_truncated_command(
     assert command[:200] in context
     assert command not in context
     assert "已截断" in context
-    pending = state.hook_state["_highrisk_pending_ask"]
-    confirmation = json.loads(pending["text"])
+    authorization_key = result["pause_event"]["metadata"]["authorization_key"]
+    confirmation = json.loads(authorization_key)
     assert set(confirmation) == {
         "operation", "identity", "reason", "superseded_by",
     }
-    assert "已运行时长" not in pending["text"]
-    assert command not in pending["text"]
+    assert "已运行时长" not in authorization_key
+    assert command not in authorization_key
 
 
 def test_cancel_pause_preview_marks_missing_runtime_and_command_unknown(
@@ -239,18 +239,15 @@ def test_cancel_approved_retry_consumes_confirmation_after_clock_advances(
     ))
     assert first["status"] == "pause", first
     assert "已运行时长=2h13m" in first["pause_event"]["context"]
-    pending = danger.pop_pending_ask(state)
-    assert pending is not None
-    confirmation = pending["text"]
-    danger.mark_confirmed(state, confirmation)
+    confirmation = first["pause_event"]["metadata"]["authorization_key"]
 
     ControlledDateTime.current += timedelta(minutes=7)
     assert manager._cancel_elapsed_runtime_preview(
         "2026-09-18T10:00:00+00:00",
     ) == "2h20m"
-    second = asyncio.run(manager._cancel_job(
-        state, "slurm", "4242", reason="operator requested stop",
-    ))
+    from tests._approval_support import resume_result
+    second = asyncio.run(resume_result(state, first, manager._cancel_job,
+        {"scheduler": "slurm", "job_id": "4242", "reason": "operator requested stop"}))
 
     assert second["status"] == "success", second
     assert cancel_calls == [1]

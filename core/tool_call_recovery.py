@@ -110,7 +110,9 @@ class UnparsedToolMarkup(Exception):
 # invoke/parameter，外层匹配上拿到了工具名、内层一个参数都没匹配上 —— 结果派发
 # 了一串空参数调用，模型收到 "missing required positional argument"，合理地判定
 # "框架的 XML 解析坏了" 然后放弃整个 run。
-_DSML = r"(?:｜DSML｜|[A-Za-z_][\w.-]*:)?"
+# Official endpoints also emit <｜｜DSML｜｜ invoke ...>. Whitespace belongs
+# to that prefix; use the same grammar for both invoke and parameter tags.
+_DSML = r"(?:｜{1,2}DSML｜{1,2}\s*|[A-Za-z_][\w.-]*:)?"
 # E2E-4 二次实测：GPUStack/deepseek-v4-pro 真实吐出的 DSML 变体**不闭合任何标签**
 # 且 parameter 带类型属性：
 #     <｜DSML｜invoke name="run_node">

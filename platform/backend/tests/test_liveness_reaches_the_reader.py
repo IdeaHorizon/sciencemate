@@ -32,7 +32,7 @@ import pytest
 from app.config import settings
 from app.models.execution import (
     ASSERTS_ACTIVE_WORK,
-    PARKED_WAITING_FOR_HUMAN,
+    PARKED_RUN_STATUSES,
     REQUIRES_LIVE_RUNTIME_STATUSES,
     Run,
     RunAttempt,
@@ -80,7 +80,7 @@ def test_retrying_is_corrected_too() -> None:
     ) == RunStatus.STALE_UNKNOWN.value
 
 
-@pytest.mark.parametrize("status", sorted(s.value for s in PARKED_WAITING_FOR_HUMAN))
+@pytest.mark.parametrize("status", sorted(s.value for s in PARKED_RUN_STATUSES))
 def test_waiting_for_a_human_is_never_corrected(status: str) -> None:
     """「在等你回答」在没有 worker 时**仍然成立** —— 回答会把它重新拉起来。
 
@@ -150,9 +150,9 @@ def test_terminal_runs_are_passed_through_untouched() -> None:
 
 def test_the_two_classes_are_derived_not_a_fourth_hand_written_list() -> None:
     """名单一多就会各自演化，而分叉时两边都不报错（同 UNFINISHED 的理由）。"""
-    assert ASSERTS_ACTIVE_WORK == REQUIRES_LIVE_RUNTIME_STATUSES - PARKED_WAITING_FOR_HUMAN
-    assert not (ASSERTS_ACTIVE_WORK & PARKED_WAITING_FOR_HUMAN)
-    assert ASSERTS_ACTIVE_WORK | PARKED_WAITING_FOR_HUMAN == REQUIRES_LIVE_RUNTIME_STATUSES
+    assert ASSERTS_ACTIVE_WORK == REQUIRES_LIVE_RUNTIME_STATUSES - PARKED_RUN_STATUSES
+    assert not (ASSERTS_ACTIVE_WORK & PARKED_RUN_STATUSES)
+    assert ASSERTS_ACTIVE_WORK | PARKED_RUN_STATUSES == REQUIRES_LIVE_RUNTIME_STATUSES
 
 
 # ── 接线：走真入口，不查名字 ─────────────────────────────────────────────────

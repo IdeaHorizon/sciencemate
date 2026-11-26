@@ -33,6 +33,7 @@ import psutil
 
 __all__ = [
     "Group",
+    "background_spawn_kwargs",
     "group_spawn_kwargs",
     "detached_spawn_kwargs",
     "alive",
@@ -55,6 +56,16 @@ WINDOWS = _WINDOWS
 # ── 起一组 ────────────────────────────────────────────────────────────────────
 
 
+def background_spawn_kwargs() -> dict:
+    """Framework helpers use pipes/files, so never allocate a Windows console.
+
+    This changes window allocation only; inherited Job membership, stdio and
+    cancellation ownership remain with the caller. Interactive terminals must
+    use their own explicit terminal launcher.
+    """
+    return {"creationflags": 0x08000000} if _WINDOWS else {}
+
+
 def group_spawn_kwargs() -> dict:
     """传给 ``subprocess.Popen`` / ``asyncio.create_subprocess_*`` 的关键字：子进程自成一组。
 
@@ -64,7 +75,7 @@ def group_spawn_kwargs() -> dict:
     :class:`Group` 里的 Job，起完之后 ``Group.of(pid)`` 把它放进去。
     """
     if _WINDOWS:
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | background_spawn_kwargs()["creationflags"]}
     return {"start_new_session": True}
 
 
@@ -90,7 +101,7 @@ def detached_spawn_kwargs() -> dict:
        **关掉应用它跟着死**。
     """
     if _WINDOWS:
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | background_spawn_kwargs()["creationflags"]}
     return {"start_new_session": True}
 
 

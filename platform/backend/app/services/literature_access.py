@@ -106,6 +106,9 @@ class LiteratureAccess:
                 job = JobIn(query=payload.get("query", ""), limit=payload.get("limit", 200))
                 result = await cnki.create_job(db, user, job)
                 await db.commit()
+                if result["state"] in {"queued", "working"}:
+                    from app.services.cnki_worker import cnki_collector
+                    cnki_collector.start(result["id"])
                 return result
             if op == "cnki_status":
                 job = await db.scalar(select(CnkiJob).where(

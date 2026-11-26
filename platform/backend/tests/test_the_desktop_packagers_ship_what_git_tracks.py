@@ -32,6 +32,7 @@ TRACKED = {
     "nodes/experiment/gone.py": "x = 1\n",
     "nodes/experiment/tests/test_node.py": "x = 1\n",
     "nodes/literature/data/reference/一二级学科.pdf": "%PDF\n",
+    "nodes/literature/data/reference/journal_metrics.sqlite3": "catalogue fixture\n",
     "platform_runtime.py": "def go():\n    import chat\n    return chat\n",
     "chat.py": "x = 1\n",
     "unimported.py": "x = 1\n",
@@ -134,13 +135,17 @@ def test_the_harness_in_the_desktop_package_is_what_git_tracks(
 
 
 @pytest.mark.parametrize("name", ["build_mac_app", "build_windows_app"])
-def test_a_desktop_package_cannot_omit_the_journal_mapping(checkout, tmp_path, name):
+@pytest.mark.parametrize("required", [
+    "docs/xiaohongshu_journal_map.tsv",
+    "nodes/literature/data/reference/journal_metrics.sqlite3",
+])
+def test_a_desktop_package_cannot_omit_journal_data(checkout, tmp_path, name, required):
     packager = _load(name)
     _point_at(packager, checkout, tmp_path)
-    (checkout / "docs/xiaohongshu_journal_map.tsv").unlink()
+    (checkout / required).unlink()
     interface = tmp_path / "ui"
     interface.mkdir()
-    with pytest.raises(SystemExit, match="xiaohongshu_journal_map.tsv"):
+    with pytest.raises(SystemExit, match=Path(required).name):
         packager.stage_into_the_package(interface)
 
 

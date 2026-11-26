@@ -140,3 +140,17 @@ test("没有标题、认不出是谁时，补的那几个字跟着界面语言�
   assert.equal(zh.creatorLabel, "未指定");
   assert.equal(en.creatorLabel, "Unassigned");
 });
+
+
+test("completion recovery carries a distinct non-tool action and keeps old servers readable", () => {
+  const payload = canonical({ executionView: view({ phase: "alive", outcome: null,
+    waitingOn: { kind: "completion" }, canStop: true, completions: [
+      { runId: "original-child", notice: "Delivery not sealed", canResume: true, recoverable: true },
+    ] }) });
+  const session = adapt(payload);
+  assert.deepEqual(session.execution.waitingOn, { kind: "completion" });
+  assert.deepEqual(session.execution.completions, [
+    { runId: "original-child", notice: "Delivery not sealed", canResume: true, recoverable: true },
+  ]);
+  assert.deepEqual(adapt(canonical()).execution.completions, []);
+});

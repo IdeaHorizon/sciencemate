@@ -3,6 +3,7 @@ import type { ExecutionEvent } from "./execution-event.ts";
 import { belongsToRun } from "./run-scope.ts";
 import { retryProgressLabel } from "./failure-surface.ts";
 import { nodeDisplayName } from "./display-names.ts";
+import { nodeDispatchOf, type NodeDispatch } from "./dispatch-presentation.ts";
 import { readPayload, type EventPayloadView } from "./payload-view.ts";
 import {
   isVisibleResearchTool,
@@ -65,13 +66,16 @@ export type RunActivityStep = {
   tools: RunActivityTool[];
 };
 
-/** 调度器对用户说的话 —— 对话级，不是节点内部独白。 */
+/** Conversation view model: speech, receipts, or locally rendered dispatch status.
+ * Dispatch text is generated from the typed fact, never copied from task inputs.
+ */
 export type RunActivitySaid = {
   id: string;
   runId?: string;
   sequence: number;
   text: string;
   aboutNodeType: string;
+  dispatch?: NodeDispatch;
   /** 这句话在回答**哪条消息**（插话锚定）。空 = 派发旁注 / CLI 投递，留在 run 窗口。
    *
    * 只认事件自带的消息锚（`repliesToMessageId` / `messageId`）。这里曾经退回
@@ -819,10 +823,25 @@ export function projectRunActivity(
 
   const said: RunActivitySaid[] = ordered
     .filter((event) => event.kind === "orchestrator.said"
+      || event.kind === "node.dispatched"
       || event.kind === "interrupt.acknowledged"
       || event.kind === "interject.queued")
     .map((event): RunActivitySaid => {
       const raw = (event.payload ?? {}) as Record<string, unknown>;
+      const dispatch = nodeDispatchOf(event);
+      if (dispatch) {
+        return {
+          id: event.id,
+          runId: event.runId,
+          sequence: event.sequence,
+          text: say({ zh: "已交给{node}节点处理。", en: "Dispatched to {node}." }, lang, {
+            node: nodeDisplayName(dispatch.nodeType, lang),
+          }),
+          aboutNodeType: dispatch.nodeType,
+          dispatch,
+          submissionId: String(raw.submissionId ?? "") || undefined,
+        };
+      }
       if (event.kind === "interject.queued") {
         // Delivery remains auditable, but it is message status, not an assistant
         // reply. This also hides receipts in historical conversations.

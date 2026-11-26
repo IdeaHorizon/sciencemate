@@ -63,6 +63,7 @@ before = dict(os.environ)
 session = SimpleNamespace(state=SimpleNamespace(project_id='project'))
 request = {'app_binding': {'user_id': 'user'}}
 _apply_request_scope(session, request)
+assert session.state.hook_state["approval_principal"] == "user"
 from app.config import settings
 assert all(getattr(settings, key) == value for key, value in context.items())
 assert settings.debug is False

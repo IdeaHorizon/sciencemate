@@ -491,7 +491,8 @@ def test_non_destructive_commands_are_not_forced_unresolved(tmp_path, cmd):
 def test_machine_wide_roots_cannot_be_made_writable(tmp_path, root):
     state = _FakeState(tmp_path, roles={
         "dependency_root": {"path": root, "writable": True}})
-    declared = [r for r in collect_path_roles(state) if r.path == root]
+    declared = [r for r in collect_path_roles(state)
+                if r.path == str(Path(root).resolve())]
     assert declared and not declared[0].writable
 
 

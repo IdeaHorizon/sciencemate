@@ -7,10 +7,23 @@ from typing import Any
 
 from core.tool_registry import ToolDefinition, register_tool
 
+from .w_argument import argument_context
 from .w_brief import load_brief, load_outline
 from .w_common import (
-    PART_CRAFT, bib_keys, bounded_llm, cite_keys, clip, craft, fragment_problems,
-    figure_text_sample, graphics_files, load_genre, manuscript_dir, normalize_math_letters, worktree_root,
+    PART_CRAFT,
+    WritingResponseError,
+    bib_keys,
+    bounded_llm,
+    cite_keys,
+    clip,
+    craft,
+    figure_text_sample,
+    fragment_problems,
+    graphics_files,
+    load_genre,
+    manuscript_dir,
+    normalize_math_letters,
+    worktree_root,
 )
 from .w_dossier import build_dossier
 
@@ -75,9 +88,11 @@ def _figure_env_mismatches(tex: str, outline: dict | None, dossier: dict) -> lis
     return out
 
 
-def _figure_table_text(outline: dict | None, available: list[dict], fig_dirs: list | None = None) -> str:
+def _figure_table_text(outline: dict | None, available: list[dict], fig_dirs: list | None = None,
+                       *, include_all_available: bool = True) -> str:
     lines = ["## 可用的图（只能用这些文件名，放在 figures/ 下）"]
     names = {f["name"]: f for f in available}
+    selected_names = set()
     for f in (outline or {}).get("figures") or []:
         src = f.get("file") or f.get("source")
         fname = None
@@ -89,8 +104,11 @@ def _figure_table_text(outline: dict | None, available: list[dict], fig_dirs: li
                     fname = a["name"]
         if fname and fname.lower().endswith(".svg"):
             fname = fname[:-4] + ".pdf"   # 框架会把 svg 转成 pdf 再放进 figures/
+        if fname:
+            selected_names.add(fname)
         lines.append(f"- {f.get('key')}: file={fname or '（尚无文件，先不放图，用文字说明）'} · 信息：{f.get('message')} · 图题：{f.get('caption') or ''}")
-    others = [a for a in available if a["name"].lower().endswith((".png", ".pdf", ".jpg"))]
+    others = [a for a in available if a["name"].lower().endswith((".png", ".pdf", ".jpg"))
+              and (include_all_available or a["name"] in selected_names)]
     if others:
         lines.append("## 目前盘上全部可用的图文件（svg 已按同名 .pdf 提供）。「记录」是图表服务铸的图题，说明这个文件画的是什么；"
                      "你写的图题必须说同一张图，放错文件就是张冠李戴")
@@ -146,7 +164,7 @@ async def _compose(state: Any, part: str, notes: str, *, existing: str | None,
     lang = brief.get("language") or {}
     system = "\n\n".join(x for x in [
         f"你是这篇稿子的作者，正在写「{part}」这一部件。语言：正文{lang.get('body','zh')}，图内文字{lang.get('figures','en')}。",
-        craft(PART_CRAFT.get(part, "introduction")),
+        craft(genre["structure"].get("craft") or PART_CRAFT.get(part, "introduction")),
         genre["style"],
         craft("latex_conventions"),
     ] if x)
@@ -156,9 +174,11 @@ async def _compose(state: Any, part: str, notes: str, *, existing: str | None,
         f"# 稿件\n标题：{brief.get('title')}\n体裁：{brief.get('genre')}（变体 {brief.get('structure_variant')}）",
         f"# 这一部件的要求\n标题：{spec.get('heading') or '（摘要，无标题）'}；长度 {spec.get('chars')} 字\n动作：\n{moves}\n禁止：{forbid}",
         f"# 用户的硬性要求\n" + "\n".join(f"- {m.get('id')}: {m.get('text')}" for m in brief.get("must_haves") or []),
+        argument_context(brief, outline),
         f"# 提纲（本部件）\n{json.dumps(op, ensure_ascii=False, indent=1) if op else '（摘要：概括全文）'}",
         _figure_table_text(outline, dossier.get("figures", []),
-                           [mdir / "figures", (worktree_root(state) / "figures") if worktree_root(state) else None]),
+                           [mdir / "figures", (worktree_root(state) / "figures") if worktree_root(state) else None],
+                           include_all_available=not bool(outline.get("editorial_focus"))),
         f"# 参考文献 key（只能用这些）\n{key_lines}",
         f"# 已起草的其他部件（保持术语与编号一致）\n{drafted_text}",
     ]
@@ -179,8 +199,11 @@ async def _compose(state: Any, part: str, notes: str, *, existing: str | None,
     user_parts.append("只输出这一部件的 LaTeX 片段。")
     user = "\n\n".join(user_parts)
     max_tokens = 2500 if part == "abstract" else 7000
-    tex = await bounded_llm(state, phase=f"draft:{part}", system=system, user=user,
-                            max_tokens=max_tokens, temperature=0.4)
+    try:
+        tex = await bounded_llm(state, phase=f"draft:{part}", system=system, user=user,
+                                max_tokens=max_tokens, temperature=0.4)
+    except WritingResponseError as exc:
+        return exc.result
     if not tex.strip():
         return {"status": "error", "error": "模型没有返回内容"}
     tex, n_math = normalize_math_letters(tex)

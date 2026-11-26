@@ -1,7 +1,7 @@
 """统一的期刊级指标查询与离线导入。
 
-数据文件默认位于 ``$HARNESS_FRAMEWORK_HOME/literature/reference/``，不随代码仓
-分发。运行时只读 SQLite；构建/更新数据库是显式离线操作。
+安装包自带只读期刊库；用户导入的 ``literature/reference/`` 数据和显式配置优先。
+构建/更新用户数据库仍是显式离线操作，不写入安装目录。
 """
 from __future__ import annotations
 
@@ -21,8 +21,17 @@ _DEFAULT_DB_NAME = "journal_metrics.sqlite3"
 
 
 def database_path() -> Path:
+    """Writable import destination; never points into an installed package."""
     configured = os.environ.get("HARNESS_JOURNAL_METRICS_DB", "").strip()
     return Path(configured).expanduser() if configured else _paths.literature_reference_dir() / _DEFAULT_DB_NAME
+
+
+def read_database_path() -> Path:
+    """Use a user's database when supplied, otherwise the shipped snapshot."""
+    path = database_path()
+    if os.environ.get("HARNESS_JOURNAL_METRICS_DB", "").strip() or path.is_file():
+        return path
+    return Path(__file__).resolve().parents[1] / "data" / "reference" / _DEFAULT_DB_NAME
 
 
 def normalize_issn(value: str | None) -> str:
@@ -214,7 +223,7 @@ def _lookup_cached(
     path = Path(db_name)
     if not path.is_file():
         return {}
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     columns = "j.*"
     try:
@@ -252,16 +261,16 @@ def lookup_journal_metrics(
     journal: str = "", *, journal_abbr: str = "", issn: str = "", eissn: str = "", nlm_id: str = ""
 ) -> dict[str, Any]:
     return _lookup_cached(
-        str(database_path()), str(journal or ""), str(journal_abbr or ""),
+        str(read_database_path()), str(journal or ""), str(journal_abbr or ""),
         str(issn or ""), str(eissn or ""), str(nlm_id or ""),
     )
 
 
 def diagnostics() -> dict[str, Any]:
-    path = database_path()
+    path = read_database_path()
     if not path.is_file():
         return {"path": str(path), "exists": False, "journals": 0, "with_factor": 0}
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
     try:
         total, with_factor, with_cas = conn.execute(
             "SELECT count(*),sum(impact_factor IS NOT NULL),sum(cas_quartile IS NOT NULL) FROM journals"

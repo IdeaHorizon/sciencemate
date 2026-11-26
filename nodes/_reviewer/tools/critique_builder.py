@@ -60,6 +60,7 @@ _ACTIONS = (
     "set_verdict",
     "add_concern",
     "add_strength",
+    "record_question",
     "set_scores",
     "set_project_synthesis",
     "add_actionable_next_step",
@@ -159,6 +160,7 @@ def _summarize(d: dict) -> dict:
             1 for c in (d.get("concerns") or [])
             if c.get("severity") == "critical"),
         "n_strengths": len(d.get("strengths") or []),
+        "n_question_findings": len(d.get("question_findings") or []),
         "recommended_action": (d.get("recommended_action") or {}).get("action"),
         "project_verdict": d.get("project_verdict"),
         "project_mode": d.get("project_mode"),
@@ -187,6 +189,17 @@ async def _compose_review_critique(
     affected_use: str = "",
     # add_strength
     text: str = "",
+    # record_question (exact evidence bindings, never an automatic verdict)
+    question_id: str = "",
+    question_status: str = "",
+    question_finding: str = "",
+    question_dependencies: list[dict] | None = None,
+    dependency_completeness: str = "",
+    dependency_limitations: str = "",
+    intended_use: str = "",
+    question_reason: str = "",
+    previous_review_id: str = "",
+    previous_review_version: int | None = None,
     # set_scores
     scores: dict | None = None,
     # set_project_synthesis
@@ -227,6 +240,27 @@ async def _compose_review_critique(
 
     if action == "status":
         return {"status": "success", "draft": _summarize(d)}
+
+    if action == "record_question":
+        from core.review_reuse import record_question
+
+        try:
+            finding = record_question(
+                state, artifact_under_review=artifact_under_review,
+                question_id=question_id, question_status=question_status,
+                question_finding=question_finding,
+                question_dependencies=question_dependencies or [],
+                dependency_completeness=dependency_completeness,
+                dependency_limitations=dependency_limitations, intended_use=intended_use,
+                question_reason=question_reason, previous_review_id=previous_review_id,
+                previous_review_version=previous_review_version,
+            )
+        except (ValueError, OSError, RuntimeError) as exc:
+            return {"status": "error", "error": str(exc)}
+        findings = d.setdefault("question_findings", [])
+        findings[:] = [old for old in findings if old["question_id"] != question_id]
+        findings.append(finding)
+        return {"status": "success", "question_finding": finding, "draft": _summarize(d)}
 
     if action == "set_verdict":
         if verdict in ("approve", "approve_with_revisions"):
@@ -432,6 +466,9 @@ async def _compose_review_critique(
             )
     try:
         review_subject = _review_subject_snapshot(state, artifact_under_review.strip())
+        from core.review_reuse import validate_at_finalize
+
+        validate_at_finalize(state, artifact_under_review.strip(), d.get("question_findings") or [])
     except (OSError, ValueError) as exc:
         return {"status": "error", "error": str(exc)}
 
@@ -467,6 +504,7 @@ async def _compose_review_critique(
         "review_subject": review_subject,
         "review_scope": d.get("review_scope", ""),
         "unverified_checks": d.get("unverified_checks", []),
+        "question_findings": d.get("question_findings", []),
         # R-OB1：缺项与意见矛盾如实随 payload 走（判决拆除批 3w）。
         "advisories": advisories,
         "_composed_by": "compose_review_critique",   # 审计：框架拼装，非模型单发
@@ -506,6 +544,8 @@ async def _compose_review_critique(
         "review_subject": review_subject,
         "advisories": advisories,
     }
+    if d.get("question_findings"):
+        metadata["question_review_scope"] = d["question_findings"][0]["scope"]
     if side_effect_check is not None:
         metadata["side_effect_check"] = {
             "promised_read_only": side_effect_check.get("promised_read_only"),
@@ -561,6 +601,11 @@ register_tool(
             "  - `add_concern`：一条 concern 一次调用（severity=critical/major/minor + "
             "title + description；可选 suggestion / basis / evidence / impact / affected_use）\n"
             "  - `add_strength`：一条 strength\n"
+            "  - `record_question`：绑定research_state中精确question_id、当前intended_use、"
+            "proof/data/definitions/criteria/use依赖；完整声明后可verified；"
+            "carried_forward须previous_review_id及version且本轮字节/用途/判据均适用；"
+            "新疑点或独立抽查用reopened并给question_reason；缺绑定用unverified并披露局限。"
+            "逐问题沿用不改变整份verdict或recommended_action。\n"
             "  - `set_scores`：per_dimension_scores（维度 → 1-5）\n"
             "  - `set_project_synthesis`：project_synthesis 专用，写入 project_verdict、"
             "mode、user_requirement_summary、current_state_summary\n"
@@ -624,6 +669,50 @@ register_tool(
                     "description": "Specific claim or use affected; avoid a blanket project veto.",
                 },
                 "text": {"type": "string"},
+                "question_id": {"type": "string"},
+                "question_status": {
+                    "type": "string",
+                    "enum": ["verified", "carried_forward", "reopened", "unverified"],
+                },
+                "question_finding": {"type": "string", "maxLength": 1200},
+                "question_dependencies": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "role": {
+                                "type": "string",
+                                "enum": ["proof", "data", "definitions", "criteria", "use"],
+                            },
+                            "artifact_id": {"type": "string"},
+                            "path": {
+                                "type": "string",
+                                "description": "Existing file, within the ordinary read boundary.",
+                            },
+                            "question_id": {
+                                "type": "string",
+                                "description": ("Select an exact research_state row by id before "
+                                                "applying pointer; safe after reorder."),
+                            },
+                            "pointer": {
+                                "type": "string",
+                                "description": ("RFC6901 pointer into {content,metadata}, or into "
+                                                "the selected question row; empty selects all."),
+                            },
+                        },
+                        "required": ["role"],
+                        "additionalProperties": False,
+                    },
+                },
+                "dependency_completeness": {"type": "string", "enum": ["complete", "limited"]},
+                "dependency_limitations": {"type": "string"},
+                "intended_use": {
+                    "type": "string",
+                    "description": "Current use checked; changing use invalidates carry-forward.",
+                },
+                "question_reason": {"type": "string"},
+                "previous_review_id": {"type": "string"},
+                "previous_review_version": {"type": "integer", "minimum": 1},
                 "scores": {"type": "object"},
                 "project_verdict": {"type": "string", "enum": list(_PROJECT_VERDICTS)},
                 "mode": {"type": "string", "enum": list(_PROJECT_MODES)},

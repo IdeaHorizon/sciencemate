@@ -5,8 +5,8 @@ import {createAcademicSearchSession} from "./search-session";
 export const academicSearchSession = createAcademicSearchSession({
   stream:(...args)=>api.streamLiteratureSearch(...args),
   plan:planLiteratureSearch,
-  status:()=>cnkiStatus(false),
-  create:(query,limit,kind)=>createCnkiJob(query,false,"domain",limit,kind),
+  status:cnkiStatus,
+  create:createCnkiJob,
   read:readCnkiJob,retry:retryCnkiJob,cancelJob:cancelCnkiJob,
   resetSession:resetCnkiSession,
   sleep:()=>new Promise(resolve=>setTimeout(resolve,2500)),

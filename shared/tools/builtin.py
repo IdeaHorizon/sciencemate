@@ -684,7 +684,6 @@ async def _run_bash(state: State, cmd: str, timeout: int = 600,
             state.append_transcript(
                 "highrisk_bash_bypass", cmd_preview=cmd[:200], category=category)
         elif _dc.is_confirmed(state, cmd):
-            _dc.consume_confirmation(state, cmd)   # 一次性：用掉这次批准
             state.append_transcript(
                 "highrisk_bash_confirmed_run", cmd_preview=cmd[:200], category=category)
         else:
@@ -1282,7 +1281,7 @@ register_tool(
         name="request_network_access",
         description=(
             "撞到出网白名单时，把「要连哪个主机、为什么」呈给用户，等他点允许。"
-            "批准**只在本次 run 内有效**：不写环境变量、不落盘、不含子域。"
+            "批准**只在本次 run 内有效**：随恢复断点保存、不写环境变量、不含子域。"
             "适合：需要某个科学数据源 —— 内置白名单里一个都没有，全是装软件用的。"
             "不适合：装依赖（pypi / github 本来就在白名单里）。"
             "被拒绝就换一条路或如实 report_blocker，不要反复问同一个域。"

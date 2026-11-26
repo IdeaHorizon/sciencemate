@@ -24,6 +24,7 @@ const DETAIL_REFRESH_EVENT_KINDS = new Set([
   "permission.required",
   "permission.resolved",
   "run.paused",
+  "run.suspended",
   "run.resumed",
   "run.retrying",
   "run.recovering",

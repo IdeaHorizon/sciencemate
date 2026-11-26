@@ -239,3 +239,21 @@ async def test_cancelled_run_still_finalizes(tmp_path, monkeypatch):
     assert summary["status"] == "cancelled"
     assert summary["cancel_meta"]["requested_by"] == "user_panic"
     assert summary["cancel_meta"]["cancelled_at"] == "tool:list_artifacts"
+
+@pytest.mark.asyncio
+async def test_custom_loop_returning_after_stop_cannot_finalize_as_completed(tmp_path, monkeypatch):
+    from core import custom_loop, executor
+    from core.agent_loop import LoopResult
+    from core.harness import NodeHarness
+
+    monkeypatch.setattr(executor, 'load_harness', lambda *a, **k: NodeHarness(node_type='data'))
+
+    async def stopped_custom(harness, state, messages, llm):
+        state.hook_state['kill_signal'] = {'reason': 'stop', 'requested_by': 'user'}
+        return LoopResult(final_text='done', turns=1, messages=messages)
+
+    monkeypatch.setattr(custom_loop, 'resolve_custom_loop', lambda _: stopped_custom)
+    summary = await executor.execute_node(node_type='data', state_dir=tmp_path, llm=object())
+    assert summary['status'] == 'cancelled'
+    assert summary['loop_terminal'] == {'kind': 'cancelled', 'cause': 'external_kill'}
+    assert summary['cancel_meta']['cancelled_at'] == 'execute_node.result'

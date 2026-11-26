@@ -3,8 +3,7 @@
 设计：两个模式，二选一，全局切换：
   - **普通模式（默认）**：命中高危模式 → 走真实 HITL pause（复用
     request_human_input 同款 pause_event 契约），等人明确批准才放行；
-    批准判定由 `highrisk_confirm_hook`（always-on loop hook）在下一轮 turn_start
-    读取人的回答文本完成，写一次性确认标记，工具重试时消费掉。
+    批准、原调用续执行与回执由 core.approvals 在派发边界完成。
   - **bypass 模式**：跳过交互确认并写审计 transcript，但绝不跳过强制 Docker
     沙盒、路径挂载或资源限制。
 
@@ -14,11 +13,9 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import re
-import time
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -578,112 +575,13 @@ def read_only_shell_refusal(out: str, err: str, returncode: int | None, *,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 一次性确认标记（human 批准后，工具重试时消费）
+# 门禁查询（仅 Core 领取执行的原调用可以使用批准）
 # ─────────────────────────────────────────────────────────────────────────────
 
-_STATE_KEY = "_highrisk_confirmed_cmds"
-_PENDING_KEY = "_highrisk_pending_ask"
-
-
-def _cmd_key(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-
-
-#: 通行证在盘上活多久。一次性凭证不该永生 —— 人批的是"现在这一次"。
-PASS_TTL_SECONDS = 3600
-
-
-def _pass_store_path(state):
-    """通行证落盘处：**会话级**，不是 run 级。
-
-    ## 为什么必须落盘（2026-08-31 实测的确定性死循环）
-
-    批准原来只写 `state.hook_state[_STATE_KEY]` —— 那是**这一个 run 的内存**。
-    而 `record_highrisk_answer` 只在 pause 还活着时被调；pause 一旦作废，
-    人的答复就被当成**新的一轮**，节点用全新 State 重跑，通行证不存在，
-    同一道**确定性**的闸再次触发 —— 回到原点。
-
-    现场：连着三次「批准执行」换回三次一模一样的高危提问，
-    `pause.abandoned` 每次都报，而 worker 从头到尾没死过。
-    **这个部署上高危操作永远批不下来。**
-
-    讽刺的是 approval_contract 自己写着「通行证绑定在你这次提交的**逐字相同的
-    参数**上」—— 身份（工具 + 逐字文本的 sha256）本来就可持久化，
-    却被存在了最活不过一轮的地方。
-
-    落在 project_root（memory.jsonl 同级）并按 session 隔离：
-    同一会话里换 run 仍然认，换会话不认。没有 project_root（教学版 run-local）
-    时退回只用内存 —— 那种形态本来就没有跨 run 语义。
-    """
-    root = getattr(state, "project_root", None)
-    return (root / "highrisk_passes.json") if root else None
-
-
-def _pass_id(state, text: str) -> str:
-    return f"{getattr(state, 'session_id', None) or '-'}:{_cmd_key(text)}"
-
-
-def _load_passes(state) -> dict:
-    path = _pass_store_path(state)
-    if path is None or not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:          # 坏文件不该把高危闸变成放行，也不该炸掉调用方
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _save_passes(state, passes: dict) -> None:
-    path = _pass_store_path(state)
-    if path is None:
-        return
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(passes, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass                    # 落盘失败不能反过来把批准搞没（内存那份还在）
-
-
-def _now() -> float:
-    return time.time()
-
-
 def is_confirmed(state, text: str) -> bool:
-    confirmed = state.hook_state.get(_STATE_KEY) or {}
-    if _cmd_key(text) in confirmed:
-        return True
-    # 内存里没有 → 可能是"人答复被当成新一轮、节点换了 State"那条路。
-    entry = _load_passes(state).get(_pass_id(state, text))
-    if not isinstance(entry, dict):
-        return False
-    expires = entry.get("expires_at")
-    return isinstance(expires, (int, float)) and _now() < expires
-
-
-def consume_confirmation(state, text: str) -> None:
-    """一次性：这次放行后清掉标记，同一命令下次再触发高危模式要重新问。"""
-    confirmed = state.hook_state.get(_STATE_KEY) or {}
-    confirmed.pop(_cmd_key(text), None)
-    state.hook_state[_STATE_KEY] = confirmed
-    passes = _load_passes(state)
-    if passes.pop(_pass_id(state, text), None) is not None:
-        _save_passes(state, passes)
-
-
-def mark_confirmed(state, text: str) -> None:
-    confirmed = state.hook_state.setdefault(_STATE_KEY, {})
-    confirmed[_cmd_key(text)] = True
-    passes = _load_passes(state)
-    # 顺手清掉过期的，别让这个文件无限长
-    now = _now()
-    passes = {
-        k: v for k, v in passes.items()
-        if isinstance(v, dict) and isinstance(v.get("expires_at"), (int, float))
-        and v["expires_at"] > now
-    }
-    passes[_pass_id(state, text)] = {"granted_at": now, "expires_at": now + PASS_TTL_SECONDS}
-    _save_passes(state, passes)
+    """A gate is authorized only inside its claimed, frozen tool invocation."""
+    from core.approvals import authorized
+    return authorized(state, text)
 
 
 #: 审批面能看到多少被批的内容。
@@ -709,175 +607,31 @@ def _preview_block(preview: str) -> str:
     )
 
 
-def register_pending_ask(state, *, tool: str, text: str, category: str) -> None:
-    """工具即将 pause 前登记，供 highrisk_confirm_hook 在下一轮读人回答时定位。"""
-    state.hook_state[_PENDING_KEY] = {"tool": tool, "text": text, "category": category}
-
-
-def pop_pending_ask(state) -> dict | None:
-    return state.hook_state.pop(_PENDING_KEY, None)
-
-
 # ── 选项即协议 ──────────────────────────────────────────────────────────────
 #
 # 界面上印的那两行选项和后端认的答复，必须是**同一个东西的两种渲染**。
 # issue #422 实测：CLI 印 `[1] 批准执行 / [2] 拒绝`，人输入 `1`，后端只认
-# "批准/同意/approve"，于是判成未批准 → 不发通行证 → 模型不再重调 submit_job。
+# "批准/同意/approve"，于是判成未批准，原调用无法继续。
 # 界面广告的能力，后端得接得住。所以选项文案在这里定义一次，pause_event 用它
 # 渲染，判定也用它反解。
 APPROVE_OPTION = "批准执行"
 DENY_OPTION = "拒绝"
 HIGHRISK_OPTIONS = [APPROVE_OPTION, DENY_OPTION]
 
-# 批准 / 拒绝关键词（跟 shared/tools/run_node.py 里 fake-orchestrator 的
-# 关键词判定风格一致：宽松匹配批准词，默认不批准更安全）
-_APPROVE_WORDS = re.compile(
-    r"批准|同意|可以|确认执行|执行吧|去吧|approve|approved|^yes\b|^ok\b|^y\b",
-    re.IGNORECASE,
-)
-
-#: 裸选项序号的各种写法：`1` / `1.` / `[1]` / `(1)` / `（1）` / `选 1`。
-_BARE_INDEX = re.compile(r"^(?:选\s*)?[\[(（]?\s*(\d+)\s*[\])）]?\s*[.。、)]?$")
-
-
-def response_text(answer: object) -> str:
-    """从人工答复里取出**人真正说的那句话**。
-
-    resume 回填给模型的是一个信封（`core/agent_loop.py::resume_loop`）：
-
-        {"status": "success", "response": "1", "asked_by": "experiment"}
-
-    而 hook 从 messages 里读到的就是这个信封的 JSON 字符串。此前判定直接拿
-    整串去匹配 —— 于是 `^yes\b` / `^ok\b` / `^y\b` 这三条锚定规则在真实路径上
-    **永远不可能成立**（串首是 `{`），`1` 更是无从谈起。判定必须先拆信封。
-    """
-    if isinstance(answer, dict):
-        inner = answer.get("response")
-        return "" if inner is None else str(inner).strip()
-    text = ("" if answer is None else str(answer)).strip()
-    if not (text.startswith("{") and text.endswith("}")):
-        return text
-    try:
-        payload = json.loads(text)
-    except (ValueError, TypeError):
-        return text
-    if isinstance(payload, dict) and "response" in payload:
-        inner = payload.get("response")
-        return "" if inner is None else str(inner).strip()
-    return text
-
-
-def _option_choice(text: str, options: list[str] | None = None) -> str | None:
-    """把答复解析成它选中的那个选项文案；不是选项就返回 None。
-
-    认三种写法：裸序号（界面印的 `[1]`）、选项原文、选项原文的前缀词。
-    """
-    opts = options or HIGHRISK_OPTIONS
-    m = _BARE_INDEX.match(text)
-    if m:
-        idx = int(m.group(1))
-        return opts[idx - 1] if 1 <= idx <= len(opts) else None
-    stripped = text.strip().strip("[]()（）").strip()
-    for opt in opts:
-        if stripped == opt:
-            return opt
-    return None
-
-
-def looks_like_approval(answer: object, options: list[str] | None = None) -> bool:
-    """人这次到底批没批。
-
-    顺序是**先选项、后关键词**：选项是界面给出的确定协议，关键词只是兜底的
-    自由文本理解。选中"拒绝"必须当场判否 —— 否则 `拒绝` 里那个"绝"字将来
-    多一条宽松词就可能被误吞。
-    """
-    text = response_text(answer)
-    if not text:
-        return False
-    choice = _option_choice(text, options)
-    if choice is not None:
-        return choice == APPROVE_OPTION
-    return bool(_APPROVE_WORDS.search(text))
-
-
-def record_highrisk_answer(state, answer: object,
-                           options: list[str] | None = None) -> bool:
-    """在框架**确知人选了什么**的那一刻，把批准与否机械记账。
-
-    与 decision package 的 `record_decision_answer`（#155/#183）同形，且原因
-    完全一样：pause_driver 手里同时有原始答复和那份选项表，hook 那边只剩一条
-    JSON 信封。判定放在信息最全的地方做一次，写成事实；hook 读事实，不再猜。
-
-    记账失败绝不能打断 resume —— 这里只写 hook_state，没有可失败的 IO。
-    """
-    approved = looks_like_approval(answer, options)
-    pending = state.hook_state.get(_PENDING_KEY)
-    if isinstance(pending, dict):
-        pending["approved"] = approved
-        pending["answer_text"] = response_text(answer)
-    return approved
-
-
 def build_pause_payload(state, *, tool: str, text: str, category: str,
                          preview: str) -> dict:
-    """统一构造高危命令确认的 pause_event（跟 request_human_input 同款契约）。
-
-    `pause_event` 是给**人**看的；`approval_contract` 是给**模型**看的。两者都
-    必须有：pause_event 里那句"批准请回复批准"只回答了人该做什么，模型这边
-    完全没有交代，它会默认"人批准了 = 框架替我执行了"，然后去查一个根本不存在
-    的结果。见 core/loop_hooks_builtin.py::_highrisk_confirm_on_turn_start 的
-    实测记录。
-    """
-    # 预授权：出发前就说清楚这一趟批准哪些类别，到点不再问人。
-    #
-    # 检查放在**这个漏斗里**，不放在各调用方 —— 调用方有三处、分属两个 owner
-    # 的节点目录，写成名单式检查就是"新增一个高危工具默认漏过预授权"，而且
-    # 越界改别人的节点。这里是每一次高危确认的必经之路，且已经拿到 category。
-    #
-    # 走的是**和人批准完全同一条路**：发一张绑定逐字命令的一次性通行证，然后
-    # 让模型用相同参数重调一次。不另开一条"框架替你执行"的路径 —— 那正是
-    # E2E v19 里模型误以为"批准 = 已执行"的那个坑，多一条路就多一种误解。
-    if preauthorized(category):
-        mark_confirmed(state, text)
-        try:
-            state.append_transcript(
-                "highrisk_preauthorized", tool=tool, category=category,
-                preview=preview[:200],
-            )
-        except Exception:
-            pass
-        return {
-            "status": "preauthorized",
-            "approval_contract": (
-                f"这次 {category}（工具：{tool}）已按**本次会话出发前声明的授权范围**"
-                f"自动批准，没有惊动任何人。\n"
-                f"批准同样**不会**替你执行 —— 它只发了一张绑定逐字参数的一次性"
-                f"通行证。请立刻用与刚才完全相同的参数重新调用一次 {tool}。\n"
-                f"改任何一个参数都会作废通行证并重新触发审批。"
-            ),
-            "category": category,
-        }
-
-    register_pending_ask(state, tool=tool, text=text, category=category)
-    return {
-        "status": "pause",
-        "approval_contract": (
-            f"这次调用**没有执行**，它在等人批准。批准本身也不会执行它 —— "
-            f"批准只会发一张一次性通行证，绑定在你这次提交的逐字相同的参数上。"
-            f"拿到批准后，你必须用**完全相同的参数**重新调用一次 {tool}，"
-            f"那一次才会真正执行。改任何一个参数都会作废通行证并重新触发审批。"
-        ),
-        "pause_event": {
-            "question": f"⚠️ 检测到高危操作（{category}），是否批准执行？",
-            "context": (
-                f"工具：{tool}\n命中类别：{category}\n"
-                f"{_preview_block(preview)}\n\n"
-                f"批准请回复 1（或 \"{APPROVE_OPTION}\"/\"批准\"/approve）；"
-                f"拒绝回复 2 或任意其它文本。"
-            ),
-            "options": list(HIGHRISK_OPTIONS),
-            "asking_node_type": state.node_type,
-            "asking_run_id": state.run_id,
-            "metadata": {"type": "highrisk_confirm", "tool": tool, "category": category},
-        },
-    }
+    """Describe a permission boundary. Core binds and resumes the original call."""
+    from core.decision_offer import Choice, Offer, PAUSE_OFFER_KEY
+    offer = Offer(
+        decision_id=f"{state.run_id}:permission:{hashlib.sha256(text.encode()).hexdigest()}",
+        kind="highrisk_confirm",
+        question=f"⚠️ 检测到高危操作（{category}），是否批准执行？",
+        context=f"工具：{tool}\n命中类别：{category}\n{_preview_block(preview)}",
+        choices=(Choice(id="approve", label=APPROVE_OPTION), Choice(id="deny", label=DENY_OPTION)),
+    ).to_pause_payload()
+    return {"status": "pause", "executed": False, "pause_event": {
+        **offer, PAUSE_OFFER_KEY: offer,
+        "asking_node_type": state.node_type, "asking_run_id": state.run_id,
+        "metadata": {"type": "highrisk_confirm", "tool": tool,
+                     "category": category, "authorization_key": text},
+    }}

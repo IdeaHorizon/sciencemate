@@ -313,7 +313,7 @@ def opening_system_prompt(content: str) -> LLMMessage:
     return LLMMessage(role="system", content=content)
 
 
-def _only_an_opening_system_message(messages: list[LLMMessage]) -> list[LLMMessage]:
+def normalize_request_messages(messages: list[LLMMessage]) -> list[LLMMessage]:
     """会话**中段**的 system 消息不上线 —— 就地包成 framework notice。
 
     `opening_system_prompt` 的文档说"存在这个函数是为了让护栏能扫盘：合法用途
@@ -343,8 +343,14 @@ def _only_an_opening_system_message(messages: list[LLMMessage]) -> list[LLMMessa
             "framework_notice）：位置 %d/%d，开头 %r",
             i, len(messages), (out[i].content or "")[:60],
         )
-        out[i] = framework_notice(out[i].content or "")
+        replacement = framework_notice(out[i].content or "")
+        replacement.context_slot = out[i].context_slot
+        out[i] = replacement
     return out
+
+
+# Legacy callers use the same idempotent normalizer, never a second policy.
+_only_an_opening_system_message = normalize_request_messages
 
 
 def framework_notice(content: str) -> LLMMessage:
@@ -358,6 +364,11 @@ def framework_notice(content: str) -> LLMMessage:
             f"{body}\n{FRAMEWORK_NOTICE_CLOSE}"
         ),
     )
+
+
+def is_primary_input(message: LLMMessage) -> bool:
+    """Local authorship is independent of provider role (including human receipts)."""
+    return message.origin in {"caller", "legacy_unknown"}
 
 
 def is_framework_notice(msg: LLMMessage) -> bool:
@@ -1124,6 +1135,8 @@ class LLMClient:
             timeout=self.timeout,
             max_retries=self.max_retries,
             retry_backoff_base=self.retry_backoff_base,
+            retry_budget_s=self.retry_budget_s,
+            role=self.role,
         )
         twin.stream_display = None
         twin.stream_reasoning_display = None
@@ -1182,7 +1195,8 @@ class LLMClient:
                 messages=messages, tools=tools,
             )
             cached = llm_cache.get(ckey)
-            if cached is not None:
+            if (cached is not None and (cached.get("content") or cached.get("tool_calls"))
+                    and (tools or not cached.get("tool_calls"))):
                 return LLMResponse(
                     content=cached.get("content"),
                     tool_calls=cached.get("tool_calls") or [],
@@ -1193,7 +1207,7 @@ class LLMClient:
 
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": [_msg_to_dict(m) for m in _only_an_opening_system_message(messages)],
+            "messages": [_msg_to_dict(m) for m in normalize_request_messages(messages)],
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
@@ -1219,6 +1233,17 @@ class LLMClient:
                     payload, timeout=effective_timeout, max_retries=effective_retries,
                 )
             response = _parse_chat_response(data)
+            if not tools and response.tool_calls:
+                # Summaries/reviews have no tool surface. A recovered call is
+                # a protocol failure here, not an action or a textual answer.
+                names = [(call.get("function") or {}).get("name")
+                         for call in response.tool_calls]
+                response.provider_recovery = {
+                    **(response.provider_recovery or {}),
+                    "reason": "unoffered_tool_calls", "tool_names": names,
+                }
+                response.tool_calls, response.content = [], None
+                response.protocol_leak, response.leak_kind = True, "markup"
             if not response.protocol_leak:
                 break
             if leak_attempt < _PROTOCOL_LEAK_RETRIES:
@@ -1247,10 +1272,14 @@ class LLMClient:
             # role=="system"，整套剥离会在改造落地那一刻静默失效 —— 防线还在、
             # 只是再也拿不到证据。两种形态都收：信封（新）+ 中段 system（框架
             # 自己的少数控制消息，如截断恢复提示，仍走这条）。
-            # 取的是信封**正文**：模型复述的是正文，壳混进来只会稀释判据。
+            # Named snapshots contain evidence the answer may need to repeat
+            # verbatim (numbers, conclusions, job handles). They are data, not
+            # proof of a scaffold echo; using them here can delete valid JSON
+            # fields or the first sentence of a scientific result.
             injected_texts = [
                 framework_notice_body(m) for m in messages[1:]
-                if m.content and (is_framework_notice(m) or m.role == "system")
+                if m.content and not m.context_slot
+                and (is_framework_notice(m) or m.role == "system")
             ]
             _clean, _reason2 = sanitize_assistant_content(
                 response.content, response.reasoning_content, injected_texts,
@@ -1258,7 +1287,7 @@ class LLMClient:
             response.content = _clean
             response.reasoning_content = _reason2
 
-        if use_cache and ckey:
+        if use_cache and ckey and not response.protocol_leak and (response.content or response.tool_calls):
             llm_cache.put(ckey, {
                 "content": response.content,
                 "tool_calls": response.tool_calls,

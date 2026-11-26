@@ -52,6 +52,7 @@ class RunStatus(StrEnum):
     WAITING_HUMAN = "waiting_human"
     WAITING_COMPUTE = "waiting_compute"
     RETRYING = "retrying"
+    SUSPENDED = "suspended"
     COMPLETED = "completed"
     COMPLETED_WITH_WARNING = "completed_with_warning"
     INCOMPLETE = "incomplete"
@@ -100,6 +101,7 @@ REQUIRES_LIVE_RUNTIME_STATUSES: frozenset[RunStatus] = frozenset({
     RunStatus.WAITING_PERMISSION,
     RunStatus.WAITING_HUMAN,
     RunStatus.RETRYING,
+    RunStatus.SUSPENDED,
 })
 
 #: 「停下来等人」—— 需要活进程，但**不断言自己在动**。
@@ -113,10 +115,16 @@ PARKED_WAITING_FOR_HUMAN: frozenset[RunStatus] = frozenset({
     RunStatus.WAITING_HUMAN,
 })
 
+#: 不消耗模型轮次的等待：人工答复与完成核验分别有自己的恢复协议。
+PARKED_RUN_STATUSES: frozenset[RunStatus] = (
+    PARKED_WAITING_FOR_HUMAN | {RunStatus.SUSPENDED}
+)
+
+
 #: 断言"它此刻在动"的状态。**推导出来的，不是第四份手写名单**
 #: （同 `UNFINISHED_RUN_STATUSES`：名单一多就会各自演化，而分叉时两边都不报错）。
 ASSERTS_ACTIVE_WORK: frozenset[RunStatus] = (
-    REQUIRES_LIVE_RUNTIME_STATUSES - PARKED_WAITING_FOR_HUMAN
+    REQUIRES_LIVE_RUNTIME_STATUSES - PARKED_RUN_STATUSES
 )
 
 #: 走到头了但**不是干净的结束** —— 还有活可以接着干。恢复资格看这个。

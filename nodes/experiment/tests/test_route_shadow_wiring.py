@@ -1576,14 +1576,14 @@ def test_v2_route_owns_dependencies_even_when_build_graph_is_actionable(
     monkeypatch.setattr(safe_bash, "_has_matching_source_recon", lambda *_a, **_k: True)
     monkeypatch.setattr(safe_bash, "_latest_build_graph", lambda *_a, **_k: graph)
 
-    result = safe_bash._build_gate(
+    result = asyncio.run(safe_bash._build_gate(
         state, "cmake --build . --target app", cwd=str(build_root),
         route_decision={
             "decision": "matched_ready_step", "authoritative": True,
             "route_ref": {"artifact_id": "route", "version": 1},
             "route_step_id": "build_app",
         },
-    )
+    ))
 
     assert result is None
 
@@ -1623,10 +1623,10 @@ def test_legacy_graph_without_observable_outputs_cannot_hard_block(
     monkeypatch.setattr(safe_bash, "_has_matching_source_recon", lambda *_a, **_k: True)
     monkeypatch.setattr(safe_bash, "_latest_build_graph", lambda *_a, **_k: graph)
 
-    assert safe_bash._build_gate(
+    assert asyncio.run(safe_bash._build_gate(
         state, "cmake --build . --target app", cwd=str(build_root),
         route_decision={"decision": "matched_legacy_step", "authoritative": False},
-    ) is None
+    )) is None
 
 
 def test_legacy_fallback_route_still_uses_legacy_contract_gate(tmp_path, monkeypatch):
@@ -1649,14 +1649,14 @@ def test_legacy_fallback_route_still_uses_legacy_contract_gate(tmp_path, monkeyp
     monkeypatch.setattr(safe_bash, "_latest_build_graph", lambda *_a, **_k: None)
     monkeypatch.setattr(safe_bash, "_build_contract_gate", lambda _state: marker)
 
-    result = safe_bash._build_gate(
+    result = asyncio.run(safe_bash._build_gate(
         state,
         "make -j2",
         route_decision={
             "decision": "matched_legacy_step",
             "authoritative": False,
         },
-    )
+    ))
 
     assert result is marker
 
@@ -1688,7 +1688,6 @@ def test_unknown_effectful_driver_uses_strong_bounded_executor(
     monkeypatch.setattr(
         safe_bash, "_exec_and_log", _recording_executor(observed),
     )
-    monkeypatch.setattr(safe_bash, "_orig_run_bash", forbidden_builtin)
     monkeypatch.setattr(safe_bash, "bench_enabled", lambda _cap: False)
 
     result = asyncio.run(safe_bash._safe_run_bash(
@@ -2162,7 +2161,6 @@ def test_control_plane_queries_reach_public_executor(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(safe_bash, "_exec_and_log", fake_executor)
-    monkeypatch.setattr(safe_bash, "_orig_run_bash", fake_executor)
     commands = (
         "kubectl get pods",
         "kubectl auth can-i create pods",
@@ -2236,7 +2234,7 @@ def test_legacy_graph_with_observable_outputs_is_recorded_not_blocked(
         safe_bash, "_latest_build_graph", lambda *_a, **_k: graph
     )
 
-    result = safe_bash._build_gate(
+    result = asyncio.run(safe_bash._build_gate(
         state,
         "cmake --build . --target app",
         cwd=str(build_root),
@@ -2244,7 +2242,7 @@ def test_legacy_graph_with_observable_outputs_is_recorded_not_blocked(
             "decision": "matched_legacy_step",
             "authoritative": False,
         },
-    )
+    ))
 
     # 判决拆除（sb:3341 删，2026-08-31）：构建前置闸整体降为 warning —— 同函数
     # 下方自认 DAG 模型不可靠，实测后果是弱模型绕行 execute_python。留痕不拦，

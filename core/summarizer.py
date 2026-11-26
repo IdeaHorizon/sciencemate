@@ -1,21 +1,8 @@
-"""Per-node summarizer：把过长的 messages 历史压成一段叙述。
+"""Token estimation and pluggable summary strategies.
 
-设计目标：
-  1. **每节点一种压缩策略**。owner 在 harness yaml 写 `summarizer:` 声明配置；
-     特殊需求时在 `nodes/{node}/summarizer.py` 里写 Python 函数注册覆盖。
-  2. **保留契约**：system message + 最近 N 轮 + 关键工具调用永不动；
-     只压缩中间的 LLM 独白 + 大 tool result。
-  3. **触发可控**：默认 token_threshold=0.7（占 max_context_tokens 比例）；
-     可配置成 turn_count、或 'never' 关闭。
-
-调用流（在 agent_loop 每轮开头执行）：
-  1. 估算当前 messages token 数。
-  2. 若超阈值且 summarizer.enabled，调用 run_summarizer。
-  3. run_summarizer 优先查 _CUSTOM[node_type]（Python 注册的）。
-  4. 没注册则用 _DEFAULT_BY_STRATEGY[harness.summarizer.strategy]。
-  5. 替换 messages 列表（in-place），写 transcript 事件。
-
-token 估算用 char/4 粗略 —— 足够 trigger 判断；精确 token 用不上。
+Request-scoped measurements and the transactional working-set result contract
+are owned by context_lifecycle. Summary generation returns a candidate; failure
+leaves the original projection intact for that owner to recover or reject.
 """
 from __future__ import annotations
 
@@ -23,12 +10,18 @@ import logging
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
 
-from . import tool_call_cache as _tool_cache
-from .harness import NodeHarness, SummarizerConfig
-from .llm import (LLMClient, LLMMessage, framework_notice, framework_notice_body,
-                  is_framework_notice, opening_system_prompt)
+from .context_view import TOMBSTONE_PREFIX
+from .harness import NodeHarness
+from .harness import SummarizerConfig as SummarizerConfig
+from .llm import (
+    LLMClient,
+    LLMMessage,
+    framework_notice,
+    is_framework_notice,
+    is_primary_input,
+    opening_system_prompt,
+)
 from .state import State
 
 log = logging.getLogger("summarizer")
@@ -36,9 +29,8 @@ log = logging.getLogger("summarizer")
 
 # ── token 估算 ───────────────────────────────────────────────────────────────
 
-# v1.6: 若 tiktoken 可用，用 cl100k_base / o200k_base 精算（GPT-4 系 + 通用 BPE
-# 跟 GLM/DeepSeek/Claude 等 OpenAI-compat backend 的实际 tokenization 误差 < 10%）。
-# 不可用时 fallback char/4（旧行为，约 50% 偏低中文 / 100% 偏高 JSON）。
+# cl100k_base supplies the local estimate; provider observations calibrate it.
+# Without the encoder, UTF-8 bytes are a conservative offline fallback.
 _TIKTOKEN_ENC = None
 
 
@@ -56,14 +48,14 @@ def _get_encoder():
             # （中文差 8 倍）。它静默换人时，压缩触发点、工具预算、慢测阈值
             # 全部跟着变 —— 2026-08 就是这样让 CI 与开发机各测各的世界。
             # get_encoding 首次使用要联网下载 BPE 词表，网络不通就会走到这。
-            log.warning("tiktoken 不可用，token 估算回落 char/4（中文低估约 8 倍）：%s", e)
+            log.warning("tiktoken 不可用，token 估算回落到保守 UTF-8 字节计数：%s", e)
             _TIKTOKEN_ENC = False
             return None
     return _TIKTOKEN_ENC
 
 
 def estimate_tokens(messages: list[LLMMessage]) -> int:
-    """估算 messages 总 token 数。tiktoken 精算（cl100k_base）；不可用回 char/4。"""
+    """Estimate messages; without the tokenizer, use conservative UTF-8 bytes."""
     enc = _get_encoder()
     if enc is not None:
         total = 0
@@ -82,17 +74,17 @@ def estimate_tokens(messages: list[LLMMessage]) -> int:
             # 每条消息有 ~4 token role + format overhead（按 OpenAI 公式）
             total += 4
         return total
-    # fallback: char/4
+    # Offline initialization must not silently make Chinese inputs appear smaller.
     chars = 0
     for m in messages:
-        chars += len(m.content or "")
+        chars += len((m.content or "").encode("utf-8")) + 4
         rc = getattr(m, "reasoning_content", None)
         if rc:
-            chars += len(rc)
+            chars += len(rc.encode("utf-8"))
         if m.tool_calls:
             for tc in m.tool_calls:
-                chars += len(str(tc))
-    return chars // 4
+                chars += len(str(tc).encode("utf-8"))
+    return chars
 
 
 # ── SummarizerContext ────────────────────────────────────────────────────────
@@ -111,6 +103,8 @@ class SummarizerContext:
     llm: LLMClient                 # 用 LLM 做压缩的话调它
     # 触发时该 turn 编号（信息性，summarizer 一般不用）
     turn: int = 0
+    summary_failure: str | None = None
+    context_view: object | None = None
 
 
 # Summarizer 签名：(ctx) -> new_messages
@@ -240,40 +234,48 @@ def estimate_text_tokens(text: str) -> int:
     enc = _get_encoder()
     if enc is not None:
         return len(enc.encode(text))
-    return len(text) // 4
+    return len(text.encode("utf-8"))
 
 
 def effective_calibration(state) -> float:
-    """env 静态系数与服务端观测比取大者（观测比封顶）。"""
-    obs = 0.0
-    if state is not None:
-        try:
-            obs = float(state.hook_state.get(_OBSERVED_RATIO_KEY) or 0.0)
-        except (TypeError, ValueError):
-            obs = 0.0
+    """A rolling upper estimate, with the static factor only as a cold prior.
+
+    Observations can correct both under- and over-counting. A bounded recent
+    window prevents an early response or a previous model from setting a
+    permanent multiplier for every subsequent request.
+    """
+    samples = state.hook_state.get("_ctx_prompt_samples", []) if state else []
+    if samples:
+        ordered = sorted(samples)
+        upper = ordered[min(len(ordered) - 1, int(len(ordered) * .9))]
+        return upper * 1.05
+    # Read legacy checkpoints until the first new observation replaces them.
+    try:
+        obs = float(state.hook_state.get(_OBSERVED_RATIO_KEY) or 0) if state else 0
+    except (TypeError, ValueError):
+        obs = 0
     return max(_CONTEXT_CALIBRATION, min(obs, _CONTEXT_CALIBRATION_CAP))
+
+
+def bind_context_model(state, llm) -> None:
+    identity = (getattr(llm, "base_url", ""), getattr(llm, "model", ""))
+    identity = list(identity)
+    if "_ctx_model" in state.hook_state and state.hook_state["_ctx_model"] != identity:
+        for key in ("_ctx_prompt_samples", _OBSERVED_RATIO_KEY, OBSERVED_CEILING_KEY,
+                    PROVIDER_HARD_CAP_KEY, "_context_projection_signature", "_context_compaction"):
+            state.hook_state.pop(key, None)
+    state.hook_state["_ctx_model"] = identity
 
 
 def note_observed_prompt_tokens(state, *, local_estimate: int,
                                  server_prompt_tokens: int) -> None:
-    """agent_loop 每轮响应后回报：服务端实收 prompt_tokens vs 本地对该请求的估算。
-
-    观测比只升不降（max），确保校准朝安全方向收敛；local_estimate 已含
-    tool schema tokens，故观测比吸收的是纯 tokenizer/协议差异 + 未建模开销。
-    """
+    """Observe the exact submitted request, including schemas, in provider units."""
     if state is None or local_estimate <= 0 or server_prompt_tokens <= 0:
         return
-    ratio = server_prompt_tokens / float(local_estimate)
-    prev = 0.0
-    try:
-        prev = float(state.hook_state.get(_OBSERVED_RATIO_KEY) or 0.0)
-    except (TypeError, ValueError):
-        prev = 0.0
-    new = max(prev, min(ratio, _CONTEXT_CALIBRATION_CAP))
-    if new > prev:
-        state.hook_state[_OBSERVED_RATIO_KEY] = new
-
-
+    ratio = max(.25, server_prompt_tokens / local_estimate)
+    samples = [*state.hook_state.get("_ctx_prompt_samples", []), ratio][-16:]
+    state.hook_state["_ctx_prompt_samples"] = samples
+    state.hook_state[_OBSERVED_RATIO_KEY] = ratio
 
 
 def effective_prompt_tokens(messages_est: int, state) -> int:
@@ -363,7 +365,7 @@ def derived_tool_budget_bytes(harness: NodeHarness, state, messages: list[LLMMes
     # 报告钉死在 context，eff 263k 对着 60k 的窗，正是 qinp 事故在真
     # tokenizer 下复活（同一函数两把尺，见 test_context_fits_by_construction）。
     # 换算比必须由**当班的那个估算器**对**正被预算的这堆内容**现算：
-    # fallback 环境下 pile_est == chars//4 → 比值≈4，行为与旧版逐字节一致。
+    # 离线 fallback 按 UTF-8 字节计数，中文内容的换算因此更保守。
     pile_chars = sum(len(m.content or "") for m in tool_msgs)
     pile_est = estimate_tokens(tool_msgs) if tool_msgs else 0
     if pile_chars > 0 and pile_est > 0:
@@ -398,67 +400,40 @@ def presend_overflow(harness: NodeHarness, state, messages: list[LLMMessage],
 
 
 def should_compress(harness: NodeHarness, messages: list[LLMMessage],
-                    turn: int, state=None) -> tuple[bool, int]:
-    """返回 (是否要压, 估算 token 数)。
+                    turn: int, state=None, *, output_tokens=None) -> tuple[bool, int]:
+    """Schedule from the rendered request and its last verified projection.
 
-    v3.1 thrash guard（审计：实测单 run 13 次近乎无效压缩，61,402→61,317）：
-    上次压缩节省 < 5% 时，接下来 5 个 turn 不再触发 —— 大 tool result 无法
-    再压时反复重跑 LLM 压缩是纯浪费。state 传 None（老调用方）时守卫不生效。
+    No turn cooldown and no arbitrary minimum token growth. An identical
+    working set under the same budget needs no repeat summary; a new caller
+    constraint or capacity observation is a new input even if very short.
     """
+    from .context_lifecycle import projection_signature, target_tokens
+
     cfg = harness.summarizer
     if not cfg.enabled or cfg.trigger_type == "never":
         return False, 0
     est = estimate_tokens(messages)
-    # 有效 token = (messages 估算 + tool schema 估算) × 校准系数。
-    # tool schemas 每轮全量随请求发送但不在 messages 里 —— v3.3 之前完全没数它。
-    # 校准系数 = max(env 静态, 服务端观测比)，见 effective_calibration。
-    eff = effective_prompt_tokens(est, state)
-
-    # 有效窗口：配置是先验，空响应观测是证据（见 OBSERVED_CEILING_KEY 注释）。
-    window = effective_context_window(harness, state)
-
-    # ── 增长门（v3.4 / P2 水位滞回）────────────────────────────────────────
-    # 上次压缩后 est 没实质增长，就不再压：同样的输入再压一遍必然是同样的
-    # 结果。E2E v20 实录就是这个环：压缩压不下去（notice 累积 bug）→ est 不降
-    # → emergency 每轮强制再压 → 每轮重写中段 → 前缀缓存全失效、烧 LLM 调用，
-    # 直到模型返回空响应。thrash guard（按轮冷却）挡不住它，因为 emergency
-    # 无视冷却；增长门是证据判据（"压缩已证明无能为力"），对 emergency 一样
-    # 生效 —— 真撞 400 由空轮回滚路径处理，反复重压不是出路。
-    if state is not None:
-        _last_after = state.hook_state.get(_LAST_COMPRESS_EST_KEY)
-        if isinstance(_last_after, int) and est <= _last_after + _MIN_GROWTH_TO_RECOMPRESS:
-            return False, est
-
-    # emergency：逼近真实窗口时无视 thrash 冷却强制压缩，避免下一轮撞 API 400。
-    # 仅 token_threshold 模式有窗口概念；turn_count 模式无。
-    if cfg.trigger_type == "token_threshold":
-        emergency = int(window * _CONTEXT_EMERGENCY_RATIO)
-        if eff >= emergency:
+    target = target_tokens(harness, state, output_tokens)
+    if state and state.hook_state.get("_context_projection_signature") == projection_signature(messages, target):
+        return False, est
+    output = output_tokens if output_tokens is not None else getattr(harness, "max_output_tokens", 0)
+    if _state_int(state, PROVIDER_HARD_CAP_KEY):
+        if presend_overflow(harness, state, messages, output_tokens=output)[2] > 0:
             return True, est
-
-    if state is not None:
-        guard_until = state.hook_state.get(_THRASH_GUARD_KEY)
-        if isinstance(guard_until, int) and turn <= guard_until:
-            return False, est
-
     if cfg.trigger_type == "token_threshold":
-        threshold = int(window * cfg.trigger_threshold)
-        return eff > threshold, est
+        return est > target, est
     if cfg.trigger_type == "turn_count":
-        # threshold 在 turn_count 模式下解读为整数轮次（也可写 float 当倍数）
-        n = int(cfg.trigger_threshold)
-        return turn > 0 and (turn % max(1, n) == 0), est
+        return turn > 0 and turn % max(1, int(cfg.trigger_threshold)) == 0, est
     return False, est
 
 
-#: P2 水位滞回：压缩后 est 至少要比上次结果多这么多，才允许再压。
-_MIN_GROWTH_TO_RECOMPRESS = 2_000
+#: Legacy checkpoint/test names; no longer used as scheduling authority.
 _LAST_COMPRESS_EST_KEY = "_summarizer_last_est_after"
 
 
 def note_compress_result(state, *, turn: int,
                           tokens_before: int, tokens_after: int) -> None:
-    """v3.1：agent_loop 压缩后回报效果；节省 < 5% → 启动 5-turn 冷却。"""
+    """Compatibility metrics; scheduling belongs to the projection signature."""
     if state is None or tokens_before <= 0:
         return
     saved_ratio = (tokens_before - tokens_after) / float(tokens_before)
@@ -466,15 +441,14 @@ def note_compress_result(state, *, turn: int,
         "turn": turn, "before": tokens_before, "after": tokens_after,
         "saved_ratio": round(saved_ratio, 4),
     }
-    if saved_ratio < 0.05:
-        state.hook_state[_THRASH_GUARD_KEY] = turn + 5
 
 
 # ── 给人看的那份占用报告 ─────────────────────────────────────────────────────
 
 def context_window_report(harness: NodeHarness, state,
                           messages: list[LLMMessage], *,
-                          server_prompt_tokens: int | None = None) -> dict:
+                          server_prompt_tokens: int | None = None,
+                          request=None) -> dict:
     """这一次请求把窗口占到了哪里 —— **与触发判据同一把尺**。
 
     界面上那条"当前上下文 xx / 窗口（xx%）· 到 70% 自动压缩"要回答的是
@@ -496,10 +470,13 @@ def context_window_report(harness: NodeHarness, state,
     有三四次全量估算，多这一次换来的是分段；嫌贵就先把这条事件关掉，
     别改分类去省。
     """
-    est = estimate_tokens(messages)
-    calib = effective_calibration(state)
-    eff = effective_prompt_tokens(est, state)
-    window = effective_context_window(harness, state)
+    from .context_lifecycle import RequestContext
+    request = request or RequestContext.measure(harness, state, messages,
+                                               output_tokens=getattr(harness, "max_output_tokens", 0))
+    est = request.message_tokens
+    calib = request.calibration
+    eff = request.budget_tokens
+    window = request.provider_window or request.configured_window
     cfg = harness.summarizer
     thresholded = bool(cfg.enabled and cfg.trigger_type == "token_threshold")
     compress_at = float(cfg.trigger_threshold) if thresholded else None
@@ -540,6 +517,9 @@ def context_window_report(harness: NodeHarness, state,
     except (TypeError, ValueError):
         prompt_tokens = None
     return {
+        **request.report(),
+        "node_type": harness.node_type,
+        "compaction": state.hook_state.get("_context_compaction") if state else None,
         "prompt_tokens": prompt_tokens,
         "est_tokens": est,
         "effective_tokens": eff,
@@ -558,192 +538,12 @@ def context_window_report(harness: NodeHarness, state,
 
 async def run_summarizer(harness: NodeHarness, state: State,
                           messages: list[LLMMessage], llm: LLMClient,
-                          turn: int, estimated_tokens: int) -> list[LLMMessage]:
-    """跑 summarizer，返回新的 messages 列表。
-
-    若没有任何匹配的 summarizer，返回原 messages 不动（log 一次 warning）。
-    """
-    fn = get_summarizer_for(harness)
-    if fn is None:
-        log.warning(
-            "节点 %r 触发了压缩，但没有匹配的 summarizer（strategy=%r 未注册）。跳过。",
-            harness.node_type, harness.summarizer.strategy,
-        )
-        return messages
-
-    # ── 无损清除先行（无条件，不看 harness 配置）──────────────────────────
-    # 清除层是**无损**的（内容凭指针可恢复），没有任何节点有理由跳过它。
-    # 做成 strategy 选项的代价 v22 实测到了：`_orchestrator` 硬编码
-    # `strategy: llm`，于是最需要它的节点（中段 93% 是 run_node 结果、
-    # 单条 ~7k）完全用不上，直接进有损层。让每个 harness 作者"记得选"就是
-    # 名单式护栏 —— 不写就默认漏过。
-    #
-    # 分工因此变清晰：**清除是框架无条件做的；`strategy` 只决定清完还不够时
-    # 用哪种有损压缩**。
-    clear_ctx = SummarizerContext(
-        harness=harness, state=state, messages=messages,
-        estimated_tokens=estimated_tokens, llm=llm, turn=turn,
-    )
-    tokens_before_clear = estimate_tokens(messages)
-    try:
-        messages = await _strategy_clear_tool_results(clear_ctx)
-    except Exception as e:
-        log.warning("无损清除层失败（不阻断后续压缩）：%s", e)
-    freed_by_clear = tokens_before_clear - estimate_tokens(messages)
-    tokens_after_clear = estimate_tokens(messages)
-    est_after_clear = effective_prompt_tokens(tokens_after_clear, state)
-    window = effective_context_window(harness, state)
-    threshold = int(window * float(harness.summarizer.trigger_threshold or 0.7))
-    # 早退的判据是"清除**确实**解决了问题"：既要清出了东西，又要现在低于阈值。
-    # 光看"现在低于阈值"会用我自己重算的值否决调用方的触发决定 —— 清除一个
-    # 字节都没清掉时那等于把压缩静默跳过（既有用例 strategy=truncate 当场
-    # 暴露：调用方说 8500 该压，这里重算后说不用压，配置的策略再没跑过）。
-    if freed_by_clear > 0 and est_after_clear <= threshold:
-        # 清够了就不进有损层 —— 省一次 LLM 调用，且零信息损失。
-        state.append_transcript(
-            "summarizer_clear_sufficed", turn=turn,
-            tokens_before=tokens_before_clear,
-            tokens_after=tokens_after_clear,
-            freed=freed_by_clear,
-        )
-        if state is not None:
-            state.hook_state[_LAST_COMPRESS_EST_KEY] = tokens_after_clear
-        return messages
-
-    ctx = SummarizerContext(
-        harness=harness, state=state, messages=messages,
-        estimated_tokens=estimate_tokens(messages), llm=llm, turn=turn,
-    )
-    try:
-        new_msgs = await fn(ctx)
-    except Exception as e:
-        log.error("Summarizer 跑挂了：%s。返回原 messages。", e, exc_info=True)
-        return messages
-    if not isinstance(new_msgs, list) or not new_msgs:
-        log.warning("Summarizer 返回了空 / 非法结果，跳过。")
-        return messages
-
-    # v3.3：压缩保任务状态。压缩按 token 数裁剪，会把"已查过什么、结论是什么"
-    # 一并裁掉 —— E2E 实测该缺口让一个 run 用 78 个 query 重复查了 51,937 次
-    # （149 次压缩，每次压完就"忘了"查过，从头再来一轮 checklist）。
-    # 工具结论台账活在 hook_state、不随 messages 消失，这里把它注回压缩结果尾部。
-    try:
-        _digest = _tool_cache.findings_digest(state)
-    except Exception as e:      # 台账异常绝不阻断压缩本身
-        log.debug("findings_digest failed: %s", e)
-        _digest = None
-    if _digest:
-        new_msgs = [*new_msgs, framework_notice(_digest)]
-        state.append_transcript(
-            "compression_findings_digest_injected",
-            turn=turn, digest_chars=len(_digest),
-        )
-
-    # v1.6 A: transcript 记 before/after tokens（之前盲飞）
-    tokens_after = estimate_tokens(new_msgs)
-    ratio = (round(tokens_after / estimated_tokens, 3)
-             if estimated_tokens > 0 else None)
-    state.append_transcript(
-        "summarizer_compress",
-        turn=turn,
-        strategy=harness.summarizer.strategy,
-        tokens_before=estimated_tokens,
-        tokens_after=tokens_after,
-        compression_ratio=ratio,
-        messages_before=len(messages),
-        messages_after=len(new_msgs),
-    )
-
-    # v1.6 F: 二次保护 —— 压完仍 > 90% × max_context_tokens：跑 drop_tool_results
-    # 再省一次（防长 session 撞 API hard limit）。用校准后的有效 token 判定，
-    # 与 should_compress 一致 —— 否则本地低估会让二次兜底也触发过晚。
-    limit = harness.max_context_tokens
-    _eff_after = effective_prompt_tokens(tokens_after, state)
-    if limit > 0 and _eff_after > 0.9 * limit:
-        log.warning(
-            "压完仍 %d tokens（有效 ~%d）> 90%%×%d。跑 drop_tool_results 二次兜底。",
-            tokens_after, _eff_after, limit,
-        )
-        ctx2 = SummarizerContext(
-            harness=harness, state=state, messages=new_msgs,
-            estimated_tokens=tokens_after, llm=llm, turn=turn,
-        )
-        try:
-            new_msgs2 = await _strategy_drop_tool_results(ctx2)
-            tokens_after2 = estimate_tokens(new_msgs2)
-            state.append_transcript(
-                "summarizer_compress_secondary",
-                turn=turn,
-                tokens_before=tokens_after,
-                tokens_after=tokens_after2,
-            )
-            new_msgs = new_msgs2
-        except Exception as e:
-            log.error("二次兜底 drop_tool_results 跑挂：%s，保留一次压缩结果。", e)
-
-    # ── P4 压后再定向：事实以压缩当刻的重扫为准 ──────────────────────────
-    # 账本只管叙事连续性；"项目现在什么样"由机械扫盘回答（同 turn-1 定向层
-    # 同一个 builder，单一真相源）。旧定向注入先移除再补新的 —— notice 累积
-    # bug（PR #351）的教训：合并了内容就必须删被取代的那条，否则每压一次
-    # 多一份。压缩本身已经重写了消息列表，此刻动 head 不额外损失缓存。
-    try:
-        from core.loop_hooks_builtin import ORIENTATION_PREFIX, build_orientation_snapshot
-
-        fresh = build_orientation_snapshot(state)
-        if fresh:
-            # 认「正文」而不是「角色 + 整条 startswith」：定向注入已改成
-            # framework-notice 信封（user 角色 + 壳），按老判据一条都匹配不上，
-            # 去重会静默失效 —— 于是每压一次多留一份旧快照，正是 PR #351 那个
-            # 累积 bug 原样复发。framework_notice_body 对非信封消息返回原文，
-            # 所以两种形态都能认。
-            new_msgs = [m for i, m in enumerate(new_msgs)
-                        if not ((is_framework_notice(m) or (m.role == "system" and i > 0))
-                                and framework_notice_body(m).startswith(ORIENTATION_PREFIX))]
-            new_msgs = [*new_msgs, framework_notice(
-                fresh + "\n\n（压缩后重扫 —— 以本快照为准，账本中的状态性描述可能已过期。）"
-            )]
-            state.append_transcript("orientation_refreshed_after_compress", turn=turn)
-    except Exception as e:
-        log.debug("压后定向重扫失败（不阻断压缩）：%s", e)
-
-    # ── P6 机械换届信号：压缩已证明无法把上下文压回窗口 ──────────────────
-    # 这是最后一道保险丝，不是常态路径 —— P1-P3 之后绝大多数场景都能压回去。
-    # 触发即 fail-loud：结构化事件给平台/driver，注入建议给模型（收尾、把
-    # 交接状态写进自己的目录、请求换届）。**不自动 publish**：publish 带科学
-    # 门语义（审查/完成度），何时换届是平台和人的决定，机制只负责把"压缩救
-    # 不了了"这个事实亮出来（v20 实测：这个事实被沉默吞掉，orchestrator 白
-    # 磨了 5 小时；手动 publish+新 session 后 v21 一次收尾）。
-    _final_est = estimate_tokens(new_msgs)
-    _final_eff = effective_prompt_tokens(_final_est, state)
-    _window = effective_context_window(harness, state)
-    if (_final_eff >= int(_window * 0.9) and state is not None
-            and not state.hook_state.get("_session_rotation_advised")):
-        state.hook_state["_session_rotation_advised"] = True
-        try:
-            state.append_transcript(
-                "session_rotation_advised", turn=turn,
-                est_after_compress=_final_est, effective=_final_eff,
-                window=_window,
-            )
-        except Exception:
-            pass
-        new_msgs = [*new_msgs, framework_notice((
-            f"⛔ **压缩已到极限**：压完仍约 {_final_eff} tokens，超过有效窗口 "
-            f"{_window} 的 90%。继续硬撑会退化到空响应（实测过）。\n"
-            "现在就收尾：\n"
-            "  1. 停止派发新的大任务；\n"
-            "  2. 把交接状态（做到哪、下一步、被什么挡着）写进你自己目录的"
-            " scratchpad / 工作文件；\n"
-            "  3. 告知用户本 session 需要换届：publish 当前成果后开新 session"
-            "（项目 Git 会带全部产物过去，新 session 开局定向层会自动看到）。"
-        ))]
-
-    if state is not None:
-        try:
-            state.hook_state[_LAST_COMPRESS_EST_KEY] = estimate_tokens(new_msgs)
-        except Exception:
-            pass
-    return new_msgs
+                          turn: int, estimated_tokens: int,
+                          *, output_tokens: int | None = None) -> list[LLMMessage]:
+    """Compatibility entry point; context_lifecycle owns the result contract."""
+    from .context_lifecycle import compact
+    return await compact(harness, state, messages, llm, turn, estimated_tokens,
+                         output_tokens=output_tokens)
 
 
 # ── 公共 helper：把 messages 切成 (system, keep_head_turns, middle, last_n_turns) ──
@@ -768,7 +568,7 @@ def split_for_compression(
     # 找出每条 assistant 消息的位置
     assistant_idxs = [i for i, m in enumerate(messages) if m.role == "assistant"]
     head_end = assistant_idxs[0] if assistant_idxs else len(messages)
-    tail_start = (assistant_idxs[-keep_last_n_turns]
+    tail_start = (len(messages) if keep_last_n_turns <= 0 else assistant_idxs[-keep_last_n_turns]
                   if len(assistant_idxs) > keep_last_n_turns else head_end)
     # Position is not authority. Older compactors moved framework notices ahead
     # of the first assistant, making thousands of derived snapshots immortal.
@@ -826,7 +626,10 @@ def extract_keep_tool_pairs(
                 (tc.get("function") or {}).get("name") in keep_tool_calls
                 for tc in m.tool_calls
             ]
-            if any(wanted):
+            end = i + 1
+            while end < len(middle) and middle[end].role == "tool":
+                end += 1
+            if any(wanted) or any(is_primary_input(item) for item in middle[i:end]):
                 # 把这条 assistant + 紧随其后的**所有** tool result 都保留
                 # （即使 tool result 对应的 tool 不在 keep 名单 —— pair 完整性硬约束）
                 out.append(m)
@@ -920,6 +723,12 @@ _DEFAULT_LLM_INSTRUCTION = (
     "  3. 丢弃：tool result 原文、模型自我重复、已解决的死胡同的过程细节"
     "（死胡同的**结论**写进 决策与理由）。\n"
     "  4. 第三人称客观叙述，不用'我'。\n"
+    "  5. 当前调用方约束和最新命名状态是核对基准，不是本轮新完成的成果。"
+    "科研数值、单位、误差、版本、样本量和适用条件逐字保留或省略，不重新计算"
+    "或从约数反推；测量、估计和未验证事项分开写。来源冲突须带引用列为未解决，"
+    "不能用摘要自行裁决。\n"
+    "  6. 不添加原记录没有的实验、核算、因果解释或成果；导入和重复读取不等于"
+    "新执行。证据移出当前视图不等于证据不存在；保留准确引用与待核对状态。\n"
 )
 
 
@@ -938,6 +747,7 @@ def _ledger_missing_sections(text: str) -> list[str]:
 # 上一轮压缩留下的 notice 标记 —— 用于检测 + running summary 合并
 _COMPRESSION_NOTICE_MARKER = "📦 历史压缩"
 _COMPRESSION_SUMMARY_HEADER = "## 历史压缩摘要"
+CONTINUATION_SLOT = "continuation_ledger"
 
 #: 摘要复活防线。压缩摘要是**对已发生的事的记录**，但它读起来和任务清单
 #: 长得一样 —— 里面的"未决事项 / 下一步"很容易被当成现在就该执行的指令，
@@ -968,7 +778,10 @@ def build_compression_notice(turn: int, detail: str, body: str = "") -> LLMMessa
     content += _ANTI_REVIVAL_PREAMBLE
     if body:
         content += f"\n{body}"
-    return framework_notice(content)
+    notice = framework_notice(content)
+    if body.startswith(_COMPRESSION_SUMMARY_HEADER):
+        notice.context_slot = CONTINUATION_SLOT
+    return notice
 
 
 def _extract_prior_summary(head: list[LLMMessage]) -> str | None:
@@ -984,7 +797,7 @@ def _extract_prior_summary(head: list[LLMMessage]) -> str | None:
         # 抽 "## 历史压缩摘要" 后到末尾的内容
         idx = m.content.find(_COMPRESSION_SUMMARY_HEADER)
         if idx < 0:
-            return None
+            continue
         text = m.content[idx + len(_COMPRESSION_SUMMARY_HEADER):].strip()
         # 去掉尾部的"（X 条 keep_tool_calls...）"括号说明
         cut = text.find("\n（")
@@ -1035,13 +848,6 @@ def _head_without_superseded_notices(head: list[LLMMessage]) -> list[LLMMessage]
     return [m for m in head if not _is_compression_notice(m)]
 
 
-#: 单条被保留的 user 消息的字节上限。用户指令通常很短；真超了说明那不是指令
-#: 而是粘进来的大块材料（日志 / 数据），那种该走摘要。
-_PRESERVE_USER_MAX_CHARS = 4000
-#: 最多保留多少条 —— 防止一个几百轮的 run 把历史 user 消息堆成新的膨胀源。
-_PRESERVE_USER_MAX_COUNT = 12
-
-
 def _preserve_user_messages(
     middle: list[LLMMessage],
     already_kept: list[LLMMessage],
@@ -1051,8 +857,7 @@ def _preserve_user_messages(
     只留**真正的用户/上游指令**：
       - 跳过 tool_result（它们 role 是 tool 或带 tool_call_id，属派生物）
       - 跳过已经被 keep_tool_calls 保留的，避免重复
-      - 超长的不留（那是粘进来的材料不是指令，该走摘要）
-      - 总条数封顶，取**最近的**（越近的约束越可能还有效）
+      - 原始调用方约束逐字保留；容量不足时交给工作集 owner 报告，不猜测其权威性
     """
     kept_ids = {id(m) for m in already_kept}
     picked: list[LLMMessage] = []
@@ -1068,10 +873,8 @@ def _preserve_user_messages(
         content = getattr(m, "content", None)
         if not content or not str(content).strip():
             continue
-        if len(str(content)) > _PRESERVE_USER_MAX_CHARS:
-            continue
         picked.append(m)
-    return picked[-_PRESERVE_USER_MAX_COUNT:]
+    return picked
 
 
 async def _strategy_llm(ctx: SummarizerContext) -> list[LLMMessage]:
@@ -1083,7 +886,7 @@ async def _strategy_llm(ctx: SummarizerContext) -> list[LLMMessage]:
     v1.6 改进：
       - running summary：如果 head 含上次压缩 notice，merge 其摘要 + 新 middle
         → 一段连贯新摘要（避免 N 段叙述碎片）
-      - 失败 fallback 改 drop_tool_results（不是 truncate，损失少）
+      - 失败返回原视图与原因，由 lifecycle owner 执行可恢复归档
       - 摘要 save_artifact(type='compression_log') 落盘可审计
       - transcript 含 before/after tokens
     """
@@ -1096,12 +899,27 @@ async def _strategy_llm(ctx: SummarizerContext) -> list[LLMMessage]:
     tokens_before = ctx.estimated_tokens
     keep_from_middle = extract_keep_tool_pairs(middle, cfg.keep_tool_calls)
 
-    raw_text = _render_messages_for_compression(middle)
-    instruction = cfg.instruction.strip() or _DEFAULT_LLM_INSTRUCTION
+    from .context_lifecycle import _current_snapshots, research_state_snapshot
+
+    # A summary of the middle still needs the current task and the newest
+    # authoritative state, including corrections sitting in the retained tail.
+    current = [m for m in ctx.messages if is_primary_input(m) and m.role != "system"]
+    snapshots = _current_snapshots(ctx.messages)
+    research = research_state_snapshot(ctx.harness, ctx.state)
+    if research is not None:
+        snapshots["research_state"] = research
+    current.extend(m for name, m in snapshots.items() if name != CONTINUATION_SLOT)
+    prior_summary = _extract_prior_summary(ctx.messages)
+    raw_text = _render_messages_for_compression([
+        m for m in middle if not is_primary_input(m)
+        and not (is_framework_notice(m) and m.context_slot)
+    ])
+    instruction = _DEFAULT_LLM_INSTRUCTION
+    if cfg.instruction.strip():
+        instruction += "\n节点专属要求（沿用上面的四节账本格式）：\n" + cfg.instruction.strip()
     target_tokens = max(500, cfg.target_tokens)
 
     # v1.6 H: running summary —— 检测上次压缩留下的摘要，prepend 给 LLM 作 baseline
-    prior_summary = _extract_prior_summary(head)
     if prior_summary:
         user_content = (
             f"以下是节点 `{ctx.harness.node_type}` 的现有账本 + 新增中间 messages。\n\n"
@@ -1119,6 +937,13 @@ async def _strategy_llm(ctx: SummarizerContext) -> list[LLMMessage]:
             f"（共 {len(middle)} 条，估算 {estimate_tokens(middle)} tokens）。"
             f"请按要求压缩。压缩目标 ≈ {target_tokens} tokens。\n\n"
             f"────────\n{raw_text}\n────────"
+        )
+    if current:
+        user_content += (
+            "\n\n## 当前调用方约束与最新状态（只读核对基准）\n"
+            + _render_messages_for_compression(current)
+            + "\n以上状态保持原件，不要把它们改写成本次新增成果；"
+              "账本与其冲突时须修正旧账本，不能沿用过时数值或猜测证据缺失。"
         )
 
     compression_messages = [
@@ -1139,65 +964,68 @@ async def _strategy_llm(ctx: SummarizerContext) -> list[LLMMessage]:
         except Exception:
             log.warning("spawn_silent 失败，压缩回退复用原 llm 实例", exc_info=True)
 
-    try:
-        resp = await compress_llm.chat(
-            compression_messages,
-            tools=None,
-            max_tokens=min(8192, target_tokens + 1000),
-            temperature=0.2,
-        )
-        summary_text = (resp.content or "").strip()
-        if isinstance(resp.usage, dict) and ctx.state is not None:
-            ctx.state.tokens_used += int(resp.usage.get("total_tokens") or 0)
-    except Exception as e:
-        log.error("Summarizer LLM 调用失败：%s。回退到 drop_tool_results。", e)
-        return await _strategy_drop_tool_results(ctx)
-
-    if not summary_text:
-        log.warning("Summarizer LLM 返回空，回退到 drop_tool_results。")
-        return await _strategy_drop_tool_results(ctx)
-
-    # ── 账本 schema 校验（仅默认指令时适用；节点自定义 instruction 自行负责）──
-    # 先机械剥口水，再查 section 齐不齐。缺就给**一次**指名纠偏的机会；仍缺则
-    # fail-loud 回退 drop —— 结构坏掉的账本比没有账本更糟（它会以权威口吻
-    # 继承到之后的每一轮）。
-    if instruction is _DEFAULT_LLM_INSTRUCTION:
-        summary_text = _sanitize_ledger(summary_text)
-        missing = _ledger_missing_sections(summary_text)
-        if missing:
-            try:
-                retry_resp = await compress_llm.chat(
-                    [*compression_messages,
-                     LLMMessage(role="assistant", content=summary_text),
-                     LLMMessage(role="user", content=(
-                         f"上一次输出缺 section：{'、'.join(missing)}。"
-                         f"重新输出**完整**账本，四个 section 一个不缺，"
-                         f"第一行就是 '## 目标'。"))],
-                    tools=None,
-                    max_tokens=min(8192, target_tokens + 1000),
-                    temperature=0.2,
-                )
-                retry_text = _sanitize_ledger((retry_resp.content or "").strip())
-                if isinstance(retry_resp.usage, dict) and ctx.state is not None:
-                    ctx.state.tokens_used += int(retry_resp.usage.get("total_tokens") or 0)
-                if not _ledger_missing_sections(retry_text):
-                    summary_text = retry_text
-                    missing = []
-                else:
-                    missing = _ledger_missing_sections(retry_text)
-            except Exception as e:
-                log.warning("账本纠偏重试失败：%s", e)
-        if missing:
+    # Two bounded attempts. Reasoning consumes output tokens too; a truncated
+    # or reasoning-only response needs more budget, not a successful label.
+    budget = max(4096, min(16384, target_tokens + 2000))
+    attempt_messages = compression_messages
+    summary_text = ""
+    failure = None
+    for attempt in range(2):
+        # This request has no tool schemas. Check its own prompt and output,
+        # rather than borrowing the main loop's schema-inclusive allowance.
+        cap = _state_int(ctx.state, PROVIDER_HARD_CAP_KEY) if getattr(ctx.state, "hook_state", None) else 0
+        prompt = int(estimate_tokens(attempt_messages) * effective_calibration(ctx.state)) if cap else 0
+        if cap and prompt + budget + presend_margin(cap) > cap:
+            failure = "summary_input_exceeds_budget"
+            if callable(getattr(ctx.state, "append_transcript", None)):
+                ctx.state.append_transcript("context_summary_refused", turn=ctx.turn,
+                                            prompt_tokens=prompt, output_budget=budget,
+                                            provider_window=cap, reason=failure)
+            break
+        usage, finish, provider_error, provider_status = {}, None, False, None
+        try:
+            resp = await compress_llm.chat(attempt_messages, tools=None,
+                                            max_tokens=budget, temperature=0.2)
+            usage = resp.usage if isinstance(resp.usage, dict) else {}
+            finish = resp.finish_reason
             if ctx.state is not None:
-                try:
-                    ctx.state.append_transcript(
-                        "ledger_schema_invalid", turn=ctx.turn,
-                        missing_sections=missing,
-                    )
-                except Exception:
-                    pass
-            log.warning("账本缺 section %s（纠偏后仍缺），回退 drop_tool_results。", missing)
-            return await _strategy_drop_tool_results(ctx)
+                ctx.state.tokens_used += int(usage.get("total_tokens") or 0)
+            text = (resp.content or "").strip()
+            failure = ("truncated" if finish == "length" else "empty" if not text else None)
+            if not failure:
+                text = _sanitize_ledger(text)
+                missing = _ledger_missing_sections(text)
+                if missing:
+                    failure = "invalid_ledger"
+                    if callable(getattr(ctx.state, "append_transcript", None)):
+                        ctx.state.append_transcript("ledger_schema_invalid", turn=ctx.turn,
+                                                    missing_sections=missing, attempt=attempt + 1)
+            if not failure and estimate_text_tokens(text) > target_tokens * 2:
+                failure = "oversized_ledger"
+        except Exception as exc:
+            text, failure, provider_error = "", type(exc).__name__, True
+            provider_status = getattr(exc, "status", None)
+        if callable(getattr(ctx.state, "append_transcript", None)):
+            ctx.state.append_transcript("context_summary_attempt", turn=ctx.turn,
+                attempt=attempt + 1, status=failure or "ready", finish_reason=finish,
+                output_budget=budget, usage=usage, provider_status=provider_status)
+        if not failure:
+            summary_text = text
+            break
+        if provider_error:
+            # The client has already exhausted its transport retry policy.
+            # Repeating an unchanged unavailable endpoint cannot improve a ledger.
+            break
+        if failure in {"empty", "truncated"}:
+            reasoning = int((usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+                            or usage.get("reasoning_tokens") or 0)
+            budget = min(16384, max(budget * 2, reasoning + target_tokens + 2000))
+        attempt_messages = [*compression_messages, LLMMessage(role="user", content=(
+            "重新输出完整工作账本，不要工具调用或开场白；只使用指定的四个标题，"
+            "每项已完成工作保留原始证据引用。上一次尝试未生成可用的完整账本。"))]
+    if not summary_text:
+        ctx.summary_failure = failure
+        return ctx.messages
 
     notice = build_compression_notice(
         ctx.turn,
@@ -1217,7 +1045,8 @@ async def _strategy_llm(ctx: SummarizerContext) -> list[LLMMessage]:
 
     new_messages = [
         *_head_without_superseded_notices(head), notice,
-        *preserved_users, *keep_from_middle, *tail,
+        *preserved_users, *keep_from_middle,
+        *(m for m in tail if m.context_slot != CONTINUATION_SLOT),
     ]
 
     # v1.6 I: 摘要落盘（compression_log artifact）便于 user 事后审计
@@ -1271,7 +1100,7 @@ register_strategy("llm", _strategy_llm)
 #: 曾经这里有一份独立的标记文本，而 `core/context_view` 有另一份。两份标记
 #: 意味着"这条已经清过了吗"有两个答案：谁用哪一份判断，取决于它碰巧 import
 #: 了谁 —— 幂等检查、跳过逻辑、测试判据会各自认一半，而且都不报错。
-from core.context_view import TOMBSTONE_PREFIX as _CLEARED_MARKER
+_CLEARED_MARKER = TOMBSTONE_PREFIX
 _COMPACTED_MARKER = "[压缩的 run_node 结果"
 _CLEAR_TARGET_RATIO = 0.5     # 清到有效窗的这个比例就停（低水位）
 _CLEAR_KEEP_RECENT_PER_TOOL = 2   # 每个工具最近 N 条结果不清（近因性）
@@ -1320,7 +1149,7 @@ async def _strategy_clear_tool_results(ctx: SummarizerContext) -> list[LLMMessag
     工作集本来就在每轮做这件事（`enforce_budget`，LRU + 墓碑 + 可从 run log
     完整取回）。这里要的"降到低水位"只是同一个动作换一个目标值。
     """
-    view = _context_view_of(ctx.state)
+    view = ctx.context_view if ctx.context_view is not None else _context_view_of(ctx.state)
     window = effective_context_window(ctx.harness, ctx.state)
     # 低水位与 per-turn 驱逐共用同一个预算 owner（issue #710：三个各自为政的
     # 预算互相不一致，三层全绿、网关 400）。取两者中更紧的：清除层的存在意义
@@ -1375,6 +1204,7 @@ async def _strategy_escalate(ctx: SummarizerContext) -> list[LLMMessage]:
     ctx2 = SummarizerContext(
         harness=ctx.harness, state=ctx.state, messages=cleared,
         estimated_tokens=est, llm=ctx.llm, turn=ctx.turn,
+        context_view=ctx.context_view,
     )
     return await _strategy_llm(ctx2)
 
@@ -1399,10 +1229,10 @@ def _render_messages_for_compression(messages: list[LLMMessage]) -> str:
                 for tc in m.tool_calls:
                     fn = (tc.get("function") or {})
                     name = fn.get("name", "?")
-                    args = (fn.get("arguments") or "")[:300]
+                    args = fn.get("arguments") or ""
                     lines.append(f"[assistant tool_call]: {name}({args})")
         elif role == "tool":
-            text = (m.content or "")[:400]
+            text = m.content or ""
             lines.append(f"[tool {m.name or '?'}]: {text}")
         elif role == "user":
             # 框架注入的提示走的是 role="user" 信封（见 loop_hooks._as_framework_notices）。
@@ -1410,7 +1240,7 @@ def _render_messages_for_compression(messages: list[LLMMessage]) -> str:
             # 摘要是会被反复喂回模型的，这个错标会一路传下去。
             tag = ("framework-notice" if is_framework_notice(m) else
                    "legacy-unknown" if m.origin == "legacy_unknown" else "user")
-            lines.append(f"[{tag}]: {(m.content or '')[:500]}")
+            lines.append(f"[{tag}]: {m.content or ''}")
         elif role == "system":
-            lines.append(f"[system]: {(m.content or '')[:300]}")
+            lines.append(f"[system]: {m.content or ''}")
     return "\n".join(lines)

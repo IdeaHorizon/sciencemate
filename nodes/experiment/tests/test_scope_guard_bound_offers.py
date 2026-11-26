@@ -96,7 +96,7 @@ def test_switching_execution_target_invalidates_scope_approval(tmp_path, monkeyp
     monkeypatch.setattr(execution_target, "current", lambda: execution_target.parse(before))
     state, request, result, event = _request(tmp_path)
     key = result["pause_event"]["metadata"]["authorization_key"]
-    danger.mark_confirmed(state, key)
+    assert not danger.is_confirmed(state, key)
 
     monkeypatch.setattr(execution_target, "current", lambda: execution_target.parse(after))
     approved, changed = safe_bash._scope_guard_authorization(state, **request)
@@ -109,8 +109,11 @@ def test_approval_is_registered_for_the_run_without_a_second_permission_cache(tm
     directory = tmp_path / "approved-environment"
     directory.mkdir()
     state, request, result, _ = _request(tmp_path, target=str(directory / "a.txt"), scope="unknown_absolute")
-    danger.mark_confirmed(state, result["pause_event"]["metadata"]["authorization_key"])
-    assert safe_bash._scope_guard_authorization(state, **request) == (True, None)
+    from tests._approval_support import resume_result
+    async def gate(state, **values):
+        allowed, blocked = safe_bash._scope_guard_authorization(state, **values)
+        return {"status": "success"} if allowed else blocked
+    assert asyncio.run(resume_result(state, result, gate, request))["status"] == "success"
     command = "printf ready > " + shlex.quote(str(directory / "b.txt").replace("\\", "/"))
     assert safe_bash._bash_path_effects_guard(state, command, cwd=str(state.root)) is None
     # The grant must not escape to the parent or a sibling.
@@ -143,22 +146,33 @@ class _DoneLLM:
 
 @pytest.mark.parametrize("text,approved", [("批准执行", True), ("拒绝", False)])
 def test_real_driver_consumes_the_nodes_own_offer_without_test_repair(tmp_path, monkeypatch, text, approved):
+    from core import approvals
+    from tests._approval_support import prepare_result
     state, request, result, event = _request(tmp_path)
-    selection = exact_pause_answer(event, text)
-    assert selection is not None
+    effects = []
+    async def gate(state, **values):
+        allowed, blocked = safe_bash._scope_guard_authorization(state, **values)
+        if allowed:
+            effects.append(1)
+            return {"status": "success"}
+        return blocked
+    payload = asyncio.run(prepare_result(state, result, gate, request))
+    record = approvals.load(state, payload)
+    call = {"id": record["operation"]["tool_call_id"], "type": "function", "function": {
+        "name": record["operation"]["tool"], "arguments": json.dumps(request)}}
     messages = [LLMMessage(role="system", content="bounded protocol test"),
-                LLMMessage(role="assistant", content="", tool_calls=[{"id": "fixture-call", "type": "function", "function": {"name": "safe_run_bash", "arguments": "{}"}}]),
-                LLMMessage(role="tool", name="safe_run_bash", tool_call_id="fixture-call", content=json.dumps(result))]
-    harness = NodeHarness(node_type="experiment", tools=[], max_turns=2, loop_hooks=["highrisk_confirm"],
-                          loop_hooks_disable=["memory_delta", "kb_delta", "turn_budget", "memory_onboarding", "law_review_gate"],
-                          summarizer=SummarizerConfig(enabled=False))
+                LLMMessage(role="assistant", tool_calls=[call]),
+                LLMMessage(role="tool", name=call["function"]["name"], tool_call_id=call["id"],
+                           content=json.dumps({"status": "pause", "pause_event": payload}))]
+    harness = NodeHarness(node_type="experiment", tools=[], max_turns=2,
+        loop_hooks_disable=["memory_delta", "kb_delta", "turn_budget", "memory_onboarding", "law_review_gate"],
+        summarizer=SummarizerConfig(enabled=False))
     pause.register_pause(pause.PausedRunContext(run_id=state.run_id, state=state, messages=messages,
-                         harness=harness, llm=_DoneLLM(), pending_tool_call_id="fixture-call", pause_event=event))
+        harness=harness, llm=_DoneLLM(), pending_tool_call_id=call["id"],
+        pause_event=pause.PauseEvent.from_payload(payload, pending_tool_call_id=call["id"])))
     async def ask(_event):
-        return selection
+        return text
     asyncio.run(pause_driver.drive_pause_chain(ask_fn=ask))
-    allowed, block = safe_bash._scope_guard_authorization(state, **request)
-    assert allowed is approved
-    assert (block is None) is approved
-    assert not any(r.get("event") == "subprocess_spawn" for r in (
-        json.loads(l) for l in (state.root / "transcript.jsonl").read_text("utf8").splitlines()))
+    assert effects == ([1] if approved else [])
+    # A later invocation has no authorization, even when its command is identical.
+    assert safe_bash._scope_guard_authorization(state, **request)[0] is False

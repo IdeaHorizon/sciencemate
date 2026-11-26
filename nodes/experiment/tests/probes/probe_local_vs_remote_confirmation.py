@@ -182,7 +182,6 @@ def _local_safe_lane(root: Path) -> dict[str, Any]:
         (manager, "_submit_sync", _success_submit(submissions)),
         (danger, "bypass_enabled", _forbidden("bypass_enabled")),
         (danger, "is_confirmed", _forbidden("is_confirmed")),
-        (danger, "consume_confirmation", _forbidden("consume_confirmation")),
         (danger, "build_pause_payload", _forbidden("build_pause_payload")),
     ]
     with _patches(changes):
@@ -247,7 +246,6 @@ def _bypass_and_confirmed_lane(root: Path) -> dict[str, Any]:
         (manager, "_submit_sync", _success_submit(bypass_calls)),
         (danger, "bypass_enabled", lambda: True),
         (danger, "is_confirmed", _forbidden("is_confirmed_after_bypass")),
-        (danger, "consume_confirmation", _forbidden("consume_after_bypass")),
     ]
     with _patches(bypass_changes):
         bypass_result = _await(manager._submit_job(
@@ -263,13 +261,10 @@ def _bypass_and_confirmed_lane(root: Path) -> dict[str, Any]:
 
     confirmed_state = _planned_state(root / "confirmed")
     confirmed_calls: list[dict[str, Any]] = []
-    consumed: list[str] = []
     confirmed_changes = [
         (sandbox, "trusted_image_id", lambda: "sha256:probe-sandbox"),
         (manager, "_submit_sync", _success_submit(confirmed_calls)),
         (danger, "bypass_enabled", lambda: False),
-        (danger, "is_confirmed", lambda *_args: True),
-        (danger, "consume_confirmation", lambda _state, text: consumed.append(text)),
     ]
     with _patches(confirmed_changes):
         confirmed_result = _await(manager._submit_job(
@@ -279,9 +274,18 @@ def _bypass_and_confirmed_lane(root: Path) -> dict[str, Any]:
             dry_run=False,
             execution_params={"case": "probe"},
         ))
+        from tests._approval_support import resume_result
+        assert confirmed_result["status"] == "pause", confirmed_result
+
+        async def original(state, **arguments):
+            return await manager._submit_job(state=state, **arguments)
+
+        confirmed_result = _await(resume_result(confirmed_state, confirmed_result, original, {
+            "command": "sudo echo submit", "scheduler": "local", "dry_run": False,
+            "execution_params": {"case": "probe"},
+        }))
     assert confirmed_result["status"] == "success", confirmed_result
     assert len(confirmed_calls) == 1, confirmed_calls
-    assert len(consumed) == 1, consumed
     assert len(_events(confirmed_state, "job_submission_confirmed")) == 1
     return {
         "bypass": {
@@ -290,7 +294,7 @@ def _bypass_and_confirmed_lane(root: Path) -> dict[str, Any]:
         },
         "confirmed": {
             "physical_submissions": len(confirmed_calls),
-            "consumed_tokens": len(consumed),
+            "approval_owner": "core.approvals",
         },
     }
 

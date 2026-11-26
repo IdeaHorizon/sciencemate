@@ -8,7 +8,7 @@ zenodo）**全是装软件用的，没有一个科学数据源**。于是每个�
 
 这组判据钉三件事：
 1. 通道真的存在、而且是**注册过的工具**（不是只有个函数躺在那）；
-2. 授权按 run 计、逐个主机、不落盘、不进环境；
+2. 授权按 run 计、逐个主机、随 run 快照恢复、不进环境；
 3. **没答就是没批** —— 问过和批过是两件事。
 """
 from __future__ import annotations
@@ -30,6 +30,9 @@ from core.capability_grants import (
 class _State:
     node_type = "experiment"
     run_id = "r-1"
+
+    def __init__(self):
+        self.hook_state = {}
 
 
 def test_the_tool_is_actually_registered():

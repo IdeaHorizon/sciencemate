@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.execution import ExecutionEvent
-from app.services.execution_ingest import ExecutionIngestService
+from app.services.execution_ingest import ExecutionIngestService, TranscriptAdapter
 from app.services.sessions import latest_context_window
 from tests.test_execution_foundation import (  # noqa: F401  (execution_db fixture)
     _context,
@@ -88,6 +88,15 @@ async def test_the_report_line_becomes_a_context_updated_event(
     assert event.visibility == "summary"
     assert event.source["rawEvent"] == "context_window"
     assert event.payload == {
+        "nodeType": "",
+        "measurement": "legacy",
+        "predictedTokens": None,
+        "budgetTokens": 52_000,
+        "budgetWindow": 100_000,
+        "providerWindow": None,
+        "reservedOutputTokens": 0,
+        "compaction": None,
+        "requestDigest": "",
         "turn": 1,
         "promptTokens": 4321,
         "estimatedTokens": 40_000,
@@ -163,3 +172,20 @@ async def test_the_session_reads_the_newest_top_level_report_only(
     assert got["at"].replace(tzinfo=None) == datetime.fromisoformat(AT).replace(tzinfo=None)
 
     assert await latest_context_window(execution_db, session_id="session-none") is None
+
+
+def test_request_measurements_and_compaction_outcomes_keep_their_separate_units():
+    raw = _report(turn=4, effective=90000, prompt=50000, window=128000)
+    raw.update(node_type="_orchestrator", measurement="request", predicted_tokens=52000,
+               budget_tokens=90000, budget_window=110000, provider_window=128000,
+               reserved_output_tokens=4096, request_digest="request-4",
+               compaction={"strategy": "archive", "status": "ready", "reason": "truncated"})
+    payload = TranscriptAdapter._context_window_payload(raw)
+    assert payload["promptTokens"] == 50000
+    assert payload["predictedTokens"] == 52000
+    assert payload["budgetTokens"] == 90000
+    assert payload["budgetWindow"] == 110000
+    assert payload["providerWindow"] == 128000
+    assert payload["reservedOutputTokens"] == 4096
+    assert payload["requestDigest"] == "request-4"
+    assert payload["compaction"]["strategy"] == "archive"

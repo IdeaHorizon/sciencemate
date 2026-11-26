@@ -1,7 +1,7 @@
 """Parent task revisions reach fresh Experiment runs through the real dispatcher.
 
 These tests cover blocked dispatch, bounded local scientific delivery, and the
-known manifest-only completion gap.  They keep the production task tool,
+manifest-only completion boundary.  They keep the production task tool,
 run_node dispatcher, executor, agent loop, Experiment tools, and sandbox in the
 path; only the external LLM response is scripted.  They are not UI, real-model,
 or scheduler acceptance.  The contract writer proves which revision the parent
@@ -9,6 +9,7 @@ selected, not that a human authorized a scientific deviation.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import shlex
 import subprocess
@@ -30,9 +31,6 @@ from nodes.experiment.tools import (
     run_bootstrap,
 )
 
-
-class KnownManifestOnlyCompletionGap(AssertionError):
-    """Exact known gap: a framework-only manifest advances an empty run."""
 
 
 def _git(root: Path, *args: str) -> str:
@@ -741,16 +739,16 @@ async def test_parent_contract_revision_requires_a_fresh_exact_dispatch(
                         "id": f"call_fixture_blocker_{call_number}",
                         "type": "function",
                         "function": {
-                            "name": "report_blocker",
+                            "name": "finish",
                             "arguments": json.dumps(
                                 {
                                     "summary": (
                                         "Integration fixture intentionally stops before "
                                         "executing an Experiment action."
                                     ),
-                                    "category": "other",
-                                    "suggested_owner": "experiment",
-                                    "retryable_after_change": False,
+                                    "outcome": "blocked",
+                                    "blocker": {"blocker_id": "dispatch-probe",
+                                                "summary": "fixture intentionally executes no action"},
                                 }
                             ),
                         },
@@ -868,130 +866,76 @@ async def test_parent_contract_revision_requires_a_fresh_exact_dispatch(
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=KnownManifestOnlyCompletionGap,
-    reason=(
-        "a text-only Experiment run currently lets its framework run_manifest "
-        "count as completed delivery"
-    ),
-)
 @pytest.mark.asyncio
 async def test_text_only_manifest_cannot_complete_or_advance_downstream(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fixture = await _initial_contract(
-        tmp_path,
-        monkeypatch,
-        project_id="manifest-only-completion-gap",
-    )
+    from dataclasses import replace
+    from core import executor
+    from core.completion_driver import suspended_runs
+    from core.pause import get_active_run
+
+    fixture = await _initial_contract(tmp_path, monkeypatch, project_id="manifest-only-completion-gap")
     parent = fixture["parent"]
     contract = fixture["contract"]
-    task_instance_uuid = fixture["task_instance_uuid"]
-    binding = fixture["binding"]
+    real_load = executor.load_harness
 
+    def bounded_harness(*args, **kwargs):
+        # This is deliberately a one-response probe. Keep the official
+        # admission provider and all task, capability and delivery contracts.
+        return replace(real_load(*args, **kwargs), max_turns=1)
+
+    monkeypatch.setattr(executor, "load_harness", bounded_harness)
     llm_calls = 0
 
-    async def _text_only_stop(
-        _client: LLMClient,
-        _messages,
-        **_kwargs,
-    ) -> LLMResponse:
+    async def text_only_stop(_client, _messages, **_kwargs):
         nonlocal llm_calls
         llm_calls += 1
-        if llm_calls > 1:
-            raise AssertionError("text-only child unexpectedly requested another LLM call")
-        return LLMResponse(
-            content="This text does not execute or deliver an experiment.",
-            tool_calls=[],
-            finish_reason="stop",
-            usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-        )
+        assert llm_calls == 1, "completion recovery silently expanded the probe budget"
+        return LLMResponse(content="No experiment was executed or delivered.", tool_calls=[],
+                           finish_reason="stop", usage={"total_tokens": 2})
 
-    monkeypatch.setattr(LLMClient, "chat", _text_only_stop, raising=True)
-    result = await execute_tool(
-        "run_node",
-        parent,
-        node_type="experiment",
+    monkeypatch.setattr(LLMClient, "chat", text_only_stop)
+    dispatch = asyncio.create_task(execute_tool(
+        "run_node", parent, node_type="experiment",
         user_note="验证只有文字、没有动作与三件套时不能完成或推动下游。",
-        node_inputs={
-            "experiment_spec": "Do not execute; this is a completion-boundary probe.",
-        },
-        task_instance_uuid=task_instance_uuid,
-        task_contract_digest=contract["task_contract_digest"],
-        resume_run_id="fresh",
-    )
-    assert llm_calls == 1
-
-    parent_events = _events(parent.transcript_path)
-    child_ends = [
-        row
-        for row in parent_events
-        if row.get("event") == "subagent_call_end"
-        and row.get("child_node_type") == "experiment"
-    ]
-    assert len(child_ends) == 1, child_ends
-    child_end = child_ends[0]
-    child_root = parent.root.parent / child_end["child_run_id"]
-    summary = json.loads((child_root / "summary.json").read_text(encoding="utf-8"))
-    child = SimpleNamespace(
-        root=child_root,
-        run_id=child_end["child_run_id"],
-        session_id=fixture["session_id"],
-    )
-    _assert_child_authority(
-        child,
-        task_instance_uuid=task_instance_uuid,
-        revision=contract["task_contract_revision"],
-        digest=contract["task_contract_digest"],
-        binding=binding,
-    )
-
-    assert summary["tool_call_count"] == 0, summary
-    produced_types = list(summary.get("produced_artifact_types") or [])
-    closure_types = {"raw_results", "clean_results", "experiment_log"}
-    assert not closure_types.intersection(produced_types), summary
-    deferred = [
-        row
-        for row in parent_events
-        if row.get("event") == "decision_deferred_to_analysis"
-        and row.get("producing_run_id") == child_end["child_run_id"]
-    ]
-
-    # One acceptable outcome within this one-response defect probe is a
-    # non-completed child with no downstream advance.  That yields XPASS.
-    # This fixture does not accept additional model turns or a newly sealed
-    # delivery, so it is not a repair-acceptance test for Core reentry/resume.
-    # The owner must test those paths separately and then retire this marker.
-    if summary["status"] != "completed" and not deferred:
-        return
-
-    # Only the exact observed defect is swallowed.  Identity failures, a real
-    # closure trio, an unexpected model/tool call, or a different flow shape
-    # remains an ordinary test failure.
-    assert summary["status"] == child_end["child_status"] == "completed", summary
-    assert produced_types == ["run_manifest"], summary
-    assert summary.get("node_task_outcome") is None, summary
-    assert child_end.get("pending_integration_registered") is True, child_end
-    skipped = [
-        row
-        for row in parent_events
-        if row.get("event") == "post_node_review_skipped_no_artifacts"
-        and row.get("producing_run_id") == child_end["child_run_id"]
-    ]
-    assert len(skipped) == 1, skipped
-    # Review now returns to the orchestrator before any decision/defer action.
-    # The independent manifest-only child-completion defect is still present.
-    assert not deferred, deferred
-    assert result["status"] == "success", result
-    assert result["post_node_review"]["review_state"] == "skipped", result
-    flow, = [
-        entry
-        for entry in parent.hook_state.get("pending_post_node_flow", [])
-        if entry.get("producing_run_id") == child_end["child_run_id"]
-    ]
-    assert flow["decision_state"] == "pending", flow
-    raise KnownManifestOnlyCompletionGap(
-        "run_manifest alone completed a zero-action Experiment run"
-    )
+        node_inputs={"experiment_spec": "Do not execute; this is a completion-boundary probe."},
+        task_instance_uuid=fixture["task_instance_uuid"],
+        task_contract_digest=contract["task_contract_digest"], resume_run_id="fresh"))
+    child = None
+    try:
+        async with asyncio.timeout(5):
+            while child is None:
+                if dispatch.done():
+                    pytest.fail(f"unsealed dispatch returned to its parent: {dispatch.result()}")
+                for waiting in suspended_runs():
+                    info = get_active_run(waiting["run_id"])
+                    if info and info.parent_run_id == parent.run_id:
+                        child = info.state
+                        assert waiting["decision"]["code"] == "closure_manifest_missing", waiting
+                        break
+                await asyncio.sleep(0.01)
+        assert llm_calls == 1
+        assert not child.summary_path.exists()
+        _assert_child_authority(child, task_instance_uuid=fixture["task_instance_uuid"],
+            revision=contract["task_contract_revision"], digest=contract["task_contract_digest"],
+            binding=fixture["binding"])
+        parent_events = _events(parent.transcript_path)
+        assert not any(row.get("event") in {"subagent_call_end", "decision_deferred_to_analysis"}
+                       for row in parent_events)
+        assert not parent.hook_state.get("pending_post_node_flow")
+        assert not {"raw_results", "clean_results", "experiment_log"}.intersection(
+            entry["type"] for entry in child.list_artifacts(own_only=True))
+        child.hook_state["kill_signal"] = {"reason": "probe inspected", "requested_by": "test"}
+        result = await asyncio.wait_for(dispatch, 3)
+        assert result["child_status"] == "cancelled", result
+        assert result.get("can_start_standard_review") is not True
+        summary = json.loads(child.summary_path.read_text())
+        assert summary["status"] == "cancelled"
+        assert summary["tool_call_count"] == 0
+    finally:
+        if not dispatch.done():
+            if child is not None:
+                child.hook_state["kill_signal"] = {"reason": "test cleanup"}
+            dispatch.cancel()
+        await asyncio.gather(dispatch, return_exceptions=True)

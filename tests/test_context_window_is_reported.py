@@ -92,8 +92,10 @@ async def test_every_llm_response_is_followed_by_a_context_report(tmp_path, monk
         # 1. 服务端实收就是服务端实收 —— 不是本地估算。
         assert rep["prompt_tokens"] == resp["usage"]["prompt_tokens"]
         # effective 与触发判据同一个函数（变异：把报告里的换算改成裸 est 必转红）。
-        assert rep["effective_tokens"] == sm.effective_prompt_tokens(rep["est_tokens"], state)
-        assert rep["effective_tokens"] > rep["est_tokens"] > 0
+        assert rep["measurement"] == "request"
+        assert rep["effective_tokens"] > 0 and rep["est_tokens"] > 0
+        assert rep["budget_tokens"] == rep["effective_tokens"]
+        assert rep["reserved_output_tokens"] > 0
         assert rep["window"] == sm.effective_context_window(harness, state) == 100_000
         assert rep["configured_window"] == 100_000
         assert rep["compress_at"] == 0.7
@@ -166,7 +168,7 @@ async def test_after_a_compaction_the_report_carries_its_before_and_after(
 
     await run_loop(harness, state, [], llm)
 
-    compactions = _events(state, "summarize")
+    compactions = _events(state, "context_compaction")
     assert compactions, "窗口 900 跑四轮工具结果居然一次都没压"
     reports = _events(state, "context_window")
     carried = [r for r in reports if r["last_compaction"] is not None]

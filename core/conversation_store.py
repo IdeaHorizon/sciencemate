@@ -25,6 +25,7 @@ from core.state import State
 def write_snapshot(path: Path, payload: dict) -> None:
     """The atomic write boundary shared by messages and their child handles."""
     import os
+
     from core.secrets import redact
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -42,6 +43,12 @@ class UnconfirmedToolOutcome(RuntimeError):
     code = "unconfirmed_tool_outcome"
 
 
+def tool_result_is_unconfirmed(value) -> bool:
+    return isinstance(value, dict) and bool(
+        (value.get("outcome") == "unknown" and value.get("do_not_resubmit"))
+        or value.get("paused_jobs"))
+
+
 def unresolved_tool_calls(messages) -> dict[str, str]:
     pending = {}
     for message in messages:
@@ -53,11 +60,7 @@ def unresolved_tool_calls(messages) -> dict[str, str]:
                 value = json.loads(message.content or "null")
             except (ValueError, TypeError):
                 value = None
-            unfinished = isinstance(value, dict) and (
-                (value.get("outcome") == "unknown" and value.get("do_not_resubmit"))
-                or bool(value.get("paused_jobs"))
-            )
-            if not unfinished:
+            if not tool_result_is_unconfirmed(value):
                 pending.pop(message.tool_call_id, None)
     return pending
 
@@ -164,6 +167,7 @@ def retire_undispatched_calls(state, messages, *, checkpoint: dict | None,
 
 async def reconcile_reentrant_calls(state, messages, *, turn: int):
     import asyncio
+
     from core.child_dispatch import checkpoint
 
     saved = checkpoint(state)
@@ -197,10 +201,13 @@ async def _reconcile_reentrant_calls(state, messages, *, turn: int):
             raw = function.get("arguments") or "{}"
             arguments = json.loads(raw) if isinstance(raw, str) else dict(raw)
             try:
-                recovery = (
-                    definition.interrupted_recovery(arguments, state=state, tool_call_id=call_id)
-                    if callable(definition.interrupted_recovery) else None
-                )
+                from core.approvals import recover_result
+                recovery = recover_result(state, call_id, function["name"], arguments)
+                if recovery is None:
+                    recovery = (
+                        definition.interrupted_recovery(arguments, state=state, tool_call_id=call_id)
+                        if callable(definition.interrupted_recovery) else None
+                    )
                 import inspect
                 if inspect.isawaitable(recovery):
                     recovery = await recovery
@@ -208,6 +215,8 @@ async def _reconcile_reentrant_calls(state, messages, *, turn: int):
                     # A child/adapter owner can recover a receipt directly from its
                     # existing durable facts without executing the original tool.
                     result = recovery["result"]
+                    from core.approvals import record_recovered_result
+                    record_recovered_result(state, call_id, function["name"], arguments, result)
                 else:
                     if not (tool_registry.is_read_only(function["name"], arguments) or recovery is True):
                         continue
@@ -288,10 +297,74 @@ def jsonable_to_msg(d: dict) -> LLMMessage:
 def restore_messages(state, records: list[dict], *, through: str | None = None,
                      record_origins: bool = True) -> list[LLMMessage]:
     """The single persistence boundary for message decoding and legacy origin repair."""
-    messages = [jsonable_to_msg(d) for d in records]
+    messages = _restore_resume_input_origins(state, [jsonable_to_msg(d) for d in records], through)
     if any(not d.get("origin") for d in records):
         return restore_message_origins(state, messages, through=through, record=record_origins)
     return messages  # a persisted unknown stays unknown; do not repeatedly rescan old evidence
+
+
+def _restore_resume_input_origins(state, messages, through):
+    """Legacy human answers need a control-plane resume receipt, not text guessing.
+
+    A tool payload alone cannot assert caller authority. Match its call ID to a
+    recorded loop_resume before using the runtime's typed answer-source fields.
+    Unattributed old answers remain protected unknowns, never human quotations.
+    """
+    from dataclasses import replace
+    from datetime import datetime
+
+    candidates = {}
+    out = list(messages)
+    control_calls = {call.get("id") for message in messages for call in message.tool_calls or []
+                     if (call.get("function") or {}).get("name") == "request_human_input"}
+    for i, message in enumerate(messages):
+        if message.role != "tool" or message.origin != "tool" or not message.tool_call_id:
+            continue
+        try:
+            payload = json.loads(message.content or "")
+        except (TypeError, ValueError):
+            continue
+        if (isinstance(payload, dict) and payload.get("status") == "success"
+                and "response" in payload and "asked_by" in payload):
+            candidates[message.tool_call_id] = (i, payload)
+            if (message.tool_call_id in control_calls and not payload.get("automatic")
+                    and payload.get("answered_by") != "auto"):
+                out[i] = replace(message, origin="legacy_unknown")
+    if not candidates:
+        return messages
+    path = getattr(state, "transcript_path", None)
+    if path is None:
+        root = getattr(state, "root", None)
+        if root is None:
+            return out
+        path = Path(root) / "transcript.jsonl"
+    if not path.exists():
+        return out
+    try:
+        cutoff = datetime.fromisoformat(through.replace("Z", "+00:00")) if through else None
+        with path.open(encoding="utf-8") as stream:
+            for line in stream:
+                if '"loop_resume"' not in line:
+                    continue
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    continue
+                if (cutoff and event.get("at") and datetime.fromisoformat(
+                        event["at"].replace("Z", "+00:00")) > cutoff):
+                    continue
+                if event.get("event") != "loop_resume":
+                    continue
+                found = candidates.get(event.get("pending_tool_call_id"))
+                if not found:
+                    continue
+                index, payload = found
+                if payload.get("automatic") or payload.get("answered_by") == "auto":
+                    continue
+                origin = "caller" if payload.get("answered_by") == "person" else "legacy_unknown"
+                out[index] = replace(out[index], origin=origin)
+    except (OSError, TypeError, ValueError):
+        return out
+    return out
 
 
 def restore_message_origins(state, messages: list[LLMMessage], *, through: str | None = None,
@@ -305,11 +378,12 @@ def restore_message_origins(state, messages: list[LLMMessage], *, through: str |
     """
     if not any(m.origin == "legacy_unknown" for m in messages):
         return messages
-    from dataclasses import replace
-    from difflib import SequenceMatcher
-    from datetime import datetime
-    from collections import Counter, defaultdict
     import hashlib
+    from collections import Counter, defaultdict
+    from dataclasses import replace
+    from datetime import datetime
+    from difflib import SequenceMatcher
+
     from core.llm import framework_notice
 
     path = getattr(state, "transcript_path", Path(state.root) / "transcript.jsonl")
@@ -420,6 +494,12 @@ def render_context_change(state, messages: list[LLMMessage], updated: list[LLMMe
     if splices:
         state.append_transcript("context_rendered", turn=turn, source=source, splices=splices)
         messages[:] = apply_context_patch(messages, splices)
+        # The live-result index is a projection too. Reconcile it at the view
+        # commit boundary, including after compaction, restoration and rollback.
+        # Waiting for next turn's eviction leaves lookup pointing at absent data.
+        from .context_view import get
+        if (view := get(state)) is not None:
+            view.sync(messages)
 
 
 def _drop_unjsonable(d: dict) -> dict:

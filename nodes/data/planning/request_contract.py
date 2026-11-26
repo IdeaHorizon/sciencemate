@@ -210,6 +210,7 @@ def _requested_assets(context: dict[str, Any], explicit: dict[str, Any]) -> list
                 for key in (
                     "scientific_role", "representation", "source_strategy",
                     "generation_recipe", "parameter_bindings", "workflow_capability",
+                    "acquisition_reference",
                 )
                 if item.get(key) not in (None, "", [], {})
             },
@@ -346,6 +347,11 @@ def normalize_preprocessing_request(
         authority_payload["artifact_id"] = _text(authority["artifact_id"])
     elif authority_kind == "pre_registration" and context.get("source_prereg_artifact_id"):
         authority_payload["artifact_id"] = _text(context["source_prereg_artifact_id"])
+    # A structured contract owns this field. Its rendered spec or an authority
+    # excerpt explains the request; neither replaces the declared purpose.
+    declared_purpose = _text(explicit.get("purpose"))
+    if not declared_purpose and structured_caller:
+        declared_purpose = _text(context.get("purpose"))
     base = {
         "schema_version": _text(explicit.get("schema_version")) or PREPROCESSING_REQUEST_SCHEMA_VERSION,
         "request_kind": _text(explicit.get("request_kind") or context.get("request_kind")) or "asset_preprocessing",
@@ -355,7 +361,8 @@ def normalize_preprocessing_request(
         # It is evidence, not an invitation for planning to expand its scope.
         "authority_snapshot": deepcopy(raw_authority),
         "purpose": _text(
-            caller_text
+            declared_purpose
+            or caller_text
             or explicit.get("purpose")
             or context.get("purpose")
             or context.get("objective")

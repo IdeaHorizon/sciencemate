@@ -278,7 +278,7 @@ async def measure(state: Any | None = None, *, timeout: int = 900) -> dict[str, 
                 break
         if works:
             status, reason = "works", ""
-        elif len(absent) == len(latex._COMPILERS):
+        elif latex.no_tex_engine():
             status = "absent"
             reason = "这台机器上没有 LaTeX：" + "、".join(latex._COMPILERS) + " 都不在"
         else:

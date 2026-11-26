@@ -25,10 +25,12 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
+from core.project_workspace import run_scratch_directory
 from core.state import State
 from core.tool_registry import contract_requirement
 from nodes.data.pipeline_contract import needs_input_result
 from nodes.data.progress import emit_progress
+from .managed_commands import run_data_command
 from .geometry_assets import (
     canonical_mesh_controls, coordinate_profile_from_params,
     flatten_parameter_groups, geometry_file_from_params,
@@ -114,13 +116,18 @@ MESH_PARAMETER_CONTRACT: dict[str, str] = {
 
 
 async def _run_mesh_worker(state: State, generator: Any, **params: Any) -> Any:
-    """Run a blocking mesher without leaving the caller with a silent UI."""
-    task = asyncio.create_task(asyncio.to_thread(generator, **params))
+    """Keep progress visible while the caller owns the complete async adapter."""
+    from core.cancellation import signal_for
+
+    if signal_for(state) or (state.kill_event is not None and state.kill_event.is_set()):
+        raise asyncio.CancelledError
+    task = asyncio.create_task(generator(state=state, **params))
     elapsed = 0
-    while True:
-        try:
-            return await asyncio.wait_for(asyncio.shield(task), timeout=30)
-        except asyncio.TimeoutError:
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=30)
+            if done:
+                return await task
             elapsed += 30
             emit_progress(
                 state,
@@ -129,6 +136,10 @@ async def _run_mesh_worker(state: State, generator: Any, **params: Any) -> Any:
                 elapsed_seconds=elapsed,
                 execution_budget_seconds=params.get("timeout", 120),
             )
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 def naca_4digit(code: str, n_points: int = 201) -> tuple[list[float], list[float], list[float], list[float]]:
     """生成 NACA 4 位翼型的上下表面坐标（余弦分布）。"""
@@ -816,14 +827,17 @@ def _parse_gmsh_msh2_quality(
     }
 
 
-def read_gmsh_mesh_quality(mesh_path: str, *, gmsh_binary: str = "gmsh", timeout: int = 120,
-                           surface_regions: list[dict] | None = None) -> dict[str, Any]:
+async def read_gmsh_mesh_quality(
+    mesh_path: str, *, state: State, gmsh_binary: str = "gmsh", timeout: int = 120,
+    surface_regions: list[dict] | None = None,
+) -> dict[str, Any]:
     """Use Gmsh's format reader and the shared topology/geometry measurements."""
-    with tempfile.TemporaryDirectory(prefix="data-mesh-readback-") as directory:
+    run_scratch_directory(state).mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="data-mesh-readback-", dir=run_scratch_directory(state)) as directory:
         readback = Path(directory) / "readback.msh"
         command = [gmsh_binary, mesh_path, "-format", "msh2", "-setnumber", "Mesh.Binary", "0",
                    "-save", "-o", str(readback)]
-        checked = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
+        checked = await run_data_command(state, command, text=True, capture_output=True, timeout=timeout)
         if checked.returncode != 0 or not readback.is_file():
             raise ValueError(f"Gmsh export read-back failed: {checked.stderr[-1200:]}")
         quality = _parse_gmsh_msh2_quality(str(readback), surface_regions=surface_regions)
@@ -1125,10 +1139,11 @@ def _openfoam_command(utility: str, command: str = "", input_file: Path | None =
     return argv
 
 
-def run_openfoam_check_mesh(
+async def run_openfoam_check_mesh(
     case_dir: str | Path,
     poly_dir: str | Path,
     *,
+    state: State,
     timeout: int = 120,
     retain_output: bool = False,
 ) -> dict[str, Any]:
@@ -1137,7 +1152,7 @@ def run_openfoam_check_mesh(
     if not poly_path.exists():
         return {"status": "error", "error": "OpenFOAM constant/polyMesh does not exist."}
     try:
-        proc = subprocess.run(
+        proc = await run_data_command(state,
             [*_openfoam_command("checkMesh"), "-case", str(Path(str(case_dir)).expanduser()),
              "-allTopology", "-allGeometry"],
             text=True,
@@ -1163,7 +1178,9 @@ def run_openfoam_check_mesh(
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
 
-def _review_gmsh_mesh(result: dict[str, Any], requested: dict[str, Any]) -> dict[str, Any]:
+async def _review_gmsh_mesh(
+    result: dict[str, Any], requested: dict[str, Any], *, state: State,
+) -> dict[str, Any]:
     """Generic deterministic Gmsh mesh review before returning success.
 
     Every future Gmsh generator gets file integrity, Tecplot/OpenFOAM export,
@@ -1205,11 +1222,12 @@ def _review_gmsh_mesh(result: dict[str, Any], requested: dict[str, Any]) -> dict
     poly_dir = result.get("polyMesh_dir") if openfoam_requested else None
     boundary_contract = _build_openfoam_boundary_contract(poly_dir, requested)
     check_mesh: dict[str, Any] = (
-        run_openfoam_check_mesh(
+        await run_openfoam_check_mesh(
             result.get("case_dir") or Path(str(poly_dir)).parent.parent,
             poly_dir,
             timeout=int(requested.get("check_mesh_timeout") or 120),
             retain_output=_as_bool(requested.get("retain_validation_log"), False),
+            state=state,
         )
         if poly_dir else {"status": "skipped" if openfoam_requested else "not_applicable"}
     )
@@ -2010,6 +2028,7 @@ def _supported_parameters(generator: Any, values: dict[str, Any]) -> dict[str, A
     """Keep only parameters accepted by the selected producer callable."""
     signature = inspect.signature(generator)
     values = canonical_mesh_controls(values, signature.parameters)
+    values.pop("state", None)
     invalid = {
         key: value for key, value in values.items()
         if key in signature.parameters
@@ -2042,11 +2061,13 @@ def _reviewed_generator_parameters(generator: Any, values: dict[str, Any]) -> di
     return selected
 
 
-def _generate_gmsh_mesh_with_review(
+async def _generate_gmsh_mesh_with_review(
     generator: Any,
     mesh_type: str,
     adjuster: Any | None = None,
     max_review_iterations: int = 0,
+    *,
+    state: State,
     **kwargs: Any,
 ) -> dict[str, Any]:
     attempts: list[dict[str, Any]] = []
@@ -2066,14 +2087,14 @@ def _generate_gmsh_mesh_with_review(
     while True:
         attempt += 1
         try:
-            result = generator(**_supported_parameters(generator, current))
+            result = await generator(state=state, **_supported_parameters(generator, current))
         except Exception as exc:
             result = _failed_gmsh_generation_result(current, exc)
         result.setdefault("mesh_type", mesh_type)
-        review = _review_gmsh_mesh(result, current | {
+        review = await _review_gmsh_mesh(result, current | {
             "mesh_type": mesh_type,
             "retain_validation_log": retain_validation_log,
-        })
+        }, state=state)
         review["attempt"] = attempt
         review_path = _write_mesh_review(result["case_dir"], review)
         result["mesh_review"] = review
@@ -2269,22 +2290,27 @@ def _quarantine_failed_mesh_result(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _generate_airfoil_gmsh_mesh_with_review(max_review_iterations: int = 0, **kwargs: Any) -> dict[str, Any]:
-    return _generate_gmsh_mesh_with_review(
+async def _generate_airfoil_gmsh_mesh_with_review(
+    max_review_iterations: int = 0, *, state: State, **kwargs: Any,
+) -> dict[str, Any]:
+    return await _generate_gmsh_mesh_with_review(
         generate_airfoil_gmsh_mesh,
         "airfoil_gmsh",
         adjuster=_adjust_airfoil_mesh_params_for_review,
         max_review_iterations=max_review_iterations,
         **kwargs,
+        state=state,
     )
 
 
-def generate_coordinate_profile_gmsh_mesh(
+async def generate_coordinate_profile_gmsh_mesh(
     case_dir: str,
     coordinate_profile_path: str = "",
     profile_dat_path: str = "",
     profile_name: str = "",
     airfoil_dat_path: str = "",
+    *,
+    state: State,
     **kwargs: Any,
 ) -> dict[str, Any]:
     """Generate a mesh from a generic closed 2D coordinate profile."""
@@ -2292,11 +2318,12 @@ def generate_coordinate_profile_gmsh_mesh(
     if not profile_path:
         raise ValueError("coordinate_profile_path or airfoil_dat_path is required")
     compatible_name = kwargs.pop("airfoil_name", "")
-    result = generate_airfoil_gmsh_mesh(
+    result = await generate_airfoil_gmsh_mesh(
         case_dir=case_dir,
         airfoil_name=profile_name or compatible_name or "coordinate_profile",
         airfoil_dat_path=profile_path,
         **_supported_parameters(generate_airfoil_gmsh_mesh, kwargs),
+        state=state,
     )
     result["mesh_type"] = "coordinate_profile_gmsh"
     result["coordinate_profile_path"] = profile_path
@@ -2306,7 +2333,7 @@ def generate_coordinate_profile_gmsh_mesh(
     return result
 
 
-def generate_coordinate_profile_cascade_gmsh_mesh(
+async def generate_coordinate_profile_cascade_gmsh_mesh(
     case_dir: str,
     coordinate_profile_path: str = "",
     profile_name: str = "",
@@ -2343,6 +2370,8 @@ def generate_coordinate_profile_cascade_gmsh_mesh(
     gmsh_binary: str = "gmsh",
     gmsh_to_foam_cmd: str = "openfoam gmshToFoam",
     timeout: int = 120,
+    *,
+    state: State,
     **_: Any,
 ) -> dict[str, Any]:
     profile_path = coordinate_profile_path or airfoil_dat_path
@@ -2405,7 +2434,7 @@ def generate_coordinate_profile_cascade_gmsh_mesh(
         spanwise_layers=max(1, int(spanwise_layers or 1)),
     )
     geo_path.write_text(geo, encoding="utf-8")
-    proc = subprocess.run(
+    proc = await run_data_command(state,
         [gmsh_path, "-3" if extrude_to_3d else "-2", str(geo_path), "-format", "msh2", "-o", str(msh_path)],
         cwd=str(out_dir),
         text=True,
@@ -2425,7 +2454,7 @@ def generate_coordinate_profile_cascade_gmsh_mesh(
     if convert_to_openfoam:
         system_result = write_openfoam_system_files(str(out_dir))
         foam_cmd = _openfoam_command("gmshToFoam", gmsh_to_foam_cmd, msh_path)
-        foam_proc = subprocess.run(
+        foam_proc = await run_data_command(state,
             foam_cmd,
             cwd=str(out_dir),
             text=True,
@@ -2492,23 +2521,29 @@ def generate_coordinate_profile_cascade_gmsh_mesh(
     }
 
 
-def _generate_coordinate_profile_cascade_gmsh_mesh_with_review(max_review_iterations: int = 0, **kwargs: Any) -> dict[str, Any]:
-    return _generate_gmsh_mesh_with_review(
+async def _generate_coordinate_profile_cascade_gmsh_mesh_with_review(
+    max_review_iterations: int = 0, *, state: State, **kwargs: Any,
+) -> dict[str, Any]:
+    return await _generate_gmsh_mesh_with_review(
         generate_coordinate_profile_cascade_gmsh_mesh,
         "coordinate_profile_cascade_gmsh",
         adjuster=_adjust_airfoil_mesh_params_for_review,
         max_review_iterations=max_review_iterations,
         **kwargs,
+        state=state,
     )
 
 
-def _generate_coordinate_profile_gmsh_mesh_with_review(max_review_iterations: int = 0, **kwargs: Any) -> dict[str, Any]:
-    return _generate_gmsh_mesh_with_review(
+async def _generate_coordinate_profile_gmsh_mesh_with_review(
+    max_review_iterations: int = 0, *, state: State, **kwargs: Any,
+) -> dict[str, Any]:
+    return await _generate_gmsh_mesh_with_review(
         generate_coordinate_profile_gmsh_mesh,
         "coordinate_profile_gmsh",
         adjuster=_adjust_airfoil_mesh_params_for_review,
         max_review_iterations=max_review_iterations,
         **kwargs,
+        state=state,
     )
 
 
@@ -2527,13 +2562,16 @@ def _adjust_cylinder_mesh_params_for_review(params: dict[str, Any], review: dict
     return adjusted
 
 
-def _generate_cylinder_gmsh_mesh_with_review(max_review_iterations: int = 0, **kwargs: Any) -> dict[str, Any]:
-    return _generate_gmsh_mesh_with_review(
+async def _generate_cylinder_gmsh_mesh_with_review(
+    max_review_iterations: int = 0, *, state: State, **kwargs: Any,
+) -> dict[str, Any]:
+    return await _generate_gmsh_mesh_with_review(
         generate_cylinder_gmsh_mesh,
         "cylinder_gmsh",
         adjuster=_adjust_cylinder_mesh_params_for_review,
         max_review_iterations=max_review_iterations,
         **kwargs,
+        state=state,
     )
 
 
@@ -2685,10 +2723,13 @@ def _text_error_context(path: Path, diagnostic: str, radius: int = 3) -> str:
     )
 
 
-def _cad_entity_bounds(source: Path, gmsh: str, length_unit: str, timeout: int) -> dict[str, Any]:
+async def _cad_entity_bounds(
+    source: Path, gmsh: str, length_unit: str, timeout: int, *, state: State,
+) -> dict[str, Any]:
     """Measure imported CAD entities, not STEP control points or coordinate systems."""
     try:
-        with tempfile.TemporaryDirectory(prefix="data-cad-bounds-") as directory:
+        run_scratch_directory(state).mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="data-cad-bounds-", dir=run_scratch_directory(state)) as directory:
             root = Path(directory)
             script = root / "bounds.geo"
             script.write_text(
@@ -2705,7 +2746,7 @@ def _cad_entity_bounds(source: Path, gmsh: str, length_unit: str, timeout: int) 
                     for mode in (0, 1)
                 ), encoding="utf-8",
             )
-            result = subprocess.run([gmsh, str(script), "-0", "-o", str(root / "bounds.brep")],
+            result = await run_data_command(state, [gmsh, str(script), "-0", "-o", str(root / "bounds.brep")],
                                     capture_output=True, text=True, timeout=timeout)
             bounds = {}
             for mode, name in ((0, "conservative"), (1, "tessellated")):
@@ -2723,7 +2764,7 @@ def _cad_entity_bounds(source: Path, gmsh: str, length_unit: str, timeout: int) 
         return {"status": "unavailable", "error": str(exc)}
 
 
-def generate_geometry_file_gmsh_mesh(
+async def generate_geometry_file_gmsh_mesh(
     geometry_file: str = "",
     case_dir: str = "",
     mesh_dimension: int | None = None,
@@ -2738,6 +2779,8 @@ def generate_geometry_file_gmsh_mesh(
     timeout: int = 180,
     minimum_length: float | None = None,
     length_unit: str = "",
+    *,
+    state: State,
     **domain_params: Any,
 ) -> dict[str, Any]:
     """Generate a generic Gmsh mesh from a user-provided geometry file.
@@ -2760,7 +2803,7 @@ def generate_geometry_file_gmsh_mesh(
         raise ValueError("minimum_length must not exceed characteristic_length")
 
     if src.suffix.lower() == ".cas":
-        return _import_fluent_reference_mesh(
+        return await _import_fluent_reference_mesh(
             src,
             Path(case_dir),
             scale=float(domain_params.get("reference_mesh_scale") or 1.0),
@@ -2768,6 +2811,7 @@ def generate_geometry_file_gmsh_mesh(
             write_tecplot=write_tecplot,
             timeout=timeout,
             domain_params=domain_params,
+            state=state,
         )
 
     out_dir = Path(case_dir)
@@ -2852,7 +2896,7 @@ def generate_geometry_file_gmsh_mesh(
             gmsh_cmd.extend(["-order", str(int(element_order))])
         if mesh_size_factor is not None:
             gmsh_cmd.extend(["-clscale", str(float(mesh_size_factor))])
-        proc = subprocess.run(
+        proc = await run_data_command(state,
             gmsh_cmd,
             cwd=str(out_dir),
             text=True,
@@ -2930,8 +2974,9 @@ def generate_geometry_file_gmsh_mesh(
         key: source_profile.get(key) for key in ("path", "sha256", "size_bytes")
     }
     if suffix in {".step", ".stp", ".iges", ".igs", ".brep"}:
-        quality["source_geometry"]["entity_bounds"] = _cad_entity_bounds(
+        quality["source_geometry"]["entity_bounds"] = await _cad_entity_bounds(
             copied_geometry, str(gmsh_path), length_unit, min(timeout, 60),
+            state=state,
         )
     quality["mesh_sizing_semantics"] = {
         "characteristic_length": "Gmsh target size; not an exact value for every element edge.",
@@ -2952,7 +2997,7 @@ def generate_geometry_file_gmsh_mesh(
                 str(gmsh_path), str(msh_path), "-format", solver_format,
                 "-setnumber", "Mesh.SaveGroupsOfNodes", "1", "-save", "-o", str(solver_path),
             ]
-        export_proc = subprocess.run(
+        export_proc = await run_data_command(state,
             export_cmd,
             cwd=str(out_dir),
             text=True,
@@ -2979,7 +3024,7 @@ def generate_geometry_file_gmsh_mesh(
         if solver_format.startswith("msh"):
             # Measure the delivered export through Gmsh's reader, rather than
             # asking review to reimplement MSH4 or trusting pre-export counts.
-            quality.update(read_gmsh_mesh_quality(solver_mesh_file, gmsh_binary=str(gmsh_path), timeout=timeout))
+            quality.update(await read_gmsh_mesh_quality(solver_mesh_file, gmsh_binary=str(gmsh_path), timeout=timeout, state=state))
             solver_export["readback"] = quality.pop("readback")
 
     quality["measurement_source"] = {"path": solver_mesh_file if solver_export.get("readback") else str(msh_path),
@@ -3029,7 +3074,7 @@ def generate_geometry_file_gmsh_mesh(
         system_result = write_openfoam_system_files(str(out_dir))
         written_files.extend(system_result.get("written_files", []))
         foam_cmd = _openfoam_command("gmshToFoam", gmsh_to_foam_cmd, msh_path)
-        foam_proc = subprocess.run(
+        foam_proc = await run_data_command(state,
             foam_cmd,
             cwd=str(out_dir),
             text=True,
@@ -3568,10 +3613,11 @@ def extract_2d_domain_loops_from_polymesh(poly_dir: str | Path) -> dict[str, Any
     }
 
 
-def _import_fluent_reference_mesh(
+async def _import_fluent_reference_mesh(
     source: Path,
     out_dir: Path,
     *,
+    state: State,
     scale: float,
     span: float,
     write_tecplot: bool,
@@ -3584,7 +3630,7 @@ def _import_fluent_reference_mesh(
         shutil.copy2(source, copied)
     write_openfoam_system_files(str(out_dir))
     cmd = ["openfoam", "fluentMeshToFoam", "-case", str(out_dir), "-2D", str(span), "-scale", str(scale), str(copied)]
-    proc = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout, check=False)
+    proc = await run_data_command(state, cmd, text=True, capture_output=True, timeout=timeout, check=False)
     poly_dir = out_dir / "constant" / "polyMesh"
     if proc.returncode != 0 or not (poly_dir / "boundary").exists():
         raise RuntimeError(f"fluentMeshToFoam failed: {(proc.stdout + proc.stderr)[-2000:]}")
@@ -3618,7 +3664,7 @@ def _import_fluent_reference_mesh(
             encoding="utf-8",
         )
         chord = float(extracted["reference_chord"])
-        remeshed = generate_coordinate_profile_cascade_gmsh_mesh(
+        remeshed = await generate_coordinate_profile_cascade_gmsh_mesh(
             case_dir=str(out_dir),
             coordinate_profile_path=str(profile_path),
             profile_name=f"{source.stem}_gmsh_remesh",
@@ -3642,6 +3688,7 @@ def _import_fluent_reference_mesh(
             write_tecplot=write_tecplot,
             quality_preset=str(domain_params.get("quality_preset") or "reference_scaled"),
             timeout=timeout,
+            state=state,
         )
         remeshed.update({
             "source_reference_mesh": str(copied),
@@ -3686,12 +3733,15 @@ def _import_fluent_reference_mesh(
     }
 
 
-def _generate_geometry_file_gmsh_mesh_with_review(max_review_iterations: int = 0, **kwargs: Any) -> dict[str, Any]:
-    return _generate_gmsh_mesh_with_review(
+async def _generate_geometry_file_gmsh_mesh_with_review(
+    max_review_iterations: int = 0, *, state: State, **kwargs: Any,
+) -> dict[str, Any]:
+    return await _generate_gmsh_mesh_with_review(
         generate_geometry_file_gmsh_mesh,
         "geometry_file_gmsh",
         max_review_iterations=max_review_iterations,
         **kwargs,
+        state=state,
     )
 
 
@@ -5157,7 +5207,7 @@ def _build_coordinate_profile_cascade_geo(
     return "\n".join(lines) + "\n", grid_params
 
 
-def generate_airfoil_gmsh_mesh(
+async def generate_airfoil_gmsh_mesh(
     case_dir: str,
     naca_code: str = "",
     airfoil_name: str = "",
@@ -5205,6 +5255,8 @@ def generate_airfoil_gmsh_mesh(
     boundary_role_names: dict[str, str] | None = None,
     boundary_map: dict[str, Any] | None = None,
     expected_boundaries: list[str] | None = None,
+    *,
+    state: State,
 ) -> dict[str, Any]:
     """Generate a NACA airfoil mesh with Gmsh.
 
@@ -5375,7 +5427,7 @@ def generate_airfoil_gmsh_mesh(
         )
     )
     geo_path.write_text(geo, encoding="utf-8")
-    proc = subprocess.run(
+    proc = await run_data_command(state,
         [gmsh_path, "-3" if extrude_to_3d else "-2", str(geo_path), "-format", "msh2", "-o", str(msh_path)],
         cwd=str(out_dir),
         text=True,
@@ -5456,7 +5508,7 @@ def generate_airfoil_gmsh_mesh(
                 encoding="utf-8",
             )
         foam_cmd = _openfoam_command("gmshToFoam", gmsh_to_foam_cmd, msh_path)
-        foam_proc = subprocess.run(
+        foam_proc = await run_data_command(state,
             foam_cmd,
             cwd=str(out_dir),
             text=True,
@@ -5795,7 +5847,7 @@ def _build_cylinder_gmsh_geo(
     return "\n".join(lines) + "\n"
 
 
-def generate_cylinder_gmsh_mesh(
+async def generate_cylinder_gmsh_mesh(
     case_dir: str,
     radius: float = 0.5,
     diameter: float | None = None,
@@ -5829,6 +5881,8 @@ def generate_cylinder_gmsh_mesh(
     boundary_role_names: dict[str, str] | None = None,
     boundary_map: dict[str, Any] | None = None,
     expected_boundaries: list[str] | None = None,
+    *,
+    state: State,
 ) -> dict[str, Any]:
     """Generate a cylinder-flow mesh while preserving the requested outer domain."""
     convert_to_openfoam = _as_bool(convert_to_openfoam, True)
@@ -5907,7 +5961,7 @@ def generate_cylinder_gmsh_mesh(
         boundary_role_names=boundary_role_names,
     )
     geo_path.write_text(geo, encoding="utf-8")
-    proc = subprocess.run(
+    proc = await run_data_command(state,
         [gmsh_path, "-3" if extrude_to_3d else "-2", str(geo_path), "-format", "msh2", "-o", str(msh_path)],
         cwd=str(out_dir),
         text=True,
@@ -5971,7 +6025,7 @@ def generate_cylinder_gmsh_mesh(
                 encoding="utf-8",
             )
         foam_cmd = _openfoam_command("gmshToFoam", gmsh_to_foam_cmd, msh_path)
-        foam_proc = subprocess.run(
+        foam_proc = await run_data_command(state,
             foam_cmd,
             cwd=str(out_dir),
             text=True,
@@ -6446,7 +6500,7 @@ def mesh_parameter_contracts(discipline: str) -> dict[str, dict[str, Any]]:
                 if parameter.default is not inspect.Parameter.empty else {}
             )}
             for key, parameter in inspect.signature(generator).parameters.items()
-            if key != "case_dir" and parameter.kind not in {
+            if key not in {"case_dir", "state"} and parameter.kind not in {
                 inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL,
             }
         }
@@ -7239,7 +7293,10 @@ async def _generate_computational_mesh(
     try:
         # 通用参数传递
         filtered_params = _supported_parameters(generator_func, params)
-        mesh_data = await asyncio.to_thread(generator_func, **filtered_params)
+        if inspect.iscoroutinefunction(generator_func):
+            mesh_data = await _run_mesh_worker(state, generator_func, **filtered_params)
+        else:
+            mesh_data = await asyncio.to_thread(generator_func, **filtered_params)
     except Exception as e:
         return {"status": "error", "error": f"网格生成失败: {e}"}
 

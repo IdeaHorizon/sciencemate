@@ -3,7 +3,8 @@
 编译器按这个顺序挑（``_resolve_compiler``）：**latexmk** 在则用它（Linux 镜像自带全套
 TeX Live，逐字不变）；缺则 **tectonic**（单文件、自带按需取包 + 多轮 + BibTeX/Biber、
 bundle 版本锁定 —— Windows 上没有任何 LaTeX，随包 tectonic 是 RFC §? 的架构答案，且比
-"host 上碰巧装了什么 TeX"更可复现）。两者都没有才判"没有 LaTeX 工具链"。这不是"host
+"host 上碰巧装了什么 TeX"更可复现）。缺少构建管理器时，已有原生引擎由同一入口管理
+多轮编译及参考文献；构建管理器、TeX 引擎与文献程序的缺失分别报告。这不是"host
 依赖的偶然回退"：tectonic 是**故意随产品分发**的那一个。
 
 **失败分四类，各归各的下一步**（2026-09-09 修：此前四类压成一句"LaTeX 编译失败"，
@@ -322,9 +323,10 @@ def _select_engine(requested: str, source_text: str) -> tuple[str | None, str | 
 #: 我们认得的编译器，**按优先级**。`_resolve_compiler` 和"这台机器有没有 LaTeX"
 #: 这两个问题共用这一份名单 —— 分成两份就会出现"选的时候认 3 个、判缺失时只认 2 个"。
 _COMPILERS = ("latexmk", "tectonic")
+_TEX_ENGINES = ("xelatex", "pdflatex", "lualatex")
 
 
-def _resolve_compiler() -> tuple[str, str]:
+def _resolve_compiler(engine: str = "xelatex") -> tuple[str, str]:
     """挑编译器 ``(kind, argv0)``：优先 ``latexmk``（全套 TeX，逐字不变）；缺则 ``tectonic``
     （单文件、自带按需取包 + 多轮 + BibTeX，Windows 无 LaTeX 时随包的那一个）。
 
@@ -338,11 +340,17 @@ def _resolve_compiler() -> tuple[str, str]:
         found = shutil.which(name)
         if found:
             return name, found
+    if engine in _TEX_ENGINES and (found := shutil.which(engine)):
+        return engine, found
+    if engine in _TEX_ENGINES and any(shutil.which(name) for name in _TEX_ENGINES):
+        # A different engine cannot stand in for the manuscript's selection.
+        # Launch the selected name so the missing-program report is precise.
+        return engine, engine
     return _COMPILERS[0], _COMPILERS[0]
 
 
 def absent_compilers() -> list[str]:
-    """``_COMPILERS`` 里 PATH 上找不到的那几个（保序）。全在这里 = 这台机器没有 TeX。
+    """PATH 上缺少的构建管理器（保序）；这不能说明原生 TeX 引擎是否存在。
 
     **现算**，不缓存：装好 texlive / 放上 tectonic 之后，下一次调用就该自己好起来。"""
     return [name for name in _COMPILERS if shutil.which(name) is None]
@@ -351,7 +359,8 @@ def absent_compilers() -> list[str]:
 def no_tex_engine() -> bool:
     """这台机器上一个我们认得的编译器都没有。「有没有 TeX」只有这一个问法 —— 出图、
     量字宽、测试的 skip 条件都问它，不各自 ``which("xelatex")``。"""
-    return len(absent_compilers()) == len(_COMPILERS)
+    return (len(absent_compilers()) == len(_COMPILERS)
+            and not any(shutil.which(name) for name in _TEX_ENGINES))
 
 
 def _launch_failure(
@@ -370,8 +379,19 @@ def _launch_failure(
     texlive 之后下一次调用就该自己好起来，不该被上一次的记录关在门外。
     """
     absent = absent_compilers()
+    engines = [name for name in _TEX_ENGINES if shutil.which(name)]
     tail = stderr_text[-1500:]
     if len(absent) == len(_COMPILERS):
+        if engines:
+            failed = Path(run.commands[-1][0]).stem if run.commands else run.compiler
+            return _error(
+                f"已检测到 TeX 引擎 {', '.join(engines)}；本次所需程序 {failed!r} 未能启动。"
+                "这是所选引擎或参考文献依赖缺失，不能解释为机器没有 LaTeX。",
+                error_code=_errs.TOOLCHAIN_MISSING,
+                recovery=f"在同一 TeX 发行版中安装或修复 {failed}，保留稿件与文献后端后重新编译。",
+                available_engines=engines, missing_program=failed,
+                stderr_tail=tail, **common,
+            )
         return _error(
             "这台机器上没有 LaTeX 工具链："
             + "、".join(_COMPILERS)
@@ -518,6 +538,8 @@ async def run_tex(
     stderr_parts: list[bytes] = []
 
     async def run(command: list[str], *, home: str = "host") -> tuple[str, int | None]:
+        if asyncio.get_running_loop().time() >= deadline:
+            return "timeout", None
         # network 只从 run_tex 的参数来，不在分支里另给。
         commands.append(command)
         status, returncode, stdout, stderr = await _run_process(
@@ -532,7 +554,7 @@ async def run_tex(
         stderr_parts.append(stderr)
         return status, returncode
 
-    kind, binary = _resolve_compiler()
+    kind, binary = _resolve_compiler(engine)
     if kind == "latexmk":
         command = [
             binary,
@@ -543,6 +565,43 @@ async def run_tex(
             tex_name,
         ]
         status, returncode = await run(command)
+    elif kind in _TEX_ENGINES:
+        command = [binary, "-no-shell-escape", "-interaction=nonstopmode",
+                   "-halt-on-error", "-file-line-error", tex_name]
+        bcf = compile_dir / Path(tex_name).with_suffix(".bcf")
+        previous_bcf = bcf.stat().st_mtime_ns if bcf.is_file() else None
+        status, returncode = await run(command)
+        if status == "done" and returncode == 0:
+            aux = compile_dir / Path(tex_name).with_suffix(".aux")
+            helper = ("biber" if bcf.is_file() and bcf.stat().st_mtime_ns != previous_bcf else
+                      "bibtex" if aux.is_file() and r"\bibdata{" in aux.read_text(
+                          encoding="utf-8", errors="replace") else None)
+            if helper:
+                # Ask the selected distribution first, preserving its engine /
+                # biblatex compatibility. Never silently rewrite the manuscript.
+                search_path = str(Path(binary).parent) + os.pathsep + os.environ.get("PATH", "")
+                helper_binary = shutil.which(helper, path=search_path) or helper
+                status, returncode = await run([helper_binary, Path(tex_name).stem])
+            # Cross-references and bibliography need repeated TeX passes. Bound
+            # convergence by the same deadline and record every actual command.
+            previous = None
+            for iteration in range(4):
+                if status != "done" or returncode != 0:
+                    break
+                status, returncode = await run(command)
+                digest = hashlib.sha256()
+                for suffix in (".aux", ".toc", ".out"):
+                    path = compile_dir / Path(tex_name).with_suffix(suffix)
+                    if path.is_file():
+                        digest.update(suffix.encode() + path.read_bytes())
+                current = digest.hexdigest()
+                if current == previous:
+                    break
+                previous = current
+            else:
+                if status == "done" and returncode == 0:
+                    returncode = 1
+                    stderr_parts.append(b"Cross-reference files did not converge within five TeX passes")
     else:  # tectonic：自己按需取包 + 多轮 + BibTeX/Biber，单条命令即可。
         # 它自成一体（宏包按需取、biber 随包），不需要用户的家里有任何东西 —— 所以住墙给的
         # 家（home="own"）。它的包缓存、格式文件、字体缓存按本平台约定写进「用户缓存目录」

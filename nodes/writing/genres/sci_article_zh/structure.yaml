@@ -1,4 +1,5 @@
 id: sci_article_zh
+document_kind: research_article
 display_name: 中文 SCI 风格研究论文
 language:
   body: zh
@@ -32,7 +33,7 @@ parts:
       - 背景一句：问题为什么重要
       - 缺口一句：现有工作缺什么
       - 本文做了什么：对象、方法、规模（几种拓扑、几种策略、多少配置）
-      - 关键结果：两到四个带数字的发现
+      - 关键结果：本文最重要的发现与支持证据；按贡献表达，证明或反例不凑数字条数
       - 意义与边界：一句话
     chars: [250, 450]
     forbid: [引用文献, 图表引用, 缩写未展开]
@@ -62,12 +63,12 @@ parts:
   results:
     heading: 结果
     moves:
-      - 总览图先行，一段一个信息
-      - 按研究问题逐一回答，每个回答落到具体图表与数字
-      - 交互效应或反例单独说
+      - 沿核心问题与最有证据的发现组织，先给理解论证所需的结果
+      - 必要子问可合并回答；显式多问按用户要求保留，不按每题一节铺陈
+      - 证据可以是证明、反例、数据、图或表；比较目标决定表达形式，不强制总览图
       - 不解释机理（留给讨论），不复述图里所有数
     chars: [1800, 3500]
-    forbid: [无图表支撑的定量断言, 在结果里加限定语堆叠]
+    forbid: [没有证据或推导来源的断言, 在结果里加限定语堆叠]
   discussion:
     heading: 讨论
     moves:
@@ -80,10 +81,14 @@ parts:
   conclusion:
     heading: 结论
     moves:
-      - 回答引言提出的问题，三到五条，可被他人转述
+      - 回答本文核心问题与必要子问，结论数量由证据及用户要求决定，可被他人转述
       - 未来工作一句到两句
     chars: [300, 700]
     forbid: [新数据, 新引用]
+  appendix:
+    heading: 附录
+    moves: [保留需要展开但不打断正文主线的证明、数据或明确问题的回答]
+    chars: [0, 4000]
 
 required_parts: [abstract, introduction, methods, results, discussion, conclusion]
 front_matter: [title, authors_optional, keywords]

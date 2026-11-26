@@ -27,9 +27,9 @@ const persistent = header.slice(0, header.indexOf("<details>"));
 /** 只取 import 段 —— 问的是"有没有接线"，不是"注释里有没有提到"。 */
 const workspaceImports = workspace.slice(0, workspace.indexOf("function SessionCanonicalRunAccessory"));
 
-test("the persistent header carries only identity and state", () => {
+test("the persistent header carries identity without a routine state badge", () => {
   assert.match(persistent, /SessionTitle/);
-  assert.match(persistent, /sessionStateLabel/);
+  assert.doesNotMatch(persistent, /sessionStateLabel|session-meta-state/);
   // 版本号 / 基线 / 驾驶者 / 指令快照 —— 四样都搬进「会话信息」了。
   assert.doesNotMatch(persistent, /sessionRevisionLabel/);
   assert.doesNotMatch(persistent, /Based on r/);

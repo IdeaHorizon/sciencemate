@@ -40,15 +40,17 @@ class SummarizerConfig:
     """节点 context 压缩配置。
 
     触发：当 messages 估算 token 数 > trigger_threshold * max_context_tokens。
-    保留：system message 永远不动；最近 N 轮原样保留；某些工具调用永远不压缩。
-    压缩：把中间老消息用 strategy 压成一段简短叙述，替换为单条 system 消息。
+    原始指令与未确认动作保留；近期轮次与关键调用是活跃视图的优先保留偏好。
+    摘要候选由 lifecycle 验收，预算不足时已确认历史可逐字归档并按引用恢复。
     """
     enabled: bool = True
     trigger_type: str = "token_threshold"   # "token_threshold" | "turn_count" | "never"
     trigger_threshold: float = 0.7          # 占 max_context_tokens 的比例
     keep_system: bool = True                # 永远保留所有 system 消息（含 initial 和 hook-injected）
-    keep_last_n_turns: int = 3              # 最近 N 轮原样保留
-    keep_tool_calls: list[str] = field(default_factory=list)   # 这些工具的 call+result 永远不压缩
+    keep_last_n_turns: int = 3              # 预算允许时保留最近 N 个完整消息组
+    # Summary candidates retain these exchanges verbatim. Confirmed history
+    # may leave the active view only via a durable, exact recovery reference.
+    keep_tool_calls: list[str] = field(default_factory=list)
     #: **有损层**用哪个。无损清除层由框架在 run_summarizer 里无条件先跑，
     #: 不受本字段影响（做成选项的话，不写的 harness 就默认漏过 —— v22 实测
     #: `_orchestrator` 正是这样错过了它最需要的那一层）。
@@ -94,11 +96,13 @@ class NodeHarness:
 
     # 完成判定
     required_outputs: list[str] = field(default_factory=list)   # artifact 类型
+    completion_provider: str | None = field(default=None, kw_only=True)
+    completion_reentry_limit: int = field(default=2, kw_only=True)
 
     # I/O 契约
     expected_inputs: dict[str, str] = field(default_factory=dict)
-    # Alternative fields carrying the actual task; the dispatch announcement is
-    # projected from the same input, never authored as a separate requirement.
+    # Alternative fields carrying the actual task. Validation only: these may
+    # contain private instructions and must never become presentation text.
     task_input_fields: list[str] = field(default_factory=list)
     expected_outputs: dict[str, str] = field(default_factory=dict)
 

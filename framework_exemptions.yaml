@@ -302,23 +302,6 @@ subprocess_call_sites:
     argv_source: framework
     reason: "切换载荷前的起动探针：用本解释器 import 一次载荷里的 app.launcher / app.main。argv 全由框架拼（sys.executable -I -c + 载荷目录），模型碰不到；必须是子进程，因为失败之后要原样继续跑旧版"
 
-  # ── nodes/data（owner cuib）──
-  - file: nodes/data/tools/atomic_structure_recovery.py
-    sites: [_read_reference_document]
-    argv_source: model_paths
-    owner: cuib
-    reason: "pdftotext 读模型指定的参考文献 PDF"
-  - file: nodes/data/tools/mesh_generator.py
-    sites: [_cad_entity_bounds, _import_fluent_reference_mesh, generate_airfoil_gmsh_mesh, generate_airfoil_gmsh_mesh, generate_coordinate_profile_cascade_gmsh_mesh, generate_coordinate_profile_cascade_gmsh_mesh, generate_cylinder_gmsh_mesh, generate_cylinder_gmsh_mesh, generate_geometry_file_gmsh_mesh, generate_geometry_file_gmsh_mesh, generate_geometry_file_gmsh_mesh, read_gmsh_mesh_quality, run_openfoam_check_mesh]
-    argv_source: model_paths
-    owner: cuib
-    reason: "gmsh / openfoam checkMesh 在宿主上跑，case 目录与几何文件来自工具参数；新增两处只测量 CAD 包围盒与把实际网格读回 ASCII MSH2，命令模板固定，不执行模型脚本。现存 model_paths 执行面仍由 #1183 跟踪迁移到 spawn_and_wait。"
-  - file: nodes/data/tools/preprocessing_capabilities.py
-    sites: [_validate_generated_artifact_format]
-    argv_source: model_paths
-    owner: cuib
-    reason: "bash -n 语法检查模型生成的脚本（只解析不执行）"
-
   # ── nodes/experiment（owner lujy）──
   - file: nodes/experiment/tools/slurm_ssh.py
     sites: [_execute]
@@ -332,14 +315,6 @@ subprocess_call_sites:
     sites: [_msys_absolute_path]
     argv_source: framework
     reason: "Windows 上把模型 bash 里的 MSYS 路径换成 Windows 绝对路径：argv 是随包 MSYS 运行时里的 cygpath.exe 加固定参数，路径走 stdin 不进 argv；只读查询、2 秒超时、不经 shell（#1271）"
-  - file: nodes/experiment/tools/build_graph.py
-    sites: [_run]
-    argv_source: framework
-    reason: "argv 是 prepare_launch 兼容垫片交回的原生后端命令（已在墙内），但自己 subprocess.run 绕开了咽喉"
-  - file: nodes/experiment/tools/build_resource_guard.py
-    sites: [_payload_with_cgroup_events, cgroup_unit_snapshot, kill_guarded_tree, supervise_local_build]
-    argv_source: framework
-    reason: "wrap_with_cgroup 把模型构建命令包成本文件的 guard 进程后经 safe_run_bash → spawn_and_wait 进墙；Popen 的两处是 guard 作为 payload 在墙内起自己的 argv[1:]；另两处是 systemctl 探针"
   - file: nodes/experiment/tools/repro_snapshot.py
     sites: [_run, _run_under_env]
     argv_source: framework

@@ -123,6 +123,23 @@ system_prompt: |
   - 对每条 concern：写 severity / description，并用 basis / evidence / impact / affected_use 说明依据、证据与影响范围；缺证据的疑点与可选改进分开
   - 给整体 verdict + 可执行的 recommended_action
 
+  research_state 的多问题返修还会收到框架提供的逐问题前轮评审引用：
+  - `eligible` 只表示旧检查可供参考，不是本轮自动核准。核对当前用途与完整依赖边界后，
+    用 compose_review_critique(action='record_question', artifact_under_review=..., question_id='Q2',
+    question_status='carried_forward', previous_review_id=..., previous_review_version=...,
+    intended_use=..., question_finding=..., dependency_completeness='complete', question_dependencies=[...])。
+  - 首次核实用 verified；依赖要覆盖 proof/data/definitions/criteria/use，引用现有 artifact
+    或项目文件。artifact 引用可用 JSON pointer 选择子记录；research_state 行先用 question_id
+    定位再选择字段，避免数组重排串题。完整性声明由你对实际核查负责，不从标题或旧 strengths 推定。
+    proof 必须覆盖实际核查的完整证明正文（例如完整 Q2 行的 note，或独立证明 artifact），
+    不能只绑定「七步已检查」的摘要。证明在混合 Q2/Q5 的共享 Markdown 且不能精确分离时，
+    绑定全文并接受其变化使旧检查失效，或如实标 limited；不以标题或简介替代证明。
+  - 证明、数据、定义、判据或用途变化时，旧记录会标 reopened 并给原因；只核查受影响范围。
+    新疑点或独立抽查也可 reopened，必须写 question_reason。无法完整绑定时用 unverified，
+    dependency_completeness='limited' 并写 dependency_limitations；不得称为已核实沿用。
+  - Q2 已核实可以明确沿用，整份研究状态仍可因 Q5 待修保持 revise；不把沿用变成全项目批准。
+    旧评审缺少绑定的记录只作 reference_only，读其原文参考，不能从中铸造自动通过。
+
   ### 7. 产 review_critique artifact
 
   `review_critique` 是 typed-only 凭证，只能用 `compose_review_critique` 分步构建；

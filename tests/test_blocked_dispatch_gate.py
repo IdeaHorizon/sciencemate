@@ -316,16 +316,26 @@ def test_a_later_clean_run_clears_the_gate(tmp_path):
     assert _blocked_dispatch_refusal(state, "writing", {}) is None
 
 
-def test_executor_actually_captures_the_situation_on_a_blocked_run():
-    """跨层接线机械核对：finalize_run 里必须真的引用 capture 与那个 key。
-
-    "我加了个字段"和"那个字段真的会被写出来"是两件事（PR#410 的教训）。
-    """
+def test_executor_actually_captures_the_situation_on_a_blocked_run(tmp_path):
+    """A real blocked finalization must persist the same situation used by dispatch."""
+    import asyncio
+    from core.agent_loop import LoopResult
     from core.executor import finalize_run
+    from core.harness import NodeHarness
 
-    names = set(finalize_run.__code__.co_names)
-    assert "capture" in names
-    assert "BLOCKED_SITUATION_KEY" in names
+    root = _worktree(tmp_path)
+    _bound(tmp_path, "experiment", root).save_artifact("clean_results", "upstream", "v1", {})
+    state = _bound(tmp_path, "writing", root)
+    state.append_transcript("run_start", node_type="writing", run_id=state.run_id)
+    state.hook_state["blockers"] = [dict(BLOCKER)]
+    state.hook_state["node_inputs"] = {"task_id": "T04"}
+    expected = dispatch_gate.capture(state, "writing", state.hook_state["node_inputs"])
+    summary = asyncio.run(finalize_run(state, NodeHarness(node_type="writing"),
+                                      LoopResult("waiting for input", 1), llm=None))
+    assert summary["status"] == "blocked"
+    assert summary[dispatch_gate.BLOCKED_SITUATION_KEY] == expected
+    saved = json.loads(state.summary_path.read_text())
+    assert saved[dispatch_gate.BLOCKED_SITUATION_KEY] == expected
 
 
 def test_capture_shape(tmp_path):

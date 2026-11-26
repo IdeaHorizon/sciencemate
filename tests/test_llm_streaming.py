@@ -276,7 +276,10 @@ async def test_one_token_eos_stream_falls_back_to_non_stream(monkeypatch):
         }
 
     monkeypatch.setattr(LLMClient, "_post_with_retry", fake_post)
-    resp = await _client().chat([LLMMessage(role="user", content="?")])
+    resp = await _client().chat(
+        [LLMMessage(role="user", content="?")],
+        tools=[{"type":"function","function":{"name":"run_bash","parameters":{"type":"object"}}}],
+    )
 
     assert called["post"] == 1
     assert [call["function"]["name"] for call in resp.tool_calls] == ["run_bash"]

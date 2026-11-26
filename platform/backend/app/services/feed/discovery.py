@@ -116,6 +116,12 @@ def is_due(user: User, *, now: datetime | None = None) -> bool:
     if not curation.is_enabled(user):
         return False
     state = curation.stored(user)
+    if (state.get("curation_result_version") == 2
+            and not state.get("last_project_search_at") and not state.get("curated_error")
+            and (state.get("inferred_queries") or state.get("inferred_news_queries"))):
+        # Enabling curation can produce terms before a collector has ever
+        # searched them. That first search must not wait another 24 hours.
+        return True
     # 旧版本把模型的空输出记成成功。失败记录仍受每日闸门限速。
     if (state.get("curated_at") and not state.get("curation_result_version") and not state.get("curated_error")
             and not state.get("inferred_queries") and not state.get("inferred_news_queries")):
@@ -143,7 +149,25 @@ async def due_users(db: AsyncSession) -> list[User]:
     JSON 袋子里，各方言的 JSON 查询写法不通用，而用户数在这个量级上无所谓。
     """
     rows = await db.execute(select(User).where(User.is_active.is_(True)))
-    return [u for u in rows.scalars().all() if is_due(u)][:MAX_USERS_PER_ROUND]
+    due = []
+    from app.services.feed import project_context
+
+    for user in rows.scalars().all():
+        if not curation.is_enabled(user):
+            continue
+        await project_context.refresh_remote_projects(user)
+        projects = await curation.user_projects(db, user)
+        if not projects:
+            continue
+        examples = await curation.saved_project_examples(db, user, projects)
+        changed = curation.needs_refresh(user, curation.project_fingerprint(projects, examples))
+        # A new/edited project can start before the daily deadline. Model errors
+        # retain their retry cooldown instead of being retried on every tick.
+        if is_due(user) or (changed and not curation.stored(user).get("curated_error")):
+            due.append(user)
+        if len(due) >= MAX_USERS_PER_ROUND:
+            break
+    return due
 
 
 async def _targeted_search(

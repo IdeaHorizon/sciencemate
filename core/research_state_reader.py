@@ -89,3 +89,36 @@ def latest_located(
             best = (version, record, path)
     return best
 
+
+def versions_for_state(state: Any) -> list[tuple[int, dict[str, Any]]]:
+    """The same version selection for bound projects and run-local records."""
+    worktree = getattr(state, "project_worktree", None)
+    records = iter_records(worktree) if worktree else state.artifact_versions(HEAD_STEM)
+    versions = {version_of(record): record for record in records if version_of(record) >= 1}
+    return sorted(versions.items())
+
+
+def read_for_state(state: Any, version: int | None = None) -> dict[str, Any]:
+    """Read-only projection shared by the node tool and context renderer."""
+    versions = versions_for_state(state)
+    if not versions:
+        return {"status":"success", "exists":False, "message":(
+            "本项目还没有 research_state —— 这是第一轮 Analysis。"
+            "走完 prereg 冻结后用 update_research_state 建立 v1。")}
+    if version is None:
+        picked_version, record = versions[-1]
+    else:
+        matches = [item for item in versions if item[0] == int(version)]
+        if not matches:
+            return {"status":"error", "error":f"没有 v{version}",
+                    "available":[item[0] for item in versions]}
+        picked_version, record = matches[0]
+    meta = metadata_of(record)
+    return {
+        "status":"success", "exists":True, "version":picked_version,
+        "available_versions":[item[0] for item in versions],
+        "verdict":meta.get("verdict"), "hypotheses":meta.get("hypotheses") or [],
+        "gaps":meta.get("gaps") or [], "next_steps":meta.get("next_steps") or [],
+        "completed_experiments":meta.get("completed_experiments") or [],
+        "content":str(record.get("content") or ""),
+    }

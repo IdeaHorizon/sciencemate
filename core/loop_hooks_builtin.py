@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
 
 from core.naming import canonical_node_type
 
@@ -295,7 +294,7 @@ def _callee_contracts_on_turn_start(ctx: HookContext) -> list[LLMMessage] | None
         lines.append(f"### `{node_type}`（{kind}）")
         if child.task_input_fields:
             lines.append("本次任务必填其一：" + " / ".join(child.task_input_fields)
-                         + "；同一任务也用于进度说明。")
+                         + "；任务输入仅供执行，需要对用户解释目的时写在正常回复正文。")
         for key, desc in expected.items():
             lines.append(f"  - `{key}`：{str(desc).strip()}")
     if not found:
@@ -1284,87 +1283,6 @@ register_loop_hook(LoopHook(
 ))
 
 
-# ── highrisk_confirm（2026-07，always-on，安全相关不走 opt-in）───────────────
-
-def _highrisk_confirm_on_turn_start(ctx: HookContext) -> list[LLMMessage] | None:
-    """高危工具调用（run_bash / execute_python / submit_job …）会 pause（见
-    shared/lib/dangerous_commands.py）。pause 恢复后，人的原始回答文本会替换那条
-    pause 占位 tool_result；本 hook 在下一轮 turn_start 读这条回答，判定是否为
-    "批准"，是则给这条命令打一次性确认标记。
-
-    **确认标记只有在模型重新调一次同一个工具时才会被消费。** 批准本身不执行
-    任何东西 —— 这半条契约以前只写在这里的注释里，从没送到模型手上，于是模型
-    普遍误以为"人批准了 = 框架替我跑了"。E2E v19 实测：submit_job 批准后模型
-    直接去 job_status 查状态，查不到就断言"local scheduler 无法启动进程"，接
-    着换 run_node / safe_run_bash / check_external_job_health 连试三条路，
-    唯独没重调 submit_job（真实故障：seq 581→585）。所以这里必须显式告诉它。
-
-    还有一处坑同样要讲明：确认标记绑定在**逐字相同的参数文本**上
-    （`_cmd_key(text)`）。同一次实测里模型重试时把 job_name 从
-    `ka_lj_slow_rep1` 改成了 `ka_lj_slow_rep1_v2`，通行证随即失效、又弹一次
-    审批。这是对的（批准的是那一条具体命令，不是那个工具），但得说出来。
-    """
-    from shared.lib import dangerous_commands as _dc
-
-    pending = _dc.pop_pending_ask(ctx.state)
-    if pending is None:
-        return None
-
-    tool = pending.get("tool") or "该工具"
-    category = pending.get("category") or "高危操作"
-
-    # 找刚才 pause 那条 tool_call 对应的 tool_result（人回答已替换进去）
-    answer_text = None
-    for m in reversed(ctx.messages):
-        if m.role == "tool":
-            answer_text = m.content or ""
-            break
-
-    # 批准与否的**权威判定**在 pause_driver 做（那里同时有原始答复和界面印的
-    # 选项表，见 record_highrisk_answer / issue #422）。这里优先读那条记账；
-    # 没有记账的路径（老 resume、直接调 hook 的测试）退回文本判定，判定本身
-    # 也已经会先拆 JSON 信封，不再只认自由文本。
-    recorded = pending.get("approved")
-    approved = bool(recorded) if isinstance(recorded, bool) \
-        else _dc.looks_like_approval(answer_text)
-    if approved:
-        _dc.mark_confirmed(ctx.state, pending["text"])
-        ctx.state.append_transcript(
-            "highrisk_confirm_approved", tool=tool, category=category,
-        )
-        return [LLMMessage(role="system", content=(
-            f"人已批准这次 {category}（工具：{tool}）。\n\n"
-            f"批准**不会**替你执行那次调用 —— 它只发了一张一次性通行证。\n"
-            f"现在请立刻用**与上次逐字相同的参数**重新调用一次 {tool}，"
-            f"那一次才会真正执行。\n"
-            f"改动任何一个参数（哪怕只是 job_name 之类的名字）都会作废这张"
-            f"通行证并重新触发审批。要改参数，就当成一次新的调用重新申请。"
-        ))]
-
-    ctx.state.append_transcript(
-        "highrisk_confirm_denied_or_unclear", tool=tool, category=category,
-        answer_preview=(pending.get("answer_text")
-                        or _dc.response_text(answer_text))[:100],
-    )
-    return [LLMMessage(role="system", content=(
-        f"这次 {category}（工具：{tool}）**没有**获得批准"
-        f"（人的回答：{(pending.get('answer_text') or _dc.response_text(answer_text) or '（空）')[:200]}）。\n"
-        f"通行证没有发出，用相同参数重调只会再被挡一次。换方案，或者用 "
-        f"request_human_input 问清楚该怎么做。"
-    ))]
-
-
-register_loop_hook(LoopHook(
-    name="highrisk_confirm",
-    description=(
-        "高危工具 pause 恢复后，读人的回答判定批准/拒绝，给命令打一次性确认标记，"
-        "并把「批准不等于已执行，必须用逐字相同的参数重调一次」这条契约注入给模型。"
-        "**always-on，不走 harness.loop_hooks opt-in**（安全相关，owner 不能误关）。"
-    ),
-    on_turn_start=_highrisk_confirm_on_turn_start,
-))
-
-
 # ── project_orientation（v2.1：Workspace-First 的定向层）─────────────────────
 #
 # Workspace-First 三层里的第三层。材料层（全读/各写各的）和叙事层
@@ -1752,6 +1670,10 @@ def _detect_situation(state) -> tuple[str, list[str]]:
     lines.append("研究进行中（research_state 已存在"
                  + (f"，verdict={verdict}" if verdict else "") + "）。")
     lines.append("- 下一步看 research_state 的 verdict / next_steps，不按固定管线顺序。")
+    lines.append("- 按本轮主交付选承办节点：文献全文取证/补检→literature，正式数据准备→data，"
+                 "科学裁决→analysis，论文→writing；实际构建/执行/测量/机械核验→experiment。")
+    lines.append("- 计划中的服务阶段可直接派服务；实验仅缺方法或数据时仍派 experiment，由它按需取。"
+                 "续派不沿用错派的承办节点，转交已有产物与缺口；仅改元数据时复用证据，不重做旧动作。")
     hint = "" if rs_path.startswith("artifact:") else "（read_file 可读）"
     lines.append(f"- 最新 research_state：`{rs_path}`{hint}")
     lines.append("- 每轮 experiment 之后回到 `analysis` 更新裁决，再决定下一步。")

@@ -73,13 +73,15 @@ def test_allowlist_preauth_passes_with_audit() -> None:
     assert len(allowed) == 1 and "allowlist" in allowed[0]["authorized_by"]
 
 
-def test_confirmed_is_consumed_once() -> None:
+def test_confirmed_is_consumed_once():
+    from tests._approval_support import resume_result
     state = _make_state()
     cmd = "sudo systemctl restart myapp"
-    _danger.mark_confirmed(state, cmd)
-    assert _gate(state, cmd) is None                     # 第一次：批准放行
-    res2 = _gate(state, cmd)
-    assert res2 is not None and res2["status"] == "pause"  # 第二次：重新问
+    first = _gate(state, cmd)
+    async def check(state, cmd):
+        return _gate(state, cmd) or {"status": "success"}
+    assert asyncio.run(resume_result(state, first, check, {"cmd": cmd}))["status"] == "success"
+    assert _gate(state, cmd)["status"] == "pause"
 
 
 def test_bypass_mode_runs_directly(monkeypatch) -> None:
@@ -141,7 +143,7 @@ def test_bypass_leaves_no_stale_confirmation(monkeypatch) -> None:
     monkeypatch.setattr(_danger, "BYPASS_ENABLED", True)
     assert _gate(state, code, mode="python", kind="python") is None
     if not _danger.bypass_enabled() and _danger.match_high_risk(code, mode="python"):
-        _danger.mark_confirmed(state, code)   # 守卫下不应执行
+        assert not _danger.is_confirmed(state, code)
 
     # bypass 关：同一 code 必须重新 pause，而不是凭残留标记放行
     monkeypatch.setattr(_danger, "BYPASS_ENABLED", False)
@@ -193,7 +195,7 @@ def test_bypass_only_overrides_soft_environment_scope(
         monkeypatch.setattr(_danger, "BYPASS_ENABLED", False)
 
     assert result["status"] == "success"
-    assert writes == [("/etc/hf-experiment-soft-scope.conf", "x", True)]
+    assert writes == [(str(Path("/etc/hf-experiment-soft-scope.conf").resolve()), "x", True)]
     import json
     events = [json.loads(line) for line in
               state.transcript_path.read_text().splitlines() if line.strip()]

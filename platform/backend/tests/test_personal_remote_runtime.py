@@ -268,6 +268,33 @@ async def test_a_real_remote_project_uses_server_folders_and_survives_desktop_di
     assert restarted_desktop.json()["root_folder"] == str(chosen)
 
 
+async def test_project_recommendations_read_context_over_real_ssh_without_moving_the_project(
+    ssh_server, real_backend, monkeypatch,
+):
+    from app.models.user import User
+    from app.services.feed import project_context
+
+    record, _, commands = ssh_server
+    record["runtime_port"] = real_backend["port"]
+    store.save(record, {"api_token": TOKEN}, remember_secret=False)
+    monkeypatch.setattr(project_context.assembly, "can_choose_project_folders", lambda: True)
+    created = await store.ask(record["id"], "POST", "/api/v1/projects/", json={
+        "name": "Remote vortex study", "research_domain": "physics",
+        "description": "Quantum turbulence and vortex reconnection",
+    })
+    user = User(id=str(uuid4()), email="feed-runtime@test.local", display_name="Reader", hashed_password="x")
+    await project_context.refresh_remote_projects(user)
+    cached = project_context.cached_remote_projects(user)
+    matching = [row for row in cached if row.id == created["id"]]
+    assert len(matching) == 1
+    assert matching[0].description == "Quantum turbulence and vortex reconnection"
+    assert matching[0].home == record["id"]
+    assert not (Path(settings.platform_data_root) / "repositories" / created["id"]).exists()
+    await tunnels.close()
+    assert real_backend["process"].poll() is None and not commands
+    assert [row.id for row in project_context.cached_remote_projects(user)] == [row.id for row in cached]
+
+
 async def test_headless_runtime_requires_the_device_token(real_backend):
     async with httpx.AsyncClient(base_url=real_backend["url"], trust_env=False) as client:
         assert (await client.get("/api/v1/projects/")).status_code == 401

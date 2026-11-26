@@ -75,8 +75,14 @@ def record_turn_effects(ctx: HookContext) -> int:
             continue
         args = row.get("args") if isinstance(row.get("args"), dict) else {}
         summary = _summarize_result(row.get("result"))
-        if _ledger.try_record(ctx.state, "effect", tool=name, effect_class=klass, turn=ctx.turn,
-                              args=_summarize_args(name, args), result=summary) is not None:
+        fields = dict(tool=name, effect_class=klass, turn=ctx.turn,
+                      args=_summarize_args(name, args), result=summary)
+        if row.get("execution_id"):
+            recorded = _ledger.open_ledger(ctx.state, write=True).append_once(
+                "effect", f"tool-effect:{row['execution_id']}", **fields)
+        else:
+            recorded = _ledger.try_record(ctx.state, "effect", **fields)
+        if recorded is not None:
             count += 1
     return count
 

@@ -6,7 +6,8 @@ import { ContextMenu, useContextMenu } from "@/shared/ui/ContextMenu";
 import { useDeleteProject } from "../hooks/useProjects";
 import { formatRelativeTime } from "@/shared/format/dates";
 import { useLanguage, useT } from "@/shared/i18n";
-import { humanizeStatus } from "../lib/project-identity";
+import { projectActivity } from "../lib/project-activity";
+import { useProjectSessions } from "@/features/sessions/hooks/useSessions";
 import type { Project } from "@/lib/api";
 
 export function ProjectCard({ project }: { project: Project }) {
@@ -14,6 +15,15 @@ export function ProjectCard({ project }: { project: Project }) {
   // 右键是"我确实在找这个操作"的信号（wangd 2026-08-19）。
   const lang = useLanguage();
   const t = useT();
+  const mode = process.env.NEXT_PUBLIC_SESSION_MODE === "demo" ? "fixture" : "api";
+  const reachable = !project.home || project.home.kind === "local" || project.home.reachable;
+  const enabled = project.status !== "archived" && reachable;
+  // Share the sidebar's query and execution projection, including remote routing.
+  // Poll only while the project list is mounted; hidden windows use Query defaults.
+  const sessions = useProjectSessions(enabled ? project.id : undefined, mode, {
+    refetchInterval: enabled && mode === "api" ? 15000 : false,
+  });
+  const activity = projectActivity(project.status, sessions.data, !reachable || sessions.isError);
   const menu = useContextMenu();
   const remove = useDeleteProject();
   const ownership = project.scope?.name || project.scope_name || project.owner?.display_name || project.owner_name || t({ zh: "个人项目", en: "Personal project" });
@@ -25,7 +35,7 @@ export function ProjectCard({ project }: { project: Project }) {
       className="project-list-row"
       onContextMenu={menu.onContextMenu}
     >
-      <i className={`project-status-${project.status}`} />
+      <i className={`project-activity-${activity.tone}`} title={t(activity.label)} aria-hidden="true" />
       <span className="project-list-main">
         <strong>{project.name}</strong>
         <small>{project.description || project.research_domain || t({ zh: "还没有研究说明", en: "No research brief yet" })}</small>
@@ -37,10 +47,9 @@ export function ProjectCard({ project }: { project: Project }) {
           s: project.member_count === 1 ? "" : "s",
         })}</small>
       </span>
-      {/* Session 是 Project 内的概念 —— 项目列表这一层只说 Project 自己的状态。
-          进了项目才有 Session（wangd 2026-08-21）。 */}
+      {/* Summarize execution without treating an unarchived project as completed. */}
       <span className="project-list-context project-list-activity">
-        <strong>{humanizeStatus(project.status, lang)}</strong>
+        <strong>{t(activity.label)}</strong>
         <small>{t({ zh: "{time}更新", en: "Updated {time}" }, { time: formatRelativeTime(project.updated_at, lang) })}</small>
       </span>
       <ArrowRight size={13} aria-hidden="true" />

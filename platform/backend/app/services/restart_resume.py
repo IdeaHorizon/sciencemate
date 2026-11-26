@@ -105,6 +105,7 @@ async def find_resumable_continuous_runs(
             or session.lifecycle_status != "active"
             or project is None
             or project.status == ProjectStatus.ARCHIVED
+            or project.deletion_requested_at is not None
         ):
             continue
         policy = await project_autonomy_policy(db, project)
@@ -371,6 +372,6 @@ async def resume_interrupted_continuous_runs(factory) -> list[str]:
         task = asyncio.create_task(
             _resume_one(factory, target), name=f"resume-{target.run_id[:12]}"
         )
-        retain_detached_execution(task, kind=REJOIN_KIND)
+        retain_detached_execution(task, kind=REJOIN_KIND, project_id=target.project_id)
         started.append(target.run_id)
     return started

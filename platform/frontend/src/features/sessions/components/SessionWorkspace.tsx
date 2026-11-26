@@ -33,6 +33,7 @@ import {
   addFileToSession,
   fetchSessionDiagnostics,
   stopSessionTurn,
+  resumeSessionCompletion,
   resetSessionConversation,
   undoLastSessionWrite,
 } from "../api/session-repository";
@@ -65,9 +66,10 @@ import { latestContextWindow } from "../lib/context-window";
 import { runFreshSessionPublish } from "../lib/publish-error-policy";
 import { canKeepCachedSession } from "@/lib/remote-runtime";
 import { WorkspacePanelHost } from "@/features/file-preview/components/WorkspacePanelHost";
+import { SessionOutputsPanel } from "@/features/catalog/components/SessionOutputsPanel";
 import { WorkspaceFileOpenerProvider } from "@/features/file-preview/components/WorkspaceFileOpener";
 import { stageSessionDraft, readSessionDraft, clearSessionDraft } from "../lib/session-draft";
-import { useWorkspacePanel } from "@/stores/workspace-panel";
+import { OUTPUTS_TAB_ID, RESEARCH_TAB_ID, useWorkspacePanel } from "@/stores/workspace-panel";
 import { SessionChangesPanel } from "./SessionChangesPanel";
 import { SessionInspectorPanel } from "./SessionInspectorPanel";
 import { composeText, type Answer } from "@/features/chat/lib/answer";
@@ -80,7 +82,7 @@ import {
   replaceToken,
 } from "@/features/chat/lib/long-paste";
 import type { SendDispatch } from "@/features/chat/hooks/useChat";
-import { useT, useLanguage, say, type Language } from "@/shared/i18n";
+import { useT, useLanguage } from "@/shared/i18n";
 import { SessionEnvironmentBanner } from "./SessionEnvironmentBanner";
 
 /**
@@ -133,13 +135,6 @@ function SessionCanonicalRunAccessory({
       onOpenNodeDetail={onOpenNodeDetail}
     />
   );
-}
-
-function sessionStateLabel(session: ResearchSession, lang: Language) {
-  // 冲突是前端从 changeSet 才知道的事，压过局面标签；其余一律用后端给的
-  // `label` —— 它与徽章、停止按钮、输入框出自同一次现算，不会互相打架。
-  if (session.conflictCount > 0) return say({ zh: "有冲突", en: "Conflict" }, lang);
-  return session.execution.label;
 }
 
 function SessionTitle({
@@ -392,6 +387,11 @@ export function SessionWorkspace({
    * 不会被调用 —— React 立刻报 "change in the order of Hooks"。tsc 抓不到，
    * 浏览器一跑就现形。
    */
+  const completionMutation = useMutation({
+    mutationFn: (runId: string) => resumeSessionCompletion(projectId, sessionId, runId),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: qk.sessionsPrefix(projectId) }); },
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "继续处理失败", en: "Could not continue" })),
+  });
   const stopMutation = useMutation({
     mutationFn: () => stopSessionTurn(projectId, sessionId),
     onSuccess: () => {
@@ -521,8 +521,10 @@ export function SessionWorkspace({
   // 右栏的开合与「显示哪个 Tab」归 store —— 打开一个文件这件事发起自另一条
   // 路由（Project files），会话页的 useState 那边够不着。见 stores/workspace-panel。
   // 宽度/拖拽/持久化随之搬进 WorkspacePanelHost。
-  const inspectorOpen = useWorkspacePanel((state) => state.open);
-  const toggleInspector = useWorkspacePanel((state) => state.toggle);
+  const inspectorOpen = useWorkspacePanel((state) => state.open && state.activeTabId === RESEARCH_TAB_ID);
+  const outputsOpen = useWorkspacePanel((state) => state.open && state.activeTabId === OUTPUTS_TAB_ID);
+  const activatePanelTab = useWorkspacePanel((state) => state.activate);
+  const closePanel = useWorkspacePanel((state) => state.close);
   const openResearchTab = useWorkspacePanel((state) => state.openResearch);
   const openPanelFile = useWorkspacePanel((state) => state.openFile);
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -872,16 +874,14 @@ export function SessionWorkspace({
     >
     <main className="session-workspace">
       <header className="session-workspace-header">
-        {/* 顶栏只留"这是哪个会话、它在干什么"。版本号 / 基线 / 驾驶者 /
-            指令快照三行字都搬进了 ⋯ 里的「会话信息」—— 那些是要查的时候才
-            查的东西，不是每一眼都要读的东西（wangd 2026-08-18）。 */}
+        {/* 顶栏只留会话名称和常用操作。执行进展在消息和输入框旁展示；
+            冲突在改动面板里处理，避免再用常驻标签重复这些信息。 */}
         <div className="session-header-primary">
           <SessionTitle
             session={session}
             editable={canOperate}
             onRename={(title) => withDriver(() => mutations.rename.mutateAsync({ sessionId, title }))}
           />
-          <span className={`session-state session-meta-state state-${view.phase}`}><i /> {sessionStateLabel(session, lang)}</span>
         </div>
         <div className="session-header-actions">
           {mode === "api" && (
@@ -889,7 +889,7 @@ export function SessionWorkspace({
               type="button"
               className={`session-inspector-toggle${inspectorOpen ? " is-active" : ""}`}
               aria-pressed={inspectorOpen}
-              onClick={toggleInspector}
+              onClick={() => inspectorOpen ? closePanel() : openResearchTab()}
             >
               <Route size={13} />{t({ zh: "研究进程", en: "Research progress" })}</button>
           )}
@@ -994,6 +994,8 @@ export function SessionWorkspace({
         projectId={projectId}
         enabled={mode === "api"}
         mainClassName="session-document-canvas"
+        outputsTab={{ render: (active) => <SessionOutputsPanel key={`${projectId}:${sessionId}`}
+          projectId={projectId} sessionId={sessionId} active={active} onOpenFile={openWorkspaceFile} /> }}
         researchTab={{
           render: () => (
             <SessionInspectorPanel
@@ -1105,6 +1107,8 @@ export function SessionWorkspace({
                   return next;
                 });
               }}
+              onOpenOutputs={mode === "api" ? () => outputsOpen ? closePanel() : activatePanelTab(OUTPUTS_TAB_ID) : undefined}
+              outputsOpen={outputsOpen}
               onAddFile={(file) => addFileMutation.mutate(file)}
               addingFile={addFileMutation.isPending}
               canAddFile={mode === "api" && canCompose}
@@ -1121,6 +1125,17 @@ export function SessionWorkspace({
             />
           )}
         >
+          {(view.completions ?? []).map((completion) => (
+            <div key={completion.runId} className="chat-inline-error" role="status">
+              <strong>{t({ zh: "交付尚未核实", en: "Delivery needs verification" })}</strong>
+              <span>{completion.notice ?? t({ zh: "已有成果保留，修正交付条件后可以继续。", en: "Existing work is retained. Continue after resolving the delivery conditions." })}</span>
+              {!completion.recoverable && <small>{t({ zh: "现场保存失败；保持当前运行，恢复存储后重试。", en: "Saving failed. Keep this runtime open and retry after restoring storage." })}</small>}
+              {completion.canResume && <button type="button" className="btn-secondary" disabled={completionMutation.isPending}
+                onClick={() => completionMutation.mutate(completion.runId)}>
+                {t({ zh: "继续处理", en: "Continue" })}
+              </button>}
+            </div>
+          ))}
           {recoveredLiveRunId && recoveredRunNeedsStandalone && (
             <SessionCanonicalRunAccessory
               runId={recoveredLiveRunId}

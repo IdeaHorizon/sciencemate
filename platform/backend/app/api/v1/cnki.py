@@ -15,7 +15,7 @@ from sqlalchemy import select, update
 
 from app.auth import credential_fingerprint, get_current_user
 from app.database import get_db
-from app.models.cnki import CnkiDevice, CnkiJob, CnkiJobPaper, CnkiPaper
+from app.models.cnki import CnkiDevice, CnkiJob, CnkiPaper
 from app.models.user import User
 from app.schemas.cnki import BatchIn, HeartbeatIn, IndexIn, JobIn, PairIn, ReportIn, SessionResetIn
 from app.services import cnki as service
@@ -65,7 +65,7 @@ async def pair(payload: PairIn, db=Depends(get_db), lang: Language = Depends(lan
 async def status(include_jobs: bool = True, user=Depends(get_current_user), db=Depends(get_db)):
     from app.services.cnki_browser import availability
     devices = (await db.scalars(select(CnkiDevice).where(CnkiDevice.user_id==user.id, CnkiDevice.claimed_at.is_not(None)))).all()
-    jobs = (await db.scalars(select(CnkiJob).where(CnkiJob.user_id==user.id).order_by(CnkiJob.created_at.desc()).limit(100))).all() if include_jobs else []
+    jobs = (await db.scalars(select(CnkiJob).where(CnkiJob.user_id==user.id, CnkiJob.recurring.is_(False)).order_by(CnkiJob.created_at.desc()).limit(100))).all() if include_jobs else []
     return {"collector": availability(), "devices":[service.device_view(d) for d in devices], "jobs":[await service.job_view(db,j) for j in jobs]}
 
 
@@ -79,27 +79,42 @@ async def revoke(device_id: str, user=Depends(get_current_user), db=Depends(get_
     return {"ok":True}
 
 
+async def _dispatch(db, view):
+    if view["executor"] == "server" and view["state"] in {"queued", "working"}:
+        from app.services.cnki_worker import cnki_collector
+        await db.commit()  # Collector opens its own transaction.
+        cnki_collector.start(view["id"])
+    return view
+
+
 @router.post("/jobs")
 async def create_job(payload: JobIn, page_size: int | None = Query(default=None, ge=1, le=500), user=Depends(get_current_user), db=Depends(get_db)):
-    return await service.create_job(db, user, payload, page_size=page_size)
+    view = await service.create_job(db, user, payload, page_size=page_size)
+    return await _dispatch(db, view)
 
 
 @router.post("/session/reset")
 async def reset_session(payload: SessionResetIn, user=Depends(get_current_user), db=Depends(get_db), lang: Language = Depends(language_on_screen)):
-    return await service.request_session_reset(db, user.id, {str(value) for value in payload.job_ids}, lang=lang)
+    from app.services.cnki_worker import cnki_collector
+    ids = {str(value) for value in payload.job_ids}
+    status = await service.request_session_reset(db, user.id, ids, lang=lang)
+    await db.commit()
+    cnki_collector.start(*ids)
+    return status
 
 
 @router.post("/jobs/{job_id}/retry")
 async def retry(job_id: str, user=Depends(get_current_user), db=Depends(get_db), lang: Language = Depends(language_on_screen)):
     await service.lock_user(db, user.id)
     job = await db.scalar(select(CnkiJob).where(CnkiJob.id==job_id, CnkiJob.user_id==user.id).with_for_update())
-    if not job or not job.enabled:
+    if not job or job.recurring or not job.enabled:
         raise HTTPException(404, say({"zh": "采集任务不存在", "en": "The collection task does not exist."}, lang))
     if service.job_state(job) not in {"working", "completed"}:
         if service.job_state(job) == "paused":
             job.checkpoint = {**(job.checkpoint or {}), "recover_session": True}
         job.last_report, job.last_report_at = {"state":"queued"}, service.now()
-    return await service.job_view(db,job,papers=True)
+    view = await service.job_view(db,job,papers=True)
+    return await _dispatch(db, view)
 
 
 @router.get("/jobs/{job_id}")
@@ -118,9 +133,6 @@ async def cancel(job_id: str, user=Depends(get_current_user), db=Depends(get_db)
         raise HTTPException(404, say({"zh": "采集任务不存在", "en": "The collection task does not exist."}, lang))
     job.enabled, job.lease_until = False, service.now()
     await db.flush()
-    if job.recurring:
-        for paper in (await db.scalars(select(CnkiPaper).join(CnkiJobPaper, CnkiJobPaper.paper_id==CnkiPaper.id).where(CnkiJobPaper.job_id==job.id))).all():
-            await service.sync_feed_paper(db,paper)
     return {"ok":True}
 
 

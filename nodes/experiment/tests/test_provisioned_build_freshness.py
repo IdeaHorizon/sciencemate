@@ -6,6 +6,8 @@ verified：标 inherited（与 built 同级、拦下游），出路只有 reused
 """
 from __future__ import annotations
 
+import asyncio
+
 import json
 import os
 import time
@@ -164,9 +166,9 @@ def test_inherited_outputs_are_recorded_with_actionable_detail(
     monkeypatch.setattr(safe_bash, "_has_matching_source_recon", lambda *_a, **_k: True)
     monkeypatch.setattr(safe_bash, "_latest_build_graph", lambda *_a, **_k: graph)
 
-    result = safe_bash._build_gate(
+    result = asyncio.run(safe_bash._build_gate(
         state, "cmake --build . --target app", cwd=str(build_root),
-    )
+    ))
 
     # 判决拆除（sb:3341 删）：墙拆了，E-11 的诊断价值无代价，整体并入 warning。
     # 这里验的从「拦住并给出可执行错误」变成「不拦，但逐文件 mtime 详单照记」——

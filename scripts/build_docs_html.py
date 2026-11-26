@@ -329,7 +329,8 @@ def introspect_tools_and_nodes() -> dict:
     hooks = []
     for hname, h in sorted(HOOK_REGISTRY.items()):
         hook_info = {"name": h.name, "description": h.description, "callbacks": {}}
-        for phase_name in ("on_turn_start", "on_llm_response", "on_turn_end", "on_end"):
+        for phase_name in ("on_turn_start", "on_llm_response", "on_turn_end", "on_end",
+                           "on_completion_admission"):
             cb = getattr(h, phase_name, None)
             if cb is None:
                 continue
@@ -1051,6 +1052,7 @@ def page_hook_detail(hook: dict) -> str:
         "on_llm_response": "🔌 on_llm_response（LLM 刚返回，观察用）",
         "on_turn_end": "🔌 on_turn_end（一轮 tool 调度完）",
         "on_end": "🔌 on_end（loop 整体结束）",
+        "on_completion_admission": "🔌 on_completion_admission（候选结束的交付准入）",
     }
     for phase, cb in hook["callbacks"].items():
         callbacks_html += f"""

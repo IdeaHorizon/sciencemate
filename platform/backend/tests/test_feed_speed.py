@@ -14,6 +14,29 @@ import platform_runtime as runtime
 
 
 @pytest.mark.asyncio
+async def test_recycled_engine_address_cannot_reuse_another_database_snapshot(db_session, monkeypatch):
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+    from app.schemas.feed import FeedCard, FeedItemOut
+    pool_cache.clear()
+    # Deterministically reproduce an allocator reusing a disposed bind's address.
+    monkeypatch.setattr(pool_cache, "id", lambda _: 7, raising=False)
+    user = User(id="same-user", email="scope@test.local", display_name="Scope", hashed_password="x", preferences={})
+    first = AsyncMock(return_value=FeedTodayOut(feed=[FeedCard(
+        item=FeedItemOut(id="foreign-item", kind="paper", title="Other database"),
+        recommendation_sources=["domain"])]))
+    await pool_cache.get_pool(db_session, user, first)
+    other_engine = create_async_engine(str(db_session.bind.url))
+    try:
+        async with AsyncSession(other_engine) as other:
+            second = AsyncMock(return_value=FeedTodayOut())
+            result = await pool_cache.get_pool(other, user, second, allow_stale=True)
+            assert result.feed == []
+            second.assert_awaited_once()
+    finally:
+        await other_engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_pool_cache_isolates_users_and_invalidates_committed_feed_edits(db_session):
     pool_cache.clear()
     user = User(email="speed@test.local", display_name="Speed", hashed_password="x", preferences={})

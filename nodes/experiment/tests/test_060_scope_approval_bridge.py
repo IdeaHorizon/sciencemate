@@ -1,13 +1,7 @@
-"""Scope approval uses the shared pause/answer/confirmation protocol.
+"""Scope gates resume their exact original invocation through Core.
 
-The real pause driver, resume loop and high-risk hook run here.  A local fake
-LLM only ends that loop; the final action is a harmless in-memory spy after the
-real node authorization gate.  No shell, model API, UI instance or dangerous
-payload is executed.  Structured-choice cases use a Core Offer fixture: they
-test Core choice resolution, not HTTP/UI construction of that offer.
-
-These tests do not establish cross-run identity, TTL or concurrent exactly-once
-guarantees for the shared confirmation store.
+A deterministic model ends the loop after the in-memory effect. Real command
+execution, persistence, TTL and concurrency have separate integration coverage.
 """
 from __future__ import annotations
 
@@ -18,7 +12,7 @@ from unittest.mock import Mock
 import pytest
 
 from core import pause, pause_driver, session_driver
-from core import loop_hooks_builtin  # noqa: F401 -- register the real hook
+from core import loop_hooks_builtin  # noqa: F401 -- register owner hooks
 from core.decision_offer import Choice, Offer
 from core.harness import NodeHarness, SummarizerConfig
 from core.llm import LLMMessage, LLMResponse
@@ -71,52 +65,32 @@ def _pending(tmp_path):
 
 
 def _register(state, payload, *, structured=False):
-    event_payload = dict(payload["pause_event"])
-    if structured:
-        # Use actual offered labels, not corrected labels supplied by the test:
-        # a mismatch with HIGHRISK_OPTIONS must remain observable.
-        offer = Offer(
-            decision_id=f"{state.run_id}:scope-approval", kind="scope-approval",
-            question=event_payload["question"], context=event_payload["context"],
-            choices=tuple(
-                Choice(id=choice_id, label=label)
-                for choice_id, label in zip(
-                    ("approve", "deny"), event_payload["options"], strict=True,
-                )
-            ),
-        )
-        event_payload.update(offer.to_pause_payload())
-    event = pause.PauseEvent.from_payload(
-        event_payload, pending_tool_call_id="scope-approval-call",
-    )
-    messages = [
-        LLMMessage(role="system", content="Only replay approval state."),
-        LLMMessage(role="user", content="Wait for the explicit choice."),
-        LLMMessage(role="assistant", content="", tool_calls=[{
-            "id": event.pending_tool_call_id, "type": "function",
-            "function": {"name": "safe_run_bash", "arguments": "{}"},
-        }]),
-        LLMMessage(
-            role="tool", name="safe_run_bash",
-            tool_call_id=event.pending_tool_call_id,
-            content=json.dumps(payload, ensure_ascii=False),
-        ),
-    ]
+    from core import approvals
+    from tests._approval_support import prepare_result
+    meta = payload["pause_event"]["metadata"]
+    request = {"kind": "bash", "cmd": "printf 'approval-probe\\n'", "cwd": str(state.root),
+               "target": meta["target"], "scope": meta["scope"], "reason": "Test-only unresolved write target", "op": "tee"}
+    async def gate(state, **values):
+        allowed, blocked = safe_bash._scope_guard_authorization(state, **values)
+        if allowed:
+            state.hook_state["approval_effects"] = state.hook_state.get("approval_effects", 0) + 1
+            return {"status": "success"}
+        return blocked
+    offered = asyncio.run(prepare_result(state, payload, gate, request))
+    record = approvals.load(state, offered)
+    operation = record["operation"]
+    event = pause.PauseEvent.from_payload(offered, pending_tool_call_id=operation["tool_call_id"])
+    messages = [LLMMessage(role="system", content="bounded approval integration"),
+        LLMMessage(role="assistant", tool_calls=[{"id": operation["tool_call_id"], "type": "function",
+            "function": {"name": operation["tool"], "arguments": json.dumps(request)}}]),
+        LLMMessage(role="tool", tool_call_id=operation["tool_call_id"], name=operation["tool"],
+            content=json.dumps({"status": "pause", "pause_event": offered}))]
     llm = _DoneLLM()
-    harness = NodeHarness(
-        node_type="experiment", tools=[], max_turns=2,
-        loop_hooks=["highrisk_confirm"],
-        loop_hooks_disable=[
-            "memory_delta", "kb_delta", "turn_budget", "memory_onboarding",
-            "law_review_gate",
-        ],
-        summarizer=SummarizerConfig(enabled=False),
-    )
-    pause.register_pause(pause.PausedRunContext(
-        run_id=state.run_id, state=state, messages=messages, harness=harness,
-        llm=llm, pending_tool_call_id=event.pending_tool_call_id,
-        pause_event=event,
-    ))
+    harness = NodeHarness(node_type="experiment", tools=[], max_turns=2,
+        loop_hooks_disable=["memory_delta", "kb_delta", "turn_budget", "memory_onboarding", "law_review_gate"],
+        summarizer=SummarizerConfig(enabled=False))
+    pause.register_pause(pause.PausedRunContext(run_id=state.run_id, state=state, messages=messages,
+        harness=harness, llm=llm, pending_tool_call_id=operation["tool_call_id"], pause_event=event))
     return event, llm
 
 
@@ -168,8 +142,8 @@ def test_raw_highrisk_key_context_does_not_promise_cwd_binding(tmp_path):
     event = payload["pause_event"]
     assert event["metadata"]["authorization_key"] == request["cmd"]
     context = event["context"]
-    assert "框架共享确认机制" in context
-    assert "不额外承诺 cwd/目标" in context
+    assert "框架续执行原调用" in context
+    assert "绑定完整参数、工作目录和执行目标" in context
     assert "当前 cwd 和该目标路径" not in context
     assert "完整内容（前 500 字符）" not in context
 
@@ -178,53 +152,26 @@ def test_raw_highrisk_key_context_does_not_promise_cwd_binding(tmp_path):
 def test_human_approval_reaches_real_driver_hook_and_retry(tmp_path, monkeypatch, answer_kind):
     state, request, payload = _pending(tmp_path)
     event, llm = _register(state, payload, structured=answer_kind == "structured")
-    record_answer = Mock(wraps=danger.record_highrisk_answer)
-    monkeypatch.setattr(danger, "record_highrisk_answer", record_answer)
-    answer = {
-        "number": "1",
-        "label": event.options[0],
-        "structured": {"offer_id": event.offer_id, "choice_id": "approve"},
-    }[answer_kind]
-
+    answer = {"number": "1", "label": event.options[0], "structured": {
+        "offer_id": event.offer_id, "choice_id": "approve"}}[answer_kind]
     async def ask(_event):
         return answer
-
     asyncio.run(pause_driver.drive_pause_chain(ask_fn=ask))
-    assert llm.calls == 1
-    assert record_answer.call_count == 1, "Do not rely on the hook's legacy text fallback"
-    assert any(row["event"] == "highrisk_confirm_approved" for row in _events(state))
-    # Re-enter the real gate as the tool retry would; never run its payload.
-    effect = Mock()
-    allowed, block = safe_bash._scope_guard_authorization(state, **request)
-    if allowed:
-        effect()
-    assert (allowed, block) == (True, None)
-    effect.assert_called_once_with()
-    allowed_again, next_pause = safe_bash._scope_guard_authorization(state, **request)
-    assert allowed_again is False
-    assert next_pause["status"] == "pause"
+    assert llm.calls == 1 and state.hook_state["approval_effects"] == 1
+    assert any(row["event"] == "approval_decided" for row in _events(state))
+    assert safe_bash._scope_guard_authorization(state, **request)[0] is False
 
 
 @pytest.mark.parametrize("answer_kind", ["number", "structured"])
 def test_human_denial_does_not_authorize_retry(tmp_path, monkeypatch, answer_kind):
     state, request, payload = _pending(tmp_path)
     event, llm = _register(state, payload, structured=answer_kind == "structured")
-    record_answer = Mock(wraps=danger.record_highrisk_answer)
-    monkeypatch.setattr(danger, "record_highrisk_answer", record_answer)
-    answer = "2" if answer_kind == "number" else {
-        "offer_id": event.offer_id, "choice_id": "deny",
-    }
-
+    answer = "2" if answer_kind == "number" else {"offer_id": event.offer_id, "choice_id": "deny"}
     async def ask(_event):
         return answer
-
     asyncio.run(pause_driver.drive_pause_chain(ask_fn=ask))
-    assert llm.calls == 1
-    assert record_answer.call_count == 1
-    assert any(row["event"] == "highrisk_confirm_denied_or_unclear" for row in _events(state))
-    allowed, block = safe_bash._scope_guard_authorization(state, **request)
-    assert allowed is False
-    assert block["status"] == "pause"
+    assert llm.calls == 1 and not state.hook_state.get("approval_effects")
+    assert safe_bash._scope_guard_authorization(state, **request)[0] is False
 
 
 def test_autonomous_scope_permission_stays_pending(tmp_path, monkeypatch):

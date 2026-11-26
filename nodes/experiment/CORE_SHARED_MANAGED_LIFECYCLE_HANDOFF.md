@@ -240,6 +240,16 @@ successful retry must not require a fictitious execution amendment.
 
 ## CS-5 — legacy systemd resource health is not the Docker execution truth
 
+**2026-11-18 resolution (#1182):** Live local commands and jobs use Core native
+isolation and its process owner. The unreachable node systemd supervisor, its
+argv builder and the second async process waiter have been retired. The node
+retains domain resource plans and read-only compatibility observations of old
+job records; these do not create a cgroup, terminate a process or claim current
+pressure enforcement. Existing `BuildLimits` serialized fields remain readable
+as planning metadata. Current per-command limits/cancellation/cleanup are Core
+facts; aggregate run budgets remain a separate Core capability (#1181).
+The historical evidence and requested decision below describe the retired path.
+
 **Severity:** P2.  **Owner:** Core/Experiment architecture.
 
 ### Evidence

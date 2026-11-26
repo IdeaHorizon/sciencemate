@@ -56,6 +56,7 @@ export function useFeedItems(filters: {
   domain?: string;
   kind?: string;
   saved?: boolean;
+  folder_id?: string;
   limit?: number;
 }) {
   return useQuery({
@@ -69,6 +70,42 @@ export function useFeedSubscriptions() {
     queryKey: qk.feedSubscriptions(),
     queryFn: () => api.getFeedSubscriptions(),
     refetchInterval: (query) => query.state.data?.scholars.some((entry) => entry.identity_status === "unresolved") ? 5000 : query.state.data?.scholars.some((entry) => entry.identity_status === "unavailable") ? 300000 : false,
+  });
+}
+
+export function useFeedFolders(enabled = true) {
+  return useQuery({
+    queryKey: qk.feedFolders(),
+    queryFn: () => api.getFeedFolders(),
+    enabled,
+    retry: false,
+    staleTime: 60_000,
+  });
+}
+
+export function useCreateFeedFolder() {
+  const qc = useQueryClient();
+  const t = useT();
+  return useMutation({
+    mutationFn: (name: string) => api.createFeedFolder(name.trim()),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: qk.feedFolders() }); },
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "新建收藏夹失败，请重试", en: "Could not create the folder. Please try again." })),
+  });
+}
+
+export function useSaveFeedItem() {
+  const qc = useQueryClient();
+  const t = useT();
+  return useMutation({
+    mutationFn: async ({ itemId, saved, folderId }: { itemId: string; saved: boolean; folderId: string | null }) => {
+      if (saved) await api.moveSavedFeedItem(itemId, folderId);
+      else await api.saveFeedItemToFolder(itemId, folderId);
+      // These endpoints acknowledge the exact location through their successful
+      // update. Academic search instead uses its returned FeedItem projection.
+      return { saved: true, saved_folder_id: folderId };
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["feed"] }),
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "保存失败，请重试", en: "Could not save the article. Please try again." })),
   });
 }
 
@@ -205,6 +242,7 @@ export function useFeedEngagement() {
     mutationFn: (vars: { itemId: string; action: FeedEngagementAction }) =>
       api.undoFeedEngagement(vars.itemId, vars.action),
     onSuccess: invalidate,
+    onError: (error) => pushError(error instanceof Error ? error.message : t({ zh: "取消操作失败，请重试", en: "Could not undo the action. Please try again." })),
   });
   return { record, undo };
 }

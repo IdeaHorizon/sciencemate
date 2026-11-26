@@ -1446,10 +1446,11 @@ async def review_delivery_against_authority(
         "verification_runtime": {"input_files": "dict[str,str]: exact inventory keys -> read-only filesystem paths; not file contents, not a module",
             "text_read_example": "from pathlib import Path\ntext = Path(input_files[" + json.dumps(next(iter(files), "file")) + "]).read_text()",
             "native_readers": {
-                "Gmsh MSH2/MSH4": "from nodes.data.tools.mesh_generator import read_gmsh_mesh_quality; "
-                    "q = read_gmsh_mesh_quality(input_files[mesh_key]). Returns counts, bounds, duplicate_nodes, "
-                    "duplicate_elements, isolated_nodes, tetrahedral_measurements and SHA-256 binding. "
-                    "Use this installed reader for comparisons; do not implement MSH block parsing.",
+                "Gmsh ASCII MSH2": "from nodes.data.tools.mesh_generator import _parse_gmsh_msh2_quality; "
+                    "q = _parse_gmsh_msh2_quality(input_files[mesh_key]). Returns counts, bounds, duplicate_nodes, "
+                    "duplicate_elements, isolated_nodes and tetrahedral_measurements. "
+                    "Bind the exact input hash. MSH4/binary normalization belongs to Data managed conversion, "
+                    "not a host subprocess from this reader. Do not implement MSH block parsing.",
                 "OpenFOAM ASCII 2D": "from nodes.data.tools.mesh_generator import extract_2d_domain_loops_from_polymesh; "
                     "read the parent of input_files['constant/polyMesh/points']; select points, faces and boundary. "
                     "Returns outer_boundary_points, body_loops and profile_points in physical XY coordinates. "

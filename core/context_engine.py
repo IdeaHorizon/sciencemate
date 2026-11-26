@@ -718,6 +718,20 @@ def _producer_side_effect_section(
 
 def render_node_inputs(node_inputs: dict) -> str:
     """Render the caller's explicit current task identically on fresh and resume."""
+    corrections = {key: node_inputs[key] for key in ("human_directive", "reviewer_feedback")
+                   if node_inputs.get(key)}
+    if node_inputs.get("mode") == "revise" and corrections:
+        original = {key: value for key, value in node_inputs.items()
+                    if key not in {"mode", "human_directive", "reviewer_feedback"}}
+        return "\n".join([
+            "## 节点输入", "### 本轮返修要求",
+            "本轮按以下纠错范围处理已有成果；人的直接指示与审查意见分别保留来源。",
+            *[f"- **{key}**：{value}" for key, value in corrections.items()],
+            "复用既有证据和已完成结果。原任务用于定位与保持既有约束；只有本轮要求确实需要"
+            "重新取证或执行时，才重做对应动作，不把旧动作清单自动重发一遍。",
+            "### 原任务与既有约束",
+            *[f"- **{key}**：{value}" for key, value in original.items()],
+        ])
     return "\n".join(["## 节点输入", *[f"- **{k}**：{v}" for k, v in node_inputs.items()]])
 
 
@@ -732,6 +746,14 @@ def _build_user_prompt(harness: NodeHarness, state: State, node_inputs: dict) ->
     if spec_section:
         sections.append(spec_section)
         _mark("owner_review_spec")
+
+    if harness.node_type in ("_reviewer", "reviewer"):
+        from core.review_reuse import context_section
+
+        question_references = context_section(state, node_inputs)
+        if question_references:
+            sections.append(question_references)
+            _mark("question_review_references")
 
     side_effect_section = _producer_side_effect_section(harness, node_inputs, state)
     if side_effect_section:

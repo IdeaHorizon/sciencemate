@@ -21,6 +21,8 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from shared.lib.process_control import background_spawn_kwargs
+
 from core.paths import identity_path, user_root
 
 
@@ -29,6 +31,7 @@ def _read_git_email() -> str | None:
         out = subprocess.run(
             ["git", "config", "user.email"],
             capture_output=True, text=True, timeout=3,
+            **background_spawn_kwargs(),
         )
         if out.returncode == 0 and out.stdout.strip():
             return out.stdout.strip()
@@ -42,6 +45,7 @@ def _read_git_name() -> str | None:
         out = subprocess.run(
             ["git", "config", "user.name"],
             capture_output=True, text=True, timeout=3,
+            **background_spawn_kwargs(),
         )
         if out.returncode == 0 and out.stdout.strip():
             return out.stdout.strip()

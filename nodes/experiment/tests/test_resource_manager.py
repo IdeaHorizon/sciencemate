@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -326,7 +327,7 @@ def test_local_non_highrisk_submission_skips_confirmation_protocol(
         pytest.fail("ordinary local submission must not enter confirmation protocol")
 
     for name in (
-        "bypass_enabled", "is_confirmed", "consume_confirmation",
+        "bypass_enabled", "is_confirmed",
         "build_pause_payload",
     ):
         monkeypatch.setattr(danger, name, forbidden_confirmation_call)
@@ -1304,25 +1305,27 @@ def test_confirmed_high_risk_submission_consumes_one_shot_approval(tmp_path, mon
     from shared.lib import dangerous_commands as danger
 
     state = _planned_state(tmp_path)
-    consumed: list[str] = []
-    monkeypatch.setattr(danger, "is_confirmed", lambda _state, _text: True)
-    monkeypatch.setattr(
-        danger, "consume_confirmation",
-        lambda _state, text: consumed.append(text),
-    )
     monkeypatch.setattr(rm, "_submit_sync", lambda *_args, **_kwargs: {
         "status": "success", "scheduler": "local", "dry_run": False,
         "job_name": "experiment_job", "job_id": "12345",
         "submission_nonce": "confirmed-receipt",
     })
 
-    result = asyncio.run(rm._submit_job(
-        state=state, command="sudo echo submit", scheduler="local", dry_run=False, execution_params={"case": "test"},
-    ))
+    from tests._approval_support import resume_result
+    submitted = []
+    submit = rm._submit_sync
+    def tracked_submit(*args, **kwargs):
+        submitted.append(1)
+        return submit(*args, **kwargs)
+    monkeypatch.setattr(rm, "_submit_sync", tracked_submit)
+    first = asyncio.run(rm._submit_job(state=state, command='sudo echo submit', scheduler='local', dry_run=False, execution_params={'case': 'test'}))
+    assert first["status"] == "pause" and not submitted
+    approval_key = first["pause_event"]["metadata"]["authorization_key"]
+    result = asyncio.run(resume_result(state, first, rm._submit_job, {'command': 'sudo echo submit', 'scheduler': 'local', 'dry_run': False, 'execution_params': {'case': 'test'}}))
+    assert submitted == [1]
 
     assert result["status"] == "success"
-    assert len(consumed) == 1
-    approved = json.loads(consumed[0])
+    approved = json.loads(approval_key)
     assert approved["memory_gb"] == 4.0
     assert approved["storage_gb"] == 8.0
     # 省略 walltime 时审批单如实写 None：本地沙箱的 60 分钟兜底是
@@ -1981,7 +1984,7 @@ def test_discover_resources_carries_core_host_declarations(tmp_path, monkeypatch
     from core import capabilities as core_capabilities
 
     host_file = tmp_path / "host-capabilities.yaml"
-    host_file.write_text("software:\n  - name: Registered Solver\n    invoke: python\n    version: 3.x\n", encoding="utf-8")
+    host_file.write_text(f"software:\n  - name: Registered Solver\n    invoke: {sys.executable}\n    version: 3.x\n", encoding="utf-8")
     grants_file = tmp_path / "grants.yaml"
     grants_file.write_text("default:\n  - kind: lab_cluster\n    endpoint: cluster.example\n", encoding="utf-8")
     monkeypatch.setenv("HARNESS_HOST_CAPABILITIES", str(host_file))
@@ -1991,7 +1994,7 @@ def test_discover_resources_carries_core_host_declarations(tmp_path, monkeypatch
     profile = asyncio.run(rm._discover_resources(_planned_state(tmp_path), save_artifact=False))
     declared = profile["core_platform_capabilities"]
     assert declared["host_software"] == [{
-        "name": "Registered Solver", "invoke": "python", "version": "3.x",
+        "name": "Registered Solver", "invoke": sys.executable, "version": "3.x",
         "notes": "", "resolvable": True,
     }]
     assert declared["compute_grants"][0]["kind"] == "lab_cluster"
@@ -2853,13 +2856,7 @@ def test_confirmed_high_risk_submission_pins_payload_executable_sha(
     target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     target.chmod(0o755)
 
-    consumed: list[str] = []
     captured: dict = {}
-    monkeypatch.setattr(danger, "is_confirmed", lambda _state, _text: True)
-    monkeypatch.setattr(
-        danger, "consume_confirmation",
-        lambda _state, text: consumed.append(text),
-    )
 
     def fake_submit_sync(*_args, **kwargs):
         captured.update(kwargs)
@@ -2871,17 +2868,25 @@ def test_confirmed_high_risk_submission_pins_payload_executable_sha(
 
     monkeypatch.setattr(rm, "_submit_sync", fake_submit_sync)
 
-    result = asyncio.run(rm._submit_job(
-        state=state, command="./solver && sudo -n true", scheduler="local", dry_run=False,
-        execution_params={"case": "test"},
-    ))
+    from tests._approval_support import resume_result
+    submitted = []
+    submit = rm._submit_sync
+    def tracked_submit(*args, **kwargs):
+        submitted.append(1)
+        return submit(*args, **kwargs)
+    monkeypatch.setattr(rm, "_submit_sync", tracked_submit)
+    first = asyncio.run(rm._submit_job(state=state, command='./solver && sudo -n true', scheduler='local', dry_run=False, execution_params={'case': 'test'}))
+    assert first["status"] == "pause" and not submitted
+    approval_key = first["pause_event"]["metadata"]["authorization_key"]
+    result = asyncio.run(resume_result(state, first, rm._submit_job, {'command': './solver && sudo -n true', 'scheduler': 'local', 'dry_run': False, 'execution_params': {'case': 'test'}}))
+    assert submitted == [1]
 
     assert result["status"] == "success"
     expected = [{
         "path": os.path.join(os.path.realpath(str(run_dir)), "solver"),
         "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
     }]
-    approved = json.loads(consumed[0])
+    approved = json.loads(approval_key)
     assert approved["payload_executables"] == expected
     assert captured["payload_executables"] == expected
 

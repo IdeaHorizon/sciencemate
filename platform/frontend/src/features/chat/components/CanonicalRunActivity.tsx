@@ -236,12 +236,9 @@ function OrchestratorSaid({ said, repeats, child, onOpen }: {
     : null;
   return (
     <>
-      {/* 调度器说的话与 assistant 消息正文是**同一种东西**，只是到达通道不同。
-          所以渲染也必须是同一份：`[论文](path)` / `![](图)` 在这里同样要变成
-          可点文件 / 内联图（RichText 里那三条安全策略跟着一起生效）。
-          从前这里是 `{said.text}` 裸文本 —— PR#642 的能力只接到了 ChatMessages
-          一处，调度器在跑动过程中说的每一句话里的链接都是死的
-          （wangd 2026-08-25：「那个链接也没法点」）。 */}
+      {/* Speech retains links/media. Dispatch status uses the same layout,
+          but its text is generated locally from node.dispatched identities;
+          task inputs never become speech or enter this renderer. */}
       <div className={said.repliesToMessageId ? "chat-interject-answer" : "chat-orchestrator-said"}>
         <RichText text={said.text} />
         {repeats && repeats > 1 ? <em>×{repeats}</em> : null}

@@ -290,7 +290,8 @@ def build_the_wheel(with_ui: bool) -> Path:
         raise SystemExit("没打出 wheel")
     wheel = wheels[-1]
     names = zipfile.ZipFile(wheel).namelist()
-    needed = ["app/harness/core/agent_loop.py", "app/harness/docs/xiaohongshu_journal_map.tsv"]
+    needed = ["app/harness/core/agent_loop.py",
+              *(f"app/harness/{rel}" for rel in git_tracked.HARNESS_RUNTIME_FILES)]
     if with_ui:
         needed.append("app/static_ui/index.html")
     for want in needed:

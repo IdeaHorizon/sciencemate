@@ -131,13 +131,11 @@ def test_tool_budget_translates_tokens_with_the_ruler_on_duty(monkeypatch):
     # 连**一份** 25k 字报告都坐不满 —— 旧 ×4 给 ~17 万字（能坐 6 份），必转红。
     assert budget < 25_000, f"2 token/字 的世界里预算给了 {budget} 字符"
 
-    # 对照：fallback 尺（char/4）下换算比 ≈4，行为与旧版同量级 —— 收紧只
-    # 发生在真刻度更紧的时候，不误伤英文/无 tiktoken 环境。
+    # 离线时按 UTF-8 字节保守估算；不能重新把中文当成 char/4。
     monkeypatch.setattr(sm, "_TIKTOKEN_ENC", False)
     budget_fallback = sm.derived_tool_budget_bytes(
         harness, None, msgs, output_tokens=2_000)
-    assert budget_fallback > 100_000, (
-        f"char/4 世界的预算被错误收紧到 {budget_fallback} 字符")
+    assert 0 < budget_fallback <= budget, budget_fallback
 
 
 # ── 2. qinp 形状回放：堆积被兜住、每个请求都装得下 ──────────────────────────
@@ -248,17 +246,21 @@ async def test_a_context_400_recalibrates_and_recovers(tmp_path, monkeypatch):
                        body=_DEEPSEEK_400_BODY)
     harness = NodeHarness(node_type="literature", max_turns=6,
                           tools=["dispatch_child"],
-                          summarizer=SummarizerConfig(enabled=False))
+                          summarizer=SummarizerConfig(enabled=True, strategy="archive"))
     harness.max_context_tokens = 300_000
     state = State.new(node_type="literature", base_dir=tmp_path, project_id="p_400")
     llm = _retrying_llm("dispatch_child", 2, fail_first_with=exc)
 
-    result = await run_loop(harness, state, [], llm)
+    # A large observed ratio is valid. Recovery requires reclaimable history;
+    # a protected prompt at the same measured size cannot fit after a 400.
+    seed = [LLMMessage(role="assistant", content="historical analysis " * 12_000)]
+    result = await run_loop(harness, state, seed, llm)
     assert result.status != "failed", f"context 400 杀掉了 run：{result.final_text[:200]}"
     assert llm.n >= 2, "400 之后没有重试"
     # 服务端权威数字进了校准（观测比 > 静态系数下限）。
     ratio = float(state.hook_state.get("_ctx_observed_prompt_ratio") or 0.0)
-    assert ratio > 1.3, f"服务端 245761 vs 本地小估算没有抬高观测比：{ratio}"
+    assert max(state.hook_state["_ctx_prompt_samples"]) > 1.3
+    assert ratio > 0, "后续有效请求的测量可以纠正上一次估算"
     # provider 宣称的硬上限进了容量后验（硬上限键，不是解码退化键）。
     assert int(state.hook_state.get(sm.PROVIDER_HARD_CAP_KEY) or 0) == 262144
     assert not state.hook_state.get(sm.OBSERVED_CEILING_KEY), \

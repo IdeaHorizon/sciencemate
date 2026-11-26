@@ -81,6 +81,10 @@ class ModelBackendConfig(Base):
     # 密钥本身从不离开服务器。两列都空 = 一条普通的、归这台机器自己的连接。
     provided_by_connection: Mapped[str | None] = mapped_column(String(64), nullable=True)
     provided_backend_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Personal SSH runtimes may inherit desktop defaults. These identify the
+    # source configuration, while credentials are encrypted by this runtime.
+    inherited_from_desktop: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    inherited_backend_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_by_user_id: Mapped[str] = mapped_column(
         Uuid(as_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )

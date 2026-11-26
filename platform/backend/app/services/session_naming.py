@@ -103,7 +103,7 @@ async def schedule_session_autoname(
     from app.services.local_execution import HOUSEKEEPING_KIND, retain_detached_execution
 
     # 命名是平台杂活，不是用户的研究 —— 别记进"还有几个执行在跑"那本账。
-    retain_detached_execution(task, kind=HOUSEKEEPING_KIND)
+    retain_detached_execution(task, kind=HOUSEKEEPING_KIND, project_id=project_id)
     return task
 
 

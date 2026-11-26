@@ -66,6 +66,22 @@ COPY: dict[str, dict[str, str]] = {
         "zh": "无法添加这个链接，请换一个链接再试。",
         "en": "This link cannot be added. Try a different link.",
     },
+    "error.folder_not_found": {
+        "zh": "找不到这个收藏夹，请重新选择。",
+        "en": "This save folder is unavailable. Choose another folder.",
+    },
+    "error.folder_name_exists": {
+        "zh": "你已经有同名收藏夹，请选择它或使用其他名称。",
+        "en": "You already have a folder with this name. Select it or use another name.",
+    },
+    "error.item_not_saved": {
+        "zh": "这篇文章还没有收藏，请先收藏再移动。",
+        "en": "Save this item before moving it to a folder.",
+    },
+    "error.folder_filter_requires_saved": {
+        "zh": "收藏夹筛选只能用于收藏列表。",
+        "en": "Folder filtering is available only for saved items.",
+    },
     "curation.no_model": {
         "zh": "还没有可用的资讯挖掘模型。请在「设置 → 模型与密钥」中，为一个模型连接勾选"
               "「资讯挖掘模型」角色，再打开此开关。",

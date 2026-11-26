@@ -36,6 +36,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 HERE = Path(__file__).resolve().parent
 MANIFEST = "fixture-manifest.json"
@@ -91,6 +92,15 @@ def _count_jsonl(path: Path) -> int:
         return 0
 
 
+def _identity(value: Any) -> str:
+    """Compare UUID representations without changing legacy opaque identities."""
+    text = str(value)
+    try:
+        return str(UUID(text))
+    except ValueError:
+        return text
+
+
 def _inventory(db: Path) -> dict[str, Any]:
     """从上一版的 SQLite 里读出项目 / 会话 / run 的 id —— 这些是 check 要核的「旧东西」。"""
     out: dict[str, Any] = {"projects": [], "sessions": [], "runs": []}
@@ -100,12 +110,12 @@ def _inventory(db: Path) -> dict[str, Any]:
     try:
         tables = {row[0] for row in con.execute("select name from sqlite_master where type='table'")}
         if "projects" in tables:
-            out["projects"] = [{"id": str(r[0]), "name": r[1]} for r in con.execute("select id, name from projects")]
+            out["projects"] = [{"id": _identity(r[0]), "name": r[1]} for r in con.execute("select id, name from projects")]
         if "sessions" in tables:
-            out["sessions"] = [{"id": str(r[0]), "project_id": str(r[1]), "title": r[2]}
+            out["sessions"] = [{"id": _identity(r[0]), "project_id": _identity(r[1]), "title": r[2]}
                                for r in con.execute("select session_id, project_id, title from sessions")]
         if "runs" in tables:
-            out["runs"] = [{"id": str(r[0]), "session_id": str(r[1]), "project_id": str(r[2]), "status": r[3]}
+            out["runs"] = [{"id": _identity(r[0]), "session_id": _identity(r[1]), "project_id": _identity(r[2]), "status": r[3]}
                            for r in con.execute("select id, session_id, project_id, status from runs")]
     finally:
         con.close()
@@ -119,9 +129,15 @@ def _kb_counts(fixture: Path, project_ids: list[str]) -> dict[str, int]:
     state = fixture / "harness-state"
     for pid in project_ids:
         best = 0
-        for candidate in [state / "projects" / pid / "kb_claims.jsonl",
-                          *state.glob(f"users/*/projects/{pid}/kb_claims.jsonl")]:
-            best = max(best, _count_jsonl(candidate))
+        spellings = {pid, _identity(pid)}
+        try:
+            spellings.add(UUID(pid).hex)
+        except ValueError:
+            pass
+        for spelling in spellings:
+            for candidate in [state / "projects" / spelling / "kb_claims.jsonl",
+                              *state.glob(f"users/*/projects/{spelling}/kb_claims.jsonl")]:
+                best = max(best, _count_jsonl(candidate))
         counts[pid] = best
     return counts
 
@@ -384,13 +400,13 @@ def check(url: str, fixture: Path, data_root: Path, *, receipt: Path | None, ins
     manifest = json.loads((fixture / MANIFEST).read_text(encoding="utf-8"))
     runs_by_session: dict[str, list[str]] = {}
     for run in manifest.get("runs", []):
-        runs_by_session.setdefault(run["session_id"], []).append(run["id"])
-    sessions = [s for s in manifest.get("sessions", []) if runs_by_session.get(s["id"])]
+        runs_by_session.setdefault(_identity(run["session_id"]), []).append(run["id"])
+    sessions = [s for s in manifest.get("sessions", []) if runs_by_session.get(_identity(s["id"]))]
     if not sessions:
         print("REHEARSAL FAILED: 夹具里没有跑过 run 的会话 —— 这不是一份「真跑过课题」的数据根", file=sys.stderr)
         return 1
     session = sessions[0]
-    project_id, session_id = session["project_id"], session["id"]
+    project_id, session_id = _identity(session["project_id"]), _identity(session["id"])
     started = time.monotonic()
     checks: dict[str, Any] = {}
     base = url.rstrip("/")
@@ -438,8 +454,8 @@ def check(url: str, fixture: Path, data_root: Path, *, receipt: Path | None, ins
         status, text = smoke.request("GET", f"{api}/runs?sessionId={session_id}&limit=200")
         if status != 200:
             raise smoke.Failed(f"runs 接口 {status}：{text[:200]}")
-        listed = {str(r.get("id")) for r in _items(json.loads(text)) if isinstance(r, dict)}
-        missing_runs = sorted(set(runs_by_session[session_id]) - listed)
+        listed = {_identity(r.get("id")) for r in _items(json.loads(text)) if isinstance(r, dict)}
+        missing_runs = sorted({_identity(run) for run in runs_by_session[session_id]} - listed)
         checks["previous_runs_visible"] = not missing_runs
         if missing_runs:
             raise smoke.Failed(f"上一版的 run 不见了：{missing_runs}")

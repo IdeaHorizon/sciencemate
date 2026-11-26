@@ -1103,7 +1103,13 @@ def reconcile_external_submission(
         if projection.get("status") != "success":
             return {"status": "integration_pending", "do_not_resubmit": True,
                     "route_projection": projection, "submission_nonce": attempt}
-    handoff = _ensure_normal_external_workflow(state, receipt)
+        # The v3 job now belongs to B. Its durable binding is the recovery
+        # authority; recreating the retired v2 handoff would leave a task that
+        # this harness has no finalize tool to discharge.
+        handoff = {"status": "success", "authority": "run_ledger",
+                   "workflow_artifact_id": None, "task_id": None}
+    else:
+        handoff = _ensure_normal_external_workflow(state, receipt)
     if handoff.get("status") != "success":
         return {
             "status": "integration_pending",

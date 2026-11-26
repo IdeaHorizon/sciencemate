@@ -77,18 +77,17 @@ def test_an_interface_mismatch_is_not_swallowed_into_an_empty_set(monkeypatch) -
 
 
 def test_the_resume_path_settles_a_capability_grant() -> None:
-    """`drive_pause_chain` 里必须有 capability_grant 的结算分支。
+    import asyncio
+    from core import approvals, tool_registry
+    state = _state()
 
-    没有它，`grant_from_answer` 就是一个没有调用方的函数 —— 确认卡照常弹、人照常
-    点、`is_granted` 仍然为假，模型再申请就再弹一张。
-    """
-    import inspect
-
-    from core import pause_driver
-
-    src = inspect.getsource(pause_driver.drive_pause_chain)
-    assert "capability_grant" in src and "grant_from_answer" in src, (
-        "resume 路径不认这个暂停类型 —— 人点的那下停在界面上")
+    async def check():
+        result = await tool_registry.execute("request_network_access", state, host="dataset.example.org", reason="input")
+        record = approvals.decide(state, result["pause_event"], "approve")
+        resumed = await approvals.run_approved(state, record["operation_id"])
+        assert resumed["status"] == "success"
+        assert cg.is_granted(state, "dataset.example.org")
+    asyncio.run(check())
 
 
 @pytest.mark.parametrize("answer,expected", [

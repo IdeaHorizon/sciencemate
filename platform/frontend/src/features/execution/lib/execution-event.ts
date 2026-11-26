@@ -10,6 +10,8 @@ export const EXECUTION_EVENT_KINDS = [
   // 理由：那是节点内部独白（一次 run 五十多条），这是对话。同一个样式渲染，
   // 信号就被噪音淹了。
   "orchestrator.said",
+  // Runtime dispatch identity; task inputs are never conversation text.
+  "node.dispatched",
   // 插话送达回执（2026-08-18）：**机械事实**（worker 已取走这句话），不是
   // 调度器说的话。旧路径发在 progress 通道，会被下一条工具进度覆盖 ——
   // 用户按下回车后 2 分钟黑屏。payload.repliesToMessageId 锚回用户那条消息。
@@ -46,6 +48,7 @@ export const EXECUTION_EVENT_KINDS = [
   "run.queued",
   "run.started",
   "run.paused",
+  "run.suspended",
   "run.resumed",
   "run.injected",
   "run.cancelled",

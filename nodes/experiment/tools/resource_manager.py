@@ -8010,7 +8010,6 @@ async def _submit_job(
                         "blocker": {"kind": "stage_in_changed_after_approval",
                                     "human_action": "resubmit_and_reconfirm"},
                     }
-                _danger.consume_confirmation(state, approval_text)
                 state.append_transcript(
                     "job_submission_confirmed", scheduler=scheduler,
                     job_name=job_name, command_preview=command[:200],
@@ -9166,10 +9165,23 @@ def _external_job_record(
     scheduler_text, job_id_text = str(scheduler or ""), str(job_id or "")
     # Destructive authority comes from the artifact ledger's producer, never
     # from a project task or a payload's model-writable owner declaration.
-    records = (
-        read_owed_submission_receipts(state) if current_run_only
-        else _submission_payloads(state) + _task_external_jobs(state)
-    )
+    records = (read_owed_submission_receipts(state) if current_run_only
+               else _submission_payloads(state))
+    if not current_run_only:
+        # Old continuation tasks omitted parts of the durable identity. They
+        # are projections of a submission, not additional physical jobs. Only
+        # a shared nonempty nonce and agreement on EVERY supplied identity
+        # field permit ignoring that projection. Conflicting receipts or task
+        # fields remain ambiguous; tasks never confer cancellation authority.
+        receipt_identities = [json.loads(_job_key_for_record(row)) for row in records]
+        for task in _task_external_jobs(state):
+            identity = json.loads(_job_key_for_record(task))
+            if identity["submission_nonce"] and any(
+                all(not value or receipt[key] == value for key, value in identity.items())
+                for receipt in receipt_identities
+            ):
+                continue
+            records.append(task)
     candidates = [
         row for row in records
         if not current_run_only or _accepted_job_payload(row)
@@ -14046,7 +14058,6 @@ async def _cancel_job(
     if _danger.bypass_enabled():
         state.append_transcript("job_cancel_bypassed", scheduler=scheduler, job_id=job_id)
     elif _danger.is_confirmed(state, confirmation):
-        _danger.consume_confirmation(state, confirmation)
         state.append_transcript("job_cancel_confirmed", scheduler=scheduler, job_id=job_id)
     else:
         state.append_transcript("job_cancel_blocked_pending_confirm", scheduler=scheduler, job_id=job_id)

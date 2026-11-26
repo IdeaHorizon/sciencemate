@@ -6,7 +6,7 @@ Install it, open it, and say what you want to research — it writes the code, r
 
 Data and computation stay **on your own machine or a personal Linux server you choose**: every project is a git repository on its selected machine, and model keys are stored encrypted there. Python, git, LaTeX (tectonic), and a bash shell for running experiments ship with the app — **nothing to set up first**.
 
-- Current version: [v0.5.16](../../releases/tag/v0.5.16) · [Download for macOS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.16/ScienceMate-0.5.16-arm64.dmg) · [Download for Windows](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.16/ScienceMate-Setup.exe) · changelog in [Releases](../../releases)
+- Current version: [v0.5.17](../../releases/tag/v0.5.17) · [Download for macOS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.17/ScienceMate-0.5.17-arm64.dmg) · [Download for Windows](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.17/ScienceMate-Setup.exe) · changelog in [Releases](../../releases)
 - This repository holds the **source code** of the Personal edition and its **releases** (installers and updates). The installers are built from this tree; see [DEVELOPMENT.md](DEVELOPMENT.md) to run it from source.
 - This is the **Personal edition**: projects run on this computer by default, with optional personal Linux servers over SSH. The Professional edition adds a shared organization server for teams and is not distributed here.
 
@@ -34,10 +34,10 @@ Open a research session inside a project and say what you need in the input box 
 
 | Platform | Download | Size |
 |---|---|---|
-| macOS (Apple Silicon) | [ScienceMate-0.5.16-arm64.dmg](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.16/ScienceMate-0.5.16-arm64.dmg) | See release assets |
-| Windows 10 / 11 (64-bit) | [ScienceMate-Setup.exe](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.16/ScienceMate-Setup.exe) | See release assets |
+| macOS (Apple Silicon) | [ScienceMate-0.5.17-arm64.dmg](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.17/ScienceMate-0.5.17-arm64.dmg) | See release assets |
+| Windows 10 / 11 (64-bit) | [ScienceMate-Setup.exe](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.17/ScienceMate-Setup.exe) | See release assets |
 
-Checksums: [SHA256SUMS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.16/SHA256SUMS) · all files: [Releases](../../releases/latest)
+Checksums: [SHA256SUMS](https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.17/SHA256SUMS) · all files: [Releases](../../releases/latest)
 
 - **macOS**: open the dmg and drag ScienceMate into Applications. The first launch is blocked once because the app is not yet signed: **System Settings → Privacy & Security → scroll down → "Open Anyway"**, then confirm. One time per machine.
 - **Windows**: run `ScienceMate-Setup.exe`. If SmartScreen shows "Windows protected your PC", click **More info → Run anyway**. One time per machine.
@@ -49,7 +49,7 @@ Checksums: [SHA256SUMS](https://github.com/IdeaHorizon/sciencemate/releases/down
 One command:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/IdeaHorizon/sciencemate/main/install.sh | sh
+curl -fsSL https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.17/install.sh | sh
 ```
 
 The app opens itself when the install finishes. **No "unidentified developer" prompt** — Gatekeeper only inspects files carrying the quarantine mark, and that mark is added by browsers when saving files. `curl` doesn't add it.
@@ -62,7 +62,7 @@ The script does five things: download the dmg → verify against `SHA256SUMS` �
 Read before you run:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/IdeaHorizon/sciencemate/main/install.sh -o install.sh
+curl -fsSL https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.17/install.sh -o install.sh
 less install.sh
 sh install.sh
 ```
@@ -78,7 +78,7 @@ You can also download the `.dmg` from [Releases](../../releases) and drag it int
 One command (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/IdeaHorizon/sciencemate/main/install.ps1 | iex
+irm https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.17/install.ps1 | iex
 ```
 
 The app opens itself when the install finishes. **No "Windows protected your PC" prompt** — SmartScreen only blocks files carrying the mark-of-the-web, and that mark is added by browsers when saving files. `irm` doesn't add it.
@@ -93,7 +93,7 @@ The script does four things: download `Setup.exe` → verify against `SHA256SUMS
 Read before you run:
 
 ```powershell
-irm https://raw.githubusercontent.com/IdeaHorizon/sciencemate/main/install.ps1 -OutFile install.ps1
+irm https://github.com/IdeaHorizon/sciencemate/releases/download/v0.5.17/install.ps1 -OutFile install.ps1
 notepad install.ps1
 .\install.ps1
 ```

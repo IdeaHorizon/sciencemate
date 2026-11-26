@@ -256,6 +256,12 @@ export class ApiClient {
     return this.request<UpdateStatus>("/update");
   }
 
+  setUpdateConnection(mode: "system" | "direct") {
+    return this.request<{ mode: "system" | "direct" }>("/update/connection", {
+      method: "PUT", body: JSON.stringify({ mode }),
+    });
+  }
+
   async installUpdate() {
     return this.request<UpdateStatus & { staged_version: string | null }>("/update/install", { method: "POST" });
   }
@@ -884,6 +890,7 @@ export class ApiClient {
     domain?: string;
     kind?: string;
     saved?: boolean;
+    folder_id?: string;
     limit?: number;
     offset?: number;
   }) {
@@ -891,15 +898,61 @@ export class ApiClient {
     if (opts?.domain) params.set("domain", opts.domain);
     if (opts?.kind) params.set("kind", opts.kind);
     if (opts?.saved) params.set("saved", "true");
+    if (opts?.folder_id !== undefined) params.set("folder_id", opts.folder_id);
     params.set("limit", String(opts?.limit ?? 30));
     params.set("offset", String(opts?.offset ?? 0));
     return this.request<FeedItem[]>(`/feed/items?${params}`);
   }
 
-  async recordFeedEngagement(itemId: string, action: FeedEngagementAction) {
+  /** Build the complete private save index, including records beyond the first page. */
+  async listSavedFeedItems(): Promise<FeedItem[]> {
+    const pageSize = 100;
+    const items = new Map<string, FeedItem>();
+    let offset = 0;
+    while (true) {
+      const page = await this.listFeedItems({ saved: true, limit: pageSize, offset });
+      const before = items.size;
+      for (const item of page) items.set(item.id, item);
+      // Old servers can ignore offset. Repeated/overlapping pages must not loop forever.
+      if (page.length < pageSize || items.size === before) return [...items.values()];
+      offset += page.length;
+    }
+  }
+
+  async recordFeedEngagement(itemId: string, action: FeedEngagementAction, folderId?: string | null) {
     return this.request<void>(`/feed/items/${encodeURIComponent(itemId)}/engagement`, {
       method: "POST",
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ action, ...(folderId !== undefined ? { folder_id: folderId } : {}) }),
+    });
+  }
+
+  async saveFeedItemToFolder(itemId: string, folderId: string | null) {
+    const target = folderId !== null || (await this.getFeedFolders()).supported ? folderId : undefined;
+    return this.recordFeedEngagement(itemId, "save", target);
+  }
+
+  async getFeedFolders(): Promise<FeedFolders> {
+    try {
+      const result = await this.request<Omit<FeedFolders, "supported">>("/feed/folders");
+      return { ...result, supported: true };
+    } catch (error) {
+      // Older organisation servers still support ordinary default saves.
+      if (error instanceof ApiError && error.status === 404) {
+        return { folders: [], default_count: 0, supported: false };
+      }
+      throw error;
+    }
+  }
+
+  async createFeedFolder(name: string) {
+    return this.request<FeedFolder>("/feed/folders", {
+      method: "POST", body: JSON.stringify({ name }),
+    });
+  }
+
+  async moveSavedFeedItem(itemId: string, folderId: string | null) {
+    return this.request<void>(`/feed/items/${encodeURIComponent(itemId)}/save`, {
+      method: "PUT", body: JSON.stringify({ folder_id: folderId }),
     });
   }
 
@@ -959,6 +1012,16 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify(data),
     });
+  }
+
+  /** Explicit location changes use the same persisted save and its returned projection. */
+  async savePaperToFeedFolder(data: SavedPaperRequest, folderId: string | null) {
+    const payload = { ...data };
+    delete payload.folder_id;
+    // A null field means "move to default" on a folder-aware server. Only the
+    // older schema (whose folders endpoint is absent) must receive the old body.
+    if (folderId !== null || (await this.getFeedFolders()).supported) payload.folder_id = folderId;
+    return this.savePaperToFeed(payload);
   }
 
   async shareFeedLink(data: {
@@ -1419,6 +1482,8 @@ export interface GovernanceScope {
 
 /** GET /update 的样子（后端 services/self_update.UpdateStatus）。 */
 export interface UpdateStatus {
+  connection_mode?: "system" | "direct";
+  connection_editable?: boolean;
   installed_version: string | null;
   installed_from: "payload" | "bundled" | "repo" | "unknown";
   self_updatable: boolean;
@@ -2366,6 +2431,18 @@ export interface LiteratureSearchResponse {
 export type FeedItemKind = "paper" | "release" | "deadline" | "news" | "digest" | "post";
 export type FeedEngagementAction = "impression" | "open" | "save" | "dismiss";
 
+export interface FeedFolder {
+  id: string;
+  name: string;
+  item_count: number;
+}
+
+export interface FeedFolders {
+  folders: FeedFolder[];
+  default_count: number;
+  supported: boolean;
+}
+
 export interface FeedItem {
   id: string;
   kind: FeedItemKind;
@@ -2384,12 +2461,14 @@ export interface FeedItem {
   author_display_name: string | null;
   /** 这条有没有配图。**没有外链** —— 要图走 feedImageUrl(id)，由后端代取。 */
   saved: boolean;
+  saved_folder_id?: string | null;
   viewed: boolean;
   extra: Record<string, unknown>;
 }
 
 /** `POST /feed/saved-papers`：文献检索里一篇论文的书目信息。 */
 export interface SavedPaperRequest {
+  folder_id?: string | null;
   title: string;
   doi: string | null;
   url: string | null;
@@ -2467,6 +2546,9 @@ export interface FeedCuration {
   inferred_domains: string[];
   inferred_domain_labels: string[];
   inferred_queries: string[];
+  project_status?: "current" | "no_projects" | "unavailable" | "pending";
+  local_project_count?: number;
+  remote_project_count?: number;
 }
 
 export interface FeedJournalSubscription {
@@ -2592,6 +2674,7 @@ export interface ModelBackend {
    * 直接出现在你自己的列表里，标着来源，改不了（那是组织管理员的事），选了就能用。
    */
   provided_by?: { connection_id: string; organisation_name: string } | null;
+  inherited_from_desktop?: boolean;
   /**
    * 这条连接是不是启用着。库里一直有这个字段、PUT 也一直收，但列表接口从前
    * 不投影它 —— 于是界面连"当前是开是关"都读不到，禁用这条路径整个不存在。

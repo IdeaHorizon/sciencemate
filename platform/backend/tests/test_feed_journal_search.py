@@ -120,3 +120,32 @@ async def test_empty_query_does_not_start_a_network_lookup(monkeypatch):
     fetch = AsyncMock(side_effect=AssertionError("empty input must not search"))
     monkeypatch.setattr(journal_search, "crossref_list_get", fetch)
     assert await journal_search.search("  ") == []
+
+
+@pytest.mark.parametrize("query,issn", [
+    ("total environment", "0048-9697"),
+    ("00489697", "0048-9697"),
+    ("Water Research", "0043-1354"),
+    ("ACS ES&amp;T Water", "2690-0637"),
+    ("Sci Total Environ", "0048-9697"),
+])
+async def test_fresh_install_finds_bundled_journals_with_network_unavailable(
+    query, issn, empty_catalog, monkeypatch,
+):
+    monkeypatch.delenv("HARNESS_JOURNAL_METRICS_DB")
+    fetch = AsyncMock(side_effect=AssertionError("the shipped catalogue must work offline"))
+    monkeypatch.setattr(journal_search, "crossref_list_get", fetch)
+    result = await search_subscriptions(
+        q=query, kind="journal", limit=20, user=None, db=None, lang="zh",
+    )
+    assert any(issn in (row.issn, row.eissn) for row in result.journals)
+    fetch.assert_not_awaited()
+    assert not empty_catalog.exists()
+
+
+async def test_a_journal_outside_the_bundle_still_uses_the_public_directory(monkeypatch):
+    monkeypatch.delenv("HARNESS_JOURNAL_METRICS_DB")
+    fetch = AsyncMock(return_value=response({"items": [remote_row("New Journal Example")]}))
+    monkeypatch.setattr(journal_search, "crossref_list_get", fetch)
+    assert (await journal_search.search("New Journal Example"))[0]["name"] == "New Journal Example"
+    fetch.assert_awaited_once()

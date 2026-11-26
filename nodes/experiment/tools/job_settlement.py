@@ -171,6 +171,19 @@ def _trim(raw: Any) -> Any:
     return raw
 
 
+def _reconcile_legacy_task(state: Any, record: dict[str, Any]) -> dict[str, Any]:
+    try:
+        try:
+            from nodes.experiment.hooks import reconcile_v3_legacy_job_task
+        except ImportError:  # standalone node bootstrap
+            from hooks import reconcile_v3_legacy_job_task
+        return reconcile_v3_legacy_job_task(state, record)
+    except Exception as exc:
+        # A task-view failure cannot roll back or hide the physical B fact.
+        return {"status": "error", "reason": "legacy_task_reconciliation_failed",
+                "error": f"{type(exc).__name__}: {exc}", "completed_task_ids": []}
+
+
 def settle_terminal(state: Any, record: dict[str, Any], *, evidence: dict[str, Any] | None,
                     scheduler_result: dict[str, Any] | None = None, observed_by: str = "",
                     output_observation: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -218,7 +231,8 @@ def settle_terminal(state: Any, record: dict[str, Any], *, evidence: dict[str, A
                 return {"settled": False, "reason": "ledger_write_failed", "nonce": nonce,
                         "error": f"{type(exc).__name__}: {exc}"}
         return {"settled": True, "already": True, "nonce": nonce, "derived_state": prior.get("derived_state"),
-                "exit_code": prior.get("exit_code"), "record": prior}
+                "exit_code": prior.get("exit_code"), "record": prior,
+                "legacy_task_reconciliation": _reconcile_legacy_task(state, record)}
     derived_state, exit_code = _derive(scheduler, evidence)
     if not isinstance(evidence, dict) or derived_state is None:
         return {"settled": False, "reason": "no_positive_terminal_evidence", "nonce": nonce}
@@ -245,7 +259,8 @@ def settle_terminal(state: Any, record: dict[str, Any], *, evidence: dict[str, A
                 "derived_state": derived_state, "exit_code": exit_code,
                 "error": f"{type(exc).__name__}: {exc}"}
     result = {"settled": True, "already": False, "nonce": nonce, "derived_state": derived_state,
-              "exit_code": exit_code, "record": row, "observation": stored_observation}
+              "exit_code": exit_code, "record": row, "observation": stored_observation,
+              "legacy_task_reconciliation": _reconcile_legacy_task(state, record)}
     if record.get("slurm_target"):
         try:
             from . import slurm_files

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "harness-framework"
-version = "0.5.16"
+version = "0.5.17"
 description = "Minimal teaching scaffold for the AI4S research platform's node harness layer."
 requires-python = ">=3.11"
 dependencies = [
@@ -160,7 +160,10 @@ include = ["core*", "shared*", "nodes*", "cli*"]
 exclude = ["tests*", "cli.tests*", "scripts*", "templates*", "docs*", "output*"]
 
 [tool.setuptools.package-data]
+# Node/skill namespace packages need their runtime instructions in wheels too.
+"*" = ["harness.yaml", "SKILL.md", "references/*.md"]
 core = ["_ssh_agent.py.in", "_ssh_askpass.cs"]
+"nodes.literature" = ["data/reference/journal_metrics.sqlite3", "data/reference/journal_catalog.md"]
 
 [tool.ruff]
 line-length = 100

@@ -1,4 +1,4 @@
-"""Metadata-only browser collection: ownership, leases, resume and feed admission.
+"""On-demand CNKI search: ownership, leases, limits and explicit retry.
 
 Uses an isolated SQLite file and ASGI transport; never contacts CNKI or the
 running platform database. Run with --noconftest to avoid integration fixtures.
@@ -26,7 +26,10 @@ from app.services import cnki as service
 
 
 @pytest.fixture
-async def rig(tmp_path):
+async def rig(tmp_path, monkeypatch):
+    # Isolated workers below use this test database; never wake the process singleton.
+    from app.services.cnki_worker import cnki_collector
+    monkeypatch.setattr(cnki_collector, "start", lambda *ids: None)
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/cnki.db")
     tables = [User.__table__, FeedSource.__table__, FeedItem.__table__,
               CnkiDevice.__table__, CnkiJob.__table__, CnkiPaper.__table__, CnkiJobPaper.__table__]
@@ -197,55 +200,78 @@ async def test_saved_indexes_return_chinese_journal_and_thesis_categories(rig):
     assert await claim(client,headers) is None  # Reclassification needs no new harvest.
 
 
-async def test_daily_schedule_24h_overlap_and_unlimited_subscription(rig, monkeypatch):
+@pytest.mark.parametrize("executor", ["local", "server"])
+async def test_old_daily_jobs_are_inert_even_with_a_lease(rig, executor):
+    from types import SimpleNamespace
+    client,sessions,users=rig
+    user=users[0]
+    headers,device_id,_=await pair(client,user)
+    rejected=await client.post("/cnki/jobs",headers=owner(user),json={"query":"已有期刊","recurring":True})
+    assert rejected.status_code==422
+    # Simulate a live pre-upgrade task, including its outstanding lease.
+    key="legacy-lease-for-the-previous-worker"
+    async with sessions.begin() as db:
+        stale=CnkiJob(user_id=user.id,query="旧订阅",category="journal",field="LY",recurring=True,
+                      created_at=service.now(),checkpoint={"executor":executor},lease_device_id=device_id,
+                      lease_hash=service.digest(key),lease_until=service.now()+timedelta(seconds=90))
+        db.add(stale)
+        await db.flush()
+        old_id=stale.id
+    assert (await client.post(f"/cnki/jobs/{old_id}/retry",headers=owner(user))).status_code==404
+    assert (await client.post("/cnki/session/reset",headers=owner(user),json={"job_ids":[old_id]})).status_code==404
+    old_batch=await client.post(f"/cnki/worker/jobs/{old_id}/batch",headers=headers,
+                                json={"lease":key,"page":1,"papers":[paper()]})
+    assert old_batch.status_code==409
+    async with sessions.begin() as db:
+        device=SimpleNamespace(id=device_id,user_id=user.id)
+        assert await service.claim_job(db,device,executor=executor) is None
+    fresh=(await client.post("/cnki/jobs",headers=owner(user),json={"query":"当次查找","executor":executor})).json()
+    async with sessions.begin() as db:
+        assert (await service.claim_job(db,device,executor=executor))["id"]==fresh["id"]
+        assert await db.scalar(select(func.count()).select_from(CnkiPaper))==0
+
+
+async def test_only_explicit_managed_requests_dispatch_and_cached_reads_stay_idle(rig, monkeypatch):
+    from app.services.cnki_worker import cnki_collector
+    client,sessions,users=rig
+    calls=[]
+    monkeypatch.setattr(cnki_collector,"start",lambda *ids: calls.append(ids))
+    record=(await client.post("/cnki/jobs",headers=owner(users[0]),json={"query":"单次题录"})).json()
+    job_id=record["id"]
+    assert calls==[(job_id,)]
+    async with sessions.begin() as db:
+        row=await db.get(CnkiJob,job_id)
+        row.last_report={"state":"error"}
+    await client.get("/cnki/jobs/"+job_id,headers=owner(users[0]))
+    await client.get("/cnki/status",headers=owner(users[0]))
+    assert calls==[(job_id,)]
+    await client.post("/cnki/jobs/"+job_id+"/retry",headers=owner(users[0]))
+    assert calls==[(job_id,),(job_id,)]
+    async with sessions.begin() as db:
+        row=await db.get(CnkiJob,job_id)
+        row.last_completed_at=service.now()
+        row.checkpoint={**row.checkpoint,"finished":True}
+    # Cached query, manual retry and completed-only reset must not launch a worker.
+    assert (await client.post("/cnki/jobs",headers=owner(users[0]),json={"query":"单次题录"})).json()["id"]==job_id
+    await client.post("/cnki/jobs/"+job_id+"/retry",headers=owner(users[0]))
+    assert (await client.post("/cnki/session/reset",headers=owner(users[0]),json={"job_ids":[job_id]})).status_code==409
+    assert calls==[(job_id,),(job_id,)]
+
+
+async def test_one_off_cache_preserved_without_feed_admission(rig, monkeypatch):
     client,sessions,users=rig
     headers,_,_=await pair(client,users[0])
-    await job(client,users[0],recurring=True,category="journal")
-    base=service.now(); task=await claim(client,headers)
-    assert task["field"]=="LY" and task["limit"] is None
-    assert task["since"]==(base-timedelta(days=365)).date().isoformat()
-    await upload(client,headers,task,[],finished=True,page_complete=True)
-    assert await claim(client,headers) is None
+    created=await job(client,users[0])
+    task=await claim(client,headers)
+    row=paper(metadata_attempted=True)
+    await upload(client,headers,task,[row],finished=True)
+    base=service.now()
     monkeypatch.setattr(service,"now",lambda:base+timedelta(hours=25))
-    next_task=await claim(client,headers)
-    assert next_task["page"]==1 and next_task["accepted"]==[]
-    assert next_task["since"]==(base-timedelta(days=31)).date().isoformat()
-
-
-async def test_feed_ready_gate_categories_window_and_unsubscribe(rig):
-    from app.api.v1.feed import _visible_clause, _to_out
-    from app.services.feed.ranking import publication_window_clause
-    client,sessions,users=rig
-    headers,_,_=await pair(client,users[0])
-    j=await job(client,users[0],recurring=True,category="project")
-    task=await claim(client,headers)
-    record=paper(pub_date=(service.now()-timedelta(days=100)).date().isoformat())
-    await upload(client,headers,task,[record])
+    assert await claim(client,headers) is None  # No next daily cycle.
+    assert (await client.post("/cnki/worker/cache",headers=headers,json=[row])).json()["papers"]==[]
+    assert (await client.get("/cnki/jobs/"+created["id"],headers=owner(users[0]))).json()["count"]==1
     async with sessions() as db:
-        assert (await db.scalar(select(FeedItem))).visibility=="withdrawn"
-    await upload(client,headers,task,[{**record,"metadata_attempted":True,"abstract":"中文摘要"}],finished=True)
-    async with sessions() as db:
-        item=await db.scalar(select(FeedItem).where(_visible_clause(users[0]),publication_window_clause(service.now())))
-        assert item and item.visibility=="private" and item.extra["cnki_categories"]==["project"]
-        assert _to_out(item).abstract_zh=="中文摘要"
-        assert await db.scalar(select(FeedItem).where(_visible_clause(users[1]))) is None
-    assert (await client.delete(f"/cnki/jobs/{j['id']}",headers=owner(users[0]))).status_code==200
-    async with sessions() as db:
-        assert (await db.scalar(select(FeedItem))).visibility=="withdrawn"
-
-
-async def test_notice_never_recommended_and_no_negative_cache_forever(rig, monkeypatch):
-    client,sessions,users=rig
-    headers,_,_=await pair(client,users[0])
-    await job(client,users[0],recurring=True)
-    task=await claim(client,headers)
-    record=paper(title="Editorial Board",metadata_attempted=True)
-    await upload(client,headers,task,[record],finished=True)
-    async with sessions() as db:
-        assert (await db.scalar(select(FeedItem))).visibility=="withdrawn"
-    current=service.now()
-    monkeypatch.setattr(service,"now",lambda:current+timedelta(hours=25))
-    assert (await client.post("/cnki/worker/cache",headers=headers,json=[record])).json()["papers"]==[]
+        assert await db.scalar(select(func.count()).select_from(FeedItem))==0
 
 
 @pytest.mark.parametrize("change",[{"cookies":"never upload"},{"url":"https://example.com/detail"},{"url":"https://kns.cnki.net/download/file.pdf"}])
@@ -616,6 +642,181 @@ async def test_access_denied_pauses_without_restarting_or_auto_retry(rig):
     assert browser.closes==0 and await worker.claim() is None
 
 
+async def test_interactive_403_resets_once_then_delivers_new_incremental_results(rig):
+    from app.services.cnki_browser import CollectionError
+    from app.services.cnki_worker import Collector
+    client, sessions, users = rig
+    search_id = str(uuid4())
+    created = []
+    for kind in ('journal', 'thesis'):
+        response = await client.post('/cnki/jobs', headers=owner(users[0]), json={
+            'query': '本次研究', 'document_kind': kind, 'limit': 23, 'search_id': search_id})
+        assert response.status_code == 200
+        created.append(response.json()['id'])
+
+    class Recovering(ManagedBrowser):
+        resets = 0
+        kind = 'journal'
+
+        async def check_recovery_verification(self, user_id):
+            pass
+
+        async def reset_session(self, user_id, request_id):
+            self.resets += 1
+
+        async def search(self, query, field, **kwargs):
+            if not self.resets:
+                raise CollectionError('access_denied', http_status=403)
+            self.kind = kwargs['document_kind']
+            return await super().search(query, field)
+
+        def snapshot(self):
+            state = super().snapshot()
+            for row in state['rows']:
+                row.update(title=self.kind+row['title'], exportId=self.kind+':'+row['exportId'],
+                           document_type='学位论文' if self.kind == 'thesis' else '期刊')
+            return state
+
+        async def execute(self, action, args=None):
+            if action == 'export':
+                kind, number = args['exportId'].split(':')
+                return {'title': f'{kind}中文研究 {number}', 'abstract': '来源摘要', 'metadata_attempted': True}
+            return await super().execute(action, args)
+
+    browser = Recovering()
+    worker = Collector(sessions, browser)
+    device, task = await worker.claim()
+    await worker.batch(device, task, papers=[paper(title='journal中文研究 0', export_id='journal:0')],
+                       total=23, page_complete=True)
+    before = (await client.get('/cnki/jobs/'+task['id']+'?page_size=200', headers=owner(users[0]))).json()
+    task['page'] = 2
+    await worker.process(device, task)
+    # No retry/reset HTTP call from the UI is needed.
+    assert await worker.reset_requested_session({})
+    assert browser.resets == 1
+    async with sessions() as db:
+        rows = (await db.scalars(select(CnkiJob))).all()
+        assert len({row.checkpoint['auto_recovery_used'] for row in rows}) == 1
+        assert (await db.get(CnkiJob, task['id'])).checkpoint['page'] == 2
+    await drain_managed(worker)
+    incremental = (await client.get('/cnki/jobs/'+task['id'], headers=owner(users[0]),
+                                   params={'page_size': 200, 'cursor': before['next_cursor']})).json()
+    assert incremental['state'] == 'completed' and incremental['count'] == 4
+    assert 'journal中文研究 22' in {p['title'] for p in incremental['result']['papers']}
+    assert not await worker.reset_requested_session({}) and browser.resets == 1
+    for identifier in created:
+        view = (await client.get('/cnki/jobs/'+identifier, headers=owner(users[0]))).json()
+        assert view['state'] == 'completed'
+
+
+async def test_repeated_403_and_late_categories_share_the_persisted_attempt(rig):
+    from app.services.cnki_browser import CollectionError
+    from app.services.cnki_worker import Collector
+    client, sessions, users = rig
+    search_id = str(uuid4())
+    async def create(kind, user=users[0], recurring=False):
+        response = await client.post('/cnki/jobs', headers=owner(user), json={
+            'query': '本次研究', 'document_kind': kind, 'search_id': search_id, 'recurring': recurring})
+        return response.json()['id']
+
+    class Denied(ManagedBrowser):
+        resets = 0
+        async def search(self, *args, **kwargs):
+            raise CollectionError('access_denied')
+        async def check_recovery_verification(self, user_id):
+            pass
+        async def reset_session(self, *args):
+            self.resets += 1
+
+    browser = Denied()
+    worker = Collector(sessions, browser)
+    first = await create('journal')
+    await worker.process(*(await worker.claim()))
+    late = await create('thesis')  # Arrives while the first category is recovering.
+    assert await worker.reset_requested_session({})
+    await drain_managed(worker)
+    assert not await worker.reset_requested_session({}) and browser.resets == 1
+    later = await create('conference')  # Arrives after the reset finished.
+    async with sessions.begin() as db:
+        for identifier in (first, late, later):
+            row = await db.get(CnkiJob, identifier)
+            assert row.checkpoint['auto_recovery_used']
+            row.checkpoint = {**row.checkpoint, 'session_reset_at': (service.now()-timedelta(minutes=5)).isoformat()}
+    await Collector(sessions, browser).process(*(await worker.claim()))  # Worker restart keeps the budget.
+    assert not await worker.reset_requested_session({}) and browser.resets == 1
+    # Other users must never join this search's recovery.
+    other = await create('book', user=users[1])
+    async with sessions() as db:
+        assert not (await db.get(CnkiJob, other)).checkpoint.get('auto_recovery_used')
+
+
+@pytest.mark.parametrize('code', ['waiting_for_verification', 'rate_limited', 'search_http_417'])
+async def test_verification_and_rate_limits_never_trigger_profile_replacement(rig, code):
+    from app.services.cnki_browser import CollectionError
+    from app.services.cnki_worker import Collector
+    client, sessions, users = rig
+    await client.post('/cnki/jobs', headers=owner(users[0]), json={
+        'query': '需要验证', 'search_id': str(uuid4())})
+    class Restricted(ManagedBrowser):
+        async def search(self, *args, **kwargs):
+            raise CollectionError(code)
+    worker = Collector(sessions, Restricted())
+    await worker.process(*(await worker.claim()))
+    assert not await worker.reset_requested_session({})
+
+
+async def test_challenge_arriving_during_recovery_is_preserved_until_verified(rig):
+    from app.services.cnki_browser import CollectionError
+    from app.services.cnki_worker import Collector
+    client, sessions, users = rig
+    response = await client.post('/cnki/jobs', headers=owner(users[0]), json={
+        'query': '需要验证', 'search_id': str(uuid4())})
+    identifier = response.json()['id']
+    class Challenged(ManagedBrowser):
+        verified = False
+        resets = 0
+        async def search(self, *args, **kwargs):
+            raise CollectionError('access_denied')
+        async def check_recovery_verification(self, user_id):
+            if not self.verified:
+                raise CollectionError('waiting_for_verification')
+        async def reset_session(self, *args):
+            self.resets += 1
+    browser = Challenged()
+    worker = Collector(sessions, browser)
+    await worker.process(*(await worker.claim()))
+    assert await worker.reset_requested_session({})
+    assert browser.resets == 0
+    async with sessions.begin() as db:
+        row = await db.get(CnkiJob, identifier)
+        assert service.job_state(row) == 'waiting_for_verification'
+        assert not row.checkpoint.get('auto_recovery_used')
+        assert not row.checkpoint.get('session_reset_at')
+        row.last_report_at = service.now()-timedelta(seconds=31)
+    browser.verified = True
+    assert await worker.claim() is None
+    await client.post('/cnki/jobs/'+identifier+'/retry', headers=owner(users[0]))
+    await worker.process(*(await worker.claim()))
+    assert await worker.reset_requested_session({}) and browser.resets == 1
+
+
+async def test_cancelled_search_is_not_reopened_by_pending_automatic_recovery(rig):
+    from app.services.cnki_browser import CollectionError
+    from app.services.cnki_worker import Collector
+    client, sessions, users = rig
+    response = await client.post('/cnki/jobs', headers=owner(users[0]), json={
+        'query': '需要停止', 'search_id': str(uuid4())})
+    identifier = response.json()['id']
+    class Denied(ManagedBrowser):
+        async def search(self, *args, **kwargs):
+            raise CollectionError('access_denied')
+    worker = Collector(sessions, Denied())
+    await worker.process(*(await worker.claim()))
+    assert (await client.delete('/cnki/jobs/'+identifier, headers=owner(users[0]))).status_code == 200
+    assert not await worker.reset_requested_session({})
+    assert await worker.claim() is None
+
+
 async def test_new_query_checks_old_denial_once_but_daily_jobs_and_polling_do_not(rig):
     from app.services.cnki_worker import Collector
     from app.services.cnki_browser import CollectionError
@@ -632,11 +833,9 @@ async def test_new_query_checks_old_denial_once_but_daily_jobs_and_polling_do_no
             return await super().search(query, field, **kwargs)
     browser = Paused()
     worker = Collector(sessions, browser)
-    daily = (await client.post('/cnki/jobs', headers=owner(users[0]), json={
-        'query': '定时订阅', 'recurring': True})).json()
-    await drain_managed(worker)
-    paused = (await client.get('/cnki/jobs/'+daily['id'], headers=owner(users[0]))).json()
-    assert paused['state'] == 'paused' and '当前请求未发送' in paused['detail']
+    daily = await client.post('/cnki/jobs', headers=owner(users[0]), json={
+        'query': '定时订阅', 'recurring': True})
+    assert daily.status_code == 422
     assert browser.checks == 0 and browser.denied
     assert await worker.claim() is None
     fresh = await managed_job(client, users[0], query='两天后主动提交的不同问题', limit=2)
@@ -646,7 +845,6 @@ async def test_new_query_checks_old_denial_once_but_daily_jobs_and_polling_do_no
     assert browser.checks == 1 and not browser.denied
     async with sessions() as db:
         assert (await db.get(CnkiJob, fresh['id'])).checkpoint['check_session'] is False
-    assert (await client.get('/cnki/jobs/'+daily['id'], headers=owner(users[0]))).json()['state'] == 'paused'
 
 
 async def test_session_pause_during_metadata_does_not_cache_a_missing_abstract(rig):
@@ -926,7 +1124,10 @@ async def test_new_index_job_precedes_due_failed_retry(rig):
     # Active leases still prevent simultaneous queries against the same tab.
     assert await worker.claim() is None
     await worker.process(device, task)
-    device, task = await worker.claim()
+    await drain_managed(worker)  # Only this fresh search can finish its metadata.
+    assert await worker.claim() is None
+    await client.post('/cnki/jobs/'+old['id']+'/retry', headers=owner(users[0]))
+    _, task = await worker.claim()
     assert task['id'] == old['id']
 
 async def test_verified_results_are_read_without_submitting_again(monkeypatch, tmp_path):
@@ -1011,6 +1212,8 @@ async def test_verification_resume_marker_survives_queue_retry(rig):
         job = (await db.scalars(select(CnkiJob))).one()
         assert job.checkpoint['resume_verification'] is True
         job.last_report_at = service.now() - timedelta(minutes=1)
+    assert await worker.claim() is None
+    await client.post('/cnki/jobs/'+job.id+'/retry', headers=owner(users[0]))
     _, task = await worker.claim()
     assert task['resume_verification'] is True
 
@@ -1272,8 +1475,10 @@ async def test_collector_runs_two_lanes_together_and_cleans_up_on_stop(rig,monke
     from app.services.cnki_worker import Collector
     from app.services import project_repository
     client,sessions,users=rig
+    ids=[]
     for kind in ('journal','thesis','book'):
-        await client.post('/cnki/jobs',headers=owner(users[0]),json={'query':'中文研究','limit':200,'document_kind':kind})
+        response = await client.post('/cnki/jobs',headers=owner(users[0]),json={'query':'中文研究','limit':200,'document_kind':kind})
+        ids.append(response.json()['id'])
     started=set();both=asyncio.Event();closed=[]
     class Lane(ManagedBrowser):
         async def search(self,query,field,**kwargs):
@@ -1284,7 +1489,7 @@ async def test_collector_runs_two_lanes_together_and_cleans_up_on_stop(rig,monke
         def lane(self,slot):return Lane()
         async def close(self):closed.append(True)
     monkeypatch.setattr(project_repository,'_the_file_lock',lambda:SimpleNamespace(try_hold=lambda path:SimpleNamespace(close=lambda:None)))
-    worker=Collector(sessions,Root());worker.task=asyncio.create_task(worker.run())
+    worker=Collector(sessions,Root());worker.start(*ids)
     try:
         await asyncio.wait_for(both.wait(),3)
         assert started=={'journal','thesis'}
@@ -1538,3 +1743,45 @@ async def test_new_category_joins_in_progress_reset_without_blocking_database(ri
     finally:
         resume.set()
         await asyncio.gather(work, return_exceptions=True)
+
+
+async def test_explicit_search_drains_only_requested_ids_and_accepts_submit_during_close(rig, monkeypatch, tmp_path):
+    from app.services.cnki_worker import Collector, cnki_collector
+    from app.services import cnki_worker
+
+    client, sessions, users = rig
+    stale = await managed_job(client, users[0], query="old request", limit=1)
+    closing, allow_close = asyncio.Event(), asyncio.Event()
+    done = asyncio.Event()
+
+    class Browser(ManagedBrowser):
+        def lane(self, slot):
+            return self
+
+        async def close(self):
+            await super().close()
+            if self.closes == 1:
+                closing.set()
+                await allow_close.wait()
+            else:
+                done.set()
+
+    browser = Browser()
+    worker = Collector(sessions, browser)
+    monkeypatch.setattr(cnki_worker, "the_data_root", lambda: tmp_path)
+    monkeypatch.setattr(cnki_collector, "start", worker.start)
+    try:
+        first = await managed_job(client, users[0], query="first request", limit=1)
+        await asyncio.wait_for(closing.wait(), 5)
+        second = await managed_job(client, users[0], query="second request", limit=1)
+        allow_close.set()
+        await asyncio.wait_for(done.wait(), 5)
+        if worker.task:
+            await asyncio.wait_for(worker.task, 5)
+        for response in (first, second, stale):
+            row = (await client.get("/cnki/jobs/" + response["id"], headers=owner(users[0]))).json()
+            assert row["state"] == ("queued" if response is stale else "completed")
+        assert worker.task is None and browser.searches == 2
+    finally:
+        allow_close.set()
+        await worker.stop()

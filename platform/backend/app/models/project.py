@@ -106,6 +106,9 @@ class Project(Base):
     status: Mapped[ProjectStatus] = mapped_column(
         _StrEnum(ProjectStatus), nullable=False, default=ProjectStatus.ACTIVE
     )
+    # Durable deletion intent precedes stopping writers and removing data. Keep
+    # the row on cleanup failure so retry never loses ownership or its target.
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
 
     # How the project was started
     entry_type: Mapped[EntryType | None] = mapped_column(_StrEnum(EntryType), nullable=True)

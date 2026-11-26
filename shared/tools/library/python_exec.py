@@ -264,7 +264,6 @@ async def _execute_python(
             state.append_transcript(
                 "highrisk_python_bypass", code_preview=code[:200], category=category)
         elif _dc.is_confirmed(state, code):
-            _dc.consume_confirmation(state, code)
             state.append_transcript(
                 "highrisk_python_confirmed_run", code_preview=code[:200], category=category)
         else:

@@ -18,6 +18,7 @@ id 是运行时才有的东西。于是我们只为每个动态段产出一份�
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 #: 静态导出里代表「运行时才知道」的那一段。与前端 `shared/routing/static-shell.ts`
@@ -79,6 +80,72 @@ def resolve_static_asset(root: Path, url_path: str) -> Path | None:
     except ValueError:  # pragma: no cover - _safe_segments 已挡掉 ..
         return None
     return candidate
+
+
+def runtime_route_payload(payload: str, shell: Path, root: Path, url_path: str) -> str:
+    """Bind exported Flight router parameters to the requested runtime address.
+
+    Serving HTML for a .txt navigation makes Next fall back to a document load.
+    Serving the unbound Flight file instead leaves every dynamic segment as `_`.
+    Only router tuples, client params and the canonical path need binding; module
+    records and rendered text must remain untouched.
+    """
+    template = list(shell.relative_to(root).with_suffix("").parts)
+    actual = _safe_segments(url_path) or []
+    values = [value for part, value in zip(template, actual) if part == SHELL_SEGMENT]
+    records = []
+    names: list[str] = []
+
+    def collect(value):
+        if isinstance(value, list):
+            if len(value) == 3 and value[1:] == [SHELL_SEGMENT, "d"] and isinstance(value[0], str):
+                if value[0] not in names:
+                    names.append(value[0])
+            for item in value:
+                collect(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                collect(item)
+
+    for line in payload.splitlines(keepends=True):
+        prefix, separator, body = line.partition(":")
+        if not separator:
+            records.append((line, None, None))
+            continue
+        try:
+            value = json.loads(body)
+        except ValueError:
+            records.append((line, None, None))
+            continue
+        collect(value)
+        records.append((line, prefix, value))
+    bindings = dict(zip(names, values))
+
+    def bind(value):
+        if isinstance(value, list):
+            if (len(value) == 3 and value[1:] == [SHELL_SEGMENT, "d"]
+                    and isinstance(value[0], str) and value[0] in bindings):
+                return [value[0], bindings[value[0]], "d"]
+            return [bind(item) for item in value]
+        if isinstance(value, dict):
+            result = {key: bind(item) for key, item in value.items()}
+            if isinstance(result.get("params"), dict):
+                result["params"] = {key: bindings.get(key, item) if item == SHELL_SEGMENT else item
+                                    for key, item in result["params"].items()}
+            if result.get("c") == ["", *template]:
+                result["c"] = ["", *actual]
+            return result
+        return value
+
+    output = []
+    for line, prefix, value in records:
+        bound = bind(value)
+        if prefix is None or bound == value:
+            output.append(line)
+        else:
+            encoded = json.dumps(bound, ensure_ascii=False, separators=(",", ":"))
+            output.append(prefix + ":" + encoded + ("\n" if line.endswith("\n") else ""))
+    return "".join(output)
 
 
 class StaticUI:
@@ -146,7 +213,16 @@ class StaticUI:
 
     def answer(self, url_path: str):
         """这个地址该送什么。送不出来返回 None（由应用自己去答）。"""
-        from fastapi.responses import FileResponse
+        from fastapi.responses import FileResponse, Response
+
+        if url_path.endswith(".txt"):
+            route = url_path[:-4]
+            shell = resolve_static_page(self.root, route)
+            flight = shell.with_suffix(".txt") if shell is not None else None
+            if flight is not None and flight.is_file():
+                payload = runtime_route_payload(
+                    flight.read_text(encoding="utf-8"), shell, self.root, route)
+                return Response(payload, media_type="text/x-component")
 
         asset = resolve_static_asset(self.root, url_path)
         if asset is not None:

@@ -148,7 +148,9 @@ async def test_scheduler_revision_uses_existing_dispatch_and_keeps_actual_result
     assert len(calls) == 1 and calls[0][1] == "analysis"
     assert calls[0][2]["node_inputs"]["research_question"] == "比较自我改进速率"
     assert calls[0][2]["node_inputs"]["human_directive"] == ""
-    assert "调度器决定" in calls[0][2]["user_note"]
+    assert "user_note" not in calls[0][2]
+    assert entry["decided_by"] == "orchestrator"
+    assert entry["orchestrator_reasoning"] == "先补足可比性定义。"
     assert result["status"] == status
     assert entry["decision_state"] == "action_authorized"  # dispatch isn't completion
 

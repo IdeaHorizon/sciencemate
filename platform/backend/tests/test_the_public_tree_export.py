@@ -68,6 +68,9 @@ def test_an_export_has_no_pro_edition_and_a_stub_seam(tmp_path: Path) -> None:
     # docs/ 整体不进，但代码和闸读的登记表要在（KEPT_INSIDE_EXCLUDED）。
     assert (into / "docs/verdict_demolition").is_dir()
     assert (into / "docs/compression-fate-table.md").is_file()
+    catalog = "nodes/literature/data/reference/journal_metrics.sqlite3"
+    assert (into / catalog).read_bytes() == (REPO / catalog).read_bytes()
+    assert not (into / "nodes/literature/data/reference/cas_journal_ranking_2025.json").exists()
     assert (into / x.SEAM).read_text(encoding="utf-8") == x.SEAM_STUB
     assert (into / "platform/backend/app/assembly.py").exists()
     assert (into / "platform/frontend/src/features/auth/slots.ts").exists()

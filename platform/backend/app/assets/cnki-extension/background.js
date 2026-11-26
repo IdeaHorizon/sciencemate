@@ -124,11 +124,12 @@ async function collect(job) {
   while (true) {
     const cfg = await read();
     if (cfg.paused) throw new Error("paused");
-    const remaining = job.limit == null || job.document_kind ? 20 : Math.max(0, job.limit - (job.page - 1) * 20);
+    // Filtering and deduplication may discard rows; they never extend the search.
+    const remaining = job.limit == null ? 20 : Math.min(20, Math.max(0, job.limit - (job.page - 1) * 20));
     const wanted = state.rows.slice(0, remaining);
     const beforeWindow = row => /^\d{4}-\d{2}-\d{2}/.test(row.pub_date) && row.pub_date.slice(0,10) < job.since;
     const within = wanted.filter(row => !job.since || !beforeWindow(row));
-    const receipt = await api(`/worker/jobs/${job.id}/batch`, {lease:job.lease, page:job.page, papers:within.map(cleanPaper), total:state.total});
+    await api(`/worker/jobs/${job.id}/batch`, {lease:job.lease, page:job.page, papers:within.map(cleanPaper), total:state.total});
     const cached = await api("/worker/cache", within.map(cleanPaper));
     const byTitle = new Map(cached.papers.map(p => [paperKey(p), p]));
     const pending = within.filter(row => !(job.accepted || []).includes(row.title));
@@ -144,7 +145,7 @@ async function collect(job) {
       if (failed) throw failed.reason;
       await badge("working", `${job.query} · 第 ${job.page} 页 · 已处理 ${Math.min(i+2,pending.length)}/${pending.length}`);
     }
-    const finished = !state.hasNext || !wanted.length || (job.limit != null && (job.document_kind ? receipt.count >= job.limit : job.page * 20 >= job.limit))
+    const finished = !state.hasNext || !wanted.length || (job.limit != null && job.page * 20 >= job.limit)
       || (job.since && state.dateSorted && state.rows.length > 0 && state.rows.every(beforeWindow));
     await api(`/worker/jobs/${job.id}/batch`, {lease:job.lease, page:job.page, papers:[], total:state.total, page_complete:true, finished:!!finished});
     if (finished) {await save({currentJob:null}); return;}
@@ -177,16 +178,15 @@ async function tick() {
       catch (error) {if (error.message !== "lease_expired") throw error; job=null; await save({currentJob:null});}
     }
     if (!job) job = (await api("/worker/poll",{state:"idle"})).job;
-    if (!job) {await badge("idle","已连接，等待采集任务");return;}
+    if (!job) {await badge("idle","已连接，没有待处理的单次检索");return;}
     await save({currentJob:job});
     await badge("working",job.query);
     await collect(job);
     await badge("idle","本轮 index 已同步");
-    setTimeout(() => void tick(),500);
   } catch (error) {
     const state = error.message === "access_denied" ? "paused" : ["waiting_for_verification","browser_closed","paused"].includes(error.message) ? error.message : "error";
-    const messages = {waiting_for_verification:"请在本机 Chrome 完成知网验证，之后自动继续", browser_closed:"知网标签页已关闭，点击继续采集", paused:"采集已暂停", rate_limited:"知网暂时限制请求，稍后重试", platform_unavailable:"平台暂时无法连接，已保留采集进度", disconnected:"连接已失效，请重新配对", result_pages_changed:"搜索结果页数已变化，请重新发起检索"};
-    const detail = error.message === "access_denied" ? "知网拒绝当前访问（HTTP 403），已暂停请求；请检查知网页面后再继续" : messages[error.message] || "采集暂时未完成，将从已确认的进度重试";
+    const messages = {waiting_for_verification:"请在本机 Chrome 完成验证，在平台重试本次检索，再点击“执行一次”", browser_closed:"知网标签页已关闭，请在平台重试本次检索", paused:"采集已暂停", rate_limited:"知网暂时限制请求，稍后重试", platform_unavailable:"平台暂时无法连接，已保留采集进度", disconnected:"连接已失效，请重新配对", result_pages_changed:"搜索结果页数已变化，请重新发起检索"};
+    const detail = error.message === "access_denied" ? "知网拒绝当前访问（HTTP 403），已暂停请求；请检查知网页面后再继续" : messages[error.message] || "检索未完成，已保存进度；请在平台重试本次检索";
     await badge(state,detail);
     if (job) {
       try {await report(job,state,detail); await save({currentJob:null});} catch {}
@@ -195,15 +195,14 @@ async function tick() {
   } finally {running=false;}
 }
 
-async function ensureAlarm() {
-  if (!await chrome.alarms.get("cnki-poll")) await chrome.alarms.create("cnki-poll",{periodInMinutes:.5});
-}
-chrome.alarms.onAlarm.addListener(alarm => {if (alarm.name === "cnki-poll") void tick();});
-chrome.runtime.onStartup.addListener(() => {void ensureAlarm(); void tick();});
-chrome.runtime.onInstalled.addListener(() => {void ensureAlarm();});
+// 0.1.0 scheduled this recurring alarm. Clear it on upgrade/startup without
+// contacting the platform or resuming a search from an earlier session.
+const clearLegacyAlarm = () => chrome.alarms.clear("cnki-poll");
+chrome.runtime.onInstalled.addListener(clearLegacyAlarm);
+chrome.runtime.onStartup.addListener(clearLegacyAlarm);
 chrome.tabs.onRemoved.addListener((tabId, info) => {
   void read().then(async cfg => {
-    if (cfg.tabId === tabId && !info.isWindowClosing) {await save({paused:true,tabId:null});await badge("browser_closed","知网标签页已关闭，点击继续采集");}
+    if (cfg.tabId === tabId && !info.isWindowClosing) {await save({paused:true,tabId:null});await badge("browser_closed","知网标签页已关闭，请在平台重试本次检索");}
   });
 });
 
@@ -217,15 +216,14 @@ async function pair(message) {
   await chrome.scripting.registerContentScripts([{id:"platform-wake",matches:[server+"/*"],js:["platform-bridge.js"]}]);
   const tabs = await chrome.tabs.query({url:server+"/*"});
   for (const tab of tabs) await chrome.scripting.executeScript({target:{tabId:tab.id},files:["platform-bridge.js"]}).catch(() => {});
-  await ensureAlarm();
-  void tick();
+  await badge("idle","已连接；提交检索后点击“执行一次”");
   return {ok:true};
 }
 
 chrome.runtime.onMessage.addListener((message,sender,respond) => {
   // Page content scripts may only wake this collector. Pair/pause controls
   // are accepted solely from the extension's own popup.
-  if (message.type === "wake") {void tick();respond({ok:true});return;}
+  if (message.type === "wake") {tick().then(()=>respond({ok:true}),()=>respond({error:"知网检索未完成"}));return true;}
   if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL("popup.html")) return;
   const work = async () => {
     if (message.type === "pair") return pair(message);
@@ -233,11 +231,10 @@ chrome.runtime.onMessage.addListener((message,sender,respond) => {
       await save({paused:true}); await badge("paused","采集已暂停");
       const cfg=await read(); if(cfg.token) await api("/worker/poll",{state:"paused"}).catch(()=>{});
     }
-    if (message.type === "resume") {await save({paused:false}); void tick();}
+    if (message.type === "resume") {await save({paused:false}); await tick();}
     if (message.type === "open") {const cfg=await read();const id=cfg.detailTabId || await searchTab();await chrome.tabs.update(id,{active:true});}
     return {ok:true};
   };
   work().then(respond,error=>respond({error:error.message}));
   return true;
 });
-void ensureAlarm();

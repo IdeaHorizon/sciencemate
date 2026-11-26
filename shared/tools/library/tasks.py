@@ -153,6 +153,7 @@ async def _task(
                 "task_instance_uuid": uuid,
                 "task_contract_revision": rev.revision,
                 "task_contract_digest": rev.digest,
+                "target_node": rev.target_node,
                 "prereg_assignment": rev.assignment_kind,
                 **({"prereg_binding": {**assignment.as_dict(), "filled_from": filled_from}}
                    if filled_from else {}),

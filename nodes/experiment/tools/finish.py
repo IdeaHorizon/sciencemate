@@ -546,9 +546,11 @@ async def _default_check_runner(state: Any, ob: dict[str, Any]) -> dict[str, Any
     """检查命令走与 safe_run_bash 同一条沙箱路径，但用只读执行根，并进账本。"""
     try:
         from .safe_bash import _exec_and_log, _bash_static_validity_block  # type: ignore
+        from .bash_paths import uses_wsl_paths
         from .execution_guard import classify_high_risk
     except ImportError:  # pragma: no cover
         from tools.safe_bash import _exec_and_log, _bash_static_validity_block  # type: ignore
+        from tools.bash_paths import uses_wsl_paths  # type: ignore
         from tools.execution_guard import classify_high_risk
     # A read-only filesystem does not prevent signals or external control.
     # Reuse execution's safety analysis; do not let verification be an alternate
@@ -566,15 +568,45 @@ async def _default_check_runner(state: Any, ob: dict[str, Any]) -> dict[str, Any
                 "admission": admission, "risk_category": risk}
     cwd = str(_obligations.resolve_path(state, ob.get("cwd") or "."))
     roots = read_only_roots(state, cwd)
-    scratch = shlex.quote(str(roots[0][0]))
+    scratch_path = roots[0][0]
+    if uses_wsl_paths():
+        from core.isolation import target_paths
+
+        try:
+            # Roots stay in Core's host coordinates; only the shell's variable
+            # value belongs to WSL. Command bodies are not rewritten by Core.
+            scratch_path = target_paths().to_linux(scratch_path)
+            if not isinstance(scratch_path, str) or not scratch_path.startswith("/"):
+                raise ValueError("Core did not return an absolute Linux scratch path")
+        except Exception as exc:
+            return {"exit_code": None, "executed": False, "stdout_tail": "", "stderr_tail": "",
+                    "error": ("[check_scratch_target_unavailable] WSL 核验临时目录无法映射："
+                              f"{type(exc).__name__}: {exc}。核验尚未执行；"
+                              "恢复所选 WSL 执行目标后重试核验，无需重跑原实验。")}
+    scratch = shlex.quote(str(scratch_path))
     command = f"export TMPDIR={scratch} TMP={scratch} TEMP={scratch}\n{ob['command']}"
     result = await _exec_and_log(state, command, timeout=int(ob.get("timeout_s") or 120),
                                  cwd=cwd, sandbox_profile="bash", sandbox_roots=roots, _read_only_check=True)
+    # A timeout has no exit code. Preserve the executor's outcome and residual
+    # output instead of turning it into an unexplained, apparently unrun check.
+    status = result.get("status")
+    error = result.get("error")
+    if status == "timeout" and not error:
+        limit = result.get("timeout_s")
+        error = f"核验命令在 {limit} 秒后超时，未观测到退出码。" if limit is not None else "核验命令超时，未观测到退出码。"
+    executed = result.get("executed")
+    if type(executed) is not bool:
+        executed = result.get("payload_spawned")
+    if type(executed) is not bool:
+        executed = True if type(result.get("returncode")) is int else None
     return {"exit_code": result.get("returncode"),
-            "executed": type(result.get("returncode")) is int,
-            "stdout_tail": str(result.get("stdout_tail") or result.get("stdout") or "")[-2000:],
-            "stderr_tail": str(result.get("stderr_tail") or result.get("stderr") or "")[-2000:],
-            "error": result.get("error"),
+            "executed": executed,
+            "execution_status": status,
+            "timeout_s": result.get("timeout_s"),
+            "next_steps": result.get("next_steps"),
+            "stdout_tail": str(result.get("stdout_tail") or result.get("stdout") or result.get("partial_stdout") or "")[-2000:],
+            "stderr_tail": str(result.get("stderr_tail") or result.get("stderr") or result.get("partial_stderr") or "")[-2000:],
+            "error": error,
             "execution_profile": {"writable_roots": [str(p) for p in roots[0]],
                                   "read_only_roots": [str(p) for p in roots[1]][:12],
                                   "note": "检查命令只有一个用完即弃的 scratch 可写；其余全部只读"}}
@@ -599,9 +631,10 @@ async def _check_evidence(state: Any, led: _ledger.Ledger, ob: dict[str, Any]) -
     try:
         run = await _check_runner(state, ob)
     except Exception as exc:  # 检查命令自己炸了：如实记，不冒充通过
-        run = {"exit_code": None, "error": f"{type(exc).__name__}: {exc}", "stdout_tail": "", "stderr_tail": ""}
+        run = {"exit_code": None, "executed": None, "error": f"{type(exc).__name__}: {exc}", "stdout_tail": "", "stderr_tail": ""}
     led.append("action_settled", action_id=action_id, state="settled", exit_code=run.get("exit_code"),
-               error=run.get("error"), executed=run.get("executed", type(run.get("exit_code")) is int))
+               error=run.get("error"), executed=run.get("executed", type(run.get("exit_code")) is int),
+               execution_status=run.get("execution_status"), timeout_s=run.get("timeout_s"))
     expected_exit = int(ob.get("expect_exit", 0))
     marker = ob.get("expect_stdout_contains")
     exit_ok = run.get("exit_code") == expected_exit and not run.get("error")
@@ -611,6 +644,8 @@ async def _check_evidence(state: Any, led: _ledger.Ledger, ob: dict[str, Any]) -
                 "stdout_tail": (run.get("stdout_tail") or "")[-400:], "error": run.get("error"),
                 "stderr_tail": (run.get("stderr_tail") or "")[-2000:],
                 "executed": run.get("executed", type(run.get("exit_code")) is int),
+                "execution_status": run.get("execution_status"), "timeout_s": run.get("timeout_s"),
+                "next_steps": run.get("next_steps"),
                 "admission": run.get("admission"), "risk_category": run.get("risk_category"),
                 "execution_profile": run.get("execution_profile")}
     if exit_ok and marker_ok:

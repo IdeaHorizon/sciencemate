@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,13 @@ def site(tmp_path: Path) -> Path:
         page = tmp_path / rel
         page.parent.mkdir(parents=True, exist_ok=True)
         page.write_text(f"<!-- {rel} -->", encoding="utf-8")
+    flight = {
+        "c": ["", "projects", "_", "sessions", "_"],
+        "tree": [["id", "_", "d"], {"children": ["sessionId", "_", "d"]}],
+        "props": {"params": {"id": "_", "sessionId": "_"}, "text": "keep _ literal"},
+    }
+    (tmp_path / "projects/_/sessions/_.txt").write_text(
+        '1:I[123,[],"Client"]\n0:' + json.dumps(flight) + '\n2:T4,test\n', encoding="utf-8")
     # 404 页从一开始就在。少了它，「应用自有路由不该被界面吃掉」那条会**碰巧
     # 绿**：界面送不出东西时本来就会落回应用，于是判据根本没被触发 ——
     # 2026-09-06 实测，装出来的包里 404.html 是真存在的，那条路一走就现形。
@@ -171,3 +179,27 @@ def test_an_unknown_page_gets_the_sites_own_404(app_with_ui, site: Path) -> None
     response = app_with_ui.get("/no/such/page")
     assert response.status_code == 404
     assert response.text == "<!-- 404 -->"
+
+
+def test_session_navigation_gets_flight_with_runtime_parameters(app_with_ui):
+    response = app_with_ui.get("/projects/project-a/sessions/session-b.txt?_rsc=navigation")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/x-component")
+    lines = response.text.splitlines()
+    assert lines[0] == '1:I[123,[],"Client"]'
+    assert lines[2] == "2:T4,test"
+    data = json.loads(lines[1][2:])
+    assert data["c"] == ["", "projects", "project-a", "sessions", "session-b"]
+    assert data["tree"] == [["id", "project-a", "d"], {"children": ["sessionId", "session-b", "d"]}]
+    assert data["props"] == {
+        "params": {"id": "project-a", "sessionId": "session-b"}, "text": "keep _ literal"}
+
+
+def test_each_navigation_binds_its_own_ids_without_changing_the_export(app_with_ui, site):
+    exported = (site / "projects/_/sessions/_.txt").read_text()
+    first = app_with_ui.get("/projects/one/sessions/two.txt").text
+    second = app_with_ui.get("/projects/three/sessions/four.txt").text
+    assert '"id","one","d"' in first and '"sessionId","two","d"' in first
+    assert '"id","three","d"' in second and '"sessionId","four","d"' in second
+    assert (site / "projects/_/sessions/_.txt").read_text() == exported
+    assert app_with_ui.get("/projects/one/unknown/deep.txt").status_code == 404

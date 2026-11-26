@@ -9,8 +9,6 @@ from pathlib import Path
 from typing import Any
 from types import SimpleNamespace
 import time
-import sqlite3
-import pickle
 from concurrent.futures import ThreadPoolExecutor
 
 from core.state import State
@@ -22,6 +20,7 @@ from shared.contrib.paper_image_policy import image_record_rejection_reason
 from .literature_catalog import retry_asset_records, upsert_paper, upsert_papers
 from shared.contrib.literature_provenance import selected_metadata_provenance
 from shared.contrib.literature_status import abstract_processing_status
+from shared.contrib.literature_identity import normalize_doi
 
 # 全文获取涉及多个来源和浏览器回退；90 秒通常只够处理少量论文。
 # 默认放宽到 10 分钟，仍可用 HARNESS_FULLTEXT_BUDGET_SECONDS 覆盖。
@@ -62,69 +61,64 @@ def _arxiv_id(paper: dict[str, Any]) -> str:
 
 
 def _restore_original_metadata(paper: dict[str, Any]) -> bool:
-    """按 DOI 从本地原始检索索引恢复 source 和完整摘要。
+    """Restore a source abstract by DOI; never archive a model-written summary.
 
-    archive_papers 只接受模型的论文选择结果；摘要必须来自检索源，不能采用
-    模型在整理清单时生成的短概述。跨来源有多个摘要时取最长的非空版本。
+    The durable index is queried through its identity API. Versioned search
+    caches supply papers that have not yet reached the index; pickle is ignored.
     """
-    # The model may provide a shortened/paraphrased abstract while selecting papers.
-    # Never trust that value: only a source cache/database abstract may enter the index.
+    from .search_engines import Paper, read_search_cache
+    from .local_index import INDEX_DB, LocalPaperIndex
+    from core.paths import literature_cache_dir
+
     paper["abstract"] = ""
-    doi = str(paper.get("doi") or "").strip()
+    original_provenance = paper.get("metadata_provenance")
+    provenance = dict(original_provenance) if isinstance(original_provenance, dict) else {}
+    provenance.pop("abstract", None)
+    paper["metadata_provenance"] = provenance
+    doi = normalize_doi(paper.get("doi"))
     if not doi:
         return False
-    try:
-        # 优先读取原始搜索缓存：其中是来源 API 返回的 Paper 对象，
-        # 不经过模型摘要压缩。跨来源同 DOI 取最长非空摘要。
-        from core.paths import literature_cache_dir
-        cached = []
-        for cache_file in literature_cache_dir().glob("*.pkl"):
-            try:
-                entries = pickle.loads(cache_file.read_bytes())
-            except Exception:
-                continue
-            if not isinstance(entries, list):
-                continue
-            for entry in entries:
-                entry_doi = str(getattr(entry, "doi", "") or "").strip()
-                if entry_doi.lower() == doi.lower():
-                    cached.append((str(getattr(entry, "source", "") or ""),
-                                   str(getattr(entry, "abstract", "") or "").strip()))
-        cached = [(src, abstract) for src, abstract in cached if abstract]
-        if cached:
-            source, original = max(cached, key=lambda item: len(item[1]))
-            paper["abstract"] = original
-            if source:
-                paper["source"] = source
-            return True
 
-        from .local_index import INDEX_DB
-        with sqlite3.connect(str(INDEX_DB)) as conn:
-            rows = conn.execute(
-                "SELECT source, abstract FROM papers WHERE lower(doi) = lower(?) "
-                "AND (source IS NOT NULL OR abstract IS NOT NULL)", (doi,)
-            ).fetchall()
-        rows = [(str(src or "").strip(), str(abs_ or "").strip()) for src, abs_ in rows]
-        rows = [(src, abs_) for src, abs_ in rows if src or abs_]
-        if not rows:
+    def accept(candidate: Paper) -> bool:
+        abstract = candidate.abstract
+        if not isinstance(abstract, str) or not abstract.strip():
             return False
-        originals = [(src, abs_) for src, abs_ in rows if abs_]
-        if originals:
-            # 以实际提供最长原始摘要的来源作为字段 provenance。
-            original_source, original = max(originals, key=lambda item: len(item[1]))
-            if not paper.get("source") and original_source:
-                paper["source"] = original_source
-            # 原始摘要优先，覆盖模型可能写入的短概述。
-            paper["abstract"] = original
-        elif not paper.get("source"):
-            for src, _ in rows:
-                if src:
-                    paper["source"] = src
-                    break
-        return bool(originals)
-    except Exception:
-        # 元数据恢复失败不阻断归档；审计可通过字段完整性发现。
-        return False
+        paper["abstract"] = abstract.strip()
+        if not paper.get("source") and candidate.source:
+            paper["source"] = candidate.source
+        origins = candidate.metadata_provenance or {}
+        origin = origins.get("abstract") if isinstance(origins, dict) else None
+        # A merged record's overall source need not be its abstract's source.
+        # Legacy records without field provenance remain unknown.
+        if origin:
+            provenance["abstract"] = origin
+        return True
+
+    # A populated index avoids scanning every query cache on each archive.
+    # Missing/broken indexes must not prevent recovery from valid JSON caches.
+    try:
+        if Path(INDEX_DB).is_file():
+            candidate = LocalPaperIndex(str(INDEX_DB)).get_papers_by_identity(
+                [Paper(title=str(paper.get("title") or ""), doi=doi)]
+            ).get(doi)
+            if candidate is not None and accept(candidate):
+                return True
+    except Exception as exc:
+        logger.warning("literature source index lookup skipped: %s", exc)
+
+    best = None
+    try:
+        for path in literature_cache_dir().glob("*.json"):
+            for candidate in read_search_cache(path) or []:
+                if normalize_doi(candidate.doi) != doi:
+                    continue
+                abstract = candidate.abstract
+                if isinstance(abstract, str) and abstract.strip():
+                    if best is None or len(abstract.strip()) > len(best.abstract.strip()):
+                        best = candidate
+    except OSError as exc:
+        logger.warning("literature source cache lookup skipped: %s", exc)
+    return best is not None and accept(best)
 
 
 def _text_sidecar(pdf_path: str, text: str) -> str:

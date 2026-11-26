@@ -1,5 +1,6 @@
 """Project management API endpoints."""
 
+import logging
 from pathlib import PurePosixPath
 from urllib.parse import quote
 
@@ -34,6 +35,35 @@ from app.services import refusals
 from app.services.user_interface import Language, language_for, language_on_screen, said_of, say
 
 router = APIRouter()
+
+
+def _personal_deletion_maintenance():
+    from app.assembly import can_choose_project_folders
+    if not can_choose_project_folders() or settings.remote_runtime_token:
+        raise HTTPException(403, "Deletion residue maintenance is available on your personal desktop")
+
+
+@router.get("/deletion-residue")
+async def deletion_residue(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    _personal_deletion_maintenance()
+    from app.services.project_deletion import find_deletion_residue
+    return {"items": await find_deletion_residue(db)}
+
+
+@router.post("/deletion-residue/{project_id}/cleanup", status_code=204)
+async def clean_deletion_residue(project_id: str, user: User = Depends(get_current_user),
+                                  db: AsyncSession = Depends(get_db),
+                                  lang: Language = Depends(language_on_screen)):
+    _personal_deletion_maintenance()
+    from app.services.project_deletion import OpenProjectJobs, delete_residue
+    try:
+        await delete_residue(db, project_id)
+    except (OSError, ValueError, RuntimeError, OpenProjectJobs) as exc:
+        await db.rollback()
+        logging.getLogger(__name__).exception("Project residue cleanup failed for %s", project_id)
+        raise HTTPException(409, detail={"code": "project_cleanup_incomplete", "message": said_of(
+            exc, lang, otherwise={"zh": "清理尚未完成，请检查应用日志，修复后可重试。",
+                                  "en": "Cleanup is incomplete. Check the application logs, fix the error and retry."})}) from exc
 
 
 async def _project_response(db: AsyncSession, user: User, project: Project) -> dict:
@@ -719,20 +749,35 @@ async def delete_project(
     project_id: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    lang: Language = Depends(language_on_screen),
 ) -> None:
-    """Delete a project and all associated data (cascade)."""
+    """Delete only after its workers, files and associated rows are removed."""
     result = await db.execute(select(Project).where(Project.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail=say(refusals.PROJECT_NOT_FOUND, language_for(user)))
-    if not await has_project_capability(db, user, project, "manage_settings"):
+    from app.policies import stewards_it
+    permitted = (await stewards_it(db, user, project) if project.deletion_requested_at
+                 else await has_project_capability(db, user, project, "manage_settings"))
+    if not permitted:
         raise HTTPException(
             status_code=403,
             detail=say(refusals.missing_capability("manage_settings"), language_for(user)),
         )
 
-    await db.execute(sql_delete(Project).where(Project.id == project_id))
-    await db.commit()
+    from app.services.project_deletion import OpenProjectJobs, delete_owned_project
+    try:
+        await delete_owned_project(db, project)
+    except (OSError, ValueError, RuntimeError, OpenProjectJobs) as exc:
+        await db.rollback()
+        logging.getLogger(__name__).exception("Project deletion incomplete for %s", project_id)
+        raise HTTPException(status_code=409, detail={
+            "code": "project_deletion_incomplete",
+            "message": said_of(exc, lang, otherwise={
+                "zh": "项目删除尚未完成，请检查应用日志，修复清理错误后重试删除。",
+                "en": "Project deletion is incomplete. Check the application logs, fix the cleanup error and retry."}),
+            "project_id": project_id,
+        }) from exc
 
 
 # ── Intake Interview（2026-09-05 删）─────────────────────────────────────

@@ -1,9 +1,9 @@
 """压缩时保留用户指令原文。"""
 from __future__ import annotations
+
 from core.llm import LLMMessage
-from core.summarizer import (
-    _preserve_user_messages, _PRESERVE_USER_MAX_CHARS, _PRESERVE_USER_MAX_COUNT,
-)
+from core.summarizer import _preserve_user_messages
+
 
 def U(c): return LLMMessage(role="user", content=c)
 def A(c): return LLMMessage(role="assistant", content=c)
@@ -22,15 +22,15 @@ def test_already_kept_not_duplicated():
     u = U("指令")
     assert _preserve_user_messages([u], [u]) == []
 
-def test_huge_paste_is_not_an_instruction():
-    """粘进来的大块材料该走摘要，不是指令。"""
-    assert _preserve_user_messages([U("x" * (_PRESERVE_USER_MAX_CHARS + 1))], []) == []
+def test_long_inputs_keep_their_authority():
+    """长度不能判断一条消息是不是原始约束。"""
+    message = U("保留这个约束。" * 2000)
+    assert _preserve_user_messages([message], []) == [message]
 
-def test_count_capped_keeps_most_recent():
-    mid = [U(f"指令{i}") for i in range(_PRESERVE_USER_MAX_COUNT + 5)]
+def test_all_caller_constraints_are_preserved():
+    mid = [U(f"指令{i}") for i in range(20)]
     out = _preserve_user_messages(mid, [])
-    assert len(out) == _PRESERVE_USER_MAX_COUNT
-    assert out[-1].content == f"指令{_PRESERVE_USER_MAX_COUNT + 4}"   # 最近的留下
+    assert out == mid
 
 def test_blank_skipped():
     assert _preserve_user_messages([U("   "), U("")], []) == []
@@ -59,6 +59,7 @@ def test_notice_carries_the_preamble():
 def test_fate_table_exists_and_matches_code():
     """命运表不能和代码分叉 —— 表里点名的机制必须真的在。"""
     from pathlib import Path
+
     from core import summarizer as sm
 
     doc = Path("docs/compression-fate-table.md")
@@ -85,6 +86,7 @@ def test_every_strategy_notice_carries_the_preamble():
     最终留在上下文里的是不带 preamble 的那一条 —— 只覆盖一条路径 = 没有防线。
     """
     import inspect
+
     from core import summarizer as sm
 
     # 所有 notice 都必须经 build_compression_notice 产出

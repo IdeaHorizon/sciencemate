@@ -178,13 +178,26 @@ def test_the_card_names_the_capability_the_resume_path_settles() -> None:
 
 
 def test_the_resume_path_dispatches_gpu_answers_to_the_gpu_grant() -> None:
-    import inspect
+    from core import approvals, tool_registry
+    state = _state()
 
-    from core import pause_driver
+    async def original(*, state, **arguments):
+        if cg.gpu_lease(state) is None:
+            return cg.request_gpu_grant(state, 2, "bounded test")
+        return {"status": "success", "indices": list(cg.gpu_lease(state).indices)}
 
-    source = inspect.getsource(pause_driver.drive_pause_chain)
-    assert "GPU_CAPABILITY" in source and "grant_gpu_from_answer" in source, (
-        "GPU 授权卡的答复没有结算分支：人点了「允许」，卡一张也分不到")
+    tool_registry.register_tool(tool_registry.ToolDefinition(name="gpu_approval_probe", description="test",
+        parameters_schema={"type": "object"}), original)
+
+    async def check():
+        result = await tool_registry.execute("gpu_approval_probe", state)
+        assert cg.gpu_lease(state) is None
+        record = approvals.decide(state, result["pause_event"], "approve")
+        resumed = await approvals.run_approved(state, record["operation_id"])
+        assert resumed["status"] == "success" and len(resumed["indices"]) == 2
+        assert len(gpu.free_indices()) == 2
+        cg.release_gpu(state)
+    asyncio.run(check())
 
 
 def test_finalize_run_gives_the_cards_back() -> None:

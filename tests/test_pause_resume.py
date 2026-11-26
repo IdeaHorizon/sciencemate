@@ -232,6 +232,7 @@ async def test_resume_loop_continues_after_answer():
     payload = json.loads(tool_msgs[0].content)
     assert payload["status"] == "success"
     assert payload["response"] == "北京"
+    assert tool_msgs[0].origin == "caller", "provider role=tool 不得抹掉真实人工输入来源"
 
 
 @pytest.mark.asyncio

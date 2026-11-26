@@ -120,6 +120,8 @@ class Settings(BaseSettings):
     #: 更新源是私有 Forgejo 仓库时的凭据（`user:token` 或裸 token，只读即可）。
     #: 空 = 匿名。release 资产与仓库同一个可见性 —— 私有仓库不带它就是 404。
     update_source_token: str = ""
+    # Explicit deployment choice; None allows a personal desktop preference.
+    update_connection_mode: Literal["system", "direct"] | None = None
     #: socket 放哪。AF_UNIX 路径有硬上限，所以要短根 —— 太深时 worker 侧
     #: 会自己回退到临时目录，真实地址以注册表行的 control_socket 为准。
     #

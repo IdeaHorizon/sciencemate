@@ -6,11 +6,21 @@ from typing import Any
 
 from core.tool_registry import ToolDefinition, register_tool
 
-from .w_brief import load_brief, load_outline
 from .w_bib import _read_bibliography
+from .w_brief import load_brief
 from .w_common import (
-    bounded_llm, clip, extract_json, figure_text_sample, graphics_files, load_genre, manuscript_dir, paper_dir,
-    read_json, worktree_root, write_json,
+    WritingResponseError,
+    bounded_llm,
+    clip,
+    extract_json,
+    figure_text_sample,
+    graphics_files,
+    load_genre,
+    manuscript_dir,
+    paper_dir,
+    read_json,
+    worktree_root,
+    write_json,
 )
 from .w_dossier import build_dossier
 
@@ -96,8 +106,11 @@ async def _referee_review(state: Any, focus: str = "", **_: Any) -> dict:
          '"comments":[{"id":1,"page":3,"location":"引言第二段","severity":"major","issue":"…","fix":"…"}],'
          '"summary":"三句话"}'),
     ])
-    raw = await bounded_llm(state, phase=f"referee:{rounds+1}", system=system, user=user,
-                            max_tokens=6000, temperature=0.2)
+    try:
+        raw = await bounded_llm(state, phase=f"referee:{rounds+1}", system=system, user=user,
+                                max_tokens=6000, temperature=0.2)
+    except WritingResponseError as exc:
+        return exc.result
     report = extract_json(raw)
     if not isinstance(report, dict) or "verdict" not in report:
         return {"status": "error", "error": "审读官没有返回合法 JSON", "raw": clip(raw, 1500)}

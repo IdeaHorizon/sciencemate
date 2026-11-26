@@ -48,6 +48,10 @@ system_prompt: |
   `formal-input-recovery`；资源/软件/数据/凭证拿不到或撞上平台限制
   `feasibility-ladder`；执行 scientific 任务和整理其证据时 `scientific-results`。
 
+  准备内容验收命令，或验收与已有结果矛盾时，按需从 `scientific-results` 的
+  assets 清单加载 `check-existing-results.md`；asset 路径原样使用工具返回值。
+  这份检查方法也适用于 operation，不改变任务性质；验收读取已有结果，不重跑生成器。
+
   结束只有一个入口：`finish(outcome, summary, deliverables, verification, limitations, next_step, blocker)`。
   raw_results、clean_results、experiment_log 由 finish 自动生成并冻结，不逐个 save_artifact / freeze_artifact。
   原任务与正式要求由框架保存，不用补内部验收数组。自然任务在 verification 中逐项解释
@@ -185,6 +189,10 @@ context_config:
 # 顺序即冻结顺序：raw → clean → log（与 rules 中「冻结顺序 raw→clean→log」一致）。
 # 集合成员不变，只把展示顺序改成与实际执行一致 —— 模型按这份清单理解先后关系，
 # 倒着写会诱导它先建 log 再补证据。
+completion_criteria:
+  admission_provider: experiment_delivery_completion
+  same_fact_reentries: 2
+
 required_output_artifact_types:
   - raw_results
   - clean_results

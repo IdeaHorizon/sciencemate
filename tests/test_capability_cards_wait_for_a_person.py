@@ -201,6 +201,11 @@ def test_if_the_leaf_asks_again_the_parent_shows_the_new_card(monkeypatch) -> No
         if ctx.run_id != child.run_id or calls["n"]:
             return await real_resume(ctx, answer, recorded_decision=recorded_decision)
         calls["n"] += 1
+        # This fake resume replaces the owner, including acceptance. Mirror that
+        # lifecycle event before simulating its next question.
+        from core.agent_loop import end_pause
+        pause_driver._settle_relays(ctx)
+        end_pause(ctx, response_preview="accepted")
         # 叶子续跑后又停下来问一个新问题（同一个 run，新的 pause）。
         again = PauseEvent(question="还要连 mirrors.tuna.tsinghua.edu.cn 吗？",
                            options=["允许", "拒绝"], asking_node_type="experiment",
