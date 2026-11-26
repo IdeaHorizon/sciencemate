@@ -31,10 +31,12 @@ import os
 import shutil
 import socket
 import sqlite3
+import stat
+import struct
 import sys
 import time
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import UUID
 
@@ -52,6 +54,244 @@ FILE_CAP = 4 * 1024 * 1024
 TOTAL_CAP = 96 * 1024 * 1024
 
 
+def _windows_mode() -> bool:
+    return sys.platform == "win32"
+
+
+class _WindowsDacl:
+    """QA-only DACL transport. Never sets owner/group/SACL or token privileges."""
+
+    def __init__(self):
+        import ctypes as c
+        from ctypes import wintypes as w
+
+        self.c, self.w = c, w
+        self.a = c.WinDLL("advapi32", use_last_error=True)
+        self.k = c.WinDLL("kernel32", use_last_error=True)
+        p = c.c_void_p
+        signatures = {
+            "OpenProcessToken": ([w.HANDLE, w.DWORD, c.POINTER(w.HANDLE)], w.BOOL),
+            "GetTokenInformation": ([w.HANDLE, w.DWORD, p, w.DWORD, c.POINTER(w.DWORD)], w.BOOL),
+            "ConvertSidToStringSidW": ([p, c.POINTER(w.LPWSTR)], w.BOOL),
+            "GetNamedSecurityInfoW": (
+                [w.LPWSTR, w.DWORD, w.DWORD, p, p, c.POINTER(p), p, c.POINTER(p)],
+                w.DWORD,
+            ),
+            "ConvertSecurityDescriptorToStringSecurityDescriptorW": (
+                [p, w.DWORD, w.DWORD, c.POINTER(w.LPWSTR), c.POINTER(w.DWORD)],
+                w.BOOL,
+            ),
+            "ConvertStringSecurityDescriptorToSecurityDescriptorW": (
+                [w.LPCWSTR, w.DWORD, c.POINTER(p), c.POINTER(w.DWORD)],
+                w.BOOL,
+            ),
+            "GetSecurityDescriptorControl": ([p, c.POINTER(w.WORD), c.POINTER(w.DWORD)], w.BOOL),
+            "GetSecurityDescriptorDacl": (
+                [p, c.POINTER(w.BOOL), c.POINTER(p), c.POINTER(w.BOOL)],
+                w.BOOL,
+            ),
+            "SetNamedSecurityInfoW": ([w.LPWSTR, w.DWORD, w.DWORD, p, p, p, p], w.DWORD),
+        }
+        for name, (args, result) in signatures.items():
+            api = getattr(self.a, name)
+            api.argtypes, api.restype = args, result
+        self.k.GetCurrentProcess.restype = w.HANDLE
+        self.k.CloseHandle.argtypes = [w.HANDLE]
+        self.k.LocalFree.argtypes, self.k.LocalFree.restype = [p], p
+
+    def _ok(self, result):
+        if not result:
+            raise self.c.WinError(self.c.get_last_error())
+
+    def current_sid(self) -> str:
+        c, w = self.c, self.w
+        token, text = w.HANDLE(), w.LPWSTR()
+        try:
+            self._ok(self.a.OpenProcessToken(self.k.GetCurrentProcess(), 8, c.byref(token)))
+            needed = w.DWORD()
+            self.a.GetTokenInformation(token, 1, None, 0, c.byref(needed))
+            buffer = c.create_string_buffer(needed.value)
+            self._ok(self.a.GetTokenInformation(token, 1, buffer, needed, c.byref(needed)))
+            sid = c.cast(buffer, c.POINTER(c.c_void_p))[0]
+            self._ok(self.a.ConvertSidToStringSidW(sid, c.byref(text)))
+            return text.value
+        finally:
+            if text:
+                self.k.LocalFree(c.cast(text, c.c_void_p))
+            if token:
+                self.k.CloseHandle(token)
+
+    def _describe(self, security) -> dict[str, Any]:
+        c, w = self.c, self.w
+        control, revision = w.WORD(), w.DWORD()
+        present, defaulted, dacl = w.BOOL(), w.BOOL(), c.c_void_p()
+        self._ok(self.a.GetSecurityDescriptorControl(security, c.byref(control), c.byref(revision)))
+        self._ok(
+            self.a.GetSecurityDescriptorDacl(
+                security, c.byref(present), c.byref(dacl), c.byref(defaulted)
+            )
+        )
+        raw = c.string_at(dacl, w.WORD.from_address(dacl.value + 2).value) if dacl else None
+        explicit = []
+        if raw is not None:
+            count = struct.unpack_from("<H", raw, 4)[0]
+            offset = 8
+            for _ in range(count):
+                size = struct.unpack_from("<H", raw, offset + 2)[0]
+                if size < 4 or offset + size > len(raw):
+                    raise ValueError("Invalid captured Windows ACL")
+                if not raw[offset + 1] & 0x10:  # INHERITED_ACE
+                    explicit.append(hashlib.sha256(raw[offset : offset + size]).hexdigest())
+                offset += size
+        return {
+            "protected": bool(control.value & 0x1000),
+            "dacl_present": bool(present),
+            "null_dacl": bool(present) and not bool(dacl),
+            "dacl_sha256": hashlib.sha256(raw).hexdigest() if raw is not None else None,
+            "explicit_ace_sha256": explicit,
+        }
+
+    def read(self, path: Path) -> dict[str, Any]:
+        c, w = self.c, self.w
+        security, dacl, text = c.c_void_p(), c.c_void_p(), w.LPWSTR()
+        try:
+            error = self.a.GetNamedSecurityInfoW(
+                long_path(path), 1, 4, None, None, c.byref(dacl), None, c.byref(security)
+            )
+            if error:
+                raise c.WinError(error)
+            self._ok(
+                self.a.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    security, 1, 4, c.byref(text), None
+                )
+            )
+            return {"sddl": text.value, **self._describe(security)}
+        finally:
+            if text:
+                self.k.LocalFree(c.cast(text, c.c_void_p))
+            if security:
+                self.k.LocalFree(security)
+
+    def _decode(self, entry: dict):
+        text = entry.get("sddl")
+        if not isinstance(text, str) or not text.startswith("D:"):
+            raise ValueError("Fixture needs DACL-only SDDL (no owner/group/SACL)")
+        security = self.c.c_void_p()
+        self._ok(
+            self.a.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                text, 1, self.c.byref(security), None
+            )
+        )
+        return security
+
+    def validate(self, entry: dict) -> None:
+        security = self._decode(entry)
+        try:
+            actual = self._describe(security)
+            if any(actual[key] != entry.get(key) for key in actual):
+                raise ValueError("Fixture DACL descriptor/protection fingerprint mismatch")
+        finally:
+            self.k.LocalFree(security)
+
+    def apply(self, path: Path, entry: dict) -> None:
+        self.validate(entry)
+        c, w = self.c, self.w
+        security = self._decode(entry)
+        try:
+            present, defaulted, dacl = w.BOOL(), w.BOOL(), c.c_void_p()
+            self._ok(
+                self.a.GetSecurityDescriptorDacl(
+                    security, c.byref(present), c.byref(dacl), c.byref(defaulted)
+                )
+            )
+            if not present:
+                raise ValueError("Absent DACL cannot be restored as a null DACL")
+            flags = 4 | (0x80000000 if entry["protected"] else 0x20000000)
+            error = self.a.SetNamedSecurityInfoW(long_path(path), 1, flags, None, None, dacl, None)
+            if error:
+                raise c.WinError(error)
+        finally:
+            self.k.LocalFree(security)
+        after = self.read(path)
+        keys = ["protected", "dacl_present", "null_dacl"]
+        # AI is bookkeeping, not an ACE policy change. Protected policies must
+        # keep their exact DACL; unprotected objects inherit from the new parent
+        # while retaining all explicit ACEs in their original order.
+        keys.append("dacl_sha256" if entry["protected"] else "explicit_ace_sha256")
+        if any(after[key] != entry[key] for key in keys):
+            raise ValueError(f"Windows DACL readback mismatch: {path}")
+
+
+def _windows_security():
+    return _WindowsDacl()
+
+
+def _is_link(path: Path) -> bool:
+    info = path.lstat()
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+
+
+def _relative_key(value: str) -> str:
+    if value == ".":
+        return value
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\\" in value
+        or ":" in value
+        or value.startswith("/")
+        or any(p in {"", ".", ".."} or p.endswith((".", " ")) for p in value.split("/"))
+    ):
+        raise ValueError(f"Invalid relative fixture path: {value!r}")
+    return PurePosixPath(value).as_posix()
+
+
+def _fixture_paths(root: Path) -> dict[str, Path]:
+    if _is_link(root):
+        raise ValueError("Fixture root cannot be a symlink/junction")
+    result = {".": root}
+    for path in root.rglob("*"):
+        key = path.relative_to(root).as_posix()
+        if _is_link(path):
+            raise ValueError(f"Fixture symlink/junction is not supported: {key}")
+        if key == MANIFEST:
+            continue
+        _relative_key(key)
+        if not path.is_file() and not path.is_dir():
+            raise ValueError(f"Fixture path is not a regular file/directory: {key}")
+        result[key] = path
+    return result
+
+
+def _windows_plan(fixture: Path, manifest: dict, api) -> list[tuple[str, dict]]:
+    stored = manifest.get("windows_dacl")
+    if not isinstance(stored, dict) or stored.get("schema_version") != 1:
+        raise ValueError(
+            "Windows fixture has no DACL metadata; recapture it from the old data root"
+        )
+    if stored.get("user_sid") != api.current_sid():
+        raise ValueError("Windows fixture belongs to a different user SID; recapture as this user")
+    entries = stored.get("entries")
+    if not isinstance(entries, dict) or "." not in entries:
+        raise ValueError("Windows fixture DACL entries are missing")
+    keys = [_relative_key(key) for key in entries]
+    if len({key.casefold() for key in keys}) != len(keys):
+        raise ValueError("Windows fixture has duplicate case-insensitive paths")
+    actual = _fixture_paths(fixture)
+    if set(entries) != set(actual):
+        raise ValueError("Windows fixture DACL coverage does not match carried paths")
+    for key, entry in entries.items():
+        if (
+            not isinstance(entry, dict)
+            or type(entry.get("protected")) is not bool
+            or type(entry.get("dacl_present")) is not bool
+            or type(entry.get("null_dacl")) is not bool
+            or entry.get("kind") != ("directory" if actual[key].is_dir() else "file")
+        ):
+            raise ValueError(f"Invalid Windows fixture DACL entry: {key}")
+        api.validate(entry)
+    return sorted(entries.items(), key=lambda pair: (len(PurePosixPath(pair[0]).parts), pair[0]))
+
 def _snapshots(tree: Path | None = None):
     """后端的权限快照模块（只用标准库）：基线和事后用同一个函数采、同一条规则比 —— 不在这里抄一份。"""
     backend = str((tree or HERE.parents[1]) / "platform" / "backend")
@@ -64,9 +304,9 @@ def _snapshots(tree: Path | None = None):
 
 def _write_baseline(to: Path, previous_version: str | None, tree: Path | None) -> dict[str, Any]:
     snap = _snapshots(tree)
-    baseline = snap.take_snapshot(to, app_version=previous_version)
     logs = to / "logs"
     logs.mkdir(parents=True, exist_ok=True)
+    baseline = snap.take_snapshot(to, app_version=previous_version)
     text = json.dumps(baseline, ensure_ascii=False, indent=1)
     (logs / BASELINE_NAME).write_text(text, encoding="utf-8")
     # 新版启动时拿 logs/ 里那份和自己比（版本号变了才比）：让它比的也是这台机器上的基线。
@@ -194,6 +434,10 @@ def _looks_like_a_secret_column(column: str) -> bool:
 
 
 def capture(data_root: Path, out: Path, *, version: str) -> dict[str, Any]:
+    if _is_link(data_root) or not data_root.is_dir():
+        raise SystemExit("Source data root must be a real directory, not a symlink/junction")
+    if out.resolve().is_relative_to(data_root.resolve()):
+        raise SystemExit("Fixture output must be outside the source data root")
     if out.exists():
         raise SystemExit(f"夹具目录已存在：{out}（换个名字，夹具不覆盖）")
     out.mkdir(parents=True)
@@ -204,16 +448,19 @@ def capture(data_root: Path, out: Path, *, version: str) -> dict[str, Any]:
         nonlocal total
         # Copy children before restoring directory modes (some are read-only).
         # mkdir's umask must not replace the permissions the old version left.
-        for directory, names, files in os.walk(src, topdown=False, followlinks=False):
+        directories = []
+        for directory, names, files in os.walk(src, topdown=True, followlinks=False):
+            names[:] = [name for name in names if not _is_link(Path(directory) / name)]
             rel = Path(directory).relative_to(src)
             (dst / rel).mkdir(parents=True, exist_ok=True)
+            directories.append((Path(directory), dst / rel))
             for name in files:
                 source = Path(directory) / name
                 try:
                     info = source.lstat()
                 except OSError:
                     continue
-                if source.is_symlink():
+                if _is_link(source):
                     continue
                 if info.st_size > FILE_CAP:
                     skipped_large.append(str(source.relative_to(data_root)))
@@ -222,11 +469,14 @@ def capture(data_root: Path, out: Path, *, version: str) -> dict[str, Any]:
                     raise SystemExit(f"夹具超过 {TOTAL_CAP // (1 << 20)} MB 上限：先清掉大产物再抄")
                 shutil.copy2(source, dst / rel / name)
                 total += info.st_size
-            if sys.platform != "win32":
-                shutil.copystat(directory, dst / rel)
+        if not _windows_mode():
+            for source, target in reversed(directories):
+                shutil.copystat(source, target)
 
     for name in CARRIED:
         source = data_root / name
+        if source.exists() and _is_link(source):
+            continue
         if source.is_dir():
             copy_tree(source, out / name)
         elif source.is_file():
@@ -235,10 +485,10 @@ def capture(data_root: Path, out: Path, *, version: str) -> dict[str, Any]:
     (out / "logs").mkdir(exist_ok=True)
     for name in CARRIED_LOGS:
         source = data_root / "logs" / name
-        if source.is_file():
+        if source.is_file() and not _is_link(source):
             shutil.copy2(source, out / "logs" / name)
-    if sys.platform != "win32":
-        # These two directories are not copied by copy_tree; Windows inherits ACLs.
+    if not _windows_mode():
+        # These two directories are not copied by copy_tree.
         if (data_root / "logs").is_dir():
             shutil.copystat(data_root / "logs", out / "logs")
         shutil.copystat(data_root, out)
@@ -258,6 +508,23 @@ def capture(data_root: Path, out: Path, *, version: str) -> dict[str, Any]:
         **inventory,
         "kb_claims": _kb_counts(out, [p["id"] for p in inventory["projects"]]),
     }
+    if _windows_mode():
+        try:
+            # Do not invent a source descriptor for a QA-created empty logs/.
+            if not (data_root / "logs").is_dir() and not any((out / "logs").iterdir()):
+                (out / "logs").rmdir()
+            api = _windows_security()
+            entries = {}
+            for key, copied in _fixture_paths(out).items():
+                source = data_root if key == "." else data_root / key
+                if _is_link(source):
+                    raise ValueError(f"Source link changed during capture: {key}")
+                entry = api.read(source)
+                entries[key] = {**entry, "kind": "directory" if copied.is_dir() else "file"}
+            manifest["windows_dacl"] = {"schema_version": 1, "user_sid": api.current_sid(),
+                                        "entries": entries}
+        except (ValueError, OSError) as exc:
+            raise SystemExit(f"Windows fixture DACL capture failed: {exc}") from exc
     (out / MANIFEST).write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     leaked = _grep_secrets(out)
     if leaked:
@@ -308,6 +575,10 @@ def unpack_if_tarball(fixture: Path) -> Path:
     scratch = Path(tempfile.mkdtemp(prefix="ufx", dir=os.environ.get("LOCALAPPDATA") or None))
     with tarfile.open(fixture, "r:*") as archive:
         members = archive.getmembers()
+        for member in members:
+            _relative_key(member.name.rstrip("/"))
+            if not member.isdir() and not member.isfile():
+                raise SystemExit(f"Fixture archive contains a link/special path: {member.name}")
         if sys.platform == "win32":
             # `\\?\` 前缀关掉了 Win32 的路径规范化：正斜杠不再被当成分隔符（WinError 123）。
             # tar 成员名是 POSIX 的，解之前换成反斜杠。
@@ -328,7 +599,22 @@ def restore(fixture: Path, to: Path, *, python: str | None = None, tree: Path | 
 
     `python` = 装好的那个应用的解释器（它装着 `app`）；没给就只抄不搬根，并大声说一句。"""
     fixture = unpack_if_tarball(fixture)
+    if _is_link(fixture) or _is_link(fixture / MANIFEST):
+        raise SystemExit("Fixture or manifest cannot be a symlink/junction")
     manifest = json.loads((fixture / MANIFEST).read_text(encoding="utf-8"))
+    api, plan = None, []
+    if _windows_mode():
+        try:
+            api = _windows_security()
+            plan = _windows_plan(fixture, manifest, api)
+        except (ValueError, OSError) as exc:
+            raise SystemExit(f"Windows fixture DACL validation failed: {exc}") from exc
+    if to.exists() and _is_link(to):
+        raise SystemExit("Restore destination cannot be a symlink/junction")
+    if _windows_mode() and to.resolve() != to.absolute():
+        raise SystemExit("Restore destination ancestors cannot be symlinks/junctions")
+    if to.resolve().is_relative_to(fixture.resolve()):
+        raise SystemExit("Restore destination must be outside the fixture")
     if to.exists() and any(to.iterdir()):
         raise SystemExit(f"目标不是空的：{to}（彩排要在干净位置上装旧数据）")
     to.mkdir(parents=True, exist_ok=True)
@@ -339,10 +625,11 @@ def restore(fixture: Path, to: Path, *, python: str | None = None, tree: Path | 
             shutil.copytree(long_path(item), long_path(to / item.name), symlinks=False)
         else:
             shutil.copy2(long_path(item), long_path(to / item.name))
-    if sys.platform != "win32":
+    if not _windows_mode():
         # copytree preserves descendant modes, but the separately created root does not.
         shutil.copystat(fixture, to)
     if python is None:
+        _apply_dacl_plan(to, plan, api)
         print("⚠️ 没给 --python：只抄了数据，没有搬根。新版会因为库里记的旧根拒绝启动 —— 彩排要给装好的解释器。")
         return manifest
     relocate = (tree or HERE.parents[1]) / "platform" / "backend" / "scripts" / "relocate_project_data.py"
@@ -356,9 +643,23 @@ def restore(fixture: Path, to: Path, *, python: str | None = None, tree: Path | 
     print((done.stdout or "").strip())
     if done.returncode != 0:
         raise SystemExit(f"搬根没成（rc={done.returncode}）：{(done.stderr or '').strip()[-2000:]}")
+    _apply_dacl_plan(to, plan, api)
     baseline = _write_baseline(to, manifest.get("previous_version"), tree)
     print(f"权限基线：{len(baseline['entries'])} 条（{to / 'logs' / BASELINE_NAME}）")
     return manifest
+
+
+def _apply_dacl_plan(to: Path, plan: list[tuple[str, dict]], api) -> None:
+    if api is None:
+        return
+    try:
+        for key, entry in plan:
+            target = to if key == "." else to / key
+            if _is_link(target) or target.resolve() != target.absolute():
+                raise ValueError(f"Restored ACL path became a symlink/junction: {key}")
+            api.apply(target, entry)
+    except (ValueError, OSError) as exc:
+        raise SystemExit(f"Windows fixture DACL restore failed: {exc}") from exc
 
 
 # ── check ────────────────────────────────────────────────────────────────────
